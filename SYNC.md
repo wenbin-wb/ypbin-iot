@@ -63,6 +63,17 @@ admin 的既有 SQL（`001`–`005`）、admin 的既有工作流。
    把我们的需求改到 IoT 自己的模块里实现——这样下一轮同步不会再冲突。
 5. 有任何冲突：修完后在提交信息里写清「同步 admin@`<sha>` + 冲突处置」，便于下次追溯。
 
+## 三·五、fork 运维须知（不写在代码里会踩的）
+
+1. **Code Scanning 的「结案」状态不随 fork 复制**：admin 仓按误报结案的告警，在本仓首次扫描时会
+   重新以 open 出现（本仓建立当天就有 2 条，位于 admin 自己的 `ypbin-system` 里）。
+   处置：**镜像 admin 的结论**（同 reason + 同理由引用），不要各判各的——否则两边会漂移出两套结论。
+2. **依赖机器人（Dependabot）默认会改 admin 拥有的 workflow 文件**，合入即破坏白名单；
+   `Sync Whitelist` 会把这类 PR 判红，正确做法是去 admin 仓升级、本仓靠同步获得。
+3. **部署目录名**：`deploy/install.sh` 按 `ypbin-admin/` 目录名拼路径（52 处，不改）；
+   部署时把本仓检出成 `ypbin-admin` 目录，或等 admin 侧把目录名做成变量。
+4. **同步后要重扫 CodeQL**：同步会把 admin 的新代码带进来，其新增/结案状态同样要按第 1 条镜像处置。
+
 ## 四、门禁
 
 - `mvn -B -ntp -fae clean verify`（架构约束 / 源码规范 / 覆盖率等；**admin 没有 spotless 插件**，
