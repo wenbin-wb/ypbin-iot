@@ -19,7 +19,7 @@
 #   [1/7] 环境准备   —— 检查并安装依赖（系统/Docker/JDK21/Maven，Maven 走阿里云镜像）
 #   [2/7] 拉取代码   —— starter + admin（main 分支）+ admin-ui（main），源自动探测/降级
 #   [3/7] 构建 starter —— mvn install（微服务依赖 starter 2.2.3 及新能力）
-#   [4/7] 构建后端   —— Maven 打包 5 个服务可执行 jar
+#   [4/7] 构建后端   —— Maven 打包 6 个服务可执行 jar
 #   [5/7] 生成配置   —— .env 凭据 + Nacos 共享配置提示
 #   [6/7] 启动服务   —— Docker: compose up（含基础设施）；NO_DOCKER: java -jar 逐个启动
 #   [7/7] 健康检查   —— 验证网关/各服务注册，输出访问地址
@@ -250,7 +250,7 @@ check_docker_disk_space() {
   avail_gb=$((avail_kb / 1024 / 1024))
   if [ "$avail_gb" -lt "$min_gb" ]; then
     warn "Docker 根目录 $root_dir 所在磁盘仅剩约 ${avail_gb}GB（建议 ≥${min_gb}GB）"
-    warn "构建 4 个服务镜像 + 前端依赖都会显著占空间；不足时会在写镜像层时报 no space left on device"
+    warn "构建 5 个服务镜像 + 前端依赖都会显著占空间；不足时会在写镜像层时报 no space left on device"
     warn "清理：docker builder prune -af && docker image prune -f && docker system df"
     return 1
   fi
@@ -1006,7 +1006,7 @@ if [ "${SKIP_BUILD:-0}" = "1" ]; then
   info "[4/7] 跳过构建（restart 模式，复用已有 jar）"
   JAR_DIR="$ROOT/ypbin-admin/target/microservice-jars"
 else
-info "[4/7] 构建后端 5 个服务"
+info "[4/7] 构建后端 6 个服务"
 cd "$ROOT/ypbin-admin"
 # 完整输出错误（不吞日志）
 if ! mvn -DskipTests clean package 2>&1 | tee /tmp/admin-build.log | tail -20; then

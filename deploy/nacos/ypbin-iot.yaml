@@ -17,6 +17,8 @@ ypbin:
   data-permission:
     enabled: true
   # iot 为下游业务服务，登录态由网关校验并注入身份头；
-  # 关闭本地 Sa-Token 全局拦截，避免 iot 直读 Redis 会话导致 token 无效。
-  sa-token:
-    enabled: false
+  # 关闭本地 Sa-Token 全局拦截（键是 ypbin.security.interceptor，由 starter 的 SecurityProperties 绑定；
+  # 写成 ypbin.sa-token.* 不存在的键会**静默无效**——复核用 `--key=value` 差分实测过：
+  # 传 ypbin.sa-token.enabled=false 时 saTokenWebConfigurer 仍 matched）。
+  security:
+    interceptor: false

@@ -46,6 +46,12 @@ spring:
                 - Path=/ai/**
               filters:
                 - StripPrefix=1
+            - id: iot
+              uri: lb://ypbin-iot
+              predicates:
+                - Path=/iot/**
+              filters:
+                - StripPrefix=1
 
 # 统一鉴权：校验 token 后清洗外部头、签发内部身份头
 ypbin:

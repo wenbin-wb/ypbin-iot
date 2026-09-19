@@ -26,6 +26,9 @@ mvn -B -ntp -fae clean verify               # 同步后必须重跑门禁
 IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，改动要尽量是「加法一行」。
 **本清单与 `.github/workflows/sync-whitelist.yml` 里的白名单必须保持一致**（改了这里就改那里）。
 
+> **白名单膨胀要记账**：目前 7 个文件。每增加一个都是「以后同步时的潜在冲突点」；
+> 加之前先问：能不能用新文件/新模块实现？只能改既有文件时才加，并在提交信息里写明理由。
+
 | 文件 | 改动 | 说明 |
 |---|---|---|
 | `pom.xml`（根） | `dependencyManagement` 加 `ypbin-iot-api` 一行 | 根 pom 统一管理各 `-api` 模块版本 |
@@ -33,12 +36,17 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 | `ypbin-service-api/pom.xml` | 加 `<module>ypbin-iot-api</module>` | 契约聚合 |
 | `deploy/install.sh` | SERVICES 加一行 + Nacos cfg 清单加 `ypbin-iot` + 同步「共 N 个」计数注释 | 部署脚本的服务清单 |
 | `deploy/docker-compose.yml` | 新增 `ypbin-iot` 服务块 | 部署编排 |
+| `deploy/nacos/ypbin-gateway.yaml` | routes 加 `iot` 一段（`Path=/iot/**` + `StripPrefix=1`） | 网关路由（IoT 路由也进仓，便于与其它服务同构） |
+| `deploy/.env.example` | 端口段注释加 18084 | 环境变量示例（纯注释） |
 | `deploy/sql/006-iot-schema.sql`、`007-iot-data.sql` | **新文件** | 全新安装用 |
 | `deploy/sql/migration/2026-09-19-iot-device-schema-and-menu.sql` | **新文件** | 已上线库用；与 006/007 **语句等价**（有 CI 校验） |
 | `admin-ui`（后续） | 路由/菜单注册 | 前端增量时再补清单 |
 
-**明确不动**的（改了就会长期冲突）：`ypbin-gateway` 路由（IoT 路由配在 **Nacos** 的
-`ypbin-gateway.yaml` 里，不进仓）、`ypbin-common`、`ypbin-auth`、`ypbin-system`、
+**口径说明（两组数字别混）**：`git diff upstream/main --stat` 的字面数字**包含新增文件**
+（IoT 业务文件 + SYNC.md + 门禁脚本等），而本纪律关心的只有「**改动的既有文件**」——
+用 `git diff --name-only --diff-filter=MDR upstream/main` 看，应当只有上表那几个。
+
+**明确不动**的（改了就会长期冲突）：`ypbin-common`、`ypbin-auth`、`ypbin-system`、
 admin 的既有 SQL（`001`–`005`）、admin 的既有工作流。
 
 **部署时的目录名**：`deploy/install.sh` 里有 52 处按 `ypbin-admin/` 目录名拼路径（它原本服务 admin 仓）。

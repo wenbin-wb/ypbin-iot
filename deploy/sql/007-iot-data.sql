@@ -16,3 +16,8 @@ VALUES (320001, 3200, 'IotDeviceCreate', 'button', 0, 'iot:device:create', 'comm
 -- 而业务菜单是 platform_only=0（租户可见），因此这里必须自己授一次。
 INSERT INTO sys_role_menu (role_id, menu_id)
 SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (3200, 320001, 320002);
+
+-- 租户可授菜单来自 sys_template_menu（SysAuthTemplateServiceImpl 从它推导）；
+-- 002-data.sql 填它时 IoT 菜单还不存在 ⇒ 这里必须补授，否则**租户永远看不到 IoT 菜单**。
+INSERT INTO sys_template_menu (template_id, menu_id)
+SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (3200, 320001, 320002);

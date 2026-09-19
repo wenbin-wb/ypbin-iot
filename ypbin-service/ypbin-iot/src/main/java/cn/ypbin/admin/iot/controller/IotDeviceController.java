@@ -31,13 +31,15 @@ import org.springframework.web.bind.annotation.RestController;
 /**
  * IoT 设备台账接口。
  *
- * <p>权限码形如 {@code iot:device:list}（与 admin 其它业务域一致：{@code 域:资源:动作}）。</p>
+ * <p>权限码形如 {@code iot:device:list}（与 admin 其它业务域一致：{@code 域:资源:动作}）。
+ * 路径是<b>纯资源路径</b>：网关按 {@code Path=/iot/**} + {@code StripPrefix=1} 转发，
+ * 因此客户端调 {@code /iot/devices}、服务内看到 {@code /devices}（与 ai/system 同构）。</p>
  *
  * @author wenbin
  * @since 2026-09-19
  */
 @RestController
-@RequestMapping("/iot/devices")
+@RequestMapping("/devices")
 @RequiredArgsConstructor
 public class IotDeviceController {
 
