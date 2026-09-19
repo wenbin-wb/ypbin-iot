@@ -7,7 +7,7 @@ name: Sync Whitelist
 # 注意：`git diff upstream/main --stat` 的字面数字包含**新增文件**，比白名单口径大得多；
 #      本工作流检查的是「改动的既有文件」（--diff-filter=MDR），别把两者混为一谈。
 # 为什么需要：纪律只写在 SYNC.md 里没有强制力——本仓刚建立时，依赖机器人（Dependabot）的 PR
-# 就在改 admin 拥有的 ci.yml/codeql.yml，合进去就破坏了「只改 3 个 pom」的分歧面。
+# 就在改 admin 拥有的 ci.yml/codeql.yml，合进去就破坏了「只改白名单内的 7 个文件」的分歧面。
 on:
   pull_request:
     branches: [main]
