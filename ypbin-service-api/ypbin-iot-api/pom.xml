@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>cn.ypbin.admin</groupId>
+        <artifactId>ypbin-service-api</artifactId>
+        <version>${revision}</version>
+    </parent>
+
+    <artifactId>ypbin-iot-api</artifactId>
+    <name>${project.artifactId}</name>
+    <description>IoT 业务契约：实体与请求/响应模型（供 ypbin-iot 与其它服务共享）</description>
+
+    <dependencies>
+        <!-- 多租户基类（TenantBaseEntity）：实体一律带 tenant_id -->
+        <dependency>
+            <groupId>cn.ypbin</groupId>
+            <artifactId>ypbin-starter-extension-tenant</artifactId>
+        </dependency>
+        <!-- PageQuery：查询对象统一继承它（分页参数与上限校验都在基类里） -->
+        <dependency>
+            <groupId>cn.ypbin</groupId>
+            <artifactId>ypbin-starter-extension-crud</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>cn.ypbin</groupId>
+            <artifactId>ypbin-starter-json</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+    </dependencies>
+</project>

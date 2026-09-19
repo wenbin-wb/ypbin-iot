@@ -1,0 +1,53 @@
+name: Sync Whitelist
+
+# 把「与 admin 基座的同步纪律」变成机器检查：
+#   1) 改动的**既有 admin 文件**必须落在白名单内（新增文件不受限——IoT 业务一律加新文件/新模块）；
+#      白名单当前 **7 个文件**（见 SYNC.md 第二节，两边必须一致）；
+#   2) IoT 的 SQL 迁移脚本必须与全新安装脚本语句等价。
+# 注意：`git diff upstream/main --stat` 的字面数字包含**新增文件**，比白名单口径大得多；
+#      本工作流检查的是「改动的既有文件」（--diff-filter=MDR），别把两者混为一谈。
+# 为什么需要：纪律只写在 SYNC.md 里没有强制力——本仓刚建立时，依赖机器人（Dependabot）的 PR
+# 就在改 admin 拥有的 ci.yml/codeql.yml，合进去就破坏了「只改白名单内的 7 个文件」的分歧面。
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  whitelist:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出（需要完整历史以计算与 upstream 的分歧）
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: 拉取 upstream（ypbin-admin）
+        run: |
+          git remote add upstream https://github.com/wenbin-wb/ypbin-admin.git
+          git fetch --no-tags upstream main
+
+      - name: 校验「改动的既有 admin 文件」都在白名单内
+        run: |
+          set -euo pipefail
+          # 白名单（与 SYNC.md 第二节保持一致；新增文件不在检查范围内）
+          ALLOWED='^(pom\.xml|ypbin-service/pom\.xml|ypbin-service-api/pom\.xml|deploy/install\.sh|deploy/docker-compose\.yml|deploy/nacos/ypbin-gateway\.yaml|deploy/\.env\.example)$'
+          changed="$(git diff --name-only --diff-filter=MDR upstream/main...HEAD)"
+          echo "改动的既有文件："
+          echo "${changed:-（无）}"
+          bad=0
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            if ! printf '%s' "$file" | grep -Eq "$ALLOWED"; then
+              echo "::error file=$file::$file 不在同步白名单内：改 admin 的文件会让 \`git merge upstream/main\` 越来越难。IoT 代码请放新模块/新文件；确需修改时先更新 SYNC.md 第二节的白名单与本工作流。"
+              bad=1
+            fi
+          done <<< "$changed"
+          [ "$bad" -eq 0 ] || exit 1
+          echo "OK：只改动了白名单内的 admin 文件"
+
+      - name: IoT SQL 迁移脚本与全新安装脚本的语句等价
+        run: bash tools/check-iot-sql-equivalence.sh

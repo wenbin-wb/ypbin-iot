@@ -1,0 +1,48 @@
+name: Upstream Sync Check
+
+# 这个工作流只做一件事：**干跑**一次 `merge upstream/main`，把「与 admin 基座的漂移」
+# 从「将来某天合并爆炸」变成「当次就报」。它不推送、不改动任何东西。
+#
+# 为什么放在单独文件而不是改 admin 的 ci.yml：**零冲突面**。
+# 本仓是 admin 的 fork（基座只更新基础功能），改 admin 的文件越多，`merge upstream/main` 越容易冲突。
+on:
+  schedule:
+    # 每周一 03:00 UTC（admin 的基础更新通常按 PR 合入，周检足够）
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  dry-run-merge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出（需要完整历史才能合并）
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: 拉取 upstream（ypbin-admin）
+        run: |
+          git remote add upstream https://github.com/wenbin-wb/ypbin-admin.git
+          git fetch --no-tags upstream main
+
+      - name: 落后多少提交
+        run: |
+          BEHIND=$(git rev-list --count HEAD..upstream/main)
+          echo "落后 upstream/main $BEHIND 个提交"
+          echo "### 与 admin 基座的差距：$BEHIND 个提交" >> "$GITHUB_STEP_SUMMARY"
+          git log --oneline HEAD..upstream/main | head -20 >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: 干跑合并（必须无冲突）
+        run: |
+          git config user.email "ci@ypbin.local"
+          git config user.name "ypbin-iot ci"
+          if git merge --no-commit --no-ff upstream/main; then
+            echo "与 upstream/main 可无冲突合并"
+            git merge --abort || true
+          else
+            echo "::error::与 upstream/main 合并冲突：该同步了（见 SYNC.md 的冲突处置清单）"
+            git merge --abort || true
+            exit 1
+          fi
