@@ -18,6 +18,6 @@
     <modules>
         <module>ypbin-system-api</module>
         <module>ypbin-ai-api</module>
-<module>ypbin-iot-api</module>
+        <module>ypbin-iot-api</module>
     </modules>
 </project>

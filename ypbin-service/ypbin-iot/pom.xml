@@ -67,6 +67,16 @@
             <groupId>cn.ypbin</groupId>
             <artifactId>ypbin-starter-log</artifactId>
         </dependency>
+        <!-- 显式声明：@Idempotent 等来自 tools（原本只是传递依赖，传递链一变就断） -->
+        <dependency>
+            <groupId>cn.ypbin</groupId>
+            <artifactId>ypbin-starter-tools</artifactId>
+        </dependency>
+        <!-- 显式声明：@Async 线程池（不声明会静默降级成同步执行，见 ai 的同款注释） -->
+        <dependency>
+            <groupId>cn.ypbin</groupId>
+            <artifactId>ypbin-starter-async</artifactId>
+        </dependency>
         <dependency>
             <groupId>cn.ypbin</groupId>
             <artifactId>ypbin-starter-web</artifactId>
@@ -94,6 +104,15 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+                <!-- repackage 必须显式声明：不声明就只有瘦 jar（无 BOOT-INF/Main-Class），
+                     而 deploy/install.sh 是按 `java -jar` 部署的 ⇒ 会直接跑不起来 -->
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>repackage</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>

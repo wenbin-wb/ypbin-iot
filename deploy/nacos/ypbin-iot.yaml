@@ -1,0 +1,22 @@
+# ============================================================
+# ypbin-iot 服务配置（Nacos 配置中心）
+# Data ID: ypbin-iot.yaml | Group: DEFAULT_GROUP | 格式: YAML
+# ============================================================
+
+ypbin:
+  tenant:
+    enabled: true
+    # fail-closed：无租户上下文时拒绝执行。IoT 业务全部按租户隔离（设备台账继承 TenantBaseEntity），
+    # 因此这里保持拒绝——任何绕过租户的写法都会在开发期暴露，而不是悄悄查全表。
+    fail-on-missing-tenant: true
+  # 身份头来源校验：仅信任带网关签名标记的身份头；未配置密钥则拒绝启动（fail-fast）
+  cloud:
+    feign:
+      trusted-source-token: ${GATEWAY_SIGN_TOKEN}
+      require-trusted-source: true
+  data-permission:
+    enabled: true
+  # iot 为下游业务服务，登录态由网关校验并注入身份头；
+  # 关闭本地 Sa-Token 全局拦截，避免 iot 直读 Redis 会话导致 token 无效。
+  sa-token:
+    enabled: false

@@ -741,7 +741,8 @@ fi
 SERVICES="ypbin-gateway:ypbin-gateway:18080
 ypbin-auth:ypbin-auth:18081
 ypbin-service/ypbin-system:ypbin-system:18082
-ypbin-service/ypbin-ai:ypbin-ai:18083"
+ypbin-service/ypbin-ai:ypbin-ai:18083
+ypbin-service/ypbin-iot:ypbin-iot:18084"
 
 # 交互确认：Y/n；-y 或 ASSUME_YES=1 时直接 yes（对齐单体脚本）
 confirm() {
@@ -1272,11 +1273,11 @@ NACOS_TOKEN=$(curl -fsS --connect-timeout 5 --max-time 30 -X POST "$NACOS_CONSOL
   --data-urlencode "username=$NACOS_USERNAME" \
   --data-urlencode "password=$NACOS_PASSWORD" 2>/dev/null | sed -n 's/.*"accessToken":"\([^"]*\)".*/\1/p' || true)
 
-# 发布 Nacos 配置（共 5 个：ypbin-common + 4 服务；幂等：已存在则覆盖；使用 Nacos 3 Console 新 API）
+# 发布 Nacos 配置（共 6 个：ypbin-common + 5 服务；幂等：已存在则覆盖；使用 Nacos 3 Console 新 API）
 if [ -n "$NACOS_TOKEN" ]; then
-  info "导入 Nacos 配置中心（ypbin-common + 4 服务）"
+  info "导入 Nacos 配置中心（ypbin-common + 5 服务）"
   NACOS_DIR="$ROOT/ypbin-admin/deploy/nacos"
-  for cfg in ypbin-common ypbin-gateway ypbin-auth ypbin-system ypbin-ai; do
+  for cfg in ypbin-common ypbin-gateway ypbin-auth ypbin-system ypbin-ai ypbin-iot; do
     if [ -f "$NACOS_DIR/$cfg.yaml" ]; then
       # 占位符替换：仓库 nacos yaml 不提交真实密码/凭证，导入前用 .env 实际值填充
       # （仅 ypbin-common.yaml 使用 ${MYSQL_ROOT_PASSWORD}/${REDIS_PASSWORD}/${INTERNAL_TOKEN}；
