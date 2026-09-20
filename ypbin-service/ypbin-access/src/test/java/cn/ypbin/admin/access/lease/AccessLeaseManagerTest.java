@@ -185,10 +185,15 @@ class AccessLeaseManagerTest {
     }
 
     @Test
-    @DisplayName("握手完成前不做任何重领（防调度器抢跑污染指标与日志）")
+    @DisplayName("握手完成前：既不重领也**不补注册**（防调度器抢跑；补注册会让抢跑窗口重新打开）")
     void refreshMustNotRunBeforeHandshake() {
+        // register 必须 stub 成成功：否则本用例会靠「mock 返回 null 信封 → registerOrFail 抛错早退」而绿，
+        // 通过的理由就不是「闸门存在」（复核用等价断言实证过：去掉闸门后会变成 register=1/acquire=1）
+        when(client.register(any())).thenReturn(R.ok());
+
         manager.renewAndSelfCheck(LocalDateTime.now().plusSeconds(600));
 
+        verify(client, times(0)).register(any());
         verify(client, times(0)).acquire(any());
         verify(client, times(0)).renew(any());
     }

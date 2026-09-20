@@ -10,10 +10,10 @@
 package cn.ypbin.admin.access.config;
 
 import cn.ypbin.admin.access.lease.AccessLeaseManager;
-import cn.ypbin.admin.iot.lease.ILeaseClient;
-import io.micrometer.core.instrument.MeterRegistry;
 import cn.ypbin.admin.access.link.LoggingTenantLinkManager;
 import cn.ypbin.admin.access.link.TenantLinkManager;
+import cn.ypbin.admin.iot.lease.ILeaseClient;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
