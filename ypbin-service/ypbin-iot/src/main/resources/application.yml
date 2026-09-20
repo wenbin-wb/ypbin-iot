@@ -4,6 +4,10 @@ server:
 spring:
   application:
     name: ypbin-iot
+  cloud:
+    nacos:
+      # 容器/非容器统一占位符：compose 注入 NACOS_ADDR 时才真的生效（不给就只能连 localhost）
+      server-addr: ${NACOS_ADDR:localhost:8848}
   config:
     import:
       - optional:nacos:ypbin-common.yaml
