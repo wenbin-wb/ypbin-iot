@@ -17,7 +17,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.stream.Stream;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -45,23 +44,17 @@ class IotSeamConventionTest {
     void replaceablePortImplementationsMustNotBeComponents() throws IOException {
         List<String> violations = new ArrayList<>();
         int scanned = 0;
-        try (Stream<Path> stream = Files.walk(REPO_ROOT)) {
-            for (Path file : stream.filter(Files::isRegularFile)
-                .filter(path -> path.toString().endsWith(".java"))
-                .filter(path -> !path.toString().contains("/target/"))
-                .toList()) {
-                List<String> lines = Files.readAllLines(file, StandardCharsets.UTF_8);
-                boolean implementsPort = lines.stream().anyMatch(line ->
-                    REPLACEABLE_PORTS.stream().anyMatch(port -> line.contains("implements " + port)));
-                if (!implementsPort) {
-                    continue;
-                }
-                scanned++;
-                // 行级判定：只有整行就是 @Component 才算注解（Javadoc 里的提及不算），避免正则开销
-                if (lines.stream().anyMatch(line -> line.trim().equals("@Component"))) {
-                    violations.add(REPO_ROOT.relativize(file)
-                        + " → 端口实现标了 @Component：宿主替换会被静默顶掉（改为 @Bean @ConditionalOnMissingBean）");
-                }
+        // 复用仓内 SourceScan：它带「嵌套检出剪枝」（排除 ypbin-starter / ypbin-iot-starter 等取源目录），
+        // 且只扫主源码——本仓 CI 会把 iot-starter 取源进工作区，Files.walk 会把外部仓一起扫进来。
+        for (Path file : SourceScan.mainSources()) {
+            List<String> lines = Files.readAllLines(file, StandardCharsets.UTF_8);
+            if (!implementsReplaceablePort(lines)) {
+                continue;
+            }
+            scanned++;
+            if (isComponentAnnotated(lines)) {
+                violations.add(SourceScan.relative(file)
+                    + " → 端口实现标了 @Component：宿主替换会被静默顶掉（改为 @Bean @ConditionalOnMissingBean）");
             }
         }
         assertThat(scanned).as("一个端口实现都没扫到 ⇒ 本规则是空跑（假绿）").isPositive();
@@ -69,12 +62,42 @@ class IotSeamConventionTest {
     }
 
     @Test
-    @DisplayName("自检：规则按行识别注解，Javadoc 里的 @Component 提及不算违规")
+    @DisplayName("自检：**直接调用规则所用的两个谓词**（规则被解除武装时必须被发现）")
     void ruleMustDetectViolationSemantically() {
-        assertThat(java.util.List.of("class A implements TenantLinkManager { }", "@Component")
-            .stream().anyMatch(line -> line.trim().equals("@Component"))).isTrue();
-        assertThat(java.util.List.of(" * 不得标 @Component（由 @ConditionalOnMissingBean 装配）",
-            "class A implements TenantLinkManager {}")
-            .stream().anyMatch(line -> line.trim().equals("@Component"))).isFalse();
+        assertThat(implementsReplaceablePort(List.of("class A implements TenantLinkManager { }"))).isTrue();
+        assertThat(implementsReplaceablePort(List.of("class A implements SomethingElse { }"))).isFalse();
+        assertThat(isComponentAnnotated(List.of("@Component", "class A implements TenantLinkManager {}"))).isTrue();
+        assertThat(isComponentAnnotated(
+            List.of("@Component(\"iotTenantLinkManager\")", "class A implements TenantLinkManager {}")))
+            .isTrue();
+        assertThat(isComponentAnnotated(List.of("@org.springframework.stereotype.Component",
+            "class A implements TenantLinkManager {}"))).isTrue();
+        assertThat(isComponentAnnotated(List.of(" * 不得标 @Component（由 @ConditionalOnMissingBean 装配）",
+            "class A implements TenantLinkManager {}"))).isFalse();
+    }
+
+    /**
+     * 是否是「可替换端口」的实现（规则谓词，自检直接调用它）。
+     *
+     * @param lines 源码行
+     * @return 是端口实现返回 {@code true}
+     */
+    static boolean implementsReplaceablePort(List<String> lines) {
+        return lines.stream().anyMatch(line -> REPLACEABLE_PORTS.stream()
+            .anyMatch(port -> line.contains("implements " + port)));
+    }
+
+    /**
+     * 是否被标为组件（规则谓词，自检直接调用它）。
+     *
+     * @param lines 源码行
+     * @return 有 @Component 注解返回 {@code true}
+     */
+    static boolean isComponentAnnotated(List<String> lines) {
+        return lines.stream().anyMatch(line -> {
+            String trimmed = line.trim();
+            return trimmed.startsWith("@Component")
+                || trimmed.startsWith("@org.springframework.stereotype.Component");
+        });
     }
 }
