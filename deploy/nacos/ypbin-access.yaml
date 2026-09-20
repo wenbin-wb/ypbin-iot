@@ -1,0 +1,39 @@
+# ============================================================
+# ypbin-access 服务配置（Nacos 配置中心）
+# Data ID: ypbin-access.yaml | Group: DEFAULT_GROUP | 格式: YAML
+# ============================================================
+#
+# 接入单元不连库：租约与归属通过 ypbin-iot 的 /internal/lease/** 获取（见 docs/LEASE.md）。
+# 因此这里**不引入 ypbin-common.yaml**（那份配置带 spring.datasource.*，会把 DataSource 自动配置拖起来，
+# 而 access 的 classpath 里没有 JDBC 驱动 ⇒ 启动期就会失败；实现侧已显式排除 DataSourceAutoConfiguration 兜底）。
+
+server:
+  port: 18086
+
+spring:
+  cloud:
+    nacos:
+      server-addr: ${NACOS_ADDR:localhost:8848}
+
+ypbin:
+  # 出站内部凭证：与 iot 的 /internal/lease/** 守卫共用同一个值（未配置 ⇒ 服务端 fail-closed 拒绝）
+  internal:
+    token: ${INTERNAL_TOKEN}
+  # access 是下游服务：登录态由网关校验，本地关闭 Sa-Token 全局拦截
+  # （键是 ypbin.security.interceptor；写成 ypbin.sa-token.* 是不存在的键，会静默无效）
+  security:
+    interceptor: false
+  access:
+    # ⚠️ 节点标识是**租约归属的键**，每个副本必须唯一：多个副本共用一个 node-id 属误配置，
+    #    会造成超额分配与双份续约，且无法从数据上察觉（服务端只打 WARN）。
+    #    单副本部署用默认值即可；扩容时给每个副本注入不同的 ACCESS_NODE_ID。
+    node-id: ${ACCESS_NODE_ID:access-1}
+    # 最多可持有租户数；不填 = 不限（单节点全量）
+    capacity:
+    # 续约周期：必须 ≥ 一次调用最坏耗时（connect 1s + read 3s）的 2 倍 ⇒ ≥ 8s，
+    # 启动自检会拒绝更小的值（否则一次卡顿就会让节点把自己判成失效）
+    renew-interval-ms: 10000
+    # 周期重领（接管执行入口）：只在启动时领取会让「待接管」的租户永远无人接手
+    acquire-interval-ms: 15000
+    # 启动握手：生产必须为 true（关掉时节点零采集，仅用于验装配）
+    startup-handshake-enabled: true
