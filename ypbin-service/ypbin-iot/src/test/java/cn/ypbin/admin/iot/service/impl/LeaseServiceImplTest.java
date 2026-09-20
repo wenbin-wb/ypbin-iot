@@ -40,6 +40,7 @@ import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.LocalDateTime;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.List;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.junit.jupiter.api.BeforeAll;
@@ -271,8 +272,8 @@ class LeaseServiceImplTest {
     @DisplayName("容量临界区真的串行化：并发领取时临界区不重叠（把锁挪走必须转红）")
     void capacityCriticalSectionMustNotOverlap() throws InterruptedException {
         registerNode();
-        java.util.concurrent.atomic.AtomicInteger inCritical = new java.util.concurrent.atomic.AtomicInteger();
-        java.util.concurrent.atomic.AtomicInteger maxConcurrent = new java.util.concurrent.atomic.AtomicInteger();
+        AtomicInteger inCritical = new AtomicInteger();
+        AtomicInteger maxConcurrent = new AtomicInteger();
         when(mapper.update(isNull(), any())).thenReturn(0);
         // 把「造批次」这一步当成临界区探针：它发生在 doAcquire 内部（锁内）
         when(mapper.insertIgnoringDuplicates(any())).thenAnswer(invocation -> {

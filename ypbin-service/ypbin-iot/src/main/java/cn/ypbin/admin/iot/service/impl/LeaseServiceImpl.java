@@ -50,10 +50,12 @@ import org.springframework.transaction.support.TransactionTemplate;
 /**
  * 租约与归属服务实现。
  *
- * <p><b>并发模型</b>：不使用进程内锁，全部依赖数据库的条件更新（CAS）与唯一键——
+ * <p><b>并发模型</b>：<b>归属裁决</b>不使用进程内锁，全部依赖数据库的条件更新（CAS）与唯一键——
  * 每个「归属变更」都是一条带守卫条件的 UPDATE，{@code affectedRows == 1} 才算赢；
  * 新分配的 INSERT 靠 {@code uk_tenant_node_assignment_tenant} 唯一键兜底，
- * 冲突即视为「别人先到」（不重试、不覆盖）。这样多副本部署也不会出现双主。</p>
+ * 冲突即视为「别人先到」（不重试、不覆盖）。这样多副本部署也不会出现双主。
+ * <b>容量计数</b>另用「每节点进程内锁」（仅同一 JVM 有效，见 {@link #acquire}）；
+ * 数据库级原子容量属 M0b（见 docs/LEASE.md §5 的 1b）。</p>
  *
  * <p><b>续约语义</b>：一次批量 UPDATE + 一次批量查询，不做逐条 CAS（那是 N+1）。
  * 请求里带的本地 epoch <b>不再用于拒绝续约</b>：只要归属仍在本节点名下就续期，并把<b>服务端 epoch</b>

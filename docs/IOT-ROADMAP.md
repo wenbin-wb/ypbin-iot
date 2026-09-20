@@ -25,7 +25,7 @@
   **无循环内 DB 调用**（架构门禁 `loopsMustNotCallDbOrRpc` 会拦）。
 - 语义与取舍写在 **`docs/LEASE.md`**（含「epoch 每次归属变更都推进」——它解决了旧栈 ADR-0001 的悬空项；
   以及「本地 epoch 落后不再吊销、改为回执带服务端 epoch」）。
-- 测试：`LeaseEpochRulesTest`（纯判据 6 条）+ `LeaseServiceImplTest`（CAS 守卫/分支/语义 15 条）；
+- 测试：`LeaseEpochRulesTest`（纯判据 6 条）+ `NacosTenantIgnoreConfigTest`（配置门禁 4 条）+ `LeaseServiceImplTest`（CAS 守卫/分支/语义 21 条）；
   单测还抓出过一个真实缺陷：`maxTenants=null`（默认「不限」）曾因 `ConcurrentHashMap` 不接受 null 而 NPE。
 - 待办（M0b）：节点注册表落库（同时让**容量**变成数据库级原子：节点行 + `SELECT ... FOR UPDATE`）、
   可分配租户改读台账表、**真库并发用例**（多副本抢同一租户，旧栈用 200 轮抓出过双主）、
