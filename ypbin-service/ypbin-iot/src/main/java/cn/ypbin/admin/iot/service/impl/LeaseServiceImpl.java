@@ -143,8 +143,9 @@ public class LeaseServiceImpl implements LeaseService {
         LocalDateTime now = LocalDateTime.now();
         LocalDateTime expireAt = now.plus(properties.getTtl());
 
-        // ① 续期自己在采的（单条原子 UPDATE）
-        int renewed = mapper.update(null, Wrappers.<TenantNodeAssignment>lambdaUpdate()
+        // ① 续期自己在采的（单条原子 UPDATE）。**不读 affectedRows**：真实持有的租户以 ② 的批量查询为准
+        //    （affectedRows 只说明匹配了多少行，区分不了状态，误用会让 ack/回收清单失真）
+        mapper.update(null, Wrappers.<TenantNodeAssignment>lambdaUpdate()
             .eq(TenantNodeAssignment::getAccessNode, node)
             .eq(TenantNodeAssignment::getState, LeaseState.ACTIVE.getCode())
             .set(TenantNodeAssignment::getLeaseExpireAt, expireAt)
