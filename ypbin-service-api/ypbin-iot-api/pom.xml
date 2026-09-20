@@ -20,6 +20,11 @@
             <groupId>cn.ypbin</groupId>
             <artifactId>ypbin-starter-extension-tenant</artifactId>
         </dependency>
+        <!-- Feign 注解（ILeaseClient）来自 starter-cloud-core，与 system-api 同源 -->
+        <dependency>
+            <groupId>cn.ypbin</groupId>
+            <artifactId>ypbin-starter-cloud-core</artifactId>
+        </dependency>
         <!-- PageQuery：查询对象统一继承它（分页参数与上限校验都在基类里） -->
         <dependency>
             <groupId>cn.ypbin</groupId>

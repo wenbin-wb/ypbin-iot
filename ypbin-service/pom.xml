@@ -19,5 +19,6 @@
         <module>ypbin-system</module>
         <module>ypbin-ai</module>
         <module>ypbin-iot</module>
+        <module>ypbin-access</module>
     </modules>
 </project>

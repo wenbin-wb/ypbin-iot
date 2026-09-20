@@ -1,0 +1,10 @@
+server:
+  port: 18086
+
+spring:
+  application:
+    name: ypbin-access
+  config:
+    import:
+      - optional:nacos:ypbin-common.yaml
+      - optional:nacos:ypbin-access.yaml
