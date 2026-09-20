@@ -182,30 +182,44 @@ public class AccessLeaseManager {
      * @param now  当前时刻
      */
     private void applyRenewResponse(LeaseRenewResp resp, LocalDateTime now) {
+        if (resp.isNodeFenced()) {
+            // 优先处理并返回：否则会先对「已被判定失效」的节点 startCollecting（3b 会真的建链），
+            // 再被 fenceAll 拆掉 —— 白建一次链
+            handleNodeFenced(now);
+            return;
+        }
         for (LeaseRenewAck ack : resp.getRenewedLeases()) {
             holdings.put(ack.getTenantId(), new LeaseSnapshot(ack.getLeaseExpireAt(), ack.getEpoch()));
         }
         for (Long tenantId : resp.getRevokedTenantIds()) {
-            if (holdings.remove(tenantId) != null) {
-                revokedCounter.increment();
-                linkManager.fence(tenantId, "business 判定该租户已失效/被接管");
-                log.warn("租户被回收，断链停采：tenantId={}", LogSanitizer.sanitize(tenantId));
-            }
+            // 无条件停采 + 计数：fence 是幂等的；3b 换真实现后本地快照可能已无该租户，
+            // 但「服务端要求停采」这件事必须执行（否则会漏停采）
+            holdings.remove(tenantId);
+            revokedCounter.increment();
+            linkManager.fence(tenantId, "business 判定该租户已失效/被接管");
+            log.warn("租户被回收，断链停采：tenantId={}", LogSanitizer.sanitize(tenantId));
         }
-        if (resp.isNodeFenced()) {
-            nodeFencedCounter.increment();
-            log.error("business 判定本节点已失效（nodeFenced）：整体停采并重新注册：node={}",
-                LogSanitizer.sanitize(properties.getNodeId()));
-            linkManager.fenceAll("business 判定节点失效");
-            holdings.clear();
-            lastAcquireAt.set(now);
-            try {
-                registerOrFail();
-                acquireOrFail();
-            } catch (RuntimeException ex) {
-                log.error("重新注册/领取失败，节点保持停采（下一轮再试）：node={}",
-                    LogSanitizer.sanitize(properties.getNodeId()), ex);
-            }
+    }
+
+    /**
+     * 节点级失效：整体停采 → 重新注册并重新领取；失败则保持停采并把 registered 置回 false。
+     *
+     * @param now 当前时刻
+     */
+    private void handleNodeFenced(LocalDateTime now) {
+        nodeFencedCounter.increment();
+        log.error("business 判定本节点已失效（nodeFenced）：整体停采并重新注册：node={}",
+            LogSanitizer.sanitize(properties.getNodeId()));
+        linkManager.fenceAll("business 判定节点失效");
+        holdings.clear();
+        lastAcquireAt.set(now);
+        try {
+            registerOrFail();
+            acquireOrFail();
+        } catch (RuntimeException ex) {
+            registered.set(false);
+            log.error("重新注册/领取失败，节点保持停采（下一轮补注册后再试）：node={}",
+                LogSanitizer.sanitize(properties.getNodeId()), ex);
         }
     }
 
@@ -216,7 +230,15 @@ public class AccessLeaseManager {
      */
     private void refreshAssignmentsIfDue(LocalDateTime now) {
         if (!registered.get()) {
-            return;
+            // nodeFenced 恢复失败时 registered 会停在 false，而服务端的 acquire 拒绝未注册节点
+            // ⇒ 不在这里补注册，节点会永久零采集（旧实现只记错误，活性缺陷）。register 是幂等覆盖。
+            try {
+                registerOrFail();
+            } catch (RuntimeException ex) {
+                log.error("重领前补注册失败（节点仍处停采状态）：node={}",
+                    LogSanitizer.sanitize(properties.getNodeId()), ex);
+                return;
+            }
         }
         LocalDateTime last = lastAcquireAt.get();
         if (last != null && Duration.between(last, now).toMillis() < properties.getAcquireIntervalMs()) {

@@ -67,6 +67,11 @@
             <groupId>cn.ypbin</groupId>
             <artifactId>ypbin-starter-log</artifactId>
         </dependency>
+        <!-- MeterRegistry 的提供者：本仓各服务都用指标，缺它启动即失败（实测） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
         <!-- 显式声明：@Idempotent 等来自 tools（原本只是传递依赖，传递链一变就断） -->
         <dependency>
             <groupId>cn.ypbin</groupId>

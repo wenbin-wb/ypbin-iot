@@ -14,7 +14,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.stereotype.Component;
+
 
 /**
  * 链路控制的 3a 实现：只维护「谁在采」的状态并打日志。
@@ -24,7 +24,6 @@ import org.springframework.stereotype.Component;
  * @author wenbin
  * @since 2026-09-20
  */
-@Component
 public class LoggingTenantLinkManager implements TenantLinkManager {
 
     private static final Logger log = LoggerFactory.getLogger(LoggingTenantLinkManager.class);

@@ -4,7 +4,19 @@ server:
 spring:
   application:
     name: ypbin-access
+  cloud:
+    nacos:
+      # 容器/非容器都用同一占位符：compose 注入 NACOS_ADDR 时才真的生效
+      server-addr: ${NACOS_ADDR:localhost:8848}
   config:
     import:
-      - optional:nacos:ypbin-common.yaml
       - optional:nacos:ypbin-access.yaml
+  # access 不连库：显式排除数据源自动配置（避免被共享配置里的 datasource.url 拖起来又没有驱动）
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration
+
+# 出站内部凭证（access → iot 的 /internal/lease/**）：未配置时服务端 fail-closed
+ypbin:
+  internal:
+    token: ${INTERNAL_TOKEN:}

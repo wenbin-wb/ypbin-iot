@@ -13,20 +13,37 @@ import cn.ypbin.admin.access.lease.AccessLeaseManager;
 import cn.ypbin.admin.access.link.TenantLinkManager;
 import cn.ypbin.admin.iot.lease.ILeaseClient;
 import io.micrometer.core.instrument.MeterRegistry;
+import cn.ypbin.admin.access.link.LoggingTenantLinkManager;
+import cn.ypbin.admin.access.link.TenantLinkManager;
+import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
+
 
 /**
- * access 的租约状态机装配。
+ * access 的租约状态机与链路端口装配。
+ *
+ * <p>⚠️ <b>必须是 {@code @AutoConfiguration}</b>：{@code @ConditionalOnMissingBean} 的顺序保证只有自动配置才有，
+ * 写在用户 {@code @Configuration} 里是假缝（3b 提供的真实现会 back off，协议栈静默不生效）。</p>
  *
  * @author wenbin
  * @since 2026-09-20
  */
-@Configuration
+@AutoConfiguration
 @EnableConfigurationProperties(AccessProperties.class)
 public class AccessLeaseConfiguration {
+
+    /**
+     * 链路控制端口的 3a 实现（宿主提供自己的实现即整体替换）。
+     *
+     * @return 链路管理实现
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public TenantLinkManager loggingTenantLinkManager() {
+        return new LoggingTenantLinkManager();
+    }
 
     /**
      * 租约状态机。
