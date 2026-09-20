@@ -27,13 +27,16 @@
   以及「本地 epoch 落后不再吊销、改为回执带服务端 epoch」）。
 - 测试：`LeaseEpochRulesTest`（纯判据 6 条）+ `LeaseServiceImplTest`（CAS 守卫/分支/语义 15 条）；
   单测还抓出过一个真实缺陷：`maxTenants=null`（默认「不限」）曾因 `ConcurrentHashMap` 不接受 null 而 NPE。
-- 待办（M0b）：节点注册表落库、可分配租户改读台账表、真库并发用例、`ILeaseClient`（随增量 3）。
+- 待办（M0b）：节点注册表落库（同时让**容量**变成数据库级原子：节点行 + `SELECT ... FOR UPDATE`）、
+  可分配租户改读台账表、**真库并发用例**（多副本抢同一租户，旧栈用 200 轮抓出过双主）、
+  到期时间改用数据库时钟（防跨副本时钟偏移）、`ILeaseClient`（随增量 3）。
+- **跨仓待办（需在 admin 仓做，本仓靠同步获得）**：网关拒绝 `/internal/**` 路径 + 把 `X-Internal-Token`
+  加进头部剥离名单（当前 `POST /iot/internal/lease/release` 会被转发进服务，见 `docs/LEASE.md` 的已知缺口）。
 
 ## 增量 2 原始设计说明（保留供追溯）
 
 **目标**：把「哪个节点采哪个租户」变成可查、可续约、可失效、可接管的服务端权威。
 
-**目标**：把「哪个节点采哪个租户」变成可查、可续约、可失效、可接管的服务端权威。
 
 - 表：`tenant_node_assignment`（tenant_id / access_node / epoch / lease_expire_at / state）
   + 必要的索引；SQL 双写（006/007 风格 + `migration/`）。

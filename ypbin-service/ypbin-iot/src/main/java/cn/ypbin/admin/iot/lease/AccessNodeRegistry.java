@@ -11,6 +11,8 @@ package cn.ypbin.admin.iot.lease;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.springframework.stereotype.Component;
 
 /**
@@ -31,6 +33,15 @@ public class AccessNodeRegistry {
     public static final int UNLIMITED_CAPACITY = Integer.MAX_VALUE;
 
     private final Map<String, Integer> nodes = new ConcurrentHashMap<>();
+
+    /**
+     * 每节点的领取锁：容量是「先读后写」（数当前持有 → 算剩余 → 限量分配），
+     * 同一进程内并发领取同一节点必须串行，否则两边都算出「剩余 = 全量」而超额分配。
+     *
+     * <p><b>作用域是「同一 JVM」</b>：多个副本用同一个 nodeId 属误配置（nodeId 是租约归属的键，必须唯一）；
+     * 把它做成数据库级原子（节点行 + {@code SELECT ... FOR UPDATE}）是 M0b 的事，已在 docs/LEASE.md 记录。</p>
+     */
+    private final Map<String, Lock> locks = new ConcurrentHashMap<>();
 
     /**
      * 注册/覆盖节点。
@@ -69,6 +80,16 @@ public class AccessNodeRegistry {
      */
     public boolean isRegistered(String accessNode) {
         return nodes.containsKey(accessNode);
+    }
+
+    /**
+     * 取该节点的领取锁（容量计数的临界区）。
+     *
+     * @param accessNode 节点标识
+     * @return 该节点的可重入锁（同节点返回同一把）
+     */
+    public Lock lockFor(String accessNode) {
+        return locks.computeIfAbsent(accessNode, ignored -> new ReentrantLock());
     }
 
     /** 已注册节点数（供观测/测试）。 */

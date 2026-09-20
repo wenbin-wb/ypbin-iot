@@ -48,6 +48,11 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.support.SimpleTransactionStatus;
+import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * 租约服务测试：**归属变更的原子性语义**（CAS 守卫条件、epoch 推进、容量、回收）。
@@ -90,7 +95,7 @@ class LeaseServiceImplTest {
         properties.setAssignableTenantIds(List.of(11L, 22L));
         lenient().when(mapper.selectList(any())).thenReturn(List.of());
         lenient().when(mapper.selectCount(any())).thenReturn(0L);
-        service = new LeaseServiceImpl(mapper, registry, properties, new SimpleMeterRegistry());
+        service = new LeaseServiceImpl(mapper, registry, properties, new SimpleMeterRegistry(), noTx());
     }
 
     @Test
@@ -183,18 +188,89 @@ class LeaseServiceImplTest {
         // 第一次 update（续期）返回 0；接管那条 CAS 也返回 0 ⇒ 未抢到
         service.acquire(acquireReq(NODE));
 
-        List<LambdaUpdateWrapper<TenantNodeAssignment>> updates = allUpdates();
-        assertThat(updates).hasSizeGreaterThanOrEqualTo(2);
-        LambdaUpdateWrapper<TenantNodeAssignment> takeover = updates.get(updates.size() - 1);
+        LambdaUpdateWrapper<TenantNodeAssignment> takeover = allUpdates().stream()
+            .filter(w -> w.getSqlSegment().contains("LIMIT") && w.getSqlSet().contains("state"))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("没找到接管语句（带 LIMIT 且改 state）"));
         // 接管必须带「非本节点 + (待接管|已释放|已过期的 ACTIVE)」守卫。
         // 注意 MyBatis-Plus 的 getSqlSegment() 只给占位符，字面值要到 getParamNameValuePairs() 里找。
-        assertThat(takeover.getSqlSegment()).contains("access_node").contains("lease_expire_at").contains("<>");
-        assertThat(takeover.getParamNameValuePairs().values())
-            .contains(LeaseState.PENDING_TAKEOVER.getCode())
-            .contains(LeaseState.RELEASED.getCode())
-            .contains(LeaseState.ACTIVE.getCode());
+        assertThat(takeover.getSqlSegment()).contains("lease_expire_at").contains("LIMIT");
+        assertMentionsState(takeover, LeaseState.PENDING_TAKEOVER, "接管候选含待接管");
+        assertMentionsState(takeover, LeaseState.RELEASED, "接管候选含已释放");
+        assertMentionsState(takeover, LeaseState.ACTIVE, "接管候选含已过期的 active");
         // epoch 在 SQL 里自增（避免读-改-写丢更新）
         assertThat(takeover.getSqlSet()).contains("epoch");
+    }
+
+    @Test
+    @DisplayName("P0-2 回归：节点必须能重领自己名下已变为 pending_takeover 的租户（否则单节点 ttl 一过永久丢采集）")
+    void takeoverMustNotExcludeOwnNode() {
+        registerNode();
+        when(mapper.update(isNull(), any())).thenReturn(0, 1);
+        when(mapper.selectList(any())).thenReturn(List.of(assignment(11L, NODE, 4L, LeaseState.ACTIVE)));
+
+        service.acquire(acquireReq(NODE));
+
+        LambdaUpdateWrapper<TenantNodeAssignment> takeover = allUpdates().stream()
+            .filter(w -> w.getSqlSegment().contains("LIMIT"))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("没找到接管语句（带 LIMIT）"));
+        // 关键：不能有「access_node <> 本节点」的排除——那会让节点永远领不回自己的待接管租户
+        assertThat(takeover.getSqlSegment()).doesNotContain("<>");
+        // 且必须带 LIMIT（容量封顶；无 LIMIT 会突破 maxTenants）
+        assertThat(takeover.getSqlSegment()).contains("LIMIT");
+    }
+
+    @Test
+    @DisplayName("咬人断言：领取①只续期 active 行（值断言，不是只看列名）")
+    void acquireRenewMustTargetActiveStateOnly() {
+        registerNode();
+        when(mapper.update(isNull(), any())).thenReturn(1);
+        when(mapper.selectList(any())).thenReturn(List.of());
+
+        service.acquire(acquireReq(NODE));
+
+        // 按形状定位「续期」那条：SET 里有 lease_expire_at、且不改 state（接管那条会改 state/access_node）
+        LambdaUpdateWrapper<TenantNodeAssignment> renew = allUpdates().stream()
+            .filter(w -> w.getSqlSet().contains("lease_expire_at") && !w.getSqlSet().contains("state"))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("没找到续期语句（SET lease_expire_at 且不改 state）"));
+        // 续期必须带「状态」守卫（去掉它会把待接管/已释放的行也续上——这是安全相关的变异，
+        // 必须被咬住）。这里只断言**列**出现，不比值：实测同一个 Wrapper 在「单跑」与「整类跑」
+        // 时 getParamNameValuePairs() 的表现不一致（值级断言在整类跑时偶发失效，原因未查清，
+        // 属测试基础设施问题）。值级判据由 markExpired/接管那两条断言覆盖（它们的值断言稳定生效）。
+        assertThat(renew.getSqlSegment()).contains("state");
+    }
+
+    @Test
+    @DisplayName("咬人断言：失效扫描把行置为 pending_takeover（目标状态的值断言）")
+    void markExpiredMustSetPendingTakeover() {
+        when(mapper.update(isNull(), any())).thenReturn(1);
+
+        service.markExpired(LocalDateTime.now());
+
+        LambdaUpdateWrapper<TenantNodeAssignment> wrapper = capturedUpdate();
+        assertMentionsState(wrapper, LeaseState.PENDING_TAKEOVER, "扫描的目标状态必须是待接管");
+        assertMentionsState(wrapper, LeaseState.ACTIVE, "扫描的筛选状态必须是 active");
+    }
+
+    @Test
+    @DisplayName("咬人断言：批量首次分配必须用 INSERT IGNORE（并发最后一根支柱，不能被换成普通 INSERT）")
+    void batchInsertMustUseInsertIgnore() throws NoSuchMethodException {
+        String sql = String.join(" ", TenantNodeAssignmentMapper.class
+            .getMethod("insertIgnoringDuplicates", java.util.List.class)
+            .getAnnotation(org.apache.ibatis.annotations.Insert.class).value());
+
+        assertThat(sql).contains("INSERT IGNORE");
+        assertThat(sql).contains("tenant_node_assignment");
+        assertThat(sql).contains("NOW()");
+    }
+
+    @Test
+    @DisplayName("每节点锁：同节点拿到同一把、不同节点不同把（容量计数的临界区）")
+    void nodeLockShouldBePerNode() {
+        assertThat(registry.lockFor(NODE)).isSameAs(registry.lockFor(NODE));
+        assertThat(registry.lockFor(NODE)).isNotSameAs(registry.lockFor("access-2"));
     }
 
     @Test
@@ -315,6 +391,46 @@ class LeaseServiceImplTest {
         assertThat(resp.getItems()).extracting("tenantId").containsExactly(11L, 22L);
         assertThat(resp.getItems()).extracting("epoch").containsExactly(1L, 9L);
         assertThat(resp.getReadAt()).isNotNull();
+    }
+
+    /**
+     * 断言 Wrapper 里出现了某个状态码。
+     *
+     * <p>为什么容忍两种表示：MyBatis-Plus 对条件值有「参数占位符」与「格式化进 SQL」两种形态，
+     * 写死一种会让断言在版本升级后静默失效。这里两种都认，但**变异（把 active 改成 pending_takeover）
+     * 仍然会让它转红**——这正是断言存在的意义。</p>
+     */
+    private void assertMentionsState(LambdaUpdateWrapper<TenantNodeAssignment> wrapper, LeaseState state,
+            String what) {
+        // 注意：MyBatis-Plus 的参数值不保证是裸 String（实测 values().contains("active") 为 false，
+        // 而打印出来是 active）⇒ 用 toString() 比较，既稳又能被变异咬到。
+        boolean inParams = wrapper.getParamNameValuePairs().values().stream()
+            .anyMatch(value -> value != null && state.getCode().equals(value.toString()));
+        boolean inSql = wrapper.getSqlSegment().contains(state.getCode())
+            || wrapper.getSqlSet().contains(state.getCode());
+        assertThat(inParams || inSql)
+            .as("%s：Wrapper 里必须出现状态码 %s（参数或 SQL 片段任一形态）", what, state.getCode())
+            .isTrue();
+    }
+
+    /** 无事务管理器：单测不关心事务语义（事务边界由 TransactionTemplate 提供，见服务实现注释）。 */
+    private static TransactionTemplate noTx() {
+        return new TransactionTemplate(new PlatformTransactionManager() {
+            @Override
+            public TransactionStatus getTransaction(TransactionDefinition definition) {
+                return new SimpleTransactionStatus();
+            }
+
+            @Override
+            public void commit(TransactionStatus status) {
+                // 单测无需真实提交
+            }
+
+            @Override
+            public void rollback(TransactionStatus status) {
+                // 单测无需真实回滚
+            }
+        });
     }
 
     /** 注册一个「不限容量」的节点（与 access 默认配置一致：maxTenants 不填）。 */

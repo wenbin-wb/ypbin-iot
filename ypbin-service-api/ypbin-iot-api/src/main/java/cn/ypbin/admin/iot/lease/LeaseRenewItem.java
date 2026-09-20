@@ -27,7 +27,13 @@ public class LeaseRenewItem {
     @NotNull(message = "租户 ID 不能为空")
     private Long tenantId;
 
-    /** 本地台账版本号（与服务端不一致说明本地视图过期，服务端会拒绝续约并回收）。 */
+    /**
+     * 本地台账版本号。
+     *
+     * <p><b>它不参与「是否拒绝续约」的判定</b>（见 {@code docs/LEASE.md} §4）：服务端只认「归属是否仍在本节点名下」，
+     * 并把这<b>服务端</b> epoch 放进回执让节点自更新；把本地落后当吊销会把一次视图滞后放大成整租户断链。
+     * 字段保留为必填是为了让节点显式声明自己的视图版本（对账与排障用），未来可演进为乐观锁。</p>
+     */
     @NotNull(message = "台账版本号不能为空")
     private Long epoch;
 }

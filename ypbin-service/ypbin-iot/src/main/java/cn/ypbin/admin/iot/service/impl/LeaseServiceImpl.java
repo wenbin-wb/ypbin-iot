@@ -42,8 +42,10 @@ import java.util.List;
 import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import java.util.concurrent.locks.Lock;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * 租约与归属服务实现。
@@ -80,17 +82,21 @@ public class LeaseServiceImpl implements LeaseService {
     private final Counter takeoverCounter;
     private final Counter expiredCounter;
     private final Counter revokedCounter;
+    private final TransactionTemplate transactionTemplate;
 
     /**
      * 构造租约服务。
      *
-     * @param mapper        归属 Mapper
-     * @param nodeRegistry  节点注册表
-     * @param properties    租约参数
-     * @param meterRegistry 指标注册表
+     * @param mapper              归属 Mapper
+     * @param nodeRegistry        节点注册表
+     * @param properties          租约参数
+     * @param meterRegistry       指标注册表
+     * @param transactionTemplate 事务模板（领取需要在「锁内、事务中」执行，见 {@link #acquire}）
      */
     public LeaseServiceImpl(TenantNodeAssignmentMapper mapper, AccessNodeRegistry nodeRegistry,
-            LeaseProperties properties, MeterRegistry meterRegistry) {
+            LeaseProperties properties, MeterRegistry meterRegistry,
+            TransactionTemplate transactionTemplate) {
+        this.transactionTemplate = transactionTemplate;
         this.mapper = mapper;
         this.nodeRegistry = nodeRegistry;
         this.properties = properties;
@@ -110,13 +116,28 @@ public class LeaseServiceImpl implements LeaseService {
     }
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
     public LeaseAcquireResp acquire(LeaseAcquireReq req) {
         String node = req.getAccessNode();
         if (!nodeRegistry.isRegistered(node)) {
             // 不隐式注册：未注册节点拿到归属会让「谁在线」不可审计
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "节点未注册，请先调用 register：" + node);
         }
+        // 容量是「先读后写」：同一进程内并发领取同一节点必须串行。
+        // ⚠️ 锁必须在**事务之外**：若把锁放在 @Transactional 方法内，方法返回即解锁、而事务提交发生在
+        // 代理边界之后 ⇒ 第二个线程会在第一个线程提交前读到旧计数，锁等于没生效。这里用事务模板把
+        // 「计数 + 限量分配」整体放进锁内、并保证提交先于解锁。
+        Lock lock = nodeRegistry.lockFor(node);
+        lock.lock();
+        try {
+            return transactionTemplate.execute(status -> doAcquire(req));
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** 领取的实际逻辑（在节点锁内、同一事务中执行）。 */
+    private LeaseAcquireResp doAcquire(LeaseAcquireReq req) {
+        String node = req.getAccessNode();
         LocalDateTime now = LocalDateTime.now();
         LocalDateTime expireAt = now.plus(properties.getTtl());
 
@@ -128,15 +149,21 @@ public class LeaseServiceImpl implements LeaseService {
             .set(TenantNodeAssignment::getUpdateTime, now));
 
         int capacity = capacityOf(node);
-        int held = renewed;
+        // 在锁内重新计数（不依赖 renewed）：容量判断与「限量分配」必须基于同一时刻的事实
+        int held = countHeld(node);
         int room = capacity == Integer.MAX_VALUE ? Integer.MAX_VALUE : Math.max(0, capacity - held);
 
         // ② 接管：待接管 / 已释放 / 已过期但仍标 ACTIVE 的（扫描滞后时兜底）。
         // 一条原子 UPDATE 完成，并用 LIMIT 把容量上限压在同一条语句里——
         // 逐行 CAS 会变成 N+1（架构门禁会拦），而且多副本下每行都要重新读一次状态。
         if (room > 0) {
+            // ⚠️ 这里**不能**加 `access_node <> 本节点` 的守卫：节点必须能重领自己名下
+            // 那些已变成 pending_takeover / released 的租户，否则单节点部署下 ttl 一过就永久丢采集
+            // （markExpired 只有「置为待接管」这一条路，没有回退路径）。
+            // 安全性不受影响：候选条件本身要求 state≠active 或「active 且已过期」，
+            // 而本节点自己的 active 行已在步骤①被续期到 now+ttl，因此不会误抢本节点在采的租户
+            // （更不会抢别的节点在采的租户）。
             int takenOver = mapper.update(null, Wrappers.<TenantNodeAssignment>lambdaUpdate()
-                .ne(TenantNodeAssignment::getAccessNode, node)
                 .and(w -> w.eq(TenantNodeAssignment::getState, LeaseState.PENDING_TAKEOVER.getCode())
                     .or().eq(TenantNodeAssignment::getState, LeaseState.RELEASED.getCode())
                     .or(x -> x.eq(TenantNodeAssignment::getState, LeaseState.ACTIVE.getCode())
