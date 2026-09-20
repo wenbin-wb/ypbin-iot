@@ -28,12 +28,13 @@
 
 ## 二、并发正确性（为什么不会双主）
 
-**不使用进程内锁**，全部由数据库裁决，因此多副本部署也只有一个赢家：
+**归属裁决不使用进程内锁**，全部由数据库裁决（单条原子 UPDATE / `INSERT IGNORE`），因此多副本部署也只有一个赢家；
+**容量计数额外用「每节点进程内锁」**（仅同一 JVM 有效，见 §5 的 1b）——两者作用不同，别混为一谈：
 
 | 操作 | 手段 |
 |---|---|
 | 领取时续期自己持有的 | 单条 `UPDATE ... WHERE access_node=? AND state='active'` |
-| 接管（待接管/已释放/已过期） | 单条 `UPDATE ... SET epoch = epoch + 1, access_node=? ... WHERE access_node<>? AND (state IN (...) OR (state='active' AND lease_expire_at<=now)) LIMIT <容量剩余>` |
+| 接管（待接管/已释放/已过期，**含本节点自己的**） | 单条 `UPDATE ... SET epoch = epoch + 1, access_node=? ... WHERE (state IN ('pending_takeover','released') OR (state='active' AND lease_expire_at<=now)) LIMIT <容量剩余>`（**不能**排除本节点：否则节点领不回自己被判失效/已释放的租户） |
 | 首次分配 | 单条 `INSERT IGNORE ... VALUES (...),(...)`：唯一键（`tenant_id`）冲突者被跳过，其余写入 |
 | 续约 | 一次批量 `UPDATE` + 一次批量查询定位「实际续到的」；`请求 − 续到` = 需回收 |
 | 释放 | 单条 `UPDATE ... WHERE access_node=? AND state='active' AND tenant_id IN (...)` |
@@ -71,10 +72,11 @@
    多副本抢同一租户的真库并发测试属 **M0b/P5**（旧栈曾用 200 轮并发用例抓出过双主）。
    ⚠️ 本机虽有既存 MySQL 容器（部署栈，非本项目所有），**未获授权不得使用**，因此没有真库验证。
 3b. **`INSERT IGNORE` 是 MySQL 语义**：除唯一键外，它也会忽略其它「可忽略错误」（如数据截断）。
-   本表字段全部由服务端生成、无外部输入，风险可控；换数据库时必须同步改这条 SQL。
+   `tenant_id/epoch/state/lease_expire_at` 由服务端生成，但 **`access_node` 来自请求**
+   （`AccessNodeRegisterReq` 等）——现已按列宽加 `@Size(max = 128)` 校验；即便如此，换数据库时仍必须同步改这条 SQL。
 3c. **接管 SQL 的 `LIMIT` 没有 `ORDER BY`**：选取哪几个候选不确定（正确性无碍，但行为不确定、不便复现）。
 3d. **单表大事务风险**：容量不限时 `LIMIT 2147483647`，且首次分配是一次插入全部可分配租户。
-3e. **容量只约束「新增」，不回收已持有**：调小 `max-tenants` 不会让节点主动释放已持有的租户。
+3e. **容量只约束「新增」，不回收已持有**：把注册请求里的 `maxTenants` 调小（或后续改成节点表字段）不会让节点主动释放已持有的租户。
 3f. **扫描周期与 ttl 无自检关系**：接管最坏延迟 ≈ `ttl + scan-interval`（默认 45s），
    靠「active 且已过期」的兜底分支缩短；这条关系未做成启动自检。
 3g. **`batchEpoch` 是全表读**（无分页/上限）：自用规模无碍，租户数上来要加上限或分页。

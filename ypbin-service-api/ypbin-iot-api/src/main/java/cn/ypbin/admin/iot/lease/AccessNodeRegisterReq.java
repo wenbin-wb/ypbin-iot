@@ -10,6 +10,7 @@
 package cn.ypbin.admin.iot.lease;
 
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -25,6 +26,7 @@ public class AccessNodeRegisterReq {
 
     /** 节点标识（租约归属的键，须全局唯一）。 */
     @NotBlank(message = "节点标识不能为空")
+    @Size(max = 128, message = "节点标识长度不能超过 128")
     private String accessNode;
 
     /** 最多可持有多少租户；{@code null} = 不限（单节点全量）。 */

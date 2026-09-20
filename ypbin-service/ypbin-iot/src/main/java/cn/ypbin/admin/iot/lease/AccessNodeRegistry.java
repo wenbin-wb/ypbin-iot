@@ -11,8 +11,11 @@ package cn.ypbin.admin.iot.lease;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import cn.ypbin.starter.core.util.LogSanitizer;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 /**
@@ -28,6 +31,8 @@ import org.springframework.stereotype.Component;
  */
 @Component
 public class AccessNodeRegistry {
+
+    private static final Logger log = LoggerFactory.getLogger(AccessNodeRegistry.class);
 
     /** 「不限容量」的哨兵值（{@code ConcurrentHashMap} 不接受 null 值，用它代替）。 */
     public static final int UNLIMITED_CAPACITY = Integer.MAX_VALUE;
@@ -58,7 +63,15 @@ public class AccessNodeRegistry {
         if (maxTenants != null && maxTenants < 0) {
             throw new IllegalArgumentException("节点容量不能为负数：node=" + accessNode + " maxTenants=" + maxTenants);
         }
-        nodes.put(accessNode, maxTenants == null ? UNLIMITED_CAPACITY : maxTenants);
+        int capacity = maxTenants == null ? UNLIMITED_CAPACITY : maxTenants;
+        Integer previous = nodes.put(accessNode, capacity);
+        if (previous != null) {
+            // 覆盖注册是允许的（重启/配置调整），但「两个副本用同一个 nodeId」也走这条路，
+            // 而那种误配置会带来超额分配与双份续约且**无法从数据上察觉** ⇒ 至少留下痕迹。
+            log.warn("节点重复注册（覆盖原容量）：node={} 原容量={} 新容量={}；"
+                + "若这是两个副本共用一个 nodeId，属误配置，请为每个副本分配唯一 node-id",
+                LogSanitizer.sanitize(accessNode), previous, capacity);
+        }
     }
 
     /**

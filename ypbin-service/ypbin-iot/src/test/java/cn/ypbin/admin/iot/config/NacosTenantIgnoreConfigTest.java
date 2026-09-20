@@ -17,6 +17,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.yaml.snakeyaml.Yaml;
@@ -66,14 +68,47 @@ class NacosTenantIgnoreConfigTest {
     }
 
     @Test
-    @DisplayName("自检：ignore-tables 里登记的表必须真的在 DDL 里存在（防表名改名后配置静默失效）")
+    @DisplayName("自检：ignore-tables 里登记的表必须真的在 DDL 里存在（锚定表名边界，防改名后静默失效）")
     void ignoredTableMustExistInSchema() throws IOException {
         String schema = Files.readString(REPO_ROOT.resolve("deploy/sql/006-iot-schema.sql"),
             StandardCharsets.UTF_8);
 
-        assertThat(schema)
-            .as("ignore-tables 登记了 %s，但 DDL 里找不到它——表名改名后配置会静默失效", PLATFORM_TABLE)
-            .contains("CREATE TABLE " + PLATFORM_TABLE);
+        // 必须锚定表名边界：`contains("CREATE TABLE " + T)` 会被 `T_renamed` 这类改名绕过（复核 C3 实证）
+        assertThat(Pattern.compile("CREATE TABLE\\s+" + PLATFORM_TABLE + "\\s*\\(").matcher(schema).find())
+            .as("ignore-tables 登记了 %s，但 DDL 里找不到它（或表名已改）", PLATFORM_TABLE)
+            .isTrue();
+    }
+
+    @Test
+    @DisplayName("泛化门禁：所有**非租户基类**的实体表都必须在 ignore-tables 里（防未来新增平台表漏登记）")
+    void everyPlatformEntityMustBeIgnored() throws IOException {
+        Map<String, Object> tenant = section(loadYaml(REPO_ROOT.resolve("deploy/nacos/ypbin-iot.yaml")),
+            "tenant");
+        List<String> ignored = asStringList(tenant.get("ignore-tables"));
+
+        Path entityDir = REPO_ROOT.resolve(
+            "ypbin-service-api/ypbin-iot-api/src/main/java/cn/ypbin/admin/iot/entity");
+        List<String> platformTables = new java.util.ArrayList<>();
+        int scanned = 0;
+        try (var files = Files.list(entityDir)) {
+            for (Path file : files.filter(p -> p.toString().endsWith(".java")).toList()) {
+                String code = Files.readString(file, StandardCharsets.UTF_8);
+                Matcher tableName = Pattern.compile("@TableName\\(\\s*\"([^\"]+)\"\\s*\\)").matcher(code);
+                if (!tableName.find()) {
+                    continue;
+                }
+                scanned++;
+                if (!code.contains("extends TenantBaseEntity")) {
+                    platformTables.add(tableName.group(1));
+                }
+            }
+        }
+        assertThat(scanned).as("一个实体都没扫到 ⇒ 本门禁是空跑（假绿）").isPositive();
+        assertThat(platformTables).as("本仓至少应有一个平台表（租户节点归属）").isNotEmpty();
+        assertThat(ignored)
+            .as("平台表（不继承 TenantBaseEntity 的实体）必须逐个登记进 ignore-tables，"
+                + "否则租户插件会给它们的 SQL 追加 tenant_id 条件。未登记：%s", platformTables)
+            .containsAll(platformTables);
     }
 
     @SuppressWarnings("unchecked")

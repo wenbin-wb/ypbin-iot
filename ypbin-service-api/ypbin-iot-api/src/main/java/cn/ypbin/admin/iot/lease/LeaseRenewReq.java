@@ -11,6 +11,7 @@ package cn.ypbin.admin.iot.lease;
 
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
 import jakarta.validation.constraints.NotEmpty;
 import java.util.ArrayList;
 import java.util.List;
@@ -29,6 +30,7 @@ public class LeaseRenewReq {
 
     /** 节点标识。 */
     @NotBlank(message = "节点标识不能为空")
+    @Size(max = 128, message = "节点标识长度不能超过 128")
     private String accessNode;
 
     /** 要续约的租户清单。 */

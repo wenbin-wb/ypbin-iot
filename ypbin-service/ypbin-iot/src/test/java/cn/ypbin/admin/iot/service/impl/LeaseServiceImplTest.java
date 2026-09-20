@@ -215,8 +215,10 @@ class LeaseServiceImplTest {
             .filter(w -> w.getSqlSegment().contains("LIMIT"))
             .findFirst()
             .orElseThrow(() -> new AssertionError("没找到接管语句（带 LIMIT）"));
-        // 关键：不能有「access_node <> 本节点」的排除——那会让节点永远领不回自己的待接管租户
-        assertThat(takeover.getSqlSegment()).doesNotContain("<>");
+        // 关键：接管谓词里**根本不该出现 access_node**——任何形态的「排除本节点」
+        //（`<>` / `NOT IN` / `not(...)`）都会让节点领不回自己的待接管租户；
+        // 只断言 `<>` 会被等价写法绕过（复核用 NOT IN 实证过）。
+        assertThat(takeover.getSqlSegment()).doesNotContain("access_node");
         // 且必须带 LIMIT（容量封顶；无 LIMIT 会突破 maxTenants）
         assertThat(takeover.getSqlSegment()).contains("LIMIT");
     }
@@ -235,11 +237,10 @@ class LeaseServiceImplTest {
             .filter(w -> w.getSqlSet().contains("lease_expire_at") && !w.getSqlSet().contains("state"))
             .findFirst()
             .orElseThrow(() -> new AssertionError("没找到续期语句（SET lease_expire_at 且不改 state）"));
-        // 续期必须带「状态」守卫（去掉它会把待接管/已释放的行也续上——这是安全相关的变异，
-        // 必须被咬住）。这里只断言**列**出现，不比值：实测同一个 Wrapper 在「单跑」与「整类跑」
-        // 时 getParamNameValuePairs() 的表现不一致（值级断言在整类跑时偶发失效，原因未查清，
-        // 属测试基础设施问题）。值级判据由 markExpired/接管那两条断言覆盖（它们的值断言稳定生效）。
+        // 续期必须带「状态」守卫，且**状态值必须是 active**（改成 pending_takeover 会让续期把不该续的行续上）。
+        // 两者都要断言：只断言列名会被「改值」的变异绕过（复核用 M4 实证过）。
         assertThat(renew.getSqlSegment()).contains("state");
+        assertMentionsState(renew, LeaseState.ACTIVE, "续期必须只针对 active 行");
     }
 
     @Test
@@ -264,6 +265,39 @@ class LeaseServiceImplTest {
         assertThat(sql).contains("INSERT IGNORE");
         assertThat(sql).contains("tenant_node_assignment");
         assertThat(sql).contains("NOW()");
+    }
+
+    @Test
+    @DisplayName("容量临界区真的串行化：并发领取时临界区不重叠（把锁挪走必须转红）")
+    void capacityCriticalSectionMustNotOverlap() throws InterruptedException {
+        registerNode();
+        java.util.concurrent.atomic.AtomicInteger inCritical = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicInteger maxConcurrent = new java.util.concurrent.atomic.AtomicInteger();
+        when(mapper.update(isNull(), any())).thenReturn(0);
+        // 把「造批次」这一步当成临界区探针：它发生在 doAcquire 内部（锁内）
+        when(mapper.insertIgnoringDuplicates(any())).thenAnswer(invocation -> {
+            int now = inCritical.incrementAndGet();
+            maxConcurrent.accumulateAndGet(now, Math::max);
+            try {
+                Thread.sleep(20);
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+            }
+            inCritical.decrementAndGet();
+            return 0;
+        });
+        when(mapper.selectList(any())).thenReturn(List.of());
+
+        Thread first = new Thread(() -> service.acquire(acquireReq(NODE)), "lease-a");
+        Thread second = new Thread(() -> service.acquire(acquireReq(NODE)), "lease-b");
+        first.start();
+        second.start();
+        first.join(5_000);
+        second.join(5_000);
+
+        assertThat(maxConcurrent.get())
+            .as("同一节点的并发领取必须被每节点锁串行化（临界区重叠说明锁没生效）")
+            .isEqualTo(1);
     }
 
     @Test
@@ -402,12 +436,13 @@ class LeaseServiceImplTest {
      */
     private void assertMentionsState(LambdaUpdateWrapper<TenantNodeAssignment> wrapper, LeaseState state,
             String what) {
-        // 注意：MyBatis-Plus 的参数值不保证是裸 String（实测 values().contains("active") 为 false，
-        // 而打印出来是 active）⇒ 用 toString() 比较，既稳又能被变异咬到。
-        boolean inParams = wrapper.getParamNameValuePairs().values().stream()
-            .anyMatch(value -> value != null && state.getCode().equals(value.toString()));
+        // ⚠️ 必须**先渲染**再读参数表：MyBatis-Plus 的 SET 值在 set() 时立即落入 paramNameValuePairs，
+        // 而 WHERE 值是**惰性**的（条件挂的是 ISqlSegment，只有被渲染时才调 formatParam）。
+        // 因此顺序是：先 getSqlSegment()/getSqlSet() 触发渲染，再查 values()。
         boolean inSql = wrapper.getSqlSegment().contains(state.getCode())
             || wrapper.getSqlSet().contains(state.getCode());
+        boolean inParams = wrapper.getParamNameValuePairs().values().stream()
+            .anyMatch(value -> value != null && state.getCode().equals(value.toString()));
         assertThat(inParams || inSql)
             .as("%s：Wrapper 里必须出现状态码 %s（参数或 SQL 片段任一形态）", what, state.getCode())
             .isTrue();
