@@ -230,6 +230,11 @@ public class AccessLeaseManager {
      */
     private void refreshAssignmentsIfDue(LocalDateTime now) {
         if (!registered.get()) {
+            if (lastAcquireAt.get() == null) {
+                // 握手还没开始（start() 还没跑到预置那行）⇒ **绝不抢跑**：
+                // 旧栈复核实测过调度器会在这一瞬完成 register+acquire，令「注册→领取→采集」的顺序变成偶然。
+                return;
+            }
             // nodeFenced 恢复失败时 registered 会停在 false，而服务端的 acquire 拒绝未注册节点
             // ⇒ 不在这里补注册，节点会永久零采集（旧实现只记错误，活性缺陷）。register 是幂等覆盖。
             try {
@@ -254,7 +259,10 @@ public class AccessLeaseManager {
             return;
         }
         if (resp == null || resp.getCode() != 200 || resp.getData() == null) {
-            log.error("周期重领返回非成功信封：node={} code={}",
+            // 服务端可能已经重启、丢了进程内的节点注册（acquire 显式拒绝未注册节点）⇒ 置回未注册，
+            // 下一轮先补注册。否则「0 租户节点 + 无 renew」会永远拿不到 nodeFenced ⇒ 永久零采集。
+            registered.set(false);
+            log.error("周期重领返回非成功信封：node={} code={}（已置回未注册，下一轮补注册）",
                 LogSanitizer.sanitize(properties.getNodeId()), resp == null ? "null" : resp.getCode());
             return;
         }
