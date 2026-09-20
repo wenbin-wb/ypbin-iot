@@ -30,3 +30,34 @@ CREATE TABLE iot_device
     UNIQUE KEY uk_iot_device_tenant_code (tenant_id, device_code),
     KEY idx_iot_device_tenant (tenant_id)
 ) COMMENT 'IoT 设备台账';
+
+-- =============================================================
+-- 租户节点归属（增量 2）
+-- 平台表：记录「哪个 access 节点在采哪个租户」，**不受租户插件约束**
+--       ⇒ 必须登记进 ypbin.tenant.ignore-tables（见 deploy/nacos/ypbin-iot.yaml），
+--         否则跨租户的失效扫描/对账会被自动追加 tenant_id 条件而查不到数据。
+-- state 存 LeaseState 的稳定码（active | pending_takeover | released），不存 ordinal。
+-- =============================================================
+
+CREATE TABLE tenant_node_assignment
+(
+    id              BIGINT       NOT NULL COMMENT '主键',
+    tenant_id       BIGINT       NOT NULL COMMENT '租户 ID',
+    access_node     VARCHAR(128) NOT NULL COMMENT '当前归属的 access 节点标识',
+    epoch           BIGINT       NOT NULL COMMENT '台账版本号（归属每次变更都推进）',
+    state           VARCHAR(32)  NOT NULL COMMENT '租约状态码：active | pending_takeover | released',
+    lease_expire_at DATETIME     NOT NULL COMMENT '租约到期时间',
+    create_user     BIGINT       NULL COMMENT '创建人',
+    create_time     DATETIME     NULL COMMENT '创建时间',
+    update_user     BIGINT       NULL COMMENT '更新人',
+    update_time     DATETIME     NULL COMMENT '更新时间',
+    status          TINYINT      NOT NULL DEFAULT 1 COMMENT '状态：1 启用 0 停用',
+    is_deleted      TINYINT      NOT NULL DEFAULT 0 COMMENT '逻辑删除',
+    PRIMARY KEY (id),
+    -- 一个租户同一时刻只能有一个归属：并发分配的兜底就靠它（INSERT 冲突即「别人先到」）
+    UNIQUE KEY uk_tenant_node_assignment_tenant (tenant_id),
+    -- 失效扫描走 (state, lease_expire_at)
+    KEY idx_tenant_node_assignment_state_expire (state, lease_expire_at),
+    -- 节点续约/释放走 (access_node, state)
+    KEY idx_tenant_node_assignment_node (access_node, state)
+) COMMENT '租户节点归属（平台表）';

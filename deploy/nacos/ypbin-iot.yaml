@@ -9,6 +9,11 @@ ypbin:
     # fail-closed：无租户上下文时拒绝执行。IoT 业务全部按租户隔离（设备台账继承 TenantBaseEntity），
     # 因此这里保持拒绝——任何绕过租户的写法都会在开发期暴露，而不是悄悄查全表。
     fail-on-missing-tenant: true
+    # ⚠️ 平台表必须登记在这里：/internal/lease/** 是 access 直连（只有 X-Internal-Token，没有租户身份头），
+    # 不登记的话租户插件会给租约的每条 SQL 追加 tenant_id 条件，并在无租户上下文时直接抛异常
+    # ⇒ 领取/续约/释放/失效扫描**全部不可用**（不是少个优化，是整个增量不工作）。
+    ignore-tables:
+      - tenant_node_assignment
   # 身份头来源校验：仅信任带网关签名标记的身份头；未配置密钥则拒绝启动（fail-fast）
   cloud:
     feign:
@@ -22,3 +27,13 @@ ypbin:
   # 传 ypbin.sa-token.enabled=false 时 saTokenWebConfigurer 仍 matched）。
   security:
     interceptor: false
+
+  # 租约维护（增量 2）：契约与语义见 docs/LEASE.md。
+  # ttl 必须大于 expected-renew-interval + 4s（一次内部调用最坏耗时），启动自检会拒绝不合法组合。
+  lease:
+    enabled: true
+    ttl: 30s
+    scan-interval-ms: 15000
+    expected-renew-interval: 10s
+    # 允许分配的租户：为空 = **不分配任何**租户（不是「分配全部」）；M0b 起改为读台账表
+    assignable-tenant-ids: []
