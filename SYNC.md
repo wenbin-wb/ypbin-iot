@@ -39,7 +39,7 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 | `deploy/nacos/ypbin-gateway.yaml` | routes 加 `iot` 一段（`Path=/iot/**` + `StripPrefix=1`） | 网关路由（IoT 路由也进仓，便于与其它服务同构） |
 | `deploy/.env.example` | 端口段注释加 18084 | 环境变量示例（纯注释） |
 | `deploy/sql/006-iot-schema.sql`、`007-iot-data.sql` | **新文件** | 全新安装用 |
-| `deploy/sql/migration/2026-09-19-iot-device-schema-and-menu.sql` | **新文件** | 已上线库用；与 006/007 **语句等价**（有 CI 校验） |
+| `deploy/sql/migration/*-iot-*.sql` | **新文件**（命名必须含 `-iot-`） | 已上线库用；按文件名排序拼接后与 `006+007` **语句等价**（有 CI 校验）。顺序即结构演进顺序：`device-schema` → `lease-schema` → `menu-data` |
 | `admin-ui`（后续） | 路由/菜单注册 | 前端增量时再补清单 |
 
 **口径说明（两组数字别混）**：`git diff upstream/main --stat` 的字面数字**包含新增文件**
