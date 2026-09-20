@@ -32,7 +32,7 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 | 文件 | 改动 | 说明 |
 |---|---|---|
 | `pom.xml`（根） | `dependencyManagement` 加 `ypbin-iot-api` 一行 | 根 pom 统一管理各 `-api` 模块版本 |
-| `ypbin-service/pom.xml` | 加 `<module>ypbin-iot</module>` | 业务域聚合 |
+| `ypbin-service/pom.xml` | 加 `<module>ypbin-iot</module> + <module>ypbin-access</module>` | 业务域聚合 |
 | `ypbin-service-api/pom.xml` | 加 `<module>ypbin-iot-api</module>` | 契约聚合 |
 | `deploy/install.sh` | SERVICES 加一行 + Nacos cfg 清单加 `ypbin-iot` + 同步「共 N 个」计数注释 | 部署脚本的服务清单 |
 | `deploy/docker-compose.yml` | 新增 `ypbin-iot` 服务块 | 部署编排 |
