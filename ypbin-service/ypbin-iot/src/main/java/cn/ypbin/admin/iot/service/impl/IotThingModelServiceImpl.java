@@ -445,11 +445,15 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
     }
 
     /**
-     * 全量替换产品下的草稿 TSL 结构（先逻辑删除旧结构，再批量插入新结构）。
+     * 全量替换产品下的草稿 TSL 结构（先<b>物理删除</b>旧结构，再批量插入新结构）。
      *
      * <p>写入全部走批量：删除按 service 主键一次 IN，插入按「服务 / 属性 / 命令 / 事件」各一次
      * 批量写，语句数恒定（不随 TSL 规模退化为 N+1）。服务主键是雪花 {@code ASSIGN_ID}，
      * 批量插入时即回填到实体，故子表能直接引用父服务 ID。</p>
+     *
+     * <p>删除必须是<b>物理</b>删除：结构表的业务唯一键不含 {@code is_deleted}，逻辑删除行会
+     * 继续占用 {@code (tenant_id, product_id, service_id)}，使同一产品再次导入 TSL 主键冲突。
+     * 代价（不可回查历史结构）见四个结构 Mapper 的 {@code physicalDelete*} 方法说明。</p>
      *
      * @param productId 产品主键
      * @param doc       TSL 文档（已通过校验）
@@ -460,7 +464,7 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
     }
 
     /**
-     * 批量逻辑删除产品下全部旧物模型结构（4 条语句）。
+     * 批量<b>物理</b>删除产品下全部旧物模型结构（4 条语句）。
      *
      * @param productId 产品主键
      */
