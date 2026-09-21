@@ -145,7 +145,7 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
         }
         int subscribed = planner.subscribe(List.copyOf(devices.values()));
         if (subscribed > 0) {
-            log.info("[access] 已建立/补建订阅：tenantId={} 本次订阅设备数={}",
+            log.info("[access] 已**发起**订阅（异步完成；成败看 subscribe.success/failure 与日志）：tenantId={} 本次发起设备数={}",
                 LogSanitizer.sanitize(tenantId), subscribed);
         }
     }

@@ -28,7 +28,7 @@ public interface SubscriptionPlanner {
      * 为一批已绑定的设备建立订阅。
      *
      * @param devices 设备规格（框架应已建链）
-     * @return 成功建立订阅的设备数
+     * 本次**发起**订阅的设备数（订阅完成是异步的，成功与否看 subscribe.success/failure 指标与日志；失败不记录跟踪，下一个租约周期会对账重试）
      */
     int subscribe(List<DeviceSpec> devices);
 }
