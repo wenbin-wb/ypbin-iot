@@ -88,8 +88,9 @@ class IotProductServiceImplTest {
             ArgumentCaptor.forClass(com.baomidou.mybatisplus.core.conditions.Wrapper.class);
         verify(versionMapper).selectList(captor.capture());
         String sql = captor.getValue().getSqlSegment();
-        assertThat(sql).containsIgnoringCase("ORDER BY").containsIgnoringCase("id")
-            .containsIgnoringCase("DESC");
+        // 必须断言 ORDER BY 子句本身：只断言「含 id」会被 WHERE 的 product_id 满足而恒真
+        assertThat(sql).containsIgnoringCase("ORDER BY id DESC");
+        assertThat(sql).doesNotContainIgnoringCase("ORDER BY version_no");
     }
 
     @Test

@@ -42,6 +42,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.ArrayList;
 import java.util.List;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
+import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -215,6 +216,7 @@ class IotThingModelServiceImplTest {
     void importShouldWriteInBatch() {
         when(productMapper.selectById(9L)).thenReturn(draftProduct(9L));
         when(serviceMapper.selectList(any())).thenReturn(List.of());
+        // 让两个服务都带子结构，检验「子表按各自父服务挂载」而不是全挂到同一个服务
         // 模拟雪花主键在批量插入时回填到实体
         doAnswer(invocation -> {
             List<IotService> inserted = invocation.getArgument(0);
@@ -225,7 +227,15 @@ class IotThingModelServiceImplTest {
             return List.of();
         }).when(serviceMapper).insert(anyList());
 
-        TslImportResult result = service.importTsl(9L, validDoc());
+        TslDocument doc = validDoc();
+        TslService second = doc.getServices().get(1);
+        TslProperty secondProperty = new TslProperty();
+        secondProperty.setPropertyName("battery");
+        secondProperty.setDataType("int");
+        secondProperty.setMethod("R");
+        second.setProperties(List.of(secondProperty));
+
+        TslImportResult result = service.importTsl(9L, doc);
 
         // 2 个服务 → 恰好一次批量插入，且绝不出现逐行 insert(T)
         verify(serviceMapper).insert(anyList());
@@ -233,6 +243,15 @@ class IotThingModelServiceImplTest {
         verify(propertyMapper).insert(anyList());
         verify(commandMapper).insert(anyList());
         verify(eventMapper).insert(anyList());
+        // 子表必须挂到各自的父服务上（只 verify(anyList()) 会把 ID 假设放过去）
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<IotProperty>> properties = ArgumentCaptor.forClass(List.class);
+        verify(propertyMapper).insert(properties.capture());
+        assertThat(properties.getValue()).hasSize(2)
+            .extracting(IotProperty::getServiceId)
+            .containsExactlyInAnyOrder(1000L, 1001L);
+        assertThat(properties.getValue()).extracting(IotProperty::getIdentifier)
+            .containsExactlyInAnyOrder("temperature", "battery");
         assertThat(result.getErrors()).isEmpty();
         assertThat(result.getSuccessCount()).isPositive();
     }
@@ -257,10 +276,41 @@ class IotThingModelServiceImplTest {
 
         service.importTsl(9L, validDoc());
 
-        verify(propertyMapper).delete(any());
-        verify(commandMapper).delete(any());
-        verify(eventMapper).delete(any());
-        // 一次 IN 删除，而非 deleteById 两次
+        // 必须是「物理删除」：逻辑删除行仍占用 uk_iot_service，会让同产品二次导入主键冲突（P1）
+        verify(propertyMapper).physicalDeleteByServiceIds(List.of(501L, 502L));
+        verify(commandMapper).physicalDeleteByServiceIds(List.of(501L, 502L));
+        verify(eventMapper).physicalDeleteByServiceIds(List.of(501L, 502L));
+        verify(serviceMapper).physicalDeleteByIds(List.of(501L, 502L));
+        // 且一次 IN 删除，而非逐服务逻辑删除
+        verify(serviceMapper, never()).deleteById(any(Long.class));
+        verify(serviceMapper, never()).deleteByIds(any());
+    }
+
+    @Test
+    @DisplayName("连续两次导入同一 TSL：删除路径必须是物理删除（逻辑删除会撞 uk_iot_service）")
+    void repeatedImportMustNotCollideOnBusinessUniqueKey() {
+        when(productMapper.selectById(9L)).thenReturn(draftProduct(9L));
+        // 第一次导入后遗留的「上一次结构」行
+        IotService previous = new IotService();
+        previous.setId(777L);
+        previous.setProductId(9L);
+        previous.setServiceId("DeviceBasic");
+        when(serviceMapper.selectList(any())).thenReturn(List.of(previous));
+        doAnswer(invocation -> {
+            List<IotService> inserted = invocation.getArgument(0);
+            long nextId = 2000L;
+            for (IotService item : inserted) {
+                item.setId(nextId++);
+            }
+            return List.of();
+        }).when(serviceMapper).insert(anyList());
+
+        // 第二次导入同一份 TSL：同一 (product_id, service_id) 会被再次插入
+        TslImportResult result = service.importTsl(9L, validDoc());
+
+        assertThat(result.getErrors()).isEmpty();
+        verify(serviceMapper).physicalDeleteByIds(List.of(777L));
+        verify(serviceMapper, never()).deleteByIds(any());
         verify(serviceMapper, never()).deleteById(any(Long.class));
     }
 

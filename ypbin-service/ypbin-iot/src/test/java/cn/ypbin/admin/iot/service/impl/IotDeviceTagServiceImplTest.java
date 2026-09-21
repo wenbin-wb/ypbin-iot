@@ -28,6 +28,7 @@ import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import java.time.LocalDateTime;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
+import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -94,7 +95,11 @@ class IotDeviceTagServiceImplTest {
 
         service.create(DEVICE_ID, req("location", "A 区"));
 
-        verify(tagMapper).insert(any(IotDeviceTag.class));
+        ArgumentCaptor<IotDeviceTag> captor = ArgumentCaptor.forClass(IotDeviceTag.class);
+        verify(tagMapper).insert(captor.capture());
+        assertThat(captor.getValue().getDeviceId()).isEqualTo(DEVICE_ID);
+        assertThat(captor.getValue().getTagKey()).isEqualTo("location");
+        assertThat(captor.getValue().getTagValue()).isEqualTo("A 区");
     }
 
     @Test

@@ -50,6 +50,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -275,29 +276,7 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
         TslDocument doc = new TslDocument();
 
         List<IotService> services = listServiceEntities(productId);
-        List<TslService> tslServices = services.stream().map(s -> {
-            TslService tsl = new TslService();
-            tsl.setServiceType(s.getServiceId());
-            tsl.setDescription(s.getServiceName());
-            tsl.setOption(s.getOption());
-            tsl.setSort(s.getSort());
-            tsl.setProperties(iotPropertyMapper.selectList(
-                    new LambdaQueryWrapper<IotProperty>()
-                        .eq(IotProperty::getServiceId, s.getId())
-                        .orderByAsc(IotProperty::getSort)).stream()
-                .map(this::toTslProperty).toList());
-            tsl.setCommands(iotCommandMapper.selectList(
-                    new LambdaQueryWrapper<IotCommand>()
-                        .eq(IotCommand::getServiceId, s.getId())
-                        .orderByAsc(IotCommand::getSort)).stream()
-                .map(this::toTslCommand).toList());
-            tsl.setEvents(iotEventMapper.selectList(
-                    new LambdaQueryWrapper<IotEvent>()
-                        .eq(IotEvent::getServiceId, s.getId())
-                        .orderByAsc(IotEvent::getSort)).stream()
-                .map(this::toTslEvent).toList());
-            return tsl;
-        }).toList();
+        List<TslService> tslServices = toTslServices(services);
         doc.setServices(tslServices);
 
         TslDocument.TslDevice device = new TslDocument.TslDevice();
@@ -488,13 +467,12 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
         if (serviceIds.isEmpty()) {
             return;
         }
-        iotPropertyMapper.delete(new LambdaQueryWrapper<IotProperty>()
-            .in(IotProperty::getServiceId, serviceIds));
-        iotCommandMapper.delete(new LambdaQueryWrapper<IotCommand>()
-            .in(IotCommand::getServiceId, serviceIds));
-        iotEventMapper.delete(new LambdaQueryWrapper<IotEvent>()
-            .in(IotEvent::getServiceId, serviceIds));
-        baseMapper.deleteByIds(serviceIds);
+        // 必须物理删除：iot_service 的业务唯一键不含 is_deleted，逻辑删除行会继续占用
+        // (tenant_id, product_id, service_id)，使同一产品第二次导入 TSL 主键冲突
+        iotPropertyMapper.physicalDeleteByServiceIds(serviceIds);
+        iotCommandMapper.physicalDeleteByServiceIds(serviceIds);
+        iotEventMapper.physicalDeleteByServiceIds(serviceIds);
+        baseMapper.physicalDeleteByIds(serviceIds);
     }
 
     /**
@@ -563,6 +541,50 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
         } catch (NumberFormatException ex) {
             errors.add(where + " 非数值：" + value);
         }
+    }
+
+    /**
+     * 组装 TSL 服务列表（子结构按 service 主键<b>一次 IN 批量取回</b>再分组，避免逐服务查询）。
+     *
+     * @param services 服务实体列表（按产品查出）
+     * @return TSL 服务列表
+     */
+    private List<TslService> toTslServices(List<IotService> services) {
+        if (services.isEmpty()) {
+            return List.of();
+        }
+        List<Long> serviceIds = services.stream().map(IotService::getId).distinct().toList();
+        Map<Long, List<IotProperty>> propertiesByService = iotPropertyMapper.selectList(
+                new LambdaQueryWrapper<IotProperty>()
+                    .in(IotProperty::getServiceId, serviceIds)
+                    .orderByAsc(IotProperty::getSort)).stream()
+            .collect(Collectors.groupingBy(IotProperty::getServiceId));
+        Map<Long, List<IotCommand>> commandsByService = iotCommandMapper.selectList(
+                new LambdaQueryWrapper<IotCommand>()
+                    .in(IotCommand::getServiceId, serviceIds)
+                    .orderByAsc(IotCommand::getSort)).stream()
+            .collect(Collectors.groupingBy(IotCommand::getServiceId));
+        Map<Long, List<IotEvent>> eventsByService = iotEventMapper.selectList(
+                new LambdaQueryWrapper<IotEvent>()
+                    .in(IotEvent::getServiceId, serviceIds)
+                    .orderByAsc(IotEvent::getSort)).stream()
+            .collect(Collectors.groupingBy(IotEvent::getServiceId));
+        List<TslService> result = new ArrayList<>(services.size());
+        for (IotService service : services) {
+            TslService tsl = new TslService();
+            tsl.setServiceType(service.getServiceId());
+            tsl.setDescription(service.getServiceName());
+            tsl.setOption(service.getOption());
+            tsl.setSort(service.getSort());
+            tsl.setProperties(propertiesByService.getOrDefault(service.getId(), List.of()).stream()
+                .map(this::toTslProperty).toList());
+            tsl.setCommands(commandsByService.getOrDefault(service.getId(), List.of()).stream()
+                .map(this::toTslCommand).toList());
+            tsl.setEvents(eventsByService.getOrDefault(service.getId(), List.of()).stream()
+                .map(this::toTslEvent).toList());
+            result.add(tsl);
+        }
+        return result;
     }
 
     /**
