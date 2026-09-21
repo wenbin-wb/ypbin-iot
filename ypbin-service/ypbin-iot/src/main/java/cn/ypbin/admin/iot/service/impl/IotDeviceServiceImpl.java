@@ -10,11 +10,15 @@
 package cn.ypbin.admin.iot.service.impl;
 
 import cn.ypbin.admin.iot.entity.IotDevice;
+import cn.ypbin.admin.iot.enums.ModelStatus;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
+import cn.ypbin.admin.iot.mapper.IotProductMapper;
 import cn.ypbin.admin.iot.model.query.IotDeviceQuery;
 import cn.ypbin.admin.iot.model.req.IotDeviceReq;
 import cn.ypbin.admin.iot.model.resp.IotDeviceResp;
 import cn.ypbin.admin.iot.service.IotDeviceService;
+import cn.ypbin.starter.core.exception.BusinessException;
+import cn.ypbin.starter.core.exception.GlobalErrorCode;
 import cn.ypbin.starter.crud.model.PageResult;
 import cn.ypbin.starter.crud.service.BaseServiceImpl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
@@ -36,6 +40,12 @@ import org.springframework.util.StringUtils;
 public class IotDeviceServiceImpl extends BaseServiceImpl<IotDeviceMapper, IotDevice>
     implements IotDeviceService {
 
+    private final IotProductMapper iotProductMapper;
+
+    public IotDeviceServiceImpl(IotProductMapper iotProductMapper) {
+        this.iotProductMapper = iotProductMapper;
+    }
+
     @Override
     public PageResult<IotDeviceResp> pageDevices(IotDeviceQuery query) {
         PageResult<IotDevice> source = page(query, buildWrapper(query));
@@ -47,11 +57,7 @@ public class IotDeviceServiceImpl extends BaseServiceImpl<IotDeviceMapper, IotDe
     @Transactional(rollbackFor = Exception.class)
     public Long createDevice(IotDeviceReq req) {
         IotDevice device = new IotDevice();
-        device.setDeviceCode(req.getDeviceCode());
-        device.setDeviceName(req.getDeviceName());
-        device.setProtocol(req.getProtocol());
-        device.setEndpoint(req.getEndpoint());
-        device.setRemark(req.getRemark());
+        applyDevice(device, req);
         save(device);
         return device.getId();
     }
@@ -60,6 +66,52 @@ public class IotDeviceServiceImpl extends BaseServiceImpl<IotDeviceMapper, IotDe
     @Transactional(rollbackFor = Exception.class)
     public void removeDevice(Long id) {
         removeById(id);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void updateDevice(Long id, IotDeviceReq req) {
+        IotDevice device = getById(id);
+        if (device == null) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "设备不存在：" + id);
+        }
+        if (req.getProductId() != null) {
+            requirePublishedProduct(req.getProductId());
+        }
+        applyDevice(device, req);
+        updateById(device);
+    }
+
+    /**
+     * 校验绑定产品存在且物模型已发布（§4.1：设备绑定的是已发布版本）。
+     *
+     * @param productId 产品主键
+     */
+    private void requirePublishedProduct(Long productId) {
+        cn.ypbin.admin.iot.entity.IotProduct product = iotProductMapper.selectById(productId);
+        if (product == null) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "产品不存在：" + productId);
+        }
+        if (!ModelStatus.PUBLISHED.getCode().equals(product.getModelStatus())) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "仅可绑定已发布物模型的产品：" + productId);
+        }
+    }
+
+    /**
+     * 请求字段应用到实体（新增/编辑共用）。
+     *
+     * @param device 实体
+     * @param req    请求
+     */
+    private void applyDevice(IotDevice device, IotDeviceReq req) {
+        device.setDeviceCode(req.getDeviceCode());
+        device.setDeviceName(req.getDeviceName());
+        device.setProtocol(req.getProtocol());
+        device.setEndpoint(req.getEndpoint());
+        device.setProductId(req.getProductId());
+        device.setProductVersion(req.getProductVersion());
+        device.setRemark(req.getRemark());
     }
 
     /**
@@ -95,6 +147,10 @@ public class IotDeviceServiceImpl extends BaseServiceImpl<IotDeviceMapper, IotDe
         resp.setDeviceName(entity.getDeviceName());
         resp.setProtocol(entity.getProtocol());
         resp.setEndpoint(entity.getEndpoint());
+        resp.setProductId(entity.getProductId());
+        resp.setProductVersion(entity.getProductVersion());
+        resp.setOnlineStatus(entity.getOnlineStatus());
+        resp.setLastSeenAt(entity.getLastSeenAt());
         resp.setRemark(entity.getRemark());
         resp.setCreateTime(entity.getCreateTime());
         return resp;

@@ -14,44 +14,35 @@ import lombok.Getter;
 import lombok.Setter;
 
 /**
- * IoT 设备响应模型。
+ * IoT 物模型服务响应模型（§3.3）。
  *
  * @author wenbin
- * @since 2026-09-19
+ * @since 2026-09-20
  */
 @Getter
 @Setter
-public class IotDeviceResp {
+public class IotServiceResp {
 
     /** 主键（Long 由全局序列化转字符串输出）。 */
     private Long id;
 
-    /** 设备编码。 */
-    private String deviceCode;
-
-    /** 设备名称。 */
-    private String deviceName;
-
-    /** 接入协议。 */
-    private String protocol;
-
-    /** 端点 URI。 */
-    private String endpoint;
-
-    /** 绑定产品 ID。 */
+    /** 所属产品 ID。 */
     private Long productId;
 
-    /** 绑定物模型版本。 */
-    private String productVersion;
+    /** 服务标识（PascalCase）。 */
+    private String serviceId;
 
-    /** 在线状态：online | offline | unknown。 */
-    private String onlineStatus;
+    /** 服务名称。 */
+    private String serviceName;
 
-    /** 最后心跳/上报时刻。 */
-    private LocalDateTime lastSeenAt;
+    /** 服务选项。 */
+    private String option;
 
-    /** 备注。 */
-    private String remark;
+    /** 排序。 */
+    private Integer sort;
+
+    /** 描述。 */
+    private String description;
 
     /** 创建时间。 */
     private LocalDateTime createTime;

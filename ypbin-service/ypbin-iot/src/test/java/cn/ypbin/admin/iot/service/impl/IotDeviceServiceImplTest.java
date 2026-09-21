@@ -10,8 +10,10 @@
 package cn.ypbin.admin.iot.service.impl;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
 
 import cn.ypbin.admin.iot.entity.IotDevice;
+import cn.ypbin.admin.iot.mapper.IotProductMapper;
 import cn.ypbin.admin.iot.model.query.IotDeviceQuery;
 import cn.ypbin.admin.iot.model.resp.IotDeviceResp;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
@@ -35,7 +37,7 @@ import org.junit.jupiter.api.Test;
  */
 class IotDeviceServiceImplTest {
 
-    private final IotDeviceServiceImpl service = new IotDeviceServiceImpl();
+    private final IotDeviceServiceImpl service = new IotDeviceServiceImpl(mock(IotProductMapper.class));
 
     /**
      * 初始化 MyBatis-Plus 的实体元信息。
@@ -71,7 +73,7 @@ class IotDeviceServiceImplTest {
     }
 
     @Test
-    @DisplayName("实体→响应：字段逐个搬运（含创建时间），不做改名")
+    @DisplayName("实体→响应：字段逐个搬运（含创建时间与 M-1 扩展字段），不做改名")
     void toRespShouldMapEveryField() {
         IotDevice entity = new IotDevice();
         entity.setId(1001L);
@@ -79,6 +81,10 @@ class IotDeviceServiceImplTest {
         entity.setDeviceName("一号网关");
         entity.setProtocol("tcp");
         entity.setEndpoint("tcp://127.0.0.1:15002");
+        entity.setProductId(2001L);
+        entity.setProductVersion("v1.0");
+        entity.setOnlineStatus("online");
+        entity.setLastSeenAt(LocalDateTime.of(2026, 9, 20, 9, 30));
         entity.setRemark("测试");
         entity.setCreateTime(LocalDateTime.of(2026, 9, 19, 10, 0));
 
@@ -89,6 +95,10 @@ class IotDeviceServiceImplTest {
         assertThat(resp.getDeviceName()).isEqualTo("一号网关");
         assertThat(resp.getProtocol()).isEqualTo("tcp");
         assertThat(resp.getEndpoint()).isEqualTo("tcp://127.0.0.1:15002");
+        assertThat(resp.getProductId()).isEqualTo(2001L);
+        assertThat(resp.getProductVersion()).isEqualTo("v1.0");
+        assertThat(resp.getOnlineStatus()).isEqualTo("online");
+        assertThat(resp.getLastSeenAt()).isEqualTo(LocalDateTime.of(2026, 9, 20, 9, 30));
         assertThat(resp.getRemark()).isEqualTo("测试");
         assertThat(resp.getCreateTime()).isEqualTo(LocalDateTime.of(2026, 9, 19, 10, 0));
     }
