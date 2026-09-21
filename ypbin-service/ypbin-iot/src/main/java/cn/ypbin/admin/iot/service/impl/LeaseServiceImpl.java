@@ -146,6 +146,11 @@ public class LeaseServiceImpl implements LeaseService {
     /** 领取的实际逻辑（在节点锁内、同一事务中执行）。 */
     private LeaseAcquireResp doAcquire(LeaseAcquireReq req) {
         String node = req.getAccessNode();
+        // ⚠️ M0b-1：**第一条语句就锁节点行**，把同一 nodeId 的并发领取从一开始串行化。
+        //    若先动归属表（步骤①的续期 UPDATE）再锁节点行，两个副本会以**相反顺序**取锁——
+        //    本仓真库并发用例实测到 MySQL 死锁（DeadlockLoserDataAccessException）。
+        //    锁顺序统一为「先节点行、后归属表」是这里的关键不变量。
+        int capacity = nodeRegistry.lockCapacity(node);
         LocalDateTime now = LocalDateTime.now();
         LocalDateTime expireAt = now.plus(properties.getTtl());
 
@@ -157,9 +162,6 @@ public class LeaseServiceImpl implements LeaseService {
             .set(TenantNodeAssignment::getLeaseExpireAt, expireAt)
             .set(TenantNodeAssignment::getUpdateTime, now));
 
-        // ⚠️ M0b-1：容量必须从**已加锁的节点行**读取——进程内计数在多副本下会各自以为还有余额而超额分配。
-        // 行锁在事务提交时释放（本方法由 transactionTemplate 包裹），因此「读容量 + 计数 + 分配」跨副本串行。
-        int capacity = nodeRegistry.lockCapacity(node);
         // 在锁内重新计数（不依赖 renewed）：容量判断与「限量分配」必须基于同一时刻的事实
         int held = countHeld(node);
         int room = capacity == Integer.MAX_VALUE ? Integer.MAX_VALUE : Math.max(0, capacity - held);

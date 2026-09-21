@@ -248,6 +248,27 @@ ERROR The build could not read 1 project
 时变更通道也不会接线（文档表述已更正，见四点五）。`PointMappingDataListener.unmappedCount` 为普通 `long`，
 跨线程可见性目前依赖调用方（单线程订阅回调场景下成立），M-2 若引入多线程需一并改为原子类型。
 
+### 四点八、M-2 / M0b-1+M0b-2：容量落库（数据库级原子）
+
+**做了什么**：新增 `access_node`（节点注册表，容量落库）与 `tenant_ledger`（租户台账：可分配来源 +
+`config_epoch`）；`AccessNodeRegistry` 由内存改为落库；容量判定改为**事务内锁节点行**
+（`SELECT ... FOR UPDATE`）；可分配租户由「读配置」改为「读台账」（配置降级为兜底）。
+
+**真库并发用例实测结论**（`LeaseConcurrencyIT`，用**两个服务实例各自独立注册表**模拟两个副本共用同一 nodeId）：
+
+1. **锁顺序是硬不变量**：最初的实现是「先动归属表（续期 UPDATE）→ 再锁节点行」，两个副本并发时
+   **实测到 MySQL 死锁**（`DeadlockLoserDataAccessException`）。改为**第一条语句就锁节点行**后消失。
+   ⇒ 规则：**统一锁顺序（先节点行、后归属表）**，否则多副本并发领取会死锁。
+2. **用例真的能咬人（变异验证）**：把 `lockCapacity` 的 `FOR UPDATE` 去掉（退回非锁定读）⇒
+   该用例立刻转红（同样以死锁形式暴露）。⇒ 它确实在守「容量数据库级原子」这个性质。
+3. **逻辑删除 + 唯一键的陷阱（M0b-3 必须处理）**：`tenant_ledger` 上 `uk_tenant_ledger(tenant_id)`
+   不含量删除标记，而 `BaseEntity` 是逻辑删除 ⇒ 软删同一 `tenant_id` 后再 insert 会撞唯一键。
+   台账写入口必须走「**复活已有行**」而不是盲目 `insert`（与 M-1 的 `iot_service` 是同一类问题）。
+
+**⚠️ 用例运行要求**：`LeaseConcurrencyIT` 必须用 **mybatis-spring 的 `SqlSessionTemplate` + Spring 事务**
+（而不是普通 IT 的裸 `SqlSessionFactory`）——否则 `FOR UPDATE` 的锁在语句结束即释放，用例会**假绿**。
+另外 `-Pit -pl <模块>` **必须带 `-am`**（不带会从 `~/.m2` 取到旧的兄弟模块 jar，见教训十八）。
+
 ### 五、替换缝（3a 已备好，3b-2 只需新增自动配置）
 3a 的 `LoggingTenantLinkManager` 已去掉 `@Component`，由 `AccessLeaseConfiguration`（`@AutoConfiguration`
 + `@Bean @ConditionalOnMissingBean`）装配，并有源码门禁守着（四处变异全咬）。⇒ 3b-2 提供真实现时
