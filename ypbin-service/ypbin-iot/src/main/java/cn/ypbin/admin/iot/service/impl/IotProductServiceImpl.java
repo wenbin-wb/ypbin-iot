@@ -44,6 +44,12 @@ import org.springframework.util.StringUtils;
 public class IotProductServiceImpl extends BaseServiceImpl<IotProductMapper, IotProduct>
     implements IotProductService {
 
+    /** 从未产生过版本记录时的哨兵值（不是真实版本号，仅用于内部比较）。 */
+    private static final String NO_VERSION = "v0.0";
+
+    /** 首个正式版本号。 */
+    private static final String FIRST_VERSION = "v1.0";
+
     private final IotProductVersionMapper iotProductVersionMapper;
 
     public IotProductServiceImpl(IotProductVersionMapper iotProductVersionMapper) {
@@ -95,9 +101,17 @@ public class IotProductServiceImpl extends BaseServiceImpl<IotProductMapper, Iot
     @Transactional(rollbackFor = Exception.class)
     public String newDraft(Long id) {
         IotProduct product = requireProduct(id);
+        IotProductVersion draft = findLatestDraftVersion(id);
         if (ModelStatus.DRAFT.getCode().equals(product.getModelStatus())) {
-            return latestVersionNo(id);
+            // 已是草稿：复用当前草稿版本；产品刚建、尚无版本记录时补一条草稿
+            if (draft != null) {
+                return draft.getVersionNo();
+            }
+            String versionNo = nextDraftVersionNo(id);
+            saveVersion(id, versionNo, ModelStatus.DRAFT.getCode(), null);
+            return versionNo;
         }
+        // 已发布 → 推进一个 minor 作为新草稿（已发布版本记录保持不可变，§3.8）
         String versionNo = nextDraftVersionNo(id);
         saveVersion(id, versionNo, ModelStatus.DRAFT.getCode(), null);
         product.setModelStatus(ModelStatus.DRAFT.getCode());
@@ -113,8 +127,19 @@ public class IotProductServiceImpl extends BaseServiceImpl<IotProductMapper, Iot
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
                 "仅草稿状态可发布，请先新建草稿");
         }
-        String versionNo = nextDraftVersionNo(id);
-        saveVersion(id, versionNo, ModelStatus.PUBLISHED.getCode(), null);
+        IotProductVersion draft = findLatestDraftVersion(id);
+        String versionNo;
+        if (draft != null) {
+            // 发布的是「当前草稿那一版」：把该草稿记录置为已发布，不另分配新号，
+            // 否则每次编辑周期会跳两级版本并留下永不发布的孤儿草稿记录
+            versionNo = draft.getVersionNo();
+            draft.setModelStatus(ModelStatus.PUBLISHED.getCode());
+            draft.setPublishedAt(LocalDateTime.now());
+            iotProductVersionMapper.updateById(draft);
+        } else {
+            versionNo = nextDraftVersionNo(id);
+            saveVersion(id, versionNo, ModelStatus.PUBLISHED.getCode(), null);
+        }
         product.setModelStatus(ModelStatus.PUBLISHED.getCode());
         updateById(product);
         return versionNo;
@@ -122,10 +147,7 @@ public class IotProductServiceImpl extends BaseServiceImpl<IotProductMapper, Iot
 
     @Override
     public List<IotProductVersionResp> listVersions(Long productId) {
-        LambdaQueryWrapper<IotProductVersion> wrapper = new LambdaQueryWrapper<>();
-        wrapper.eq(IotProductVersion::getProductId, productId)
-            .orderByDesc(IotProductVersion::getVersionNo);
-        return iotProductVersionMapper.selectList(wrapper).stream()
+        return listVersionEntities(productId).stream()
             .map(this::toVersionResp)
             .toList();
     }
@@ -180,14 +202,43 @@ public class IotProductServiceImpl extends BaseServiceImpl<IotProductMapper, Iot
     }
 
     /**
-     * 取该产品已存在的最大版本号（未发布过则 v0.0）。
+     * 取该产品已存在的最大版本号（未发布过则 {@link #NO_VERSION}）。
+     *
+     * <p>按主键倒序取首条而非按版本号字符串倒序：版本记录按单调递增的顺序写入，
+     * 主键序即版本序；字符串序会把 {@code v1.10} 排到 {@code v1.9} 之前。</p>
      *
      * @param productId 产品主键
      * @return 版本号
      */
     private String latestVersionNo(Long productId) {
-        List<IotProductVersionResp> versions = listVersions(productId);
-        return versions.isEmpty() ? "v0.0" : versions.getFirst().getVersionNo();
+        List<IotProductVersion> versions = listVersionEntities(productId);
+        return versions.isEmpty() ? NO_VERSION : versions.getFirst().getVersionNo();
+    }
+
+    /**
+     * 取该产品最新的草稿版本记录（无则 {@code null}）。
+     *
+     * @param productId 产品主键
+     * @return 草稿版本记录；不存在时 {@code null}
+     */
+    private IotProductVersion findLatestDraftVersion(Long productId) {
+        return listVersionEntities(productId).stream()
+            .filter(version -> ModelStatus.DRAFT.getCode().equals(version.getModelStatus()))
+            .findFirst()
+            .orElse(null);
+    }
+
+    /**
+     * 查询版本记录（按主键倒序，即版本由新到旧）。
+     *
+     * @param productId 产品主键
+     * @return 版本记录列表（空集合表示无版本）
+     */
+    private List<IotProductVersion> listVersionEntities(Long productId) {
+        LambdaQueryWrapper<IotProductVersion> wrapper = new LambdaQueryWrapper<>();
+        wrapper.eq(IotProductVersion::getProductId, productId)
+            .orderByDesc(IotProductVersion::getId);
+        return iotProductVersionMapper.selectList(wrapper);
     }
 
     /**
@@ -198,8 +249,8 @@ public class IotProductServiceImpl extends BaseServiceImpl<IotProductMapper, Iot
      */
     String nextDraftVersionNo(Long productId) {
         String latest = latestVersionNo(productId);
-        if ("v0.0".equals(latest)) {
-            return "v1.0";
+        if (NO_VERSION.equals(latest)) {
+            return FIRST_VERSION;
         }
         int minor = Integer.parseInt(latest.substring(latest.lastIndexOf('.') + 1));
         return "v1." + (minor + 1);

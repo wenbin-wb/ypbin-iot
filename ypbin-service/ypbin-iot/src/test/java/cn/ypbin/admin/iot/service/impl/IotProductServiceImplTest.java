@@ -10,11 +10,15 @@
 package cn.ypbin.admin.iot.service.impl;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import cn.ypbin.admin.iot.entity.IotProduct;
 import cn.ypbin.admin.iot.entity.IotProductVersion;
+import cn.ypbin.admin.iot.mapper.IotProductMapper;
 import cn.ypbin.admin.iot.mapper.IotProductVersionMapper;
 import cn.ypbin.admin.iot.model.query.IotProductQuery;
 import cn.ypbin.admin.iot.model.resp.IotProductResp;
@@ -25,13 +29,15 @@ import java.time.LocalDateTime;
 import java.util.List;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
 
 /**
  * 产品服务的纯逻辑单测（不起 Spring 上下文、不连库）。
  *
- * <p>版本号递增（§3.8 语义化 v{major}.{minor}）是发布流程的核心规则，必须钉死；
+ * <p>版本号递增（§3.8 语义化 v{major}.{minor}）与发布状态机是发布流程的核心规则，必须钉死；
  * 查询条件构造与实体→响应映射与设备台账同构。</p>
  *
  * @author wenbin
@@ -39,6 +45,7 @@ import org.junit.jupiter.api.Test;
  */
 class IotProductServiceImplTest {
 
+    private final IotProductMapper productMapper = mock(IotProductMapper.class);
     private final IotProductVersionMapper versionMapper = mock(IotProductVersionMapper.class);
     private final IotProductServiceImpl service = new IotProductServiceImpl(versionMapper);
 
@@ -48,6 +55,12 @@ class IotProductServiceImplTest {
             IotProduct.class);
         TableInfoHelper.initTableInfo(new MapperBuilderAssistant(new MybatisConfiguration(), ""),
             IotProductVersion.class);
+    }
+
+    @BeforeEach
+    void wireBaseMapper() {
+        // getById 走 ServiceImpl 的 baseMapper 字段（Spring 注入点），纯单测里手动装桩
+        ReflectionTestUtils.setField(service, "baseMapper", productMapper);
     }
 
     @Test
@@ -60,6 +73,60 @@ class IotProductServiceImplTest {
         v10.setVersionNo("v1.0");
         when(versionMapper.selectList(org.mockito.ArgumentMatchers.any())).thenReturn(List.of(v10));
         assertThat(service.nextDraftVersionNo(100L)).isEqualTo("v1.1");
+    }
+
+    @Test
+    @DisplayName("最新版本判定走主键序（不按字符串序）：v1.10 必须被认作最新，而非 v1.9")
+    void latestVersionShouldNotUseLexicographicOrder() {
+        // 列表已按主键倒序返回（v1.10 是最新写入的那条）
+        IotProductVersion v110 = new IotProductVersion();
+        v110.setVersionNo("v1.10");
+        IotProductVersion v19 = new IotProductVersion();
+        v19.setVersionNo("v1.9");
+        when(versionMapper.selectList(org.mockito.ArgumentMatchers.any()))
+            .thenReturn(List.of(v110, v19));
+
+        assertThat(service.nextDraftVersionNo(100L)).isEqualTo("v1.11");
+    }
+
+    @Test
+    @DisplayName("发布复用当前草稿版本记录（置 published），不另分配版本号、不留孤儿草稿")
+    void publishShouldReuseDraftVersionRecord() {
+        IotProduct product = new IotProduct();
+        product.setId(300L);
+        product.setModelStatus("draft");
+        when(productMapper.selectById(300L)).thenReturn(product);
+        IotProductVersion draft = new IotProductVersion();
+        draft.setId(900L);
+        draft.setProductId(300L);
+        draft.setVersionNo("v1.1");
+        draft.setModelStatus("draft");
+        when(versionMapper.selectList(org.mockito.ArgumentMatchers.any()))
+            .thenReturn(List.of(draft));
+
+        String versionNo = service.publish(300L);
+
+        assertThat(versionNo).isEqualTo("v1.1");
+        // 草稿记录被更新为已发布（而不是再插一条 v1.2）
+        verify(versionMapper).updateById(draft);
+        verify(versionMapper, never()).insert(any(IotProductVersion.class));
+        assertThat(draft.getModelStatus()).isEqualTo("published");
+        assertThat(draft.getPublishedAt()).isNotNull();
+    }
+
+    @Test
+    @DisplayName("首次发布（无草稿记录）：分配 v1.0 并插入 published 记录")
+    void firstPublishShouldAllocateV1_0() {
+        IotProduct product = new IotProduct();
+        product.setId(301L);
+        product.setModelStatus("draft");
+        when(productMapper.selectById(301L)).thenReturn(product);
+        when(versionMapper.selectList(org.mockito.ArgumentMatchers.any())).thenReturn(List.of());
+
+        String versionNo = service.publish(301L);
+
+        assertThat(versionNo).isEqualTo("v1.0");
+        verify(versionMapper).insert(any(IotProductVersion.class));
     }
 
     @Test
