@@ -23,6 +23,19 @@ import org.apache.ibatis.annotations.Select;
 public interface AccessNodeMapper extends BaseMapper<AccessNode> {
 
     /**
+     * 按节点标识精确查询（未注册返回 {@code null}）。
+     *
+     * <p>用显式 SQL 而不是 Lambda 包装器：列少、命中唯一键，且不必依赖实体的 lambda 缓存
+     * （单测里少一处易碎的初始化）。</p>
+     *
+     * @param accessNode 节点标识
+     * @return 节点行；不存在返回 {@code null}
+     */
+    @Select("SELECT * FROM access_node WHERE access_node = #{accessNode} AND is_deleted = 0 "
+        + "LIMIT 1")
+    AccessNode selectByNode(@Param("accessNode") String accessNode);
+
+    /**
      * 锁定节点行（容量判定的原子前提：同一节点的并发分配在此串行化）。
      *
      * <p>必须在事务内调用；返回 {@code null} 表示该节点未注册。</p>

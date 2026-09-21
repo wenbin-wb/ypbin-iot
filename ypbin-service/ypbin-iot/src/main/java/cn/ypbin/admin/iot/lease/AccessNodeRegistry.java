@@ -9,22 +9,34 @@
  */
 package cn.ypbin.admin.iot.lease;
 
+import cn.ypbin.admin.iot.entity.AccessNode;
+import cn.ypbin.admin.iot.mapper.AccessNodeMapper;
+import cn.ypbin.starter.core.exception.BusinessException;
+import cn.ypbin.starter.core.exception.GlobalErrorCode;
 import cn.ypbin.starter.core.util.LogSanitizer;
+import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import java.time.LocalDateTime;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Transactional;
 
 /**
- * access 节点注册表（进程内）。
+ * access 节点注册表（M0b-1：**落库**，容量成为数据库级原子）。
  *
- * <p><b>取舍（写清楚，别当成完整实现）</b>：节点信息目前只活在进程内——本服务重启后节点需要重新注册，
- * 期间它们的续约会收到 {@code nodeFenced=true}。这不是漏洞而是设计好的恢复路径：access 收到节点级失效后
- * 会整体停采 → 重新注册 → 重新领取（P4b 已端到端验证过这条路径）。
- * 把节点也落库（容量与存活跨重启）属于 M0b 的后续项，不影响本增量的正确性。</p>
+ * <p><b>为什么必须落库</b>：容量判定原先在进程内计数里做。单副本可用，但多副本部署时每个副本都以为
+ * 「我还有余额」，于是各自分配 ⇒ **超额分配**，且只能靠日志发现（服务端只打 WARN，从数据上看不出来）。
+ * 落库后，用节点行的 {@code SELECT ... FOR UPDATE}（见 {@link #lockCapacity(String)}）把
+ * 「计数 + 限量分配」跨副本串行化；节点存活也随之跨重启（此前重启期间其它节点续约会收到
+ * {@code nodeFenced=true}，靠 access 重新注册恢复）。</p>
+ *
+ * <p><b>进程内锁仍保留</b>：{@link #lockFor(String)} 只用于减少同一 JVM 内的无效竞争；
+ * 跨副本的正确性**只由数据库行锁保证**。</p>
  *
  * @author wenbin
  * @since 2026-09-19
@@ -34,55 +46,93 @@ public class AccessNodeRegistry {
 
     private static final Logger log = LoggerFactory.getLogger(AccessNodeRegistry.class);
 
-    /** 「不限容量」的哨兵值（{@code ConcurrentHashMap} 不接受 null 值，用它代替）。 */
+    /** 「不限容量」的哨兵值（表里用 {@code NULL} 表示，内存表示用这个）。 */
     public static final int UNLIMITED_CAPACITY = Integer.MAX_VALUE;
 
-    private final Map<String, Integer> nodes = new ConcurrentHashMap<>();
+    private final AccessNodeMapper mapper;
 
-    /**
-     * 每节点的领取锁：容量是「先读后写」（数当前持有 → 算剩余 → 限量分配），
-     * 同一进程内并发领取同一节点必须串行，否则两边都算出「剩余 = 全量」而超额分配。
-     *
-     * <p><b>作用域是「同一 JVM」</b>：多个副本用同一个 nodeId 属误配置（nodeId 是租约归属的键，必须唯一）；
-     * 把它做成数据库级原子（节点行 + {@code SELECT ... FOR UPDATE}）是 M0b 的事，已在 docs/LEASE.md 记录。</p>
-     */
+    /** 进程内锁（仅减少同 JVM 竞争；跨副本互斥靠数据库行锁）。 */
     private final Map<String, Lock> locks = new ConcurrentHashMap<>();
 
-    /**
-     * 注册/覆盖节点。
-     *
-     * <p>⚠️ {@code maxTenants == null} 表示<b>不限</b>（单节点全量）——这是最常见的配置，
-     * 必须映射成哨兵值再入 Map：直接把 null 放进 {@code ConcurrentHashMap} 会抛 NPE，
-     * 表现为 register 端点 500、access 启动失败（本类曾经就是这样，被单测抓出来）。</p>
-     *
-     * @param accessNode 节点标识
-     * @param maxTenants 最多可持有租户数；{@code null} = 不限
-     * @throws IllegalArgumentException 容量为负数（配置错误，不静默接受）
-     */
-    public void register(String accessNode, Integer maxTenants) {
-        if (maxTenants != null && maxTenants < 0) {
-            throw new IllegalArgumentException("节点容量不能为负数：node=" + accessNode + " maxTenants=" + maxTenants);
-        }
-        int capacity = maxTenants == null ? UNLIMITED_CAPACITY : maxTenants;
-        Integer previous = nodes.put(accessNode, capacity);
-        if (previous != null) {
-            // 覆盖注册是允许的（重启/配置调整），但「两个副本用同一个 nodeId」也走这条路，
-            // 而那种误配置会带来超额分配与双份续约且**无法从数据上察觉** ⇒ 至少留下痕迹。
-            log.warn("节点重复注册（覆盖原容量）：node={} 原容量={} 新容量={}；"
-                + "若这是两个副本共用一个 nodeId，属误配置，请为每个副本分配唯一 node-id",
-                LogSanitizer.sanitize(accessNode), previous, capacity);
-        }
+    public AccessNodeRegistry(AccessNodeMapper mapper) {
+        this.mapper = mapper;
     }
 
     /**
-     * 查询节点的容量。
+     * 注册（或覆盖注册）节点：落库 upsert，并更新心跳时间。
      *
      * @param accessNode 节点标识
-     * @return 容量；未注册节点返回 {@link #UNLIMITED_CAPACITY}
-     *     （判定「是否注册」请用 {@link #isRegistered}，不要靠本方法的返回值）
+     * @param maxTenants 最多可持有租户数；{@code null} = 不限
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public void register(String accessNode, Integer maxTenants) {
+        if (maxTenants != null && maxTenants < 0) {
+            throw new IllegalArgumentException("节点容量不能为负数：node=" + accessNode
+                + " maxTenants=" + maxTenants);
+        }
+        AccessNode existing = selectByNode(accessNode);
+        if (existing == null) {
+            AccessNode node = new AccessNode();
+            node.setAccessNode(accessNode);
+            node.setMaxTenants(maxTenants);
+            node.setLastHeartbeatAt(LocalDateTime.now());
+            try {
+                mapper.insert(node);
+                log.info("[iot] access 节点注册（首次落库）：node={} capacity={}",
+                    LogSanitizer.sanitize(accessNode), capacityText(maxTenants));
+                return;
+            } catch (DuplicateKeyException ex) {
+                // 并发首次注册：另一副本已插入 ⇒ 退化为更新路径（有意降级到 upsert 语义，异常仍入日志）
+                log.debug("[iot] 节点并发首次注册，转为更新：node={}",
+                    LogSanitizer.sanitize(accessNode), ex);
+                existing = selectByNode(accessNode);
+            }
+        }
+        if (existing == null) {
+            // 极端竞态：既没插进去也查不到（例如被并发删除）。暴露而不是静默当作注册成功。
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "节点注册失败（并发冲突且无法读取）：" + accessNode);
+        }
+        Integer previous = existing.getMaxTenants();
+        mapper.update(null, Wrappers.<AccessNode>lambdaUpdate()
+            .eq(AccessNode::getAccessNode, accessNode)
+            .set(AccessNode::getMaxTenants, maxTenants)
+            .set(AccessNode::getLastHeartbeatAt, LocalDateTime.now()));
+        // 覆盖注册是允许的（重启/配置调整），但「两个副本用同一个 nodeId」也走这条路，
+        // 而那种误配置会带来超额分配与双份续约且**无法从数据上察觉** ⇒ 至少留下痕迹。
+        log.warn("节点重复注册（覆盖原容量）：node={} 原容量={} 新容量={}；"
+            + "若这是两个副本共用一个 nodeId，属误配置，请为每个副本分配唯一 node-id",
+            LogSanitizer.sanitize(accessNode), capacityText(previous), capacityText(maxTenants));
+    }
+
+    /**
+     * 在**事务内**锁定节点行并返回其容量（跨副本容量判定的原子前提）。
+     *
+     * @param accessNode 节点标识
+     * @return 容量；不限容量返回 {@link #UNLIMITED_CAPACITY}
+     */
+    public int lockCapacity(String accessNode) {
+        AccessNode row = mapper.selectForUpdate(accessNode);
+        if (row == null) {
+            // 不隐式注册：未注册节点拿到归属会让「谁在线」不可审计
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "节点未注册，请先调用 register：" + accessNode);
+        }
+        return row.getMaxTenants() == null ? UNLIMITED_CAPACITY : row.getMaxTenants();
+    }
+
+    /**
+     * 非锁定读容量（仅观测用途；**不要**用它做分配判定）。
+     *
+     * @param accessNode 节点标识
+     * @return 容量；未注册或不限容量返回 {@link #UNLIMITED_CAPACITY}
      */
     public int capacityOf(String accessNode) {
-        return nodes.getOrDefault(accessNode, UNLIMITED_CAPACITY);
+        AccessNode row = selectByNode(accessNode);
+        if (row == null || row.getMaxTenants() == null) {
+            return UNLIMITED_CAPACITY;
+        }
+        return row.getMaxTenants();
     }
 
     /**
@@ -92,21 +142,24 @@ public class AccessNodeRegistry {
      * @return 已注册返回 {@code true}
      */
     public boolean isRegistered(String accessNode) {
-        return nodes.containsKey(accessNode);
+        return selectByNode(accessNode) != null;
     }
 
     /**
-     * 取该节点的领取锁（容量计数的临界区）。
+     * 取该节点的进程内锁。
      *
      * @param accessNode 节点标识
-     * @return 该节点的可重入锁（同节点返回同一把）
+     * @return 进程内锁
      */
     public Lock lockFor(String accessNode) {
-        return locks.computeIfAbsent(accessNode, ignored -> new ReentrantLock());
+        return locks.computeIfAbsent(accessNode, key -> new ReentrantLock());
     }
 
-    /** 已注册节点数（供观测/测试）。 */
-    public int size() {
-        return nodes.size();
+    private AccessNode selectByNode(String accessNode) {
+        return mapper.selectByNode(accessNode);
+    }
+
+    private String capacityText(Integer maxTenants) {
+        return maxTenants == null ? "不限" : String.valueOf(maxTenants);
     }
 }

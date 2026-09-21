@@ -26,6 +26,8 @@ import cn.ypbin.admin.iot.lease.LeaseRenewResp;
 import cn.ypbin.admin.iot.lease.LeaseState;
 import cn.ypbin.admin.iot.lease.TenantEpochBatchResp;
 import cn.ypbin.admin.iot.lease.TenantEpochItem;
+import cn.ypbin.admin.iot.entity.TenantLedger;
+import cn.ypbin.admin.iot.mapper.TenantLedgerMapper;
 import cn.ypbin.admin.iot.mapper.TenantNodeAssignmentMapper;
 import cn.ypbin.admin.iot.service.LeaseService;
 import cn.ypbin.starter.core.exception.BusinessException;
@@ -80,6 +82,9 @@ public class LeaseServiceImpl implements LeaseService {
 
     private final TenantNodeAssignmentMapper mapper;
     private final AccessNodeRegistry nodeRegistry;
+
+    /** 租户台账（M0b-2：可分配租户来源 + config_epoch）。 */
+    private final TenantLedgerMapper ledgerMapper;
     private final LeaseProperties properties;
     private final Counter takeoverCounter;
     private final Counter expiredCounter;
@@ -96,11 +101,12 @@ public class LeaseServiceImpl implements LeaseService {
      * @param transactionTemplate 事务模板（领取需要在「锁内、事务中」执行，见 {@link #acquire}）
      */
     public LeaseServiceImpl(TenantNodeAssignmentMapper mapper, AccessNodeRegistry nodeRegistry,
-            LeaseProperties properties, MeterRegistry meterRegistry,
+            TenantLedgerMapper ledgerMapper, LeaseProperties properties, MeterRegistry meterRegistry,
             TransactionTemplate transactionTemplate) {
         this.transactionTemplate = transactionTemplate;
         this.mapper = mapper;
         this.nodeRegistry = nodeRegistry;
+        this.ledgerMapper = ledgerMapper;
         this.properties = properties;
         this.takeoverCounter = Counter.builder(METRIC_PREFIX + "takeover")
             .description("接管（含释放后重新分配）成功的租户数").register(meterRegistry);
@@ -151,7 +157,9 @@ public class LeaseServiceImpl implements LeaseService {
             .set(TenantNodeAssignment::getLeaseExpireAt, expireAt)
             .set(TenantNodeAssignment::getUpdateTime, now));
 
-        int capacity = capacityOf(node);
+        // ⚠️ M0b-1：容量必须从**已加锁的节点行**读取——进程内计数在多副本下会各自以为还有余额而超额分配。
+        // 行锁在事务提交时释放（本方法由 transactionTemplate 包裹），因此「读容量 + 计数 + 分配」跨副本串行。
+        int capacity = nodeRegistry.lockCapacity(node);
         // 在锁内重新计数（不依赖 renewed）：容量判断与「限量分配」必须基于同一时刻的事实
         int held = countHeld(node);
         int room = capacity == Integer.MAX_VALUE ? Integer.MAX_VALUE : Math.max(0, capacity - held);
@@ -375,10 +383,33 @@ public class LeaseServiceImpl implements LeaseService {
         return result;
     }
 
+    /**
+     * 可分配租户来源（M0b-2）：**优先读租户台账**，台账为空时退回配置（引导/向后兼容）。
+     *
+     * <p>为什么改成读台账：配置项「谁可被接入」要重启才生效，且无法承载「台账变更 + 版本号」语义；
+     * 台账把这件事变成可运维的数据，并带上 {@code config_epoch} 供变更推送对账（M0b-3）。</p>
+     *
+     * @return 可分配租户（可能为空集合，绝不返回 null）
+     */
+    private List<Long> assignableTenantIds() {
+        List<TenantLedger> ledger = ledgerMapper.selectList(Wrappers.<TenantLedger>lambdaQuery()
+            .select(TenantLedger::getTenantId)
+            .eq(TenantLedger::getAssignable, Boolean.TRUE));
+        if (!ledger.isEmpty()) {
+            List<Long> fromLedger = new ArrayList<>(ledger.size());
+            for (TenantLedger row : ledger) {
+                fromLedger.add(row.getTenantId());
+            }
+            return fromLedger;
+        }
+        List<Long> fallback = properties.getAssignableTenantIds();
+        return fallback == null ? List.of() : fallback;
+    }
+
     /** 可分配但尚无归属行的租户（一次 IN 查询；入参为空时短路返回空集合）。 */
     private List<Long> missingTenants() {
-        List<Long> assignable = properties.getAssignableTenantIds();
-        if (assignable == null || assignable.isEmpty()) {
+        List<Long> assignable = assignableTenantIds();
+        if (assignable.isEmpty()) {
             return List.of();
         }
         List<TenantNodeAssignment> existing = mapper.selectList(Wrappers.<TenantNodeAssignment>lambdaQuery()
