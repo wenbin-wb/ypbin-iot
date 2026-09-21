@@ -91,10 +91,8 @@ class IotTenantIsolationIT {
         config.setMaximumPoolSize(4);
         dataSource = new HikariDataSource(config);
 
-        try (Connection connection = dataSource.getConnection()) {
-            ScriptUtils.executeSqlScript(connection,
-                new FileSystemResource(REPO_ROOT.resolve("deploy/sql/006-iot-schema.sql")));
-        }
+        // 幂等建表：同一 MySQL 会被多个 IT 共用（谁先跑谁建），避免「表已存在」导致初始化失败
+        ItSchema.ensure(dataSource, REPO_ROOT);
         sqlSessionFactory = buildSqlSessionFactory();
         purgeTestTenants();
     }

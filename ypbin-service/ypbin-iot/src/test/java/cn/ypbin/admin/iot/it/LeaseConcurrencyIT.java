@@ -116,14 +116,8 @@ class LeaseConcurrencyIT {
         config.setMaximumPoolSize(8);
         dataSource = new HikariDataSource(config);
 
-        try (Connection connection = dataSource.getConnection()) {
-            // 同一 MySQL 容器可能已被其它 IT 建过表（Testcontainers 复用）⇒ 只在缺失时执行建表脚本，
-            // 否则会因「表已存在」直接初始化失败（这属于用例基建，与被测逻辑无关）
-            if (!tableExists(connection, "iot_device")) {
-                ScriptUtils.executeSqlScript(connection,
-                    new FileSystemResource(REPO_ROOT.resolve("deploy/sql/006-iot-schema.sql")));
-            }
-        }
+        // 幂等建表（与其它 IT 共用同一实例与同一助手）
+        ItSchema.ensure(dataSource, REPO_ROOT);
 
         // mybatis-spring：让 Mapper 调用加入 Spring 事务（FOR UPDATE 的锁才真的持有到提交）
         MybatisConfiguration configuration = new MybatisConfiguration();
@@ -275,17 +269,6 @@ class LeaseConcurrencyIT {
             .map(TenantNodeAssignment::getTenantId)
             .distinct()
             .count();
-    }
-
-    private static boolean tableExists(Connection connection, String table) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() "
-                    + "AND table_name = ?")) {
-            statement.setString(1, table);
-            try (ResultSet rs = statement.executeQuery()) {
-                return rs.next() && rs.getLong(1) > 0;
-            }
-        }
     }
 
     private static void purge() {
