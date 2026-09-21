@@ -26,6 +26,8 @@ import cn.ypbin.admin.iot.lease.LeaseRenewResp;
 import cn.ypbin.admin.iot.lease.LeaseState;
 import cn.ypbin.admin.iot.lease.TenantEpochBatchResp;
 import cn.ypbin.admin.iot.lease.TenantEpochItem;
+import cn.ypbin.admin.iot.entity.TenantLedger;
+import cn.ypbin.admin.iot.mapper.TenantLedgerMapper;
 import cn.ypbin.admin.iot.mapper.TenantNodeAssignmentMapper;
 import cn.ypbin.admin.iot.service.LeaseService;
 import cn.ypbin.starter.core.exception.BusinessException;
@@ -37,8 +39,10 @@ import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -80,6 +84,9 @@ public class LeaseServiceImpl implements LeaseService {
 
     private final TenantNodeAssignmentMapper mapper;
     private final AccessNodeRegistry nodeRegistry;
+
+    /** 租户台账（M0b-2：可分配租户来源 + config_epoch）。 */
+    private final TenantLedgerMapper ledgerMapper;
     private final LeaseProperties properties;
     private final Counter takeoverCounter;
     private final Counter expiredCounter;
@@ -96,11 +103,12 @@ public class LeaseServiceImpl implements LeaseService {
      * @param transactionTemplate 事务模板（领取需要在「锁内、事务中」执行，见 {@link #acquire}）
      */
     public LeaseServiceImpl(TenantNodeAssignmentMapper mapper, AccessNodeRegistry nodeRegistry,
-            LeaseProperties properties, MeterRegistry meterRegistry,
+            TenantLedgerMapper ledgerMapper, LeaseProperties properties, MeterRegistry meterRegistry,
             TransactionTemplate transactionTemplate) {
         this.transactionTemplate = transactionTemplate;
         this.mapper = mapper;
         this.nodeRegistry = nodeRegistry;
+        this.ledgerMapper = ledgerMapper;
         this.properties = properties;
         this.takeoverCounter = Counter.builder(METRIC_PREFIX + "takeover")
             .description("接管（含释放后重新分配）成功的租户数").register(meterRegistry);
@@ -140,7 +148,13 @@ public class LeaseServiceImpl implements LeaseService {
     /** 领取的实际逻辑（在节点锁内、同一事务中执行）。 */
     private LeaseAcquireResp doAcquire(LeaseAcquireReq req) {
         String node = req.getAccessNode();
-        LocalDateTime now = LocalDateTime.now();
+        // ⚠️ M0b-1：**第一条语句就锁节点行**，把同一 nodeId 的并发领取从一开始串行化。
+        //    若先动归属表（步骤①的续期 UPDATE）再锁节点行，两个副本会以**相反顺序**取锁——
+        //    本仓真库并发用例实测到 MySQL 死锁（DeadlockLoserDataAccessException）。
+        //    锁顺序统一为「先节点行、后归属表」是这里的关键不变量。
+        int capacity = nodeRegistry.lockCapacity(node);
+        // M0b-4：时间基准取**数据库时钟**（多节点时钟漂移会让快的节点提前抢走仍在续约的租户）
+        LocalDateTime now = mapper.selectNow();
         LocalDateTime expireAt = now.plus(properties.getTtl());
 
         // ① 续期自己在采的（单条原子 UPDATE）。**不读 affectedRows**：真实持有的租户以 ② 的批量查询为准
@@ -151,7 +165,6 @@ public class LeaseServiceImpl implements LeaseService {
             .set(TenantNodeAssignment::getLeaseExpireAt, expireAt)
             .set(TenantNodeAssignment::getUpdateTime, now));
 
-        int capacity = capacityOf(node);
         // 在锁内重新计数（不依赖 renewed）：容量判断与「限量分配」必须基于同一时刻的事实
         int held = countHeld(node);
         int room = capacity == Integer.MAX_VALUE ? Integer.MAX_VALUE : Math.max(0, capacity - held);
@@ -215,7 +228,8 @@ public class LeaseServiceImpl implements LeaseService {
             log.warn("[iot] 续约来自未注册节点，判定节点失效：node={}", LogSanitizer.sanitize(node));
             return resp;
         }
-        LocalDateTime now = LocalDateTime.now();
+        // M0b-4：时间基准取**数据库时钟**（多节点时钟漂移会让快的节点提前抢走仍在续约的租户）
+        LocalDateTime now = mapper.selectNow();
         LocalDateTime expireAt = now.plus(properties.getTtl());
         List<Long> requested = new ArrayList<>();
         for (LeaseRenewItem item : req.getLeases()) {
@@ -267,7 +281,8 @@ public class LeaseServiceImpl implements LeaseService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void release(LeaseReleaseReq req) {
-        LocalDateTime now = LocalDateTime.now();
+        // M0b-4：时间基准取**数据库时钟**（多节点时钟漂移会让快的节点提前抢走仍在续约的租户）
+        LocalDateTime now = mapper.selectNow();
         int rows = mapper.update(null, Wrappers.<TenantNodeAssignment>lambdaUpdate()
             .eq(TenantNodeAssignment::getAccessNode, req.getAccessNode())
             .in(TenantNodeAssignment::getTenantId, req.getTenantIds())
@@ -290,22 +305,33 @@ public class LeaseServiceImpl implements LeaseService {
     public TenantEpochBatchResp batchEpoch() {
         List<TenantNodeAssignment> all = mapper.selectList(Wrappers.<TenantNodeAssignment>lambdaQuery()
             .select(TenantNodeAssignment::getTenantId, TenantNodeAssignment::getEpoch));
+        // M0b-3：一次批量对账同时给出「归属 epoch」与「配置 epoch」——接入侧据此判断
+        // 「要采什么」有没有变（不一致才拉全量设备规格），避免每轮都打远端。
+        Map<Long, Long> configEpochs = new HashMap<>();
+        for (TenantLedger ledger : ledgerMapper.selectList(Wrappers.<TenantLedger>lambdaQuery()
+            .select(TenantLedger::getTenantId, TenantLedger::getConfigEpoch))) {
+            configEpochs.put(ledger.getTenantId(),
+                ledger.getConfigEpoch() == null ? 0L : ledger.getConfigEpoch());
+        }
         List<TenantEpochItem> items = new ArrayList<>();
         for (TenantNodeAssignment assignment : all) {
             TenantEpochItem item = new TenantEpochItem();
             item.setTenantId(assignment.getTenantId());
             item.setEpoch(assignment.getEpoch());
+            item.setConfigEpoch(configEpochs.getOrDefault(assignment.getTenantId(), 0L));
             items.add(item);
         }
         TenantEpochBatchResp resp = new TenantEpochBatchResp();
         resp.setItems(items);
-        resp.setReadAt(LocalDateTime.now());
+        resp.setReadAt(mapper.selectNow());
         return resp;
     }
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public int markExpired(LocalDateTime now) {
+    public int markExpired() {
+        // M0b-4：入参不再由调用方给本机时钟，统一取数据库时钟（调用方给什么就可能给错）
+        LocalDateTime now = mapper.selectNow();
         int rows = mapper.update(null, Wrappers.<TenantNodeAssignment>lambdaUpdate()
             .eq(TenantNodeAssignment::getState, LeaseState.ACTIVE.getCode())
             .le(TenantNodeAssignment::getLeaseExpireAt, now)
@@ -357,10 +383,6 @@ public class LeaseServiceImpl implements LeaseService {
         return count == null ? 0 : count.intValue();
     }
 
-    /** 分配容量（注册表已把「不限」映射成哨兵值）。 */
-    private int capacityOf(String node) {
-        return nodeRegistry.capacityOf(node);
-    }
 
     /** 本节点当前的归属清单（按租户排序，便于对账）。 */
     private List<LeaseAssignmentDto> listAssignmentsOf(String node) {
@@ -375,10 +397,33 @@ public class LeaseServiceImpl implements LeaseService {
         return result;
     }
 
+    /**
+     * 可分配租户来源（M0b-2）：**优先读租户台账**，台账为空时退回配置（引导/向后兼容）。
+     *
+     * <p>为什么改成读台账：配置项「谁可被接入」要重启才生效，且无法承载「台账变更 + 版本号」语义；
+     * 台账把这件事变成可运维的数据，并带上 {@code config_epoch} 供变更推送对账（M0b-3）。</p>
+     *
+     * @return 可分配租户（可能为空集合，绝不返回 null）
+     */
+    private List<Long> assignableTenantIds() {
+        List<TenantLedger> ledger = ledgerMapper.selectList(Wrappers.<TenantLedger>lambdaQuery()
+            .select(TenantLedger::getTenantId)
+            .eq(TenantLedger::getAssignable, Boolean.TRUE));
+        if (!ledger.isEmpty()) {
+            List<Long> fromLedger = new ArrayList<>(ledger.size());
+            for (TenantLedger row : ledger) {
+                fromLedger.add(row.getTenantId());
+            }
+            return fromLedger;
+        }
+        List<Long> fallback = properties.getAssignableTenantIds();
+        return fallback == null ? List.of() : fallback;
+    }
+
     /** 可分配但尚无归属行的租户（一次 IN 查询；入参为空时短路返回空集合）。 */
     private List<Long> missingTenants() {
-        List<Long> assignable = properties.getAssignableTenantIds();
-        if (assignable == null || assignable.isEmpty()) {
+        List<Long> assignable = assignableTenantIds();
+        if (assignable.isEmpty()) {
             return List.of();
         }
         List<TenantNodeAssignment> existing = mapper.selectList(Wrappers.<TenantNodeAssignment>lambdaQuery()

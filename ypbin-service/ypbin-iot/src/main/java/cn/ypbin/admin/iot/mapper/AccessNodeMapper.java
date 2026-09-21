@@ -1,0 +1,73 @@
+/*
+ * Copyright (c) 2026-present ypbin-admin authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ */
+package cn.ypbin.admin.iot.mapper;
+
+import cn.ypbin.admin.iot.entity.AccessNode;
+import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import org.apache.ibatis.annotations.Param;
+import org.apache.ibatis.annotations.Select;
+import org.apache.ibatis.annotations.Update;
+
+/**
+ * 接入节点 Mapper。
+ *
+ * @author wenbin
+ * @since 2026-09-21
+ */
+public interface AccessNodeMapper extends BaseMapper<AccessNode> {
+
+    /**
+     * 按节点标识精确查询（未注册返回 {@code null}）。
+     *
+     * <p>用显式 SQL 而不是 Lambda 包装器：列少、命中唯一键，且不必依赖实体的 lambda 缓存
+     * （单测里少一处易碎的初始化）。</p>
+     *
+     * @param accessNode 节点标识
+     * @return 节点行；不存在返回 {@code null}
+     */
+    @Select("SELECT * FROM access_node WHERE access_node = #{accessNode} AND is_deleted = 0 "
+        + "LIMIT 1")
+    AccessNode selectByNode(@Param("accessNode") String accessNode);
+
+    /**
+     * 按节点标识查询，**包含逻辑删除行**（用于「复活」判断）。
+     *
+     * <p>为什么需要：{@code uk_access_node(access_node)} 不包含删除标记，而实体是逻辑删除
+     * ⇒ 软删后直接 insert 会撞唯一键。注册入口必须先看到被软删的行并复活它。</p>
+     *
+     * @param accessNode 节点标识
+     * @return 节点行（含已删除）；不存在返回 {@code null}
+     */
+    @Select("SELECT * FROM access_node WHERE access_node = #{accessNode} LIMIT 1")
+    AccessNode selectIncludingDeleted(@Param("accessNode") String accessNode);
+
+    /**
+     * 复活（或更新）节点行：重置容量与心跳，并清掉逻辑删除标记。
+     *
+     * @param accessNode 节点标识
+     * @param maxTenants 容量（{@code null} = 不限）
+     * @return 受影响行数
+     */
+    @Update("UPDATE access_node SET max_tenants = #{maxTenants}, last_heartbeat_at = NOW(), "
+        + "is_deleted = 0, update_time = NOW() WHERE access_node = #{accessNode}")
+    int revive(@Param("accessNode") String accessNode, @Param("maxTenants") Integer maxTenants);
+
+    /**
+     * 锁定节点行（容量判定的原子前提：同一节点的并发分配在此串行化）。
+     *
+     * <p>必须在事务内调用；返回 {@code null} 表示该节点未注册。</p>
+     *
+     * @param accessNode 节点标识
+     * @return 节点行（已加锁）
+     */
+    @Select("SELECT * FROM access_node WHERE access_node = #{accessNode} AND is_deleted = 0 "
+        + "FOR UPDATE")
+    AccessNode selectForUpdate(@Param("accessNode") String accessNode);
+}

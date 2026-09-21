@@ -14,6 +14,9 @@ ypbin:
     # ⇒ 领取/续约/释放/失效扫描**全部不可用**（不是少个优化，是整个增量不工作）。
     ignore-tables:
       - tenant_node_assignment
+      # M0b-1/M0b-2 平台表：节点注册表与租户台账都不按租户隔离（台账本身就是「租户清单」）
+      - access_node
+      - tenant_ledger
   # 身份头来源校验：仅信任带网关签名标记的身份头；未配置密钥则拒绝启动（fail-fast）
   cloud:
     feign:

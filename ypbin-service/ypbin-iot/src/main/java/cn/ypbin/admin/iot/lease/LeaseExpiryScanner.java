@@ -10,7 +10,6 @@
 package cn.ypbin.admin.iot.lease;
 
 import cn.ypbin.admin.iot.service.LeaseService;
-import java.time.LocalDateTime;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -43,6 +42,6 @@ public class LeaseExpiryScanner {
     /** 周期扫描（间隔由 {@code ypbin.lease.scan-interval-ms} 控制）。 */
     @Scheduled(fixedDelayString = "${ypbin.lease.scan-interval-ms:15000}")
     public void scan() {
-        leaseService.markExpired(LocalDateTime.now());
+        leaseService.markExpired();
     }
 }

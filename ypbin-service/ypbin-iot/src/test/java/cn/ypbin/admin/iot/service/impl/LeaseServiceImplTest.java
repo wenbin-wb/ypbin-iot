@@ -18,7 +18,11 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import cn.ypbin.admin.iot.entity.AccessNode;
+import cn.ypbin.admin.iot.entity.TenantLedger;
 import cn.ypbin.admin.iot.entity.TenantNodeAssignment;
+import cn.ypbin.admin.iot.mapper.AccessNodeMapper;
+import cn.ypbin.admin.iot.mapper.TenantLedgerMapper;
 import cn.ypbin.admin.iot.lease.AccessNodeRegisterReq;
 import cn.ypbin.admin.iot.lease.AccessNodeRegistry;
 import cn.ypbin.admin.iot.lease.AssignmentQueryReq;
@@ -35,13 +39,14 @@ import cn.ypbin.admin.iot.lease.TenantEpochBatchResp;
 import cn.ypbin.admin.iot.mapper.TenantNodeAssignmentMapper;
 import cn.ypbin.starter.core.exception.BusinessException;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
-import com.baomidou.mybatisplus.core.conditions.Wrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.LocalDateTime;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -79,24 +84,55 @@ class LeaseServiceImplTest {
      */
     @BeforeAll
     static void initTableInfo() {
-        TableInfoHelper.initTableInfo(new MapperBuilderAssistant(new MybatisConfiguration(), ""),
-            TenantNodeAssignment.class);
+        for (Class<?> entity : List.of(TenantNodeAssignment.class, AccessNode.class,
+                TenantLedger.class)) {
+            TableInfoHelper.initTableInfo(new MapperBuilderAssistant(new MybatisConfiguration(), ""),
+                entity);
+        }
     }
 
     private TenantNodeAssignmentMapper mapper;
+    private AccessNodeMapper accessNodeMapper;
+    private TenantLedgerMapper ledgerMapper;
     private AccessNodeRegistry registry;
     private LeaseProperties properties;
     private LeaseServiceImpl service;
 
+    /** 模拟 access_node 表：注册写入、按节点名查询/加锁读出（未注册节点必须查不到）。 */
+    private final Map<String, AccessNode> nodeTable = new ConcurrentHashMap<>();
+
     @BeforeEach
     void setUp() {
+        nodeTable.clear();
         mapper = Mockito.mock(TenantNodeAssignmentMapper.class);
-        registry = new AccessNodeRegistry();
+        accessNodeMapper = Mockito.mock(AccessNodeMapper.class);
+        ledgerMapper = Mockito.mock(TenantLedgerMapper.class);
+        // 节点表桩：按**查询里的节点名**返回（否则「未注册节点」会被误判为已注册，负向用例恒真）
+        lenient().when(accessNodeMapper.selectByNode(any())).thenAnswer(inv -> {
+            String name = inv.getArgument(0);
+            return name == null ? null : nodeTable.get(name);
+        });
+        lenient().when(accessNodeMapper.selectForUpdate(any())).thenAnswer(inv -> {
+            String name = inv.getArgument(0);
+            return name == null ? null : nodeTable.get(name);
+        });
+        lenient().when(accessNodeMapper.insert(any(AccessNode.class))).thenAnswer(inv -> {
+            AccessNode row = inv.getArgument(0);
+            nodeTable.put(row.getAccessNode(), row);
+            return 1;
+        });
+        lenient().when(accessNodeMapper.update(any(), any())).thenReturn(1);
+        // 台账桩默认空 ⇒ 分配来源回退到配置（保持既有用例的语义不变）
+        lenient().when(ledgerMapper.selectList(any())).thenReturn(List.of());
+        registry = new AccessNodeRegistry(accessNodeMapper);
         properties = new LeaseProperties();
         properties.setAssignableTenantIds(List.of(11L, 22L));
         lenient().when(mapper.selectList(any())).thenReturn(List.of());
         lenient().when(mapper.selectCount(any())).thenReturn(0L);
-        service = new LeaseServiceImpl(mapper, registry, properties, new SimpleMeterRegistry(), noTx());
+        // M0b-4：服务改用数据库时钟 ⇒ 桩一个固定值（否则 selectNow() 返回 null 会 NPE）
+        lenient().when(mapper.selectNow()).thenReturn(LocalDateTime.of(2026, 9, 21, 12, 0));
+        service = new LeaseServiceImpl(mapper, registry, ledgerMapper, properties,
+            new SimpleMeterRegistry(), noTx());
     }
 
     @Test
@@ -249,7 +285,7 @@ class LeaseServiceImplTest {
     void markExpiredMustSetPendingTakeover() {
         when(mapper.update(isNull(), any())).thenReturn(1);
 
-        service.markExpired(LocalDateTime.now());
+        service.markExpired();
 
         LambdaUpdateWrapper<TenantNodeAssignment> wrapper = capturedUpdate();
         assertMentionsState(wrapper, LeaseState.PENDING_TAKEOVER, "扫描的目标状态必须是待接管");
@@ -384,7 +420,7 @@ class LeaseServiceImplTest {
     void markExpiredShouldUseSingleAtomicUpdate() {
         when(mapper.update(isNull(), any())).thenReturn(3);
 
-        int affected = service.markExpired(LocalDateTime.of(2026, 9, 19, 12, 0));
+        int affected = service.markExpired();
 
         assertThat(affected).isEqualTo(3);
         LambdaUpdateWrapper<TenantNodeAssignment> wrapper = capturedUpdate();
@@ -398,7 +434,7 @@ class LeaseServiceImplTest {
     void markExpiredShouldBeNoopWhenNothingExpired() {
         when(mapper.update(isNull(), any())).thenReturn(0);
 
-        assertThat(service.markExpired(LocalDateTime.now())).isZero();
+        assertThat(service.markExpired()).isZero();
     }
 
     @Test

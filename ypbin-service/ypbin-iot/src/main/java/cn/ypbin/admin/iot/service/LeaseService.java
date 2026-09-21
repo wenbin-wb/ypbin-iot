@@ -80,8 +80,7 @@ public interface LeaseService {
     /**
      * 失效扫描：把已到期且仍为 ACTIVE 的租约置为待接管（单条原子 UPDATE）。
      *
-     * @param now 当前时刻
      * @return 本次置为待接管的租户数
      */
-    int markExpired(LocalDateTime now);
+    int markExpired();
 }

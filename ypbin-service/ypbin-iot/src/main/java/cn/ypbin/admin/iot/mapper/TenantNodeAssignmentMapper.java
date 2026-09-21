@@ -13,7 +13,9 @@ import cn.ypbin.admin.iot.entity.TenantNodeAssignment;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import java.util.List;
 import org.apache.ibatis.annotations.Insert;
+import java.time.LocalDateTime;
 import org.apache.ibatis.annotations.Param;
+import org.apache.ibatis.annotations.Select;
 
 /**
  * 租户节点归属 Mapper（平台表，租户插件按 {@code ignore-tables} 忽略它）。
@@ -22,6 +24,17 @@ import org.apache.ibatis.annotations.Param;
  * @since 2026-09-19
  */
 public interface TenantNodeAssignmentMapper extends BaseMapper<TenantNodeAssignment> {
+
+    /**
+     * 取**数据库时钟**（M0b-4：租约的时间基准统一到 DB，避免多节点时钟漂移）。
+     *
+     * <p>为什么要用数据库时钟：租约的写入与过期判定若各自读本机时钟，节点间快慢差就会造成
+     * 「时钟快的节点提前抢走仍在正常续约的租户」。统一到 DB 时钟后，判定与写入同源。</p>
+     *
+     * @return 数据库当前时间
+     */
+    @Select("SELECT NOW()")
+    LocalDateTime selectNow();
 
     /**
      * 批量首次分配（单条语句 + 唯一键冲突即跳过）。

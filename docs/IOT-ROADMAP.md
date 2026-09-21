@@ -248,6 +248,86 @@ ERROR The build could not read 1 project
 时变更通道也不会接线（文档表述已更正，见四点五）。`PointMappingDataListener.unmappedCount` 为普通 `long`，
 跨线程可见性目前依赖调用方（单线程订阅回调场景下成立），M-2 若引入多线程需一并改为原子类型。
 
+### 四点八、M-2 / M0b-1+M0b-2：容量落库（数据库级原子）
+
+**做了什么**：新增 `access_node`（节点注册表，容量落库）与 `tenant_ledger`（租户台账：可分配来源 +
+`config_epoch`）；`AccessNodeRegistry` 由内存改为落库；容量判定改为**事务内锁节点行**
+（`SELECT ... FOR UPDATE`）；可分配租户由「读配置」改为「读台账」（配置降级为兜底）。
+
+**真库并发用例实测结论**（`LeaseConcurrencyIT`，用**两个服务实例各自独立注册表**模拟两个副本共用同一 nodeId）：
+
+1. **锁顺序是硬不变量**：最初的实现是「先动归属表（续期 UPDATE）→ 再锁节点行」，两个副本并发时
+   **实测到 MySQL 死锁**（`DeadlockLoserDataAccessException`）。改为**第一条语句就锁节点行**后消失。
+   ⇒ 规则：**统一锁顺序（先节点行、后归属表）**，否则多副本并发领取会死锁。
+2. **用例真的能咬人（变异验证）**：把 `lockCapacity` 的 `FOR UPDATE` 去掉（退回非锁定读）⇒
+   该用例立刻转红（同样以死锁形式暴露）。⇒ 它确实在守「容量数据库级原子」这个性质。
+3. **逻辑删除 + 唯一键的陷阱（M0b-3 必须处理）**：`tenant_ledger` 上 `uk_tenant_ledger(tenant_id)`
+   不含量删除标记，而 `BaseEntity` 是逻辑删除 ⇒ 软删同一 `tenant_id` 后再 insert 会撞唯一键。
+   台账写入口必须走「**复活已有行**」而不是盲目 `insert`（与 M-1 的 `iot_service` 是同一类问题）。
+
+**⚠️ 用例运行要求**：`LeaseConcurrencyIT` 必须用 **mybatis-spring 的 `SqlSessionTemplate` + Spring 事务**
+（而不是普通 IT 的裸 `SqlSessionFactory`）——否则 `FOR UPDATE` 的锁在语句结束即释放，用例会**假绿**。
+另外 `-Pit -pl <模块>` **必须带 `-am`**（不带会从 `~/.m2` 取到旧的兄弟模块 jar，见教训十八）。
+
+### 四点九、M0b-3 / M0b-4：台账写入口与**数据库时钟**
+
+**M0b-3（配置版本号）**
+- 新增 `TenantLedgerService.setAssignable(...)`：新建 ⇒ `config_epoch=1`；变更 ⇒ 一条 UPDATE 内
+  `assignable=? , config_epoch = config_epoch + 1`（**同语句**，否则「台账变了、版本没变」⇒ 接入侧漏拉）；
+  **软删过则复活同一行**（`uk_tenant_ledger(tenant_id)` 不含量删标记 ⇒ 盲目 insert 撞唯一键，与 M-1 的
+  `iot_service` 同类）；并发首次写入撞唯一键退化为复活。
+- 对账契约 `TenantEpochItem` 现同时带 `epoch`（归属：**谁在采**）与 `configEpoch`（配置：**要采什么**），
+  `batchEpoch()` 一并回填 ⇒ 接入侧一次批量拉取即可「不一致才拉全量」。
+- 真库用例 `TenantLedgerIT`：新建=1 → 变更=2 → **软删后重设必须复活且=3**、全程仅一行。
+  **它当场抓到实现者的真 bug**：`BaseEntity.getIsDeleted()` 是 **Integer** 而非 Boolean，
+  `Boolean.TRUE.equals(...)` 恒假 ⇒「复活」被误判成「更新」。
+
+**M0b-4（数据库时钟）**
+- 租约的时间基准统一改为 **`SELECT NOW()`（数据库时钟）**：`doAcquire`/`renew`/`release`/`markExpired`
+  以及 `batchEpoch.readAt` 都取 DB 时间；`markExpired()` 不再接受调用方传入的本机时间（给什么就可能给错）。
+- 原因：写入与过期判定各读本机时钟时，**时钟快的节点会提前抢走仍在正常续约的租户**（表现为莫名频繁的接管，
+  且无显式错误）。
+- 真库用例 `LeaseDbClockIT`：把该用例自己的连接池会话时区设为 `-11:00`，使 DB 的 `NOW()` 与 JVM 时钟
+  相差数小时，再断言落库的 `lease_expire_at` 跟 **DB 时钟**走。
+  **变异验证**：把 `doAcquire` 退回 `LocalDateTime.now()` ⇒ 用例转红，报
+  「到期时间应≈DB 现在(07:42:15)+ttl，实际=18:42:46」**相差 39601 秒**；还原后逐字节一致。
+  （该用例在 JVM 时区恰好等于 -11:00 时会显式跳过「必须偏离」那半条断言，而不是假装通过。）
+
+### 四点十、M0b 外委复核结论（PASS）与**待接线项**（如实登记，避免把前置件当闭环）
+
+第三次之后又做了一轮 **M0b 专项外委复核**：结论 **PASS（可合并）**，A–E 五组声明全部成立（各由复核者亲跑命令与
+亲读行号支撑），并给出 P1 缺陷与 P2–P10 建议。**已在本分支修掉 P1/P2/P3/P9**：
+
+- **P1（测试可重复性，已修）**：`LeaseConcurrencyIT` 的 `registerNode/purge` 原先用 MyBatis-Plus **逻辑删除**，
+  而 `uk_access_node(access_node)` 不含量删标记 ⇒ 对**持久化** MySQL 第二次运行整类失败
+  （复核者自建实例实测 `Duplicate entry ... uk_access_node`）。改为**物理删除**，并新增用例
+  `purgeMustPhysicallyRemoveNodeSoTestIsRepeatable`（连续注册两次不得撞唯一键）。
+  **变异验证**：把 `registerNode` 退回逻辑删除 ⇒ 该 IT 类 3 条全 ERROR，报的正是复核者的唯一键冲突；
+  还原后逐字节一致。（第一次变异只改了 `purge`，被 `registerNode` 的物理删除掩盖 ⇒ 说明**承重点在 registerNode**。）
+- **P2（代码缺口，已修）**：`AccessNodeRegistry.register` 补「复活软删节点行」分支
+  （`selectIncludingDeleted` + `revive`），与 `TenantLedgerService` 的复活语义对齐；
+  否则软删后注册会抛「并发冲突且无法读取」。
+- **P3（用例顺序耦合，已修）**：`assignableTenantsComeFromLedger` 自行 `registerNode()`，不再偷依赖其它用例。
+- **P9（清理，已修）**：删除死代码 `LeaseServiceImpl.capacityOf`、删除改签名后过期的 `@param now`、
+  删除 `LeaseExpiryScanner` 未用 import。
+
+**⚠️ 必须如实登记的待接线项（复核 P4–P8、P10 —— 现在还不是闭环）**：
+
+| # | 事项 | 现状（勿写成已完成） |
+|---|---|---|
+| **P4** | `config_epoch` **目前无消费方** | 接入侧 `AccessLeaseManager` 只用 register/acquire/renew，**从不调** `batchEpoch`/`/internal/lease/epochs` ⇒ 「不一致才拉全量」的**对账尚未落地**；本分支只交付了列/契约/写入口（前置件） |
+| **P5** | `TenantLedgerService.setAssignable` **无生产调用者/端点** | 「运维可动态增删可分配租户」在运行态**尚不可达**（仅 IT 调用） |
+| **P6** | 台账全置不可分配时会**静默回落配置** | 当前 nacos `assignable-tenant-ids: []` 故无害；一旦填了配置，撤销操作会被静默忽略 ⇒ 接线时须一并处理 |
+| **P7** | 容量只限「新分配」，**不回收存量** | 容量改小/改 0 后，既有 ACTIVE 行仍被续期，旧租户不会自动脱落（设计取舍，需显式说明） |
+| **P8** | `status` 列未参与过滤 | `assignableTenantIds`/`listAssignableTenantIds` 与 `selectByNode/selectForUpdate` 都不过滤 `status`（本仓他处是显式过滤的） |
+| **P10** | 多副本残余死锁面 | `renew/release/markExpired` 不取节点行锁，与 `doAcquire` 可能成环（表现为可重试死锁异常，非数据损坏） |
+
+**M0b-4 的残留面（复核 D 补充，写下来避免误以为已闭环）**：接入侧 `AccessLeaseManager` 仍用**本机时钟**
+做租约语义判定（`LeaseSnapshot` → `needsSelfFence(..., now)`）——服务端已改用 DB 时钟，
+但接入侧「本地到期即自行停采」的比较仍受本机时钟影响（**钟快=提前停采、钟慢=服务端接管后仍多采一段**）。
+彻底闭环需要租约契约带上**服务端时间**（如 `LeaseAcquireResp`/`RenewAck` 增加 serverTime），
+接入侧以「服务端时间 + 本地单调流逝」判断。属 M-2 数据面/契约项，登记在此。
+
 ### 五、替换缝（3a 已备好，3b-2 只需新增自动配置）
 3a 的 `LoggingTenantLinkManager` 已去掉 `@Component`，由 `AccessLeaseConfiguration`（`@AutoConfiguration`
 + `@Bean @ConditionalOnMissingBean`）装配，并有源码门禁守着（四处变异全咬）。⇒ 3b-2 提供真实现时
