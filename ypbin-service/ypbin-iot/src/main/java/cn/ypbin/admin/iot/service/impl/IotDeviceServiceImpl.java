@@ -10,6 +10,7 @@
 package cn.ypbin.admin.iot.service.impl;
 
 import cn.ypbin.admin.iot.entity.IotDevice;
+import cn.ypbin.admin.iot.entity.IotProduct;
 import cn.ypbin.admin.iot.enums.ModelStatus;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.IotProductMapper;
@@ -88,7 +89,7 @@ public class IotDeviceServiceImpl extends BaseServiceImpl<IotDeviceMapper, IotDe
      * @param productId 产品主键
      */
     private void requirePublishedProduct(Long productId) {
-        cn.ypbin.admin.iot.entity.IotProduct product = iotProductMapper.selectById(productId);
+        IotProduct product = iotProductMapper.selectById(productId);
         if (product == null) {
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "产品不存在：" + productId);
         }

@@ -30,7 +30,10 @@ import org.junit.jupiter.api.Test;
  *
  * <p>为什么只测这两处：查询条件构造与实体→响应映射是<b>本类自己的逻辑</b>，也是回归风险最高的两处；
  * 分页与落库本身由 {@code BaseServiceImpl} 与 MyBatis-Plus 承担，起上下文测它们属于重复验证。
- * 租户隔离不在这里测——它由租户插件保证，端到端越权用例属于 M0b 的验收面。</p>
+ * 租户隔离的<b>机制面</b>由 {@code IotTenantIsolationGateTest} 覆盖（表不被 ignore、租户上下文
+ * 缺失时 fail-closed、实体继承 TenantBaseEntity）；§10/§14 要求的<b>端到端</b>越权用例
+ * （A 租户 token 访问 B 租户数据 → HTTP 200 + R.code=403）需要真实 DB 与登录态，归属 CI
+ * 集成测试面，本机纯单测形态跑不了——它是 M-1 尚未关闭的验收项，不因本注释而移出 M-1。</p>
  *
  * @author wenbin
  * @since 2026-09-19

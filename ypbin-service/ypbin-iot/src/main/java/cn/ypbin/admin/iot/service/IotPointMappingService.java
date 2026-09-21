@@ -50,5 +50,5 @@ public interface IotPointMappingService {
      *
      * @param id 映射主键
      */
-    void remove(Long id);
+    void remove(Long deviceId, Long id);
 }

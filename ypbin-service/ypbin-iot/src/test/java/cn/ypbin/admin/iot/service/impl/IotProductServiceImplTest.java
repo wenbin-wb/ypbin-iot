@@ -28,6 +28,7 @@ import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import java.time.LocalDateTime;
 import java.util.List;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
+import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -76,17 +77,41 @@ class IotProductServiceImplTest {
     }
 
     @Test
-    @DisplayName("最新版本判定走主键序（不按字符串序）：v1.10 必须被认作最新，而非 v1.9")
-    void latestVersionShouldNotUseLexicographicOrder() {
-        // 列表已按主键倒序返回（v1.10 是最新写入的那条）
+    @DisplayName("最新版本判定必须按主键序查询（ORDER BY id DESC），不能按版本号字符串序")
+    void latestVersionQueryMustOrderByIdDesc() {
+        // 断言查询条件本身：若退回 orderByDesc(versionNo)，v1.10 会被排在 v1.9 之前而算错版本
+        when(versionMapper.selectList(org.mockito.ArgumentMatchers.any())).thenReturn(List.of());
+
+        service.nextDraftVersionNo(100L);
+
+        ArgumentCaptor<com.baomidou.mybatisplus.core.conditions.Wrapper<IotProductVersion>> captor =
+            ArgumentCaptor.forClass(com.baomidou.mybatisplus.core.conditions.Wrapper.class);
+        verify(versionMapper).selectList(captor.capture());
+        String sql = captor.getValue().getSqlSegment();
+        assertThat(sql).containsIgnoringCase("ORDER BY").containsIgnoringCase("id")
+            .containsIgnoringCase("DESC");
+    }
+
+    @Test
+    @DisplayName("号段解析：v1.10 之后应是 v1.11（字典序会误判为 v1.2）")
+    void versionNumberShouldParseNumerically() {
         IotProductVersion v110 = new IotProductVersion();
         v110.setVersionNo("v1.10");
-        IotProductVersion v19 = new IotProductVersion();
-        v19.setVersionNo("v1.9");
         when(versionMapper.selectList(org.mockito.ArgumentMatchers.any()))
-            .thenReturn(List.of(v110, v19));
+            .thenReturn(List.of(v110));
 
         assertThat(service.nextDraftVersionNo(100L)).isEqualTo("v1.11");
+    }
+
+    @Test
+    @DisplayName("major 不写死：v2.3 之后应是 v2.4（而非 v1.4）")
+    void majorShouldBePreserved() {
+        IotProductVersion v23 = new IotProductVersion();
+        v23.setVersionNo("v2.3");
+        when(versionMapper.selectList(org.mockito.ArgumentMatchers.any()))
+            .thenReturn(List.of(v23));
+
+        assertThat(service.nextDraftVersionNo(100L)).isEqualTo("v2.4");
     }
 
     @Test

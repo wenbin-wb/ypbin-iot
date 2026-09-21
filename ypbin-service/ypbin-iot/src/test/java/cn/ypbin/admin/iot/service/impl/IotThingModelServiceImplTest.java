@@ -11,17 +11,42 @@ package cn.ypbin.admin.iot.service.impl;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import cn.ypbin.admin.iot.entity.IotProduct;
+import cn.ypbin.admin.iot.entity.IotCommand;
+import cn.ypbin.admin.iot.entity.IotEvent;
+import cn.ypbin.admin.iot.entity.IotProperty;
+import cn.ypbin.admin.iot.entity.IotService;
+import cn.ypbin.admin.iot.mapper.IotCommandMapper;
+import cn.ypbin.admin.iot.mapper.IotEventMapper;
+import cn.ypbin.admin.iot.mapper.IotProductMapper;
+import cn.ypbin.admin.iot.mapper.IotPropertyMapper;
+import cn.ypbin.admin.iot.mapper.IotServiceMapper;
+import cn.ypbin.admin.iot.model.resp.TslImportResult;
 import cn.ypbin.admin.iot.model.tsl.TslCommand;
 import cn.ypbin.admin.iot.model.tsl.TslDocument;
 import cn.ypbin.admin.iot.model.tsl.TslEvent;
 import cn.ypbin.admin.iot.model.tsl.TslPara;
 import cn.ypbin.admin.iot.model.tsl.TslProperty;
 import cn.ypbin.admin.iot.model.tsl.TslService;
+import com.baomidou.mybatisplus.core.MybatisConfiguration;
+import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.ArrayList;
 import java.util.List;
+import org.apache.ibatis.builder.MapperBuilderAssistant;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
 
 /**
  * TSL 导入校验纯逻辑单测（不起 Spring、不连库）。
@@ -34,8 +59,30 @@ import org.junit.jupiter.api.Test;
  */
 class IotThingModelServiceImplTest {
 
+    private final IotProductMapper productMapper = mock(IotProductMapper.class);
+    private final IotPropertyMapper propertyMapper = mock(IotPropertyMapper.class);
+    private final IotCommandMapper commandMapper = mock(IotCommandMapper.class);
+    private final IotEventMapper eventMapper = mock(IotEventMapper.class);
+    private final IotServiceMapper serviceMapper = mock(IotServiceMapper.class);
     private final IotThingModelServiceImpl service = new IotThingModelServiceImpl(
-        new ObjectMapper(), null, null, null, null);
+        new ObjectMapper(), productMapper, propertyMapper, commandMapper, eventMapper);
+
+    @BeforeAll
+    static void initTableInfo() {
+        TableInfoHelper.initTableInfo(new MapperBuilderAssistant(new MybatisConfiguration(), ""),
+            IotService.class);
+        TableInfoHelper.initTableInfo(new MapperBuilderAssistant(new MybatisConfiguration(), ""),
+            IotProperty.class);
+        TableInfoHelper.initTableInfo(new MapperBuilderAssistant(new MybatisConfiguration(), ""),
+            IotCommand.class);
+        TableInfoHelper.initTableInfo(new MapperBuilderAssistant(new MybatisConfiguration(), ""),
+            IotEvent.class);
+    }
+
+    @BeforeEach
+    void wireBaseMapper() {
+        ReflectionTestUtils.setField(service, "baseMapper", serviceMapper);
+    }
 
     @Test
     @DisplayName("合法 TSL：master 唯一 + 引用完整 + 命名/类型全合规 → 零错误")
@@ -58,6 +105,15 @@ class IotThingModelServiceImplTest {
         service.validateTsl(doc, errors);
 
         assertThat(errors).anyMatch(e -> e.contains("恰好包含 1 个产品定义"));
+
+        // 多于 1 个同样拒绝
+        TslDocument twoDevices = validDoc();
+        twoDevices.setDevices(List.of(twoDevices.getDevices().getFirst(),
+            twoDevices.getDevices().getFirst()));
+
+        List<String> errors2 = new ArrayList<>();
+        service.validateTsl(twoDevices, errors2);
+        assertThat(errors2).anyMatch(e -> e.contains("恰好包含 1 个产品定义"));
     }
 
     @Test
@@ -101,10 +157,12 @@ class IotThingModelServiceImplTest {
         doc.getServices().getFirst().getProperties().getFirst().setPropertyName("Bad-Name");
         doc.getServices().getFirst().getCommands().getFirst().setCommandName("bad_name");
         doc.getServices().getFirst().getEvents().getFirst().setEventName("1Event");
+        doc.getServices().getFirst().setServiceType("bad_service");
 
         List<String> errors = new ArrayList<>();
         service.validateTsl(doc, errors);
 
+        assertThat(errors).anyMatch(e -> e.contains("服务标识格式非法"));
         assertThat(errors).anyMatch(e -> e.contains("属性标识格式非法"));
         assertThat(errors).anyMatch(e -> e.contains("命令标识格式非法"));
         assertThat(errors).anyMatch(e -> e.contains("事件标识格式非法"));
@@ -150,6 +208,120 @@ class IotThingModelServiceImplTest {
         service.validateTsl(doc, errors);
 
         assertThat(errors).anyMatch(e -> e.contains("属性读写权限非法"));
+    }
+
+    @Test
+    @DisplayName("导入走批量写：每个表只插一次（不随 TSL 规模退化为 N+1），且子表引用父服务 ID")
+    void importShouldWriteInBatch() {
+        when(productMapper.selectById(9L)).thenReturn(draftProduct(9L));
+        when(serviceMapper.selectList(any())).thenReturn(List.of());
+        // 模拟雪花主键在批量插入时回填到实体
+        doAnswer(invocation -> {
+            List<IotService> inserted = invocation.getArgument(0);
+            long nextId = 1000L;
+            for (IotService item : inserted) {
+                item.setId(nextId++);
+            }
+            return List.of();
+        }).when(serviceMapper).insert(anyList());
+
+        TslImportResult result = service.importTsl(9L, validDoc());
+
+        // 2 个服务 → 恰好一次批量插入，且绝不出现逐行 insert(T)
+        verify(serviceMapper).insert(anyList());
+        verify(serviceMapper, never()).insert(any(IotService.class));
+        verify(propertyMapper).insert(anyList());
+        verify(commandMapper).insert(anyList());
+        verify(eventMapper).insert(anyList());
+        assertThat(result.getErrors()).isEmpty();
+        assertThat(result.getSuccessCount()).isPositive();
+    }
+
+    @Test
+    @DisplayName("导入前先批量清空旧结构：按 service 主键一次 IN，不逐服务删除")
+    void importShouldDeleteOldStructureInBatch() {
+        when(productMapper.selectById(9L)).thenReturn(draftProduct(9L));
+        IotService old1 = new IotService();
+        old1.setId(501L);
+        IotService old2 = new IotService();
+        old2.setId(502L);
+        when(serviceMapper.selectList(any())).thenReturn(List.of(old1, old2));
+        doAnswer(invocation -> {
+            List<IotService> inserted = invocation.getArgument(0);
+            long nextId = 1000L;
+            for (IotService item : inserted) {
+                item.setId(nextId++);
+            }
+            return List.of();
+        }).when(serviceMapper).insert(anyList());
+
+        service.importTsl(9L, validDoc());
+
+        verify(propertyMapper).delete(any());
+        verify(commandMapper).delete(any());
+        verify(eventMapper).delete(any());
+        // 一次 IN 删除，而非 deleteById 两次
+        verify(serviceMapper, never()).deleteById(any(Long.class));
+    }
+
+    @Test
+    @DisplayName("无服务列表时短路：不产生任何批量写")
+    void importWithNoServicesShouldShortCircuit() {
+        when(productMapper.selectById(9L)).thenReturn(draftProduct(9L));
+        when(serviceMapper.selectList(any())).thenReturn(List.of());
+        TslDocument doc = validDoc();
+        doc.setServices(List.of());
+
+        service.importTsl(9L, doc);
+
+        verify(serviceMapper, never()).insert(anyList());
+        verify(propertyMapper, never()).insert(anyList());
+    }
+
+    @Test
+    @DisplayName("serviceType 为空：逐项报错而不是抛 NPE（哈希表不收 null 键）")
+    void nullServiceTypeShouldBeReportedNotThrow() {
+        TslDocument doc = validDoc();
+        doc.getServices().getFirst().setServiceType(null);
+
+        List<String> errors = new ArrayList<>();
+        service.validateTsl(doc, errors);
+
+        assertThat(errors).anyMatch(e -> e.contains("服务标识格式非法"));
+    }
+
+    @Test
+    @DisplayName("maxLength 非整数：在校验阶段逐项报错，而不是写入时抛 NumberFormatException")
+    void nonNumericMaxLengthShouldBeReported() {
+        TslDocument doc = validDoc();
+        doc.getServices().getFirst().getProperties().getFirst().setMaxLength("abc");
+        doc.getServices().getFirst().getEvents().getFirst().setMaxLength("-5");
+
+        List<String> errors = new ArrayList<>();
+        service.validateTsl(doc, errors);
+
+        assertThat(errors).anyMatch(e -> e.contains("maxLength 非整数"));
+        assertThat(errors).anyMatch(e -> e.contains("maxLength 必须为正整数"));
+    }
+
+    @Test
+    @DisplayName("min/max/step 非数值：在校验阶段逐项报错")
+    void nonNumericDecimalShouldBeReported() {
+        TslDocument doc = validDoc();
+        doc.getServices().getFirst().getProperties().getFirst().setMin("abc");
+
+        List<String> errors = new ArrayList<>();
+        service.validateTsl(doc, errors);
+
+        assertThat(errors).anyMatch(e -> e.contains("非数值"));
+    }
+
+    /** 构造草稿态产品（importTsl 前置校验用）。 */
+    private static IotProduct draftProduct(Long id) {
+        IotProduct product = new IotProduct();
+        product.setId(id);
+        product.setModelStatus("draft");
+        return product;
     }
 
     /** 构造合法 TSL 文档：1 产品 + 2 服务（1 master + 1 optional），每服务 1 属性/1 命令/1 事件。 */

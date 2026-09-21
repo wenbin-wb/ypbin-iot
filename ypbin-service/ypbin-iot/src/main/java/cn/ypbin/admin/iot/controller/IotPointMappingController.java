@@ -85,6 +85,7 @@ public class IotPointMappingController {
     @Log("编辑 IoT 点位映射")
     public R<Void> update(@PathVariable Long deviceId, @PathVariable Long id,
                           @Valid @RequestBody IotPointMappingReq req) {
+        req.setDeviceId(deviceId);
         iotPointMappingService.update(id, req);
         return R.ok();
     }
@@ -101,7 +102,7 @@ public class IotPointMappingController {
     @Idempotent
     @Log("删除 IoT 点位映射")
     public R<Void> remove(@PathVariable Long deviceId, @PathVariable Long id) {
-        iotPointMappingService.remove(id);
+        iotPointMappingService.remove(deviceId, id);
         return R.ok();
     }
 }

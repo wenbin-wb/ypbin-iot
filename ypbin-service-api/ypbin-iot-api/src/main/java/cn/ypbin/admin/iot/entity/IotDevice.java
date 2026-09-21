@@ -58,7 +58,13 @@ public class IotDevice extends TenantBaseEntity {
     /** 在线状态：online | offline | unknown（§4.3）。 */
     private String onlineStatus;
 
-    /** 影子快照（reported/desired，§3.10）。 */
+    /**
+     * 影子快照（reported/desired，§3.10）。
+     *
+     * <p>设计在设备表保留了该列（§3.1），但 <b>M-1 的权威存储在 {@code iot_shadow} 表</b>
+     * （§12「Redis 为主，可选落库」的落库分支）：影子读写全部走 {@code iot_shadow}，
+     * 本列在 M-1 不读不写，等 M-2 影子 Redis 化（§5.3）后再定其去留——避免两处影子互不一致。</p>
+     */
     private String shadowJson;
 
     /** 最后心跳/上报时刻。 */

@@ -43,12 +43,15 @@ import cn.ypbin.starter.core.exception.GlobalErrorCode;
 import cn.ypbin.starter.crud.service.BaseServiceImpl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.core.type.TypeReference;
+import java.math.BigDecimal;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
-import java.util.stream.Collectors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -65,6 +68,8 @@ import org.springframework.util.StringUtils;
 @Service
 public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, IotService>
     implements IotThingModelService {
+
+    private static final Logger log = LoggerFactory.getLogger(IotThingModelServiceImpl.class);
 
     /** 属性/事件标识 camelCase：小写字母开头，仅字母数字。 */
     private static final Pattern PATTERN_CAMEL = Pattern.compile("[a-z][A-Za-z0-9]*");
@@ -348,8 +353,14 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
             return;
         }
         TslDocument.TslDevice device = devices.getFirst();
-        Map<String, TslService> byType = services.stream()
-            .collect(Collectors.toMap(TslService::getServiceType, s -> s, (a, b) -> b));
+        // 空值安全收集：serviceType 为空的项留给下方命名校验逐项报错；
+        // 不能直接 toMap —— HashMap 不收 null 键，会抛 NPE 而绕过「逐项报错」
+        Map<String, TslService> byType = new LinkedHashMap<>();
+        for (TslService service : services) {
+            if (StringUtils.hasText(service.getServiceType())) {
+                byType.put(service.getServiceType(), service);
+            }
+        }
         long masterCount = services.stream()
             .filter(s -> ServiceOption.MASTER.getCode().equals(s.getOption())).count();
         if (masterCount != 1) {
@@ -362,7 +373,8 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
             }
         }
         for (TslService service : services) {
-            if (!PATTERN_PASCAL.matcher(service.getServiceType()).matches()) {
+            if (!StringUtils.hasText(service.getServiceType())
+                || !PATTERN_PASCAL.matcher(service.getServiceType()).matches()) {
                 errors.add("服务标识格式非法（应 PascalCase）：" + service.getServiceType());
             }
             if (!StringUtils.hasText(service.getOption())
@@ -370,7 +382,8 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
                 errors.add("服务选项非法（master|mandatory|optional）：" + service.getServiceType());
             }
             for (TslProperty property : service.getProperties() == null ? List.<TslProperty>of() : service.getProperties()) {
-                if (!PATTERN_CAMEL.matcher(property.getPropertyName()).matches()) {
+                if (!StringUtils.hasText(property.getPropertyName())
+                    || !PATTERN_CAMEL.matcher(property.getPropertyName()).matches()) {
                     errors.add("属性标识格式非法（应 camelCase）：" + property.getPropertyName());
                 }
                 if (!DATA_TYPES.contains(property.getDataType())) {
@@ -379,21 +392,28 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
                 if (!AccessMode.isValid(property.getMethod())) {
                     errors.add("属性读写权限非法（R|W|RW）：" + property.getPropertyName());
                 }
+                validateMaxLength(property.getMaxLength(), "属性 " + property.getPropertyName(), errors);
+                validateDecimal(property.getMin(), "属性 " + property.getPropertyName() + " min", errors);
+                validateDecimal(property.getMax(), "属性 " + property.getPropertyName() + " max", errors);
+                validateDecimal(property.getStep(), "属性 " + property.getPropertyName() + " step", errors);
             }
             for (TslCommand command : service.getCommands() == null ? List.<TslCommand>of() : service.getCommands()) {
-                if (!PATTERN_UPPER_SNAKE.matcher(command.getCommandName()).matches()) {
+                if (!StringUtils.hasText(command.getCommandName())
+                    || !PATTERN_UPPER_SNAKE.matcher(command.getCommandName()).matches()) {
                     errors.add("命令标识格式非法（应 UPPER_SNAKE）：" + command.getCommandName());
                 }
                 validateParas(command.getParas(), "命令 " + command.getCommandName() + " 入参", errors);
                 validateParas(command.getResponses(), "命令 " + command.getCommandName() + " 出参", errors);
             }
             for (TslEvent event : service.getEvents() == null ? List.<TslEvent>of() : service.getEvents()) {
-                if (!PATTERN_CAMEL.matcher(event.getEventName()).matches()) {
+                if (!StringUtils.hasText(event.getEventName())
+                    || !PATTERN_CAMEL.matcher(event.getEventName()).matches()) {
                     errors.add("事件标识格式非法（应 camelCase）：" + event.getEventName());
                 }
                 if (!DATA_TYPES.contains(event.getDataType())) {
                     errors.add("事件数据类型非法：" + event.getEventName() + " -> " + event.getDataType());
                 }
+                validateMaxLength(event.getMaxLength(), "事件 " + event.getEventName(), errors);
             }
         }
     }
@@ -407,51 +427,154 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
      */
     private void validateParas(List<TslPara> paras, String where, List<String> errors) {
         for (TslPara para : paras == null ? List.<TslPara>of() : paras) {
-            if (!PATTERN_CAMEL.matcher(para.getParaName()).matches()) {
+            if (!StringUtils.hasText(para.getParaName())
+                || !PATTERN_CAMEL.matcher(para.getParaName()).matches()) {
                 errors.add(where + " 参数名格式非法（应 camelCase）：" + para.getParaName());
             }
             if (!DATA_TYPES.contains(para.getDataType())) {
                 errors.add(where + " 参数数据类型非法：" + para.getParaName() + " -> " + para.getDataType());
             }
+            validateMaxLength(para.getMaxLength(), where + " 参数 " + para.getParaName(), errors);
         }
     }
 
     /**
-     * 全量替换产品下的草稿 TSL 结构（先逻辑删除旧结构，再插入新结构）。
+     * 校验 TSL 的 maxLength：非空时必须是正整数。
+     *
+     * <p>TSL 里 maxLength 是字符串而落库列是 INT，若不校验，非法值会在写入阶段抛
+     * {@code NumberFormatException} 变成 500，绕过「逐项报错、失败不落库」的约定。</p>
+     *
+     * @param maxLength TSL maxLength 字符串（可空）
+     * @param where     出错定位描述
+     * @param errors    错误收集器
+     */
+    private void validateMaxLength(String maxLength, String where, List<String> errors) {
+        if (!StringUtils.hasText(maxLength)) {
+            return;
+        }
+        try {
+            if (Integer.parseInt(maxLength.trim()) <= 0) {
+                errors.add(where + " maxLength 必须为正整数：" + maxLength);
+            }
+        } catch (NumberFormatException ex) {
+            errors.add(where + " maxLength 非整数：" + maxLength);
+        }
+    }
+
+    /**
+     * 全量替换产品下的草稿 TSL 结构（先逻辑删除旧结构，再批量插入新结构）。
+     *
+     * <p>写入全部走批量：删除按 service 主键一次 IN，插入按「服务 / 属性 / 命令 / 事件」各一次
+     * 批量写，语句数恒定（不随 TSL 规模退化为 N+1）。服务主键是雪花 {@code ASSIGN_ID}，
+     * 批量插入时即回填到实体，故子表能直接引用父服务 ID。</p>
      *
      * @param productId 产品主键
      * @param doc       TSL 文档（已通过校验）
      */
     private void replaceTsl(Long productId, TslDocument doc) {
-        List<IotService> oldServices = listServiceEntities(productId);
-        for (IotService old : oldServices) {
-            iotPropertyMapper.delete(new LambdaQueryWrapper<IotProperty>()
-                .eq(IotProperty::getServiceId, old.getId()));
-            iotCommandMapper.delete(new LambdaQueryWrapper<IotCommand>()
-                .eq(IotCommand::getServiceId, old.getId()));
-            iotEventMapper.delete(new LambdaQueryWrapper<IotEvent>()
-                .eq(IotEvent::getServiceId, old.getId()));
-            baseMapper.deleteById(old.getId());
+        deleteTslStructure(productId);
+        insertTslStructure(productId, doc);
+    }
+
+    /**
+     * 批量逻辑删除产品下全部旧物模型结构（4 条语句）。
+     *
+     * @param productId 产品主键
+     */
+    private void deleteTslStructure(Long productId) {
+        List<Long> serviceIds = listServiceEntities(productId).stream()
+            .map(IotService::getId)
+            .toList();
+        if (serviceIds.isEmpty()) {
+            return;
         }
-        int sort = 0;
-        for (TslService tsl : doc.getServices()) {
+        iotPropertyMapper.delete(new LambdaQueryWrapper<IotProperty>()
+            .in(IotProperty::getServiceId, serviceIds));
+        iotCommandMapper.delete(new LambdaQueryWrapper<IotCommand>()
+            .in(IotCommand::getServiceId, serviceIds));
+        iotEventMapper.delete(new LambdaQueryWrapper<IotEvent>()
+            .in(IotEvent::getServiceId, serviceIds));
+        baseMapper.deleteByIds(serviceIds);
+    }
+
+    /**
+     * 批量写入产品的新物模型结构（4 条批量写语句）。
+     *
+     * @param productId 产品主键
+     * @param doc       TSL 文档（已通过校验）
+     */
+    private void insertTslStructure(Long productId, TslDocument doc) {
+        List<TslService> tslServices = doc.getServices() == null
+            ? List.<TslService>of() : doc.getServices();
+        List<IotService> services = new ArrayList<>(tslServices.size());
+        int serviceSort = 0;
+        for (TslService tsl : tslServices) {
             IotService service = new IotService();
             service.setProductId(productId);
             service.setServiceId(tsl.getServiceType());
             service.setServiceName(StringUtils.hasText(tsl.getDescription())
                 ? tsl.getDescription() : tsl.getServiceType());
             service.setOption(tsl.getOption());
-            service.setSort(sort++);
-            baseMapper.insert(service);
-            insertProperties(service.getId(), tsl.getProperties());
-            insertCommands(service.getId(), tsl.getCommands());
-            insertEvents(service.getId(), tsl.getEvents());
+            service.setSort(serviceSort++);
+            services.add(service);
+        }
+        if (services.isEmpty()) {
+            return;
+        }
+        // 先批量落服务：此后雪花主键已回填到实体，子表可引用
+        baseMapper.insert(services);
+
+        List<IotProperty> properties = new ArrayList<>();
+        List<IotCommand> commands = new ArrayList<>();
+        List<IotEvent> events = new ArrayList<>();
+        for (int i = 0; i < services.size(); i++) {
+            Long serviceId = services.get(i).getId();
+            TslService tsl = tslServices.get(i);
+            collectProperties(serviceId, tsl.getProperties(), properties);
+            collectCommands(serviceId, tsl.getCommands(), commands);
+            collectEvents(serviceId, tsl.getEvents(), events);
+        }
+        if (!properties.isEmpty()) {
+            iotPropertyMapper.insert(properties);
+        }
+        if (!commands.isEmpty()) {
+            iotCommandMapper.insert(commands);
+        }
+        if (!events.isEmpty()) {
+            iotEventMapper.insert(events);
         }
     }
 
-    private void insertProperties(Long serviceId, List<TslProperty> properties) {
+    /**
+     * 校验 TSL 的数值型字段（min/max/step）：非空时必须是合法十进制数。
+     *
+     * <p>与 maxLength 同理：TSL 里是字符串而落库列是 DECIMAL，不校验会在写入阶段抛异常。</p>
+     *
+     * @param value 待校验字符串（可空）
+     * @param where 出错定位描述
+     * @param errors 错误收集器
+     */
+    private void validateDecimal(String value, String where, List<String> errors) {
+        if (!StringUtils.hasText(value)) {
+            return;
+        }
+        try {
+            new BigDecimal(value.trim());
+        } catch (NumberFormatException ex) {
+            errors.add(where + " 非数值：" + value);
+        }
+    }
+
+    /**
+     * 组装属性实体（不落库，交由调用方批量写入）。
+     *
+     * @param serviceId 所属服务主键
+     * @param tslList   TSL 属性列表（可空）
+     * @param out       收集容器
+     */
+    private void collectProperties(Long serviceId, List<TslProperty> tslList, List<IotProperty> out) {
         int sort = 0;
-        for (TslProperty tsl : properties == null ? List.<TslProperty>of() : properties) {
+        for (TslProperty tsl : tslList == null ? List.<TslProperty>of() : tslList) {
             IotProperty property = new IotProperty();
             property.setServiceId(serviceId);
             property.setIdentifier(tsl.getPropertyName());
@@ -462,19 +585,26 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
             property.setMinValue(toDecimal(tsl.getMin()));
             property.setMaxValue(toDecimal(tsl.getMax()));
             property.setStep(toDecimal(tsl.getStep()));
-            property.setMaxLength(tsl.getMaxLength() == null ? null : Integer.parseInt(tsl.getMaxLength()));
+            property.setMaxLength(parseMaxLength(tsl.getMaxLength()));
             property.setUnit(tsl.getUnit());
             property.setEnumList(tsl.getEnumList() == null ? null : toJson(tsl.getEnumList()));
             property.setDefaultValue(tsl.getDefaultValue());
             property.setExpand(tsl.getExpand() == null ? null : toJson(tsl.getExpand()));
             property.setSort(sort++);
-            iotPropertyMapper.insert(property);
+            out.add(property);
         }
     }
 
-    private void insertCommands(Long serviceId, List<TslCommand> commands) {
+    /**
+     * 组装命令实体（不落库，交由调用方批量写入）。
+     *
+     * @param serviceId 所属服务主键
+     * @param tslList   TSL 命令列表（可空）
+     * @param out       收集容器
+     */
+    private void collectCommands(Long serviceId, List<TslCommand> tslList, List<IotCommand> out) {
         int sort = 0;
-        for (TslCommand tsl : commands == null ? List.<TslCommand>of() : commands) {
+        for (TslCommand tsl : tslList == null ? List.<TslCommand>of() : tslList) {
             IotCommand command = new IotCommand();
             command.setServiceId(serviceId);
             // TSL 命令只有一个名称字段（§3.7：commandName，UPPER_SNAKE），无独立展示名，
@@ -485,25 +615,44 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
             command.setOutputParams(tsl.getResponses() == null ? null : toJson(tsl.getResponses()));
             command.setTimeoutMs(tsl.getTimeoutMs());
             command.setSort(sort++);
-            iotCommandMapper.insert(command);
+            out.add(command);
         }
     }
 
-    private void insertEvents(Long serviceId, List<TslEvent> events) {
+    /**
+     * 组装事件实体（不落库，交由调用方批量写入）。
+     *
+     * @param serviceId 所属服务主键
+     * @param tslList   TSL 事件列表（可空）
+     * @param out       收集容器
+     */
+    private void collectEvents(Long serviceId, List<TslEvent> tslList, List<IotEvent> out) {
         int sort = 0;
-        for (TslEvent tsl : events == null ? List.<TslEvent>of() : events) {
+        for (TslEvent tsl : tslList == null ? List.<TslEvent>of() : tslList) {
             IotEvent event = new IotEvent();
             event.setServiceId(serviceId);
             // 同命令：§3.7 的 TSL 事件只有 eventName 一个名称字段，identifier 与 eventName 同值
             event.setIdentifier(tsl.getEventName());
             event.setEventName(tsl.getEventName());
             event.setDataType(tsl.getDataType());
-            event.setMaxLength(tsl.getMaxLength() == null ? null : Integer.parseInt(tsl.getMaxLength()));
+            event.setMaxLength(parseMaxLength(tsl.getMaxLength()));
             event.setUnit(tsl.getUnit());
             event.setEnumList(tsl.getEnumList() == null ? null : toJson(tsl.getEnumList()));
             event.setSort(sort++);
-            iotEventMapper.insert(event);
+            out.add(event);
         }
+    }
+
+    /**
+     * 解析 TSL 的 maxLength（字符串）为整数。
+     *
+     * <p>调用前 {@code validateTsl} 已保证可解析为正整数，此处仅是转换。</p>
+     *
+     * @param maxLength TSL maxLength 字符串（可空）
+     * @return 整数值；入参为空时 {@code null}
+     */
+    private Integer parseMaxLength(String maxLength) {
+        return StringUtils.hasText(maxLength) ? Integer.valueOf(maxLength.trim()) : null;
     }
 
     /**
@@ -750,6 +899,7 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
         try {
             return objectMapper.writeValueAsString(value);
         } catch (Exception ex) {
+            log.error("[iot] TSL 扩展字段 JSON 序列化失败", ex);
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR.getCode(), "JSON 序列化失败");
         }
     }
@@ -758,16 +908,17 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
         try {
             return objectMapper.readValue(json, type);
         } catch (Exception ex) {
+            log.error("[iot] TSL 扩展字段 JSON 反序列化失败", ex);
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR.getCode(), "JSON 反序列化失败");
         }
     }
 
-    private java.math.BigDecimal toDecimal(String value) {
+    private BigDecimal toDecimal(String value) {
         if (!StringUtils.hasText(value)) {
             return null;
         }
         try {
-            return new java.math.BigDecimal(value);
+            return new BigDecimal(value);
         } catch (NumberFormatException ex) {
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "数值格式非法：" + value);
         }

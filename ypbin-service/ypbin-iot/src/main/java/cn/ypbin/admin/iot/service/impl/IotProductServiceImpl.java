@@ -242,7 +242,7 @@ public class IotProductServiceImpl extends BaseServiceImpl<IotProductMapper, Iot
     }
 
     /**
-     * 计算下一个草稿版本号：未发布过 v1.0；否则末位 minor + 1。
+     * 计算下一个草稿版本号：未发布过 v1.0；否则在最新版本的 minor 上 +1（major 保持不变）。
      *
      * @param productId 产品主键
      * @return 版本号
@@ -252,8 +252,10 @@ public class IotProductServiceImpl extends BaseServiceImpl<IotProductMapper, Iot
         if (NO_VERSION.equals(latest)) {
             return FIRST_VERSION;
         }
-        int minor = Integer.parseInt(latest.substring(latest.lastIndexOf('.') + 1));
-        return "v1." + (minor + 1);
+        int dot = latest.lastIndexOf('.');
+        int major = Integer.parseInt(latest.substring(1, dot));
+        int minor = Integer.parseInt(latest.substring(dot + 1));
+        return "v" + major + "." + (minor + 1);
     }
 
     /**

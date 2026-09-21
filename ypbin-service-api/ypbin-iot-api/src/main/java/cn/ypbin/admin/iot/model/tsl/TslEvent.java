@@ -11,6 +11,7 @@ package cn.ypbin.admin.iot.model.tsl;
 
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
+import java.util.List;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -44,7 +45,7 @@ public class TslEvent {
     private String unit;
 
     /** 枚举取值。 */
-    private java.util.List<String> enumList;
+    private List<String> enumList;
 
     /** 排序。 */
     private Integer sort;

@@ -16,10 +16,12 @@ import cn.ypbin.admin.iot.enums.ModelStatus;
 import cn.ypbin.admin.iot.enums.PointRefType;
 import cn.ypbin.admin.iot.entity.IotProduct;
 import cn.ypbin.admin.iot.entity.IotProperty;
+import cn.ypbin.admin.iot.entity.IotService;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.IotPointMappingMapper;
 import cn.ypbin.admin.iot.mapper.IotProductMapper;
 import cn.ypbin.admin.iot.mapper.IotPropertyMapper;
+import cn.ypbin.admin.iot.mapper.IotServiceMapper;
 import cn.ypbin.admin.iot.model.req.IotPointMappingReq;
 import cn.ypbin.admin.iot.model.resp.IotPointMappingResp;
 import cn.ypbin.admin.iot.service.IotPointMappingService;
@@ -47,13 +49,16 @@ public class IotPointMappingServiceImpl extends BaseServiceImpl<IotPointMappingM
     private final IotDeviceMapper iotDeviceMapper;
     private final IotPropertyMapper iotPropertyMapper;
     private final IotProductMapper iotProductMapper;
+    private final IotServiceMapper iotServiceMapper;
 
     public IotPointMappingServiceImpl(IotDeviceMapper iotDeviceMapper,
                                       IotPropertyMapper iotPropertyMapper,
-                                      IotProductMapper iotProductMapper) {
+                                      IotProductMapper iotProductMapper,
+                                      IotServiceMapper iotServiceMapper) {
         this.iotDeviceMapper = iotDeviceMapper;
         this.iotPropertyMapper = iotPropertyMapper;
         this.iotProductMapper = iotProductMapper;
+        this.iotServiceMapper = iotServiceMapper;
     }
 
     @Override
@@ -80,7 +85,13 @@ public class IotPointMappingServiceImpl extends BaseServiceImpl<IotPointMappingM
     @Transactional(rollbackFor = Exception.class)
     public void update(Long id, IotPointMappingReq req) {
         IotPointMapping mapping = requireMapping(id);
-        IotDevice device = requireDevice(mapping.getDeviceId());
+        // 映射归属由路径设备决定：请求体的 deviceId 不得把映射迁到别的设备
+        // （否则可用一个已发布产品的设备路径去改挂到未发布产品的设备上，绕过 §3.9）
+        if (!mapping.getDeviceId().equals(req.getDeviceId())) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "点位映射不属于该设备，禁止跨设备迁移：" + id);
+        }
+        IotDevice device = requireDevice(req.getDeviceId());
         validateReference(device, req);
         apply(mapping, req);
         updateById(mapping);
@@ -88,8 +99,12 @@ public class IotPointMappingServiceImpl extends BaseServiceImpl<IotPointMappingM
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void remove(Long id) {
-        requireMapping(id);
+    public void remove(Long deviceId, Long id) {
+        IotPointMapping mapping = requireMapping(id);
+        if (!mapping.getDeviceId().equals(deviceId)) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "点位映射不属于该设备：" + id);
+        }
         removeById(id);
     }
 
@@ -113,6 +128,12 @@ public class IotPointMappingServiceImpl extends BaseServiceImpl<IotPointMappingM
         if (product == null || !ModelStatus.PUBLISHED.getCode().equals(product.getModelStatus())) {
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
                 "点位映射必须引用已发布版本的属性：请先给设备绑定产品并发布物模型");
+        }
+        // 属性必须经「服务的产品」可达：否则可引用其它产品（甚至其它租户产品）的属性
+        IotService service = iotServiceMapper.selectById(property.getServiceId());
+        if (service == null || !product.getId().equals(service.getProductId())) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "属性不属于设备所绑定产品的物模型：" + req.getPropertyId());
         }
         if (!AccessMode.READ_WRITE.getCode().equals(property.getAccessMode())
             && !property.getAccessMode().equals(req.getRw())) {

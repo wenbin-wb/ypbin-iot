@@ -1,6 +1,6 @@
 -- =============================================================
 -- ypbin-iot 菜单与权限（全新安装用）
--- 权限码约定：iot:device:list | iot:device:create | iot:device:delete
+-- 权限码约定：iot:device:list | iot:device:create | iot:device:update | iot:device:delete
 -- ⚠️ 002-data.sql 里那条「把所有 platform_only=1 的菜单授给角色 1」在本文件**之前**执行，
 --    因此本文件必须自己再授一次权，否则新菜单不会出现在平台管理员菜单树里。
 -- 已有库升级：见 deploy/sql/migration/2026-09-19-iot-device-schema-and-menu.sql
