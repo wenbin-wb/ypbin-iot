@@ -133,11 +133,12 @@
    access 的**启动握手（注册/领取）必须在框架 loadAll 之前完成**，否则首轮会按「无租户」引导设备。
 
 ### 四、CI 与依赖（教训三十二的两条硬要求）
-- **SNAPSHOT 未发布 ⇒ CI 必须显式取源并锁定 SHA**（跟随分支 = 同代码不同时间结果不同）；
+- ~~**SNAPSHOT 未发布 ⇒ CI 必须显式取源并锁定 SHA**~~ **已不再适用**：协议栈已发 0.1.0 正式版
+  （见「四点四」）。此条仍作为**将来切回 SNAPSHOT 时**的纪律保留；
 - **iot-starter 源码树绝不能落在本仓工作目录内**（否则「仓内每个 pom 都必须有归属」门禁转红——旧栈 CI 实测失败）；
 - 依赖接入后需重跑：`ypbin-architecture-tests`（模块归属/发布规则）+ 白名单门禁（`pom.xml` 变更需同步 `SYNC.md`）。
 
-### 四点四、⚠️ 阻塞：协议栈依赖与「不可改的 ci.yml」冲突（2026-09-21 实测，需决策）
+### 四点四、✅ 已解：协议栈依赖与「不可改的 ci.yml」冲突（2026-09-21 实测 → 当日按方案 A 解决）
 
 **现象**：给 access 加上 iot-starter 依赖后，主 CI（`.github/workflows/ci.yml`，admin 拥有、在白名单内、
 **本仓不允许修改**）会转红。根因不是测试/代码，而是 Maven 的模型解析：
@@ -165,8 +166,15 @@ ERROR The build could not read 1 project
 | **B. admin 侧改 ci.yml** | 在 admin 仓的 ci.yml 里加一步「取源并安装 iot-starter」，本仓靠同步获得 | 语义不对（admin 的 CI 不该知道 IoT 协议栈）；需跨仓 PR + 合并 + 同步，周期长 |
 | **C. 依赖移出默认 reactor**（过渡） | 新增 `ypbin-access-stack` 模块承载协议栈装配，并在 `ypbin-service/pom.xml` 里**放进 profile**（默认不激活）；CI 默认构建不含它 ⇒ 不解析 iot BOM；3b-2 的构建/集成测试用 `-Piot-stack` | 主 CI 今天就能绿、零外部依赖；但**部署也必须带该 profile**（install.sh / compose 的构建命令要同步改），否则部署出来的 access 不含协议栈——属于「用构建开关表达能力开关」，需要接受这个形态 |
 
-**倾向**：先按 **C** 过渡（立刻解除对主 CI 的阻塞，且不碰 admin），等 iot-starter 发正式版（A）后把依赖移回
-默认 reactor、去掉 profile。
+**最终采用 A（2026-09-21 当日完成）**：`ypbin-iot-starter` 发布 **0.1.0 正式版到 Maven Central**
+（deploymentId `08a8deaf-bd1b-46e5-86f0-ac69f6d4391a`，`autoPublish=true`；tag `v0.1.0` + GitHub Release）。
+本仓随之把 `ypbin-access` 的 `<ypbin-iot.version>` 从 `0.1.0-SNAPSHOT` 改为 `0.1.0`，
+并删掉集成测试工作流里「从源码安装 SNAPSHOT」那一步 —— 主 CI 从此可直接解析，阻塞解除、无需碰 admin。
+**A 优于 C 的关键点**：不需要为了绕开构建期解析而引入「构建开关表达能力开关」的 profile，
+部署形态保持单一（install.sh / compose 不需要带 profile）。
+
+> **给未来的提醒**：只要协议栈依赖还是 SNAPSHOT，上述「reactor 读不动」问题就会复现；
+> 下次升级协议栈版本时，要么同样走正式版发布，要么在 CI 里显式取源安装（锁 SHA、源码放 workspace 之外）。
 
 ### 四点五、实测踩到的两个坑（2026-09-21 实施时发现，务必照抄结论）
 

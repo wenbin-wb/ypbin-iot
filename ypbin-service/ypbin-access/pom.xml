@@ -15,10 +15,10 @@
     <description>IoT 设备接入单元（有状态、独立部署）：租约驱动的采集与 self-fencing</description>
 
     <properties>
-        <!-- 协议栈框架版本。注意：0.1.0-SNAPSHOT 尚未发布到远程仓库
-             （其 ROADMAP 的决策是"先让 access 用 SNAPSHOT 跑通，再发 0.1.0"），
-             故本机与 CI 都必须从源码安装该版本（CI 已锁 SHA，见 .github/workflows）。 -->
-        <ypbin-iot.version>0.1.0-SNAPSHOT</ypbin-iot.version>
+        <!-- 协议栈框架版本：0.1.0 是**已发布到 Maven Central 的正式版**（2026-09-21，
+             首个真实宿主即本模块）。正式版意味着本仓无需再"从源码安装 SNAPSHOT"，
+             主 CI（ci.yml，admin 拥有、本仓不可改）也能直接解析到——这正是 3b-2 曾被阻塞的原因。 -->
+        <ypbin-iot.version>0.1.0</ypbin-iot.version>
     </properties>
 
     <dependencyManagement>
