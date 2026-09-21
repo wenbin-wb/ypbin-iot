@@ -58,7 +58,14 @@ class IotTenantIsolationGateTest {
         "iot_device_tag", "iot_shadow");
 
     /** 平台表（不继承租户基类，必须被忽略——作为「ignoreTable 能返回 true」的自检锚点）。 */
-    private static final String PLATFORM_TABLE = "tenant_node_assignment";
+    /**
+     * 平台表白名单：不继承 {@code TenantBaseEntity} 的实体**只允许**是这些表。
+     *
+     * <p>新增平台表时必须同步改这里 + {@code deploy/nacos/ypbin-iot.yaml} 的 ignore-tables——
+     * 两处缺一，要么本用例转红，要么 {@code NacosTenantIgnoreConfigTest} 转红（这是有意设计的双保险）。</p>
+     */
+    private static final List<String> PLATFORM_TABLES =
+        List.of("tenant_node_assignment", "access_node", "tenant_ledger");
 
     private static final Path REPO_ROOT = Path.of("..", "..").toAbsolutePath().normalize();
 
@@ -76,7 +83,7 @@ class IotTenantIsolationGateTest {
         DefaultTenantLineHandler handler = productionHandler();
 
         // 自检：ignoreTable 对平台表必须返回 true，否则本断言可能恒真（教训二十七）
-        assertThat(handler.ignoreTable(PLATFORM_TABLE))
+        assertThat(handler.ignoreTable(PLATFORM_TABLES.get(0)))
             .as("自检失败：ignoreTable 对平台表也应返回 true，否则本用例的断言无法咬人")
             .isTrue();
 
@@ -130,7 +137,7 @@ class IotTenantIsolationGateTest {
             .containsAll(M1_TENANT_TABLES);
         assertThat(notExtending)
             .as("非租户基类的实体只允许平台表，其它表漏继承会让租户插件对它们失效")
-            .containsExactly(PLATFORM_TABLE);
+            .containsExactlyInAnyOrderElementsOf(PLATFORM_TABLES);
     }
 
     @Test
