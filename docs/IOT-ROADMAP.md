@@ -207,18 +207,23 @@ ERROR The build could not read 1 project
 | fence | ✅ | 停 iot → `续约失败…到期后将自行停采` → `协议栈断链停采：tenantId=1 reason=本地租约已过期`，读数 **0** |
 | 恢复 | ✅ | 重启 iot 后 access 自动重新领取并出数 |
 
-**e2e 一跑就抓到两个「单测与 CI 全绿、服务却根本起不来」的真缺陷**（均已修，见 `79356f1`/`a31ad2d`）：
+**e2e 一跑就抓到两个「单测与 CI 全绿、服务在真实启动时才暴露」的真缺陷**（均已修，见 `79356f1`/`a31ad2d`）：
 
 1. **缺 `io.micrometer:context-propagation`**：starter 的 `TenantAutoConfiguration` 需要 tenant 的
-   `ThreadLocalAccessor`，而该依赖在 starter 侧 optional 不传递 ⇒ `ClassNotFoundException`，应用启动即失败。
-   admin 的 `ypbin-system` 一直显式声明（`:171-172`），我们两个新服务漏了。
+   `ThreadLocalAccessor`，而该依赖在 starter 侧 optional 不传递 ⇒ `ClassNotFoundException`。
+   admin 的 `ypbin-system` 一直显式声明（`ypbin-system/pom.xml:170-173`），我们两个新服务漏了。
+   **⚠️ 触发条件（第三次外委复核实测更正）**：该自动配置的类级条件
+   `@ConditionalOnProperty(prefix="ypbin.tenant", name="enabled", havingValue="true")` **没有 `matchIfMissing`**，
+   而 `TenantProperties.enabled` 默认 **false** ⇒ **只有 `ypbin.tenant.enabled=true` 时才会启动失败**；
+   未开该开关的服务（如本次 e2e 里的 access，缺依赖仍能 `Started AccessApplication`）。
+   iot 服务确实开着 tenant ⇒ 它启动即崩，与观测一致。**修复对两者都正确**（将来 access 上租户插件时必需）。
 2. **Jackson 2/3 用错**：本栈是 Spring Boot 4，只自动配置 **Jackson 3**（`tools.jackson.databind.ObjectMapper`），
    而我 M-1/3b-2 的代码注入的是 Jackson 2 的 `com.fasterxml...ObjectMapper` ⇒ 无该 Bean，启动失败。
 
 > **结论（写给未来的自己）**：这两类缺陷**单测与 `mvn verify` 都抓不到**（它们不启动完整应用上下文）。
 > 「真 socket 端到端」不是可选项，而是这类缺陷**唯一**的暴露面——这正是外委复核坚持把它列为放行条件的理由。
 
-### 四点六、3b-2 的已知限制（外委复核提出，**M-2 前必须处置**）
+### 四点七、3b-2 的已知限制（外委复核提出，**M-2 前必须处置**）
 
 > 以下是 3b-2 交付时**刻意保留**的占位/边界。它们不影响「当前只装 TCP」的可用性，
 > 但都会在特定条件下**静默失效**（不报错、只是没数据），故在此显式登记，避免被当成已完成能力。
@@ -227,10 +232,17 @@ ERROR The build could not read 1 project
 |---|---|---|---|---|
 | **S4** | **点位地址语义未定死**：MQTT 回调用**具体主题**当 address（`MqttSession` 有意如此），而订阅用 mapping 的 `address` 当**过滤器**，`PointMappingDataListener` 做**字符串精确匹配** | 加装 `ypbin-iot-protocol-mqtt` 模块**当天**（当前只装 tcp，故未触发） | 映射里填了通配符（`a/#`、`a/+/c`）时**订阅成功但每条数据都判「未映射」被丢弃** ⇒ 看起来在采、实际零数据 | 定死「`raw_address` = 具体地址，非过滤器」，并在点位映射保存时**加校验拒绝通配符**；或改为按主题前缀匹配 |
 | **S5** | 订阅计数与会话跟踪的精度：`AccessSubscriptionPlanner` 在 `session.subscribe(...)` **之前**就写入 `subscribedSessions` 并自增计数 ⇒ **异步订阅失败不会被重试**（对账只对「无会话」或「会话实例变化」重试） | 会话存在但订阅被协议侧拒绝（如地址非法） | 日志「已订阅设备数」**高估**；订阅失败只记 ERROR，**不会**自愈，需靠链路重建（会话实例变化）才能恢复 | 把「成功」定义在 `CompletionStage` 完成之后（失败则**不**写 `subscribedSessions`，让对账自动重试）；并把失败计入指标 |
+| **S7** | **零设备租户的周期噪声**：修复 N-1 后，设备清单为空的租户**每个租约周期（15s）都会打一条 WARN 并重新拉一次内部接口** | 租户已分配但尚未配设备／点位（或设备全部停用） | 日志噪声 + 每 15s 一次内部调用（规模大时是无效压力） | M-2 引入「空清单退避」（指数或固定上限）并改为指标计数；当前判定为**可接受**（第三次外委复核观测 5 次/80s） |
 | **N-2** | **bind 失败后永不重发 ADD**：ADD 只在首次采集时发，而框架仅在 `bind()` **成功后**才挂重连监听（`IotLifecycle`） | 启动瞬间设备离线（建链失败） | 该设备**永久零数据**且不自动恢复，只有日志一次 ERROR | 对「已采集但无会话」的设备在后续对账中**重发 ADD**（或登记为显式限制）；当前仅在 planner 打 DEBUG「暂无会话」 |
 | **S6** | **出口是日志占位**：`LoggingAccessReadingSink` / `LoggingDataSink` 是唯一实现且**无 profile 限制** | 生产部署 | 按 INFO **逐条打印**且**数据不落任何地方** ⇒ 「有日志＝像在工作」而实际零持久化 | M-2 数据面替换为「有界队列 → 微批 → EMQX → business 落 IoTDB/Redis」（§5.1），并加**丢弃计数**；替换前不得以占位实现宣称数据面可用 |
 
 **已修（第二轮复核发现，与 B1 同类且更早一步）**：`startCollecting` 原会把 `loadByTenant()` 的空结果也缓存进 `collected`，而取数瞬时失败返回的就是空集合 ⇒ **启动期一次取数失败即把该租户永久钉死为零设备**。现改为「空清单不缓存、下轮重取」，并把「本节点负责该租户」的状态（`collecting`）与设备清单缓存**分开**，保证 fencing 与观测语义不变；已补可咬回归用例 `emptyDeviceListMustNotBePinned`。
+
+**跨仓待反馈（第三次外委复核发现，R8）**：starter 的 `TenantAutoConfiguration` 里
+`tenantThreadLocalAccessor()` 的方法级 `@ConditionalOnClass(io.micrometer.context.ThreadLocalAccessor)`
+**挡不住**——Spring 注册 bean 方法时会走 `ReflectionUtils.getDeclaredMethods → Class.getDeclaredMethods`，
+解析缺失父类（`TenantThreadLocalAccessor`）即抛错，方法级条件根本来不及生效。
+宿主只能靠显式依赖兜底。建议反馈到 `ypbin-starter`（本仓不可改该仓，属跨仓待办）。
 
 **另有两条复核指出的实现注意（已修/已记）**：revision 单调与「两个开关」的区分已修；`devices.enabled=false`
 时变更通道也不会接线（文档表述已更正，见四点五）。`PointMappingDataListener.unmappedCount` 为普通 `long`，
