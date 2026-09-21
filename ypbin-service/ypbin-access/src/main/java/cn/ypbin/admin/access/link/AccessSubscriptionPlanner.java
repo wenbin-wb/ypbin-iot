@@ -19,6 +19,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -44,6 +45,12 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
     private final ObjectMapper objectMapper;
     private final AccessReadingSink readingSink;
 
+    /**
+     * 已订阅的**会话实例**（按 deviceId）。会话实例变了（框架重连会新建会话）就必须重订阅，
+     * 否则表现为「链路恢复但数据不再上报」——这是框架不给宿主发重连事件时的唯一可靠判据。
+     */
+    private final Map<String, DeviceSession> subscribedSessions = new ConcurrentHashMap<>();
+
     public AccessSubscriptionPlanner(Supplier<Map<String, DeviceSession>> sessions,
                                      ObjectMapper objectMapper, AccessReadingSink readingSink) {
         this.sessions = sessions;
@@ -58,9 +65,13 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
         for (DeviceSpec device : devices) {
             DeviceSession session = bound.get(device.deviceId());
             if (session == null) {
-                // 建链失败时框架已记日志；这里补一条说明「该设备不会有数据」
-                log.warn("[access] 设备无可用会话，跳过订阅（本轮该设备不采集）：deviceId={}",
+                // 启动期会话尚未建链（ApplicationRunner 早于 ApplicationReadyEvent）或建链失败：
+                // 本方法由每个租约周期重复调用，因此这里只是「本轮跳过」，下一轮会补上
+                log.debug("[access] 设备暂无会话，本轮跳过订阅（下个周期重试）：deviceId={}",
                     device.deviceId());
+                continue;
+            }
+            if (subscribedSessions.get(device.deviceId()) == session) {
                 continue;
             }
             List<AccessPointMappingDto> points = parsePoints(device);
@@ -77,6 +88,7 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
                     Map.of());
             PointMappingDataListener listener =
                 new PointMappingDataListener(device.deviceId(), points, readingSink);
+            subscribedSessions.put(device.deviceId(), session);
             session.subscribe(request, listener).whenComplete((handle, error) -> {
                 if (error != null) {
                     // 订阅失败要暴露：否则表现为「采了但没数据」
@@ -90,6 +102,11 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
             subscribed++;
         }
         return subscribed;
+    }
+
+    /** 已跟踪会话数的观测入口（测试/自检）。 */
+    public int trackedSessionCount() {
+        return subscribedSessions.size();
     }
 
     private List<AccessPointMappingDto> parsePoints(DeviceSpec device) {

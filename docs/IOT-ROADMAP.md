@@ -127,8 +127,10 @@
    落地：access 侧发变更时必须带单调递增 revision，并加一条「同 revision 重复投递被丢弃」的回归用例。
 2. **`ypbin.iot.enabled` 与 `ypbin.iot.devices.enabled` 是两个开关**：`IotAutoConfiguration` 由
    `@ConditionalOnProperty(prefix=IotProperties.PREFIX, name="enabled", …)`（`:64`）控制；各协议模块另有
-   自己的 `prefix.enabled`（如 tcp 模块的 `TcpAutoConfiguration`）。**关掉 devices 只关设备引导**（变更通道仍接线），
-   而关掉 `ypbin.iot.enabled` 会让整条链路不装配 ⇒ 两种「没数据」现象要能区分。
+   自己的 `prefix.enabled`（如 tcp 模块的 `TcpAutoConfiguration`）。关掉 `ypbin.iot.enabled` 会让整条链路不装配；
+   **⚠️ 更正（2026-09-21 读源码核实）**：关掉 `ypbin.iot.devices.enabled` 时 `IotLifecycle.onApplicationEvent`
+   会**直接 return**，`registry.addChangeListener(...)` 根本不会执行 ⇒ **变更通道也不会接线**（不是「只关引导」）。
+   两种「没数据」现象的区别是：前者连 `IotLifecycle` 都不存在（零日志），后者有引导日志但无变更通道。
 3. **就绪期顺序**：`loadAll()` 与框架的 `ApplicationRunner` 的先后决定首轮绑定看到的状态；
    access 的**启动握手（注册/领取）必须在框架 loadAll 之前完成**，否则首轮会按「无租户」引导设备。
 

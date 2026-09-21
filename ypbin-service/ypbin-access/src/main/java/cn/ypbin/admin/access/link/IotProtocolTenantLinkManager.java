@@ -66,24 +66,36 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
         this.planner = planner;
     }
 
+    /**
+     * 开始采集某租户（**对账语义**：可被每个租约周期反复调用）。
+     *
+     * <p>为什么不是「只做一次」：启动期的租约领取发生在 {@code ApplicationRunner} 阶段，
+     * <b>早于</b>框架的 {@code ApplicationReadyEvent}</b>——那时变更监听器尚未接线、设备尚未建链，
+     * 既发不出 ADD、也没有会话可订阅。若本方法只做一次，订阅将永远是 0（且不会自愈）。
+     * 因此：<b>ADD 只在首次采集时发</b>（避免重复建链），<b>订阅每轮对账</b>——
+     * 启动期跳过、下一周期补上；框架重连换了会话实例时也会在此补订阅。</p>
+     */
     @Override
     public synchronized void startCollecting(Long tenantId) {
-        if (collected.containsKey(tenantId)) {
-            return;
+        Map<String, DeviceSpec> devices = collected.get(tenantId);
+        if (devices == null) {
+            devices = new LinkedHashMap<>();
+            for (DeviceSpec device : source.loadByTenant(tenantId)) {
+                devices.put(device.deviceId(), device);
+            }
+            collected.put(tenantId, devices);
+            for (DeviceSpec device : devices.values()) {
+                registry.emit(new DeviceChange(ChangeType.ADD, device,
+                    registry.nextRevision(device.deviceId())));
+            }
+            log.info("[access] 协议栈开始采集租户：tenantId={} 设备数={}",
+                LogSanitizer.sanitize(tenantId), devices.size());
         }
-        Map<String, DeviceSpec> devices = new LinkedHashMap<>();
-        for (DeviceSpec device : source.loadByTenant(tenantId)) {
-            devices.put(device.deviceId(), device);
-        }
-        collected.put(tenantId, devices);
-        for (DeviceSpec device : devices.values()) {
-            registry.emit(new DeviceChange(ChangeType.ADD, device,
-                registry.nextRevision(device.deviceId())));
-        }
-        // ADD 已让框架同步建链；随后按点位建立订阅（框架不主动订阅，见 AccessSubscriptionPlanner）
         int subscribed = planner.subscribe(List.copyOf(devices.values()));
-        log.info("[access] 协议栈开始采集租户：tenantId={} 设备数={} 已订阅设备数={}",
-            LogSanitizer.sanitize(tenantId), devices.size(), subscribed);
+        if (subscribed > 0) {
+            log.info("[access] 已建立/补建订阅：tenantId={} 本次订阅设备数={}",
+                LogSanitizer.sanitize(tenantId), subscribed);
+        }
     }
 
     @Override

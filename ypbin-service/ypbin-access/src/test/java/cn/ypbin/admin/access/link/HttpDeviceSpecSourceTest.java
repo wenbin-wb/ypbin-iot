@@ -79,6 +79,8 @@ class HttpDeviceSpecSourceTest {
 
         assertThat(source.loadByTenant(TENANT)).isEmpty();
         assertThat(source.findConnection("t11-d100")).as("失败不得留下半份缓存").isEmpty();
+        // 可证伪性：若失败结果被写进缓存，findConnection 就不会再拉一次 —— 只断言 isEmpty() 是咬不住的
+        verify(client, times(2)).listByTenant(TENANT);
     }
 
     @Test

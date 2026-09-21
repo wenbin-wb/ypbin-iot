@@ -88,6 +88,20 @@ class IotProtocolTenantLinkManagerTest {
     }
 
     @Test
+    @DisplayName("★ 对账：每轮都必须重试订阅（启动期无会话→0，下一周期会话就绪→补上），ADD 不得重复")
+    void repeatedStartShouldReconcileSubscription() {
+        source.devices.put(TENANT_A, List.of(device("d1")));
+
+        linkManager.startCollecting(TENANT_A);
+        linkManager.startCollecting(TENANT_A);
+
+        // 这条钉住 B1 的修复机制：启动期（ApplicationRunner 早于 ApplicationReadyEvent）没有会话，
+        // 订阅必须靠「下一个租约周期再对账」补上——否则采集恒为 0 且不自愈
+        assertThat(subscribedBatchSizes).as("每轮都要对账").containsExactly(1, 1);
+        assertThat(framework.actions).as("ADD 只在首次采集时发，不得重复建链").containsExactly("ADD:d1");
+    }
+
+    @Test
     @DisplayName("断链：发 REMOVE 并复用 ADD 时的同一份规格；重复断链是空操作")
     void fenceShouldEmitRemoveAndBeIdempotent() {
         source.devices.put(TENANT_A, List.of(device("d1")));
