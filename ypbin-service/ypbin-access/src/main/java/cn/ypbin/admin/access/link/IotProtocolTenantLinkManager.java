@@ -54,13 +54,16 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
 
     private final DeviceSpecSource source;
     private final AccessDeviceRegistry registry;
+    private final SubscriptionPlanner planner;
 
     /** 本节点正在采集的租户 → 已推给框架的设备（deviceId → 当时那份规格，断链时原样用于 REMOVE）。 */
     private final Map<Long, Map<String, DeviceSpec>> collected = new ConcurrentHashMap<>();
 
-    public IotProtocolTenantLinkManager(DeviceSpecSource source, AccessDeviceRegistry registry) {
+    public IotProtocolTenantLinkManager(DeviceSpecSource source, AccessDeviceRegistry registry,
+                                        SubscriptionPlanner planner) {
         this.source = source;
         this.registry = registry;
+        this.planner = planner;
     }
 
     @Override
@@ -77,8 +80,10 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
             registry.emit(new DeviceChange(ChangeType.ADD, device,
                 registry.nextRevision(device.deviceId())));
         }
-        log.info("[access] 协议栈开始采集租户：tenantId={} 设备数={}",
-            LogSanitizer.sanitize(tenantId), devices.size());
+        // ADD 已让框架同步建链；随后按点位建立订阅（框架不主动订阅，见 AccessSubscriptionPlanner）
+        int subscribed = planner.subscribe(List.copyOf(devices.values()));
+        log.info("[access] 协议栈开始采集租户：tenantId={} 设备数={} 已订阅设备数={}",
+            LogSanitizer.sanitize(tenantId), devices.size(), subscribed);
     }
 
     @Override

@@ -9,14 +9,25 @@
  */
 package cn.ypbin.admin.access.config;
 
+import cn.ypbin.admin.access.egress.AccessReadingSink;
+import cn.ypbin.admin.access.egress.LoggingAccessReadingSink;
+import cn.ypbin.admin.access.egress.LoggingDataSink;
 import cn.ypbin.admin.access.lease.AccessLeaseManager;
+import cn.ypbin.admin.access.link.AccessSubscriptionPlanner;
+import cn.ypbin.admin.access.link.SubscriptionPlanner;
 import cn.ypbin.admin.access.link.AccessConnectionSpecProvider;
 import cn.ypbin.admin.access.link.AccessDeviceRegistry;
 import cn.ypbin.admin.access.link.DeviceSpecSource;
 import cn.ypbin.admin.access.link.IotProtocolTenantLinkManager;
 import cn.ypbin.admin.access.link.TenantLinkManager;
+import cn.ypbin.iot.core.protocol.DeviceSession;
 import cn.ypbin.iot.core.spi.ConnectionSpecProvider;
+import cn.ypbin.iot.core.spi.DataSink;
 import cn.ypbin.iot.core.spi.DeviceRegistry;
+import cn.ypbin.iot.spring.autoconfigure.IotLifecycle;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.util.Map;
+import java.util.function.Supplier;
 import java.util.Set;
 import java.util.function.Supplier;
 import org.springframework.beans.factory.ObjectProvider;
@@ -89,8 +100,51 @@ public class AccessIotProtocolConfiguration {
     @Bean
     @ConditionalOnMissingBean
     public TenantLinkManager iotProtocolTenantLinkManager(DeviceSpecSource specSource,
-                                                          AccessDeviceRegistry registry) {
-        return new IotProtocolTenantLinkManager(specSource, registry);
+                                                          AccessDeviceRegistry registry,
+                                                          SubscriptionPlanner planner) {
+        return new IotProtocolTenantLinkManager(specSource, registry, planner);
+    }
+
+    /**
+     * 映射后读数出口（3b-2 用日志占位；M-2 换成有界队列 → 微批 → EMQX）。
+     *
+     * @return 读数出口
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public AccessReadingSink accessReadingSink() {
+        return new LoggingAccessReadingSink();
+    }
+
+    /**
+     * 协议栈批量出口占位（3b-2 只需日志/内存实现）。
+     *
+     * @return 批量出口
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public DataSink loggingDataSink() {
+        return new LoggingDataSink();
+    }
+
+    /**
+     * 订阅规划器：会话从协议栈 {@code IotLifecycle.sessions()} 惰性取（避免构造期依赖顺序问题）。
+     *
+     * @param lifecycleProvider 协议栈生命周期（由 iot-starter 装配）
+     * @param objectMapper      点位清单反序列化
+     * @param readingSink       映射后读数出口
+     * @return 订阅规划器
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public SubscriptionPlanner accessSubscriptionPlanner(ObjectProvider<IotLifecycle> lifecycleProvider,
+                                                        ObjectMapper objectMapper,
+                                                        AccessReadingSink readingSink) {
+        Supplier<Map<String, DeviceSession>> sessions = () -> {
+            IotLifecycle lifecycle = lifecycleProvider.getIfAvailable();
+            return lifecycle == null ? Map.of() : lifecycle.sessions();
+        };
+        return new AccessSubscriptionPlanner(sessions, objectMapper, readingSink);
     }
 
     /**

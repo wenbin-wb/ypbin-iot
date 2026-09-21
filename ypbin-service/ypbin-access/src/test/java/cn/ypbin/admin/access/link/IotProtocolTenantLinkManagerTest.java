@@ -46,13 +46,17 @@ class IotProtocolTenantLinkManagerTest {
     private FakeSource source;
     private AccessDeviceRegistry registry;
     private IotProtocolTenantLinkManager linkManager;
+    private final List<Integer> subscribedBatchSizes = new ArrayList<>();
     private FakeFramework framework;
 
     @BeforeEach
     void setUp() {
         source = new FakeSource();
         registry = new AccessDeviceRegistry(source, () -> Set.of(TENANT_A, TENANT_B));
-        linkManager = new IotProtocolTenantLinkManager(source, registry);
+        linkManager = new IotProtocolTenantLinkManager(source, registry, devices -> {
+            subscribedBatchSizes.add(devices.size());
+            return devices.size();
+        });
         framework = new FakeFramework();
         registry.addChangeListener(framework::onChange);
     }
@@ -68,6 +72,8 @@ class IotProtocolTenantLinkManagerTest {
             "ADD:d1", "ADD:d2");
         assertThat(linkManager.isCollecting(TENANT_A)).isTrue();
         assertThat(linkManager.collectingTenants()).containsExactly(TENANT_A);
+        assertThat(subscribedBatchSizes).as("ADD 之后必须发起订阅（框架不主动订阅）")
+            .containsExactly(2);
     }
 
     @Test

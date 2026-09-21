@@ -36,7 +36,7 @@ import org.slf4j.LoggerFactory;
  * @author wenbin
  * @since 2026-09-21
  */
-public class AccessSubscriptionPlanner {
+public class AccessSubscriptionPlanner implements SubscriptionPlanner {
 
     private static final Logger log = LoggerFactory.getLogger(AccessSubscriptionPlanner.class);
 
@@ -51,12 +51,7 @@ public class AccessSubscriptionPlanner {
         this.readingSink = readingSink;
     }
 
-    /**
-     * 为一批已绑定的设备建立订阅。
-     *
-     * @param devices 已发过 ADD 的设备规格（框架应已建链）
-     * @return 成功建立订阅的设备数
-     */
+    @Override
     public int subscribe(List<DeviceSpec> devices) {
         Map<String, DeviceSession> bound = sessions.get();
         int subscribed = 0;
