@@ -102,6 +102,21 @@ class IotProtocolTenantLinkManagerTest {
     }
 
     @Test
+    @DisplayName("★ 空清单不得被缓存：取数失败（返回空）后必须在下一轮重新取数并对账订阅")
+    void emptyDeviceListMustNotBePinned() {
+        // 第一轮：取数失败（source 返回空）——不得把「零设备」钉死
+        linkManager.startCollecting(TENANT_A);
+        assertThat(framework.actions).isEmpty();
+
+        // 第二轮：内部接口恢复，设备出现 ⇒ 必须能取到并建链 + 订阅
+        source.devices.put(TENANT_A, List.of(device("d1")));
+        linkManager.startCollecting(TENANT_A);
+
+        assertThat(framework.actions).as("恢复后必须重新取数并建链").containsExactly("ADD:d1");
+        assertThat(subscribedBatchSizes).as("恢复后必须对账订阅").containsExactly(1);
+    }
+
+    @Test
     @DisplayName("断链：发 REMOVE 并复用 ADD 时的同一份规格；重复断链是空操作")
     void fenceShouldEmitRemoveAndBeIdempotent() {
         source.devices.put(TENANT_A, List.of(device("d1")));

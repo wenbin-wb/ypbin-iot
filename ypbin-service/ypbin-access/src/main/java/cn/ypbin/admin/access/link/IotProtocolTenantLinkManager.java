@@ -59,6 +59,14 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
     /** 本节点正在采集的租户 → 已推给框架的设备（deviceId → 当时那份规格，断链时原样用于 REMOVE）。 */
     private final Map<Long, Map<String, DeviceSpec>> collected = new ConcurrentHashMap<>();
 
+    /**
+     * 本节点「负责」的租户集合（与设备清单缓存**分开**）。
+     *
+     * <p>为什么必须分开：设备清单可能因取数瞬时失败而为空，此时不能把它缓存下来（会把该租户永久钉死为零设备），
+     * 但「本节点负责该租户」这个事实仍然成立（否则 fencing 语义与观测都会失真）。</p>
+     */
+    private final Set<Long> collecting = ConcurrentHashMap.newKeySet();
+
     public IotProtocolTenantLinkManager(DeviceSpecSource source, AccessDeviceRegistry registry,
                                         SubscriptionPlanner planner) {
         this.source = source;
@@ -77,11 +85,20 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
      */
     @Override
     public synchronized void startCollecting(Long tenantId) {
+        collecting.add(tenantId);
         Map<String, DeviceSpec> devices = collected.get(tenantId);
         if (devices == null) {
             devices = new LinkedHashMap<>();
             for (DeviceSpec device : source.loadByTenant(tenantId)) {
                 devices.put(device.deviceId(), device);
+            }
+            if (devices.isEmpty()) {
+                // **空清单不得被缓存**：取数失败（内部接口尚未就绪/瞬时抖动）返回的就是空集合，
+                // 若在此缓存，该租户会被永久钉死为「零设备」且不再重取——与 B1 同类、更早一步的静默零数据。
+                // 这里只是「本轮跳过」，下一个租约周期会重新取数。
+                log.warn("[access] 租户设备清单为空，本轮不缓存并等待下轮重取：tenantId={}"
+                    + "（若持续为空，请检查点位映射与内部接口）", LogSanitizer.sanitize(tenantId));
+                return;
             }
             collected.put(tenantId, devices);
             for (DeviceSpec device : devices.values()) {
@@ -100,6 +117,7 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
 
     @Override
     public synchronized void fence(Long tenantId, String reason) {
+        collecting.remove(tenantId);
         Map<String, DeviceSpec> devices = collected.remove(tenantId);
         if (devices == null) {
             return;
@@ -114,7 +132,7 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
 
     @Override
     public void fenceAll(String reason) {
-        List<Long> tenants = List.copyOf(collected.keySet());
+        List<Long> tenants = List.copyOf(collecting);
         for (Long tenantId : tenants) {
             fence(tenantId, reason);
         }
@@ -126,11 +144,11 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
 
     @Override
     public boolean isCollecting(Long tenantId) {
-        return collected.containsKey(tenantId);
+        return collecting.contains(tenantId);
     }
 
     @Override
     public Set<Long> collectingTenants() {
-        return Set.copyOf(collected.keySet());
+        return Set.copyOf(collecting);
     }
 }
