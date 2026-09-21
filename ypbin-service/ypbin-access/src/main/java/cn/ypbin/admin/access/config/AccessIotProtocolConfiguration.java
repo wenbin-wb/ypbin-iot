@@ -26,6 +26,7 @@ import cn.ypbin.iot.core.spi.DataSink;
 import cn.ypbin.iot.core.spi.DeviceRegistry;
 import cn.ypbin.iot.spring.autoconfigure.IotLifecycle;
 import tools.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Supplier;
@@ -139,12 +140,13 @@ public class AccessIotProtocolConfiguration {
     @ConditionalOnMissingBean
     public SubscriptionPlanner accessSubscriptionPlanner(ObjectProvider<IotLifecycle> lifecycleProvider,
                                                         ObjectMapper objectMapper,
-                                                        AccessReadingSink readingSink) {
+                                                        AccessReadingSink readingSink,
+                                                        MeterRegistry meterRegistry) {
         Supplier<Map<String, DeviceSession>> sessions = () -> {
             IotLifecycle lifecycle = lifecycleProvider.getIfAvailable();
             return lifecycle == null ? Map.of() : lifecycle.sessions();
         };
-        return new AccessSubscriptionPlanner(sessions, objectMapper, readingSink);
+        return new AccessSubscriptionPlanner(sessions, objectMapper, readingSink, meterRegistry);
     }
 
     /**

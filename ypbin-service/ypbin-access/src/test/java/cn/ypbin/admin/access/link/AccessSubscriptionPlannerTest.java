@@ -18,9 +18,11 @@ import static org.mockito.Mockito.when;
 
 import cn.ypbin.iot.core.model.DeviceSpec;
 import cn.ypbin.iot.core.model.SubscribeRequest;
+import cn.ypbin.iot.core.model.SubscriptionHandle;
 import cn.ypbin.iot.core.protocol.DeviceSession;
 import cn.ypbin.iot.core.protocol.ProtocolCode;
 import tools.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -51,7 +53,7 @@ class AccessSubscriptionPlannerTest {
         AtomicReference<Map<String, DeviceSession>> bound =
             new AtomicReference<>(Map.of("d1", first));
         AccessSubscriptionPlanner planner =
-            new AccessSubscriptionPlanner(bound::get, objectMapper, reading -> { });
+            new AccessSubscriptionPlanner(bound::get, objectMapper, reading -> { }, new SimpleMeterRegistry());
 
         assertThat(planner.subscribe(List.of(device("d1")))).as("首次订阅").isEqualTo(1);
         assertThat(planner.subscribe(List.of(device("d1")))).as("同一会话实例不得重复订阅").isZero();
@@ -64,11 +66,33 @@ class AccessSubscriptionPlannerTest {
     }
 
     @Test
+    @DisplayName("★ S5：异步订阅失败**不得**留下跟踪记录，且下一轮必须重试（否则永久停采）")
+    void failedSubscribeMustNotBeTrackedAndMustBeRetried() {
+        DeviceSession session = mock(DeviceSession.class);
+        CompletableFuture<SubscriptionHandle> failed = new CompletableFuture<>();
+        failed.completeExceptionally(new IllegalStateException("协议侧拒绝订阅"));
+        when(session.subscribe(any(SubscribeRequest.class), any())).thenReturn(failed);
+        AtomicReference<Map<String, DeviceSession>> bound =
+            new AtomicReference<>(Map.of("d1", session));
+        AccessSubscriptionPlanner planner = new AccessSubscriptionPlanner(bound::get, objectMapper,
+            reading -> { }, new SimpleMeterRegistry());
+
+        assertThat(planner.subscribe(List.of(device("d1")))).as("本次发起了 1 次订阅").isEqualTo(1);
+        assertThat(planner.trackedSessionCount())
+            .as("订阅失败绝不能写跟踪表——写了就会被对账认为「已订阅」而永不重试")
+            .isZero();
+
+        assertThat(planner.subscribe(List.of(device("d1"))))
+            .as("下一轮必须重新发起（同一会话实例、但上次没成功）").isEqualTo(1);
+        verify(session, times(2)).subscribe(any(SubscribeRequest.class), any());
+    }
+
+    @Test
     @DisplayName("无会话时跳过且不记录（下一轮对账要能补上）；点位为空时不订阅")
     void missingSessionAndEmptyPointsShouldBeSkipped() {
         AtomicReference<Map<String, DeviceSession>> bound = new AtomicReference<>(Map.of());
         AccessSubscriptionPlanner planner =
-            new AccessSubscriptionPlanner(bound::get, objectMapper, reading -> { });
+            new AccessSubscriptionPlanner(bound::get, objectMapper, reading -> { }, new SimpleMeterRegistry());
 
         assertThat(planner.subscribe(List.of(device("d1")))).as("无会话⇒跳过").isZero();
         assertThat(planner.trackedSessionCount()).as("跳过时不得留下跟踪记录").isZero();

@@ -17,6 +17,8 @@ import cn.ypbin.iot.core.model.SubscribeRequest;
 import cn.ypbin.iot.core.protocol.DeviceSession;
 import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -51,13 +53,29 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
      */
     private final Map<String, DeviceSession> subscribedSessions = new ConcurrentHashMap<>();
 
+    /** 订阅**成功**计数（会话建立后真正订阅成功的设备数）。 */
+    private final Counter subscribeSuccess;
+
+    /** 订阅**失败**计数（失败不写跟踪表 ⇒ 下一个租约周期会对账重试；这里让它可观测）。 */
+    private final Counter subscribeFailure;
+
     public AccessSubscriptionPlanner(Supplier<Map<String, DeviceSession>> sessions,
-                                     ObjectMapper objectMapper, AccessReadingSink readingSink) {
+                                     ObjectMapper objectMapper, AccessReadingSink readingSink,
+                                     MeterRegistry meterRegistry) {
         this.sessions = sessions;
         this.objectMapper = objectMapper;
         this.readingSink = readingSink;
+        this.subscribeSuccess = meterRegistry.counter("ypbin.access.subscribe.success");
+        this.subscribeFailure = meterRegistry.counter("ypbin.access.subscribe.failure");
     }
 
+    /**
+     * 为一批已绑定设备发起订阅（幂等：同一会话实例只会订阅一次）。
+     *
+     * @param devices 设备规格
+     * @return 本次**发起**订阅的设备数（注意：订阅完成是异步的，成功与否看计数与日志；失败不会记录跟踪，
+     *     下一个租约周期会对账重试）
+     */
     @Override
     public int subscribe(List<DeviceSpec> devices) {
         Map<String, DeviceSession> bound = sessions.get();
@@ -88,17 +106,24 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
                     Map.of());
             PointMappingDataListener listener =
                 new PointMappingDataListener(device.deviceId(), points, readingSink);
-            subscribedSessions.put(device.deviceId(), session);
+            // ⚠️ S5 修复：**订阅成功之后**才记录跟踪。
+            //    此前是先写 `subscribedSessions` 再 subscribe ⇒ 异步失败时跟踪表已记上「已订阅」，
+            //    对账会认为无需重试 ⇒ 该设备**永久停止采集**且只有一行 ERROR 日志。
+            //    现在失败不写 ⇒ 下一个租约周期自动重试。
             session.subscribe(request, listener).whenComplete((handle, error) -> {
                 if (error != null) {
+                    subscribeFailure.increment();
                     // 订阅失败要暴露：否则表现为「采了但没数据」
-                    log.error("[access] 订阅失败：deviceId={} addresses={}", device.deviceId(),
-                        addresses.size(), error);
+                    log.error("[access] 订阅失败（下一轮对账将重试）：deviceId={} addresses={}",
+                        device.deviceId(), addresses.size(), error);
                 } else {
+                    subscribedSessions.put(device.deviceId(), session);
+                    subscribeSuccess.increment();
                     log.info("[access] 订阅成功：deviceId={} 点位数={}", device.deviceId(),
                         addresses.size());
                 }
             });
+            // 返回值是「本次**发起**的订阅数」：完成与否是异步的，调用方不得据此判断成功
             subscribed++;
         }
         return subscribed;
