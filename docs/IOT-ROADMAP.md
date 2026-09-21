@@ -190,6 +190,21 @@ ERROR The build could not read 1 project
    重打包后的 fat jar（类在 `BOOT-INF/classes` 下，普通类加载器看不见）⇒ 测试报
    `NoClassDefFoundError`。必须在 failsafe 里显式 `<classesDirectory>${project.build.outputDirectory}</classesDirectory>`。
 
+### 四点六、3b-2 的已知限制（外委复核提出，**M-2 前必须处置**）
+
+> 以下是 3b-2 交付时**刻意保留**的占位/边界。它们不影响「当前只装 TCP」的可用性，
+> 但都会在特定条件下**静默失效**（不报错、只是没数据），故在此显式登记，避免被当成已完成能力。
+
+| # | 限制 | 触发条件 | 后果 | M-2 前的处置要求 |
+|---|---|---|---|---|
+| **S4** | **点位地址语义未定死**：MQTT 回调用**具体主题**当 address（`MqttSession` 有意如此），而订阅用 mapping 的 `address` 当**过滤器**，`PointMappingDataListener` 做**字符串精确匹配** | 加装 `ypbin-iot-protocol-mqtt` 模块**当天**（当前只装 tcp，故未触发） | 映射里填了通配符（`a/#`、`a/+/c`）时**订阅成功但每条数据都判「未映射」被丢弃** ⇒ 看起来在采、实际零数据 | 定死「`raw_address` = 具体地址，非过滤器」，并在点位映射保存时**加校验拒绝通配符**；或改为按主题前缀匹配 |
+| **S5** | 订阅计数与会话跟踪的精度：`AccessSubscriptionPlanner` 的计数在 `subscribe` **异步失败**时仍自增，且订阅失败**无自身重试** | 会话存在但订阅被协议侧拒绝（如地址非法） | 日志「已订阅设备数」**高估**；失败只记 ERROR，靠下一个租约周期的**对账**兜底 | 把「成功」定义在 `CompletionStage` 完成之后（失败则不清 `subscribedSessions`，让对账自动重试）；并把失败计入指标 |
+| **S6** | **出口是日志占位**：`LoggingAccessReadingSink` / `LoggingDataSink` 是唯一实现且**无 profile 限制** | 生产部署 | 按 INFO **逐条打印**且**数据不落任何地方** ⇒ 「有日志＝像在工作」而实际零持久化 | M-2 数据面替换为「有界队列 → 微批 → EMQX → business 落 IoTDB/Redis」（§5.1），并加**丢弃计数**；替换前不得以占位实现宣称数据面可用 |
+
+**另有两条复核指出的实现注意（已修/已记）**：revision 单调与「两个开关」的区分已修；`devices.enabled=false`
+时变更通道也不会接线（文档表述已更正，见四点五）。`PointMappingDataListener.unmappedCount` 为普通 `long`，
+跨线程可见性目前依赖调用方（单线程订阅回调场景下成立），M-2 若引入多线程需一并改为原子类型。
+
 ### 五、替换缝（3a 已备好，3b-2 只需新增自动配置）
 3a 的 `LoggingTenantLinkManager` 已去掉 `@Component`，由 `AccessLeaseConfiguration`（`@AutoConfiguration`
 + `@Bean @ConditionalOnMissingBean`）装配，并有源码门禁守着（四处变异全咬）。⇒ 3b-2 提供真实现时
