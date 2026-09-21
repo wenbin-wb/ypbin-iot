@@ -94,21 +94,23 @@
   `access 启动自检通过：node=e2e-file-1 renewIntervalMs=10000 acquireIntervalMs=15000` → `Started AccessApplication`
   → `租户领取完成：node=e2e-file-1 持有租户=[22, 11]` → 服务端归属 `ACTIVE/e2e-file-1`（证明 node-id 来自配置文件）。
 
-### ⚠️ 3b 的两项待决（需要决策，未擅自改）
+### 3b 的遗留事项（第 2 项已于 2026-09-21 完成 → 见「增量 3b-2」节）
 1. **`install.sh` 硬编码指向上游仓**：`SCRIPT_URL`/`GITEE_SCRIPT_URL` 默认是 `wenbin-wb/ypbin-admin`，
    且 `NACOS_DIR="$ROOT/ypbin-admin/deploy/nacos"` 也写死 `ypbin-admin` 目录名 ⇒ **fork 的一键部署脚本目前部署的是 upstream，
    不是本仓**。需要决定：本仓部署目录是继续叫 `ypbin-admin`（改动最小、与现有运维脚本兼容），还是改名 `ypbin-iot`
    （语义正确、但所有路径/文档/运维习惯都要跟着改）。
-2. **协议栈接入（3b-2）**：`ypbin-iot-bom` + 协议模块 + 三个宿主 SPI + 真建链/断链。按教训三十二，
+2. ~~**协议栈接入（3b-2）**：`ypbin-iot-bom` + 协议模块 + 三个宿主 SPI + 真建链/断链。按教训三十二，
    接入前必须**读 iot-starter 的装配源码**（不看 README），且它的 SNAPSHOT 未发布 ⇒ CI 必须
-   **显式取源并锁定 SHA**，源码树不能落在本仓工作目录内（否则「仓内每个 pom 都必须有归属」的门禁会转红）。
+   **显式取源并锁定 SHA**，源码树不能落在本仓工作目录内（否则「仓内每个 pom 都必须有归属」的门禁会转红）。~~
+   **✅ 已完成（2026-09-21，PR #13）**：接入前已逐条重读装配源码；协议栈 `0.1.0` 已发 Central ⇒
+   CI 不再需要取源锁 SHA（见下方「四点四」）；三个宿主 SPI + 真订阅已落地。
 
 ## 增量 3b-2 协议栈接入清单（源码级侦察结论，2026-09-20）
 
 > 侦察对象：`ypbin-iot-starter`（**读源码，不读 README**——教训三十二）。以下均为该仓一手事实（文件+行）。
 
 ### 一、坐标与模块
-- BOM：`ypbin-iot-bom`（版本走 `${revision}`，**当前未发布到 Central**）；核心 `ypbin-iot-core`、
+- BOM：`ypbin-iot-bom`（版本走 `${revision}`；**0.1.0 已于 2026-09-21 发布到 Central**）；核心 `ypbin-iot-core`、
   运行时 `ypbin-iot-runtime`、自动配置 `ypbin-iot-spring-boot-starter`、
   协议模块 `ypbin-iot-protocol-{tcp,mqtt,modbus,opcua}`、`ypbin-iot-test` / `ypbin-iot-integration-tests`。
 - 本仓接入方式：新增 `ypbin-service/ypbin-access` 依赖（协议先上 **tcp**）+ 在 `ypbin-service-api/pom.xml`
