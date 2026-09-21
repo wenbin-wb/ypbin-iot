@@ -39,8 +39,10 @@ import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -300,11 +302,20 @@ public class LeaseServiceImpl implements LeaseService {
     public TenantEpochBatchResp batchEpoch() {
         List<TenantNodeAssignment> all = mapper.selectList(Wrappers.<TenantNodeAssignment>lambdaQuery()
             .select(TenantNodeAssignment::getTenantId, TenantNodeAssignment::getEpoch));
+        // M0b-3：一次批量对账同时给出「归属 epoch」与「配置 epoch」——接入侧据此判断
+        // 「要采什么」有没有变（不一致才拉全量设备规格），避免每轮都打远端。
+        Map<Long, Long> configEpochs = new HashMap<>();
+        for (TenantLedger ledger : ledgerMapper.selectList(Wrappers.<TenantLedger>lambdaQuery()
+            .select(TenantLedger::getTenantId, TenantLedger::getConfigEpoch))) {
+            configEpochs.put(ledger.getTenantId(),
+                ledger.getConfigEpoch() == null ? 0L : ledger.getConfigEpoch());
+        }
         List<TenantEpochItem> items = new ArrayList<>();
         for (TenantNodeAssignment assignment : all) {
             TenantEpochItem item = new TenantEpochItem();
             item.setTenantId(assignment.getTenantId());
             item.setEpoch(assignment.getEpoch());
+            item.setConfigEpoch(configEpochs.getOrDefault(assignment.getTenantId(), 0L));
             items.add(item);
         }
         TenantEpochBatchResp resp = new TenantEpochBatchResp();
