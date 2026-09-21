@@ -1,0 +1,565 @@
+/*
+ * Copyright (c) 2026-present ypbin-admin authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ */
+package cn.ypbin.admin.iot.service.impl;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import cn.ypbin.admin.iot.entity.IotProduct;
+import cn.ypbin.admin.iot.entity.IotCommand;
+import cn.ypbin.admin.iot.entity.IotEvent;
+import cn.ypbin.admin.iot.entity.IotProperty;
+import cn.ypbin.admin.iot.entity.IotService;
+import cn.ypbin.admin.iot.mapper.IotCommandMapper;
+import cn.ypbin.admin.iot.mapper.IotEventMapper;
+import cn.ypbin.admin.iot.mapper.IotProductMapper;
+import cn.ypbin.admin.iot.mapper.IotPropertyMapper;
+import cn.ypbin.admin.iot.mapper.IotServiceMapper;
+import cn.ypbin.admin.iot.model.resp.TslImportResult;
+import cn.ypbin.admin.iot.model.tsl.TslCommand;
+import cn.ypbin.admin.iot.model.tsl.TslDocument;
+import cn.ypbin.admin.iot.model.tsl.TslEvent;
+import cn.ypbin.admin.iot.model.tsl.TslPara;
+import cn.ypbin.admin.iot.model.tsl.TslProperty;
+import cn.ypbin.admin.iot.model.tsl.TslService;
+import com.baomidou.mybatisplus.core.MybatisConfiguration;
+import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.util.ArrayList;
+import java.util.List;
+import org.apache.ibatis.builder.MapperBuilderAssistant;
+import org.mockito.ArgumentCaptor;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
+
+/**
+ * TSL 导入校验纯逻辑单测（不起 Spring、不连库）。
+ *
+ * <p>validateTsl 是校验规则本体（§3.7：命名规范/类型枚举/master 唯一/引用完整性，逐项报错），
+ * 是 TSL 导入安全的关键逻辑，必须钉死。</p>
+ *
+ * @author wenbin
+ * @since 2026-09-20
+ */
+class IotThingModelServiceImplTest {
+
+    private final IotProductMapper productMapper = mock(IotProductMapper.class);
+    private final IotPropertyMapper propertyMapper = mock(IotPropertyMapper.class);
+    private final IotCommandMapper commandMapper = mock(IotCommandMapper.class);
+    private final IotEventMapper eventMapper = mock(IotEventMapper.class);
+    private final IotServiceMapper serviceMapper = mock(IotServiceMapper.class);
+    private final IotThingModelServiceImpl service = new IotThingModelServiceImpl(
+        new ObjectMapper(), productMapper, propertyMapper, commandMapper, eventMapper);
+
+    @BeforeAll
+    static void initTableInfo() {
+        TableInfoHelper.initTableInfo(new MapperBuilderAssistant(new MybatisConfiguration(), ""),
+            IotService.class);
+        TableInfoHelper.initTableInfo(new MapperBuilderAssistant(new MybatisConfiguration(), ""),
+            IotProperty.class);
+        TableInfoHelper.initTableInfo(new MapperBuilderAssistant(new MybatisConfiguration(), ""),
+            IotCommand.class);
+        TableInfoHelper.initTableInfo(new MapperBuilderAssistant(new MybatisConfiguration(), ""),
+            IotEvent.class);
+    }
+
+    @BeforeEach
+    void wireBaseMapper() {
+        ReflectionTestUtils.setField(service, "baseMapper", serviceMapper);
+    }
+
+    @Test
+    @DisplayName("合法 TSL：master 唯一 + 引用完整 + 命名/类型全合规 → 零错误")
+    void validTslShouldPass() {
+        TslDocument doc = validDoc();
+
+        List<String> errors = new ArrayList<>();
+        service.validateTsl(doc, errors);
+
+        assertThat(errors).isEmpty();
+    }
+
+    @Test
+    @DisplayName("devices 数组必须恰好 1 个：0 个或多于 1 个都报错")
+    void devicesCountMustBeOne() {
+        TslDocument doc = validDoc();
+        doc.setDevices(List.of());
+
+        List<String> errors = new ArrayList<>();
+        service.validateTsl(doc, errors);
+
+        assertThat(errors).anyMatch(e -> e.contains("恰好包含 1 个产品定义"));
+
+        // 多于 1 个同样拒绝
+        TslDocument twoDevices = validDoc();
+        twoDevices.setDevices(List.of(twoDevices.getDevices().getFirst(),
+            twoDevices.getDevices().getFirst()));
+
+        List<String> errors2 = new ArrayList<>();
+        service.validateTsl(twoDevices, errors2);
+        assertThat(errors2).anyMatch(e -> e.contains("恰好包含 1 个产品定义"));
+    }
+
+    @Test
+    @DisplayName("master 服务有且仅有一个：缺少或多于一个都报错")
+    void masterServiceMustBeExactlyOne() {
+        // 缺 master：两个服务都改成非 master
+        TslDocument noMaster = validDoc();
+        noMaster.getServices().get(0).setOption("mandatory");
+        noMaster.getServices().get(1).setOption("optional");
+
+        List<String> errors1 = new ArrayList<>();
+        service.validateTsl(noMaster, errors1);
+        assertThat(errors1).anyMatch(e -> e.contains("master 服务必须有且仅有一个"));
+
+        // 多于一个 master
+        TslDocument twoMasters = validDoc();
+        twoMasters.getServices().get(1).setOption("master");
+
+        List<String> errors2 = new ArrayList<>();
+        service.validateTsl(twoMasters, errors2);
+        assertThat(errors2).anyMatch(e -> e.contains("master 服务必须有且仅有一个"));
+    }
+
+    @Test
+    @DisplayName("引用完整性：serviceTypeCapabilities 引用的服务必须在 services 中定义")
+    void serviceRefMustResolve() {
+        TslDocument doc = validDoc();
+        doc.getDevices().getFirst().getServiceTypeCapabilities().getFirst()
+            .setServiceType("GhostService");
+
+        List<String> errors = new ArrayList<>();
+        service.validateTsl(doc, errors);
+
+        assertThat(errors).anyMatch(e -> e.contains("服务引用未在 services 中定义"));
+    }
+
+    @Test
+    @DisplayName("命名规范：属性 camelCase / 命令 UPPER_SNAKE / 事件 camelCase / 服务 PascalCase")
+    void namingRulesShouldEnforce() {
+        TslDocument doc = validDoc();
+        doc.getServices().getFirst().getProperties().getFirst().setPropertyName("Bad-Name");
+        doc.getServices().getFirst().getCommands().getFirst().setCommandName("bad_name");
+        doc.getServices().getFirst().getEvents().getFirst().setEventName("1Event");
+        doc.getServices().getFirst().setServiceType("bad_service");
+
+        List<String> errors = new ArrayList<>();
+        service.validateTsl(doc, errors);
+
+        assertThat(errors).anyMatch(e -> e.contains("服务标识格式非法"));
+        assertThat(errors).anyMatch(e -> e.contains("属性标识格式非法"));
+        assertThat(errors).anyMatch(e -> e.contains("命令标识格式非法"));
+        assertThat(errors).anyMatch(e -> e.contains("事件标识格式非法"));
+    }
+
+    @Test
+    @DisplayName("类型枚举：dataType 必须是 9 类之一（属性/命令参数/事件）")
+    void dataTypeMustBeWhitelisted() {
+        TslDocument doc = validDoc();
+        doc.getServices().getFirst().getProperties().getFirst().setDataType("blob");
+        doc.getServices().getFirst().getCommands().getFirst().getParas().getFirst().setDataType("blob");
+        doc.getServices().getFirst().getEvents().getFirst().setDataType("blob");
+
+        List<String> errors = new ArrayList<>();
+        service.validateTsl(doc, errors);
+
+        assertThat(errors).anyMatch(e -> e.contains("属性数据类型非法"));
+        assertThat(errors).anyMatch(e -> e.contains("参数数据类型非法"));
+        assertThat(errors).anyMatch(e -> e.contains("事件数据类型非法"));
+    }
+
+    @Test
+    @DisplayName("逐项报错：同一文档多处违规时每条都列出，不静默丢弃")
+    void errorsShouldBePerItem() {
+        TslDocument doc = validDoc();
+        doc.getServices().getFirst().getProperties().getFirst().setDataType("blob");
+        doc.getServices().getFirst().getProperties().getFirst().setPropertyName("X-Bad");
+        doc.getServices().getFirst().getCommands().getFirst().setCommandName("lower_snake");
+
+        List<String> errors = new ArrayList<>();
+        service.validateTsl(doc, errors);
+
+        assertThat(errors).hasSize(3);
+    }
+
+    @Test
+    @DisplayName("属性读写权限 method 必须是 R|W|RW")
+    void methodMustBeRW() {
+        TslDocument doc = validDoc();
+        doc.getServices().getFirst().getProperties().getFirst().setMethod("X");
+
+        List<String> errors = new ArrayList<>();
+        service.validateTsl(doc, errors);
+
+        assertThat(errors).anyMatch(e -> e.contains("属性读写权限非法"));
+    }
+
+    @Test
+    @DisplayName("导入走批量写：每个表只插一次（不随 TSL 规模退化为 N+1），且子表引用父服务 ID")
+    void importShouldWriteInBatch() {
+        when(productMapper.selectById(9L)).thenReturn(draftProduct(9L));
+        when(serviceMapper.selectList(any())).thenReturn(List.of());
+        // 让两个服务都带子结构，检验「子表按各自父服务挂载」而不是全挂到同一个服务
+        // 模拟雪花主键在批量插入时回填到实体
+        doAnswer(invocation -> {
+            List<IotService> inserted = invocation.getArgument(0);
+            long nextId = 1000L;
+            for (IotService item : inserted) {
+                item.setId(nextId++);
+            }
+            return List.of();
+        }).when(serviceMapper).insert(anyList());
+
+        TslDocument doc = validDoc();
+        TslService second = doc.getServices().get(1);
+        TslProperty secondProperty = new TslProperty();
+        secondProperty.setPropertyName("battery");
+        secondProperty.setDataType("int");
+        secondProperty.setMethod("R");
+        second.setProperties(List.of(secondProperty));
+
+        TslImportResult result = service.importTsl(9L, doc);
+
+        // 2 个服务 → 恰好一次批量插入，且绝不出现逐行 insert(T)
+        verify(serviceMapper).insert(anyList());
+        verify(serviceMapper, never()).insert(any(IotService.class));
+        verify(propertyMapper).insert(anyList());
+        verify(commandMapper).insert(anyList());
+        verify(eventMapper).insert(anyList());
+        // 子表必须挂到各自的父服务上（只 verify(anyList()) 会把 ID 假设放过去）
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<IotProperty>> properties = ArgumentCaptor.forClass(List.class);
+        verify(propertyMapper).insert(properties.capture());
+        assertThat(properties.getValue()).hasSize(2)
+            .extracting(IotProperty::getServiceId)
+            .containsExactlyInAnyOrder(1000L, 1001L);
+        assertThat(properties.getValue()).extracting(IotProperty::getIdentifier)
+            .containsExactlyInAnyOrder("temperature", "battery");
+        assertThat(result.getErrors()).isEmpty();
+        assertThat(result.getSuccessCount()).isPositive();
+    }
+
+    @Test
+    @DisplayName("导入前先批量清空旧结构：按 service 主键一次 IN，不逐服务删除")
+    void importShouldDeleteOldStructureInBatch() {
+        when(productMapper.selectById(9L)).thenReturn(draftProduct(9L));
+        IotService old1 = new IotService();
+        old1.setId(501L);
+        IotService old2 = new IotService();
+        old2.setId(502L);
+        when(serviceMapper.selectList(any())).thenReturn(List.of(old1, old2));
+        doAnswer(invocation -> {
+            List<IotService> inserted = invocation.getArgument(0);
+            long nextId = 1000L;
+            for (IotService item : inserted) {
+                item.setId(nextId++);
+            }
+            return List.of();
+        }).when(serviceMapper).insert(anyList());
+
+        service.importTsl(9L, validDoc());
+
+        // 必须是「物理删除」：逻辑删除行仍占用 uk_iot_service，会让同产品二次导入主键冲突（P1）
+        verify(propertyMapper).physicalDeleteByServiceIds(List.of(501L, 502L));
+        verify(commandMapper).physicalDeleteByServiceIds(List.of(501L, 502L));
+        verify(eventMapper).physicalDeleteByServiceIds(List.of(501L, 502L));
+        verify(serviceMapper).physicalDeleteByIds(List.of(501L, 502L));
+        // 且一次 IN 删除，而非逐服务逻辑删除
+        verify(serviceMapper, never()).deleteById(any(Long.class));
+        verify(serviceMapper, never()).deleteByIds(any());
+    }
+
+    @Test
+    @DisplayName("连续两次导入同一 TSL：删除路径必须是物理删除（逻辑删除会撞 uk_iot_service）")
+    void repeatedImportMustNotCollideOnBusinessUniqueKey() {
+        when(productMapper.selectById(9L)).thenReturn(draftProduct(9L));
+        // 第一次导入后遗留的「上一次结构」行
+        IotService previous = new IotService();
+        previous.setId(777L);
+        previous.setProductId(9L);
+        previous.setServiceId("DeviceBasic");
+        when(serviceMapper.selectList(any())).thenReturn(List.of(previous));
+        doAnswer(invocation -> {
+            List<IotService> inserted = invocation.getArgument(0);
+            long nextId = 2000L;
+            for (IotService item : inserted) {
+                item.setId(nextId++);
+            }
+            return List.of();
+        }).when(serviceMapper).insert(anyList());
+
+        // 第二次导入同一份 TSL：同一 (product_id, service_id) 会被再次插入
+        TslImportResult result = service.importTsl(9L, validDoc());
+
+        assertThat(result.getErrors()).isEmpty();
+        verify(serviceMapper).physicalDeleteByIds(List.of(777L));
+        verify(serviceMapper, never()).deleteByIds(any());
+        verify(serviceMapper, never()).deleteById(any(Long.class));
+    }
+
+    @Test
+    @DisplayName("无服务列表时短路：不产生任何批量写")
+    void importWithNoServicesShouldShortCircuit() {
+        when(productMapper.selectById(9L)).thenReturn(draftProduct(9L));
+        when(serviceMapper.selectList(any())).thenReturn(List.of());
+        TslDocument doc = validDoc();
+        doc.setServices(List.of());
+
+        service.importTsl(9L, doc);
+
+        verify(serviceMapper, never()).insert(anyList());
+        verify(propertyMapper, never()).insert(anyList());
+    }
+
+    @Test
+    @DisplayName("serviceType 为空：逐项报错而不是抛 NPE（哈希表不收 null 键）")
+    void nullServiceTypeShouldBeReportedNotThrow() {
+        TslDocument doc = validDoc();
+        doc.getServices().getFirst().setServiceType(null);
+
+        List<String> errors = new ArrayList<>();
+        service.validateTsl(doc, errors);
+
+        assertThat(errors).anyMatch(e -> e.contains("服务标识格式非法"));
+    }
+
+    @Test
+    @DisplayName("maxLength 非整数：在校验阶段逐项报错，而不是写入时抛 NumberFormatException")
+    void nonNumericMaxLengthShouldBeReported() {
+        TslDocument doc = validDoc();
+        doc.getServices().getFirst().getProperties().getFirst().setMaxLength("abc");
+        doc.getServices().getFirst().getEvents().getFirst().setMaxLength("-5");
+
+        List<String> errors = new ArrayList<>();
+        service.validateTsl(doc, errors);
+
+        assertThat(errors).anyMatch(e -> e.contains("maxLength 非整数"));
+        assertThat(errors).anyMatch(e -> e.contains("maxLength 必须为正整数"));
+    }
+
+    @Test
+    @DisplayName("min/max/step 非数值：在校验阶段逐项报错")
+    void nonNumericDecimalShouldBeReported() {
+        TslDocument doc = validDoc();
+        doc.getServices().getFirst().getProperties().getFirst().setMin("abc");
+
+        List<String> errors = new ArrayList<>();
+        service.validateTsl(doc, errors);
+
+        assertThat(errors).anyMatch(e -> e.contains("非数值"));
+    }
+
+    @Test
+    @DisplayName("单条删服务也必须物理删除（含级联子表）：软删残留行仍占用 uk_iot_service")
+    void removeServiceMustPhysicallyDeleteWithChildren() {
+        IotService existing = new IotService();
+        existing.setId(801L);
+        existing.setProductId(9L);
+        when(serviceMapper.selectById(801L)).thenReturn(existing);
+        when(productMapper.selectById(9L)).thenReturn(draftProduct(9L));
+
+        service.removeService(801L);
+
+        verify(propertyMapper).physicalDeleteByServiceIds(List.of(801L));
+        verify(commandMapper).physicalDeleteByServiceIds(List.of(801L));
+        verify(eventMapper).physicalDeleteByServiceIds(List.of(801L));
+        verify(serviceMapper).physicalDeleteByIds(List.of(801L));
+        // 绝不走逻辑删除：残留行会让「手工删服务 → 再导入同名 TSL」主键冲突
+        verify(serviceMapper, never()).deleteById(any(Long.class));
+    }
+
+    @Test
+    @DisplayName("单条删属性/命令/事件同样物理删除")
+    void removeChildElementsMustPhysicallyDelete() {
+        when(productMapper.selectById(9L)).thenReturn(draftProduct(9L));
+        IotProperty property = new IotProperty();
+        property.setId(901L);
+        property.setServiceId(1000L);
+        when(propertyMapper.selectById(901L)).thenReturn(property);
+        when(serviceMapper.selectById(1000L)).thenReturn(draftService(1000L));
+        service.removeProperty(901L);
+        verify(propertyMapper).physicalDeleteByIds(List.of(901L));
+
+        IotCommand command = new IotCommand();
+        command.setId(902L);
+        command.setServiceId(1000L);
+        when(commandMapper.selectById(902L)).thenReturn(command);
+        service.removeCommand(902L);
+        verify(commandMapper).physicalDeleteByIds(List.of(902L));
+
+        IotEvent event = new IotEvent();
+        event.setId(903L);
+        event.setServiceId(1000L);
+        when(eventMapper.selectById(903L)).thenReturn(event);
+        service.removeEvent(903L);
+        verify(eventMapper).physicalDeleteByIds(List.of(903L));
+    }
+
+    @Test
+    @DisplayName("导出走批量：子结构一次 IN 取回（查询数与服务数无关），按父服务分组装配")
+    void exportShouldBatchLoadChildren() {
+        IotProduct product = draftProduct(9L);
+        when(productMapper.selectById(9L)).thenReturn(product);
+        when(serviceMapper.selectList(any())).thenReturn(List.of(
+            serviceEntity(1000L, "DeviceBasic", 0), serviceEntity(1001L, "Telemetry", 1)));
+        // 两个服务各一个属性 → 若逐服务查询会调用 2 次；批量应只有 1 次
+        when(propertyMapper.selectList(any())).thenReturn(List.of(
+            propertyEntity(11L, 1000L, "temperature"), propertyEntity(12L, 1001L, "battery")));
+        when(commandMapper.selectList(any())).thenReturn(List.of(
+            commandEntity(21L, 1000L, "SET_VALUE")));
+        when(eventMapper.selectList(any())).thenReturn(List.of(
+            eventEntity(31L, 1001L, "alarm")));
+
+        TslDocument doc = service.exportTsl(9L);
+
+        assertThat(doc.getServices()).hasSize(2);
+        assertThat(doc.getServices().get(0).getServiceType()).isEqualTo("DeviceBasic");
+        assertThat(doc.getServices().get(0).getProperties())
+            .extracting(TslProperty::getPropertyName).containsExactly("temperature");
+        assertThat(doc.getServices().get(0).getCommands())
+            .extracting(TslCommand::getCommandName).containsExactly("SET_VALUE");
+        assertThat(doc.getServices().get(0).getEvents()).isEmpty();
+        assertThat(doc.getServices().get(1).getProperties())
+            .extracting(TslProperty::getPropertyName).containsExactly("battery");
+        assertThat(doc.getServices().get(1).getEvents())
+            .extracting(TslEvent::getEventName).containsExactly("alarm");
+        assertThat(doc.getDevices()).hasSize(1);
+        assertThat(doc.getDevices().getFirst().getServiceTypeCapabilities()).hasSize(2);
+
+        // 查询次数与 TSL 规模无关：每个子表各 1 次
+        verify(propertyMapper).selectList(any());
+        verify(commandMapper).selectList(any());
+        verify(eventMapper).selectList(any());
+    }
+
+    private static IotService draftService(Long id) {
+        IotService service = new IotService();
+        service.setId(id);
+        service.setProductId(9L);
+        return service;
+    }
+
+    private static IotService serviceEntity(Long id, String serviceId, int sort) {
+        IotService service = new IotService();
+        service.setId(id);
+        service.setProductId(9L);
+        service.setServiceId(serviceId);
+        service.setServiceName(serviceId);
+        service.setServiceOption("master".equals(serviceId) || sort == 0 ? "master" : "optional");
+        service.setSort(sort);
+        return service;
+    }
+
+    private static IotProperty propertyEntity(Long id, Long serviceId, String identifier) {
+        IotProperty property = new IotProperty();
+        property.setId(id);
+        property.setServiceId(serviceId);
+        property.setIdentifier(identifier);
+        property.setDataType("int");
+        property.setAccessMode("R");
+        property.setSort(0);
+        return property;
+    }
+
+    private static IotCommand commandEntity(Long id, Long serviceId, String identifier) {
+        IotCommand command = new IotCommand();
+        command.setId(id);
+        command.setServiceId(serviceId);
+        command.setIdentifier(identifier);
+        command.setCommandName(identifier);
+        command.setSort(0);
+        return command;
+    }
+
+    private static IotEvent eventEntity(Long id, Long serviceId, String identifier) {
+        IotEvent event = new IotEvent();
+        event.setId(id);
+        event.setServiceId(serviceId);
+        event.setIdentifier(identifier);
+        event.setEventName(identifier);
+        event.setDataType("string");
+        event.setSort(0);
+        return event;
+    }
+
+    /** 构造草稿态产品（importTsl 前置校验用）。 */
+    private static IotProduct draftProduct(Long id) {
+        IotProduct product = new IotProduct();
+        product.setId(id);
+        product.setModelStatus("draft");
+        return product;
+    }
+
+    /** 构造合法 TSL 文档：1 产品 + 2 服务（1 master + 1 optional），每服务 1 属性/1 命令/1 事件。 */
+    private static TslDocument validDoc() {
+        TslDocument doc = new TslDocument();
+
+        TslProperty property = new TslProperty();
+        property.setPropertyName("temperature");
+        property.setDataType("int");
+        property.setMethod("R");
+
+        TslPara para = new TslPara();
+        para.setParaName("value");
+        para.setDataType("int");
+
+        TslCommand command = new TslCommand();
+        command.setCommandName("SET_VALUE");
+        command.setParas(List.of(para));
+        command.setResponses(List.of());
+
+        TslEvent event = new TslEvent();
+        event.setEventName("alarm");
+        event.setDataType("string");
+
+        TslService master = new TslService();
+        master.setServiceType("DeviceBasic");
+        master.setDescription("基础服务");
+        master.setOption("master");
+        master.setProperties(List.of(property));
+        master.setCommands(List.of(command));
+        master.setEvents(List.of(event));
+
+        TslService optional = new TslService();
+        optional.setServiceType("Telemetry");
+        optional.setDescription("遥测");
+        optional.setOption("optional");
+        optional.setProperties(List.of());
+        optional.setCommands(List.of());
+        optional.setEvents(List.of());
+
+        TslDocument.TslDevice device = new TslDocument.TslDevice();
+        device.setProtocolType("mqtt");
+        device.setDeviceType("WaterMeter");
+        TslDocument.TslServiceRef ref1 = new TslDocument.TslServiceRef();
+        ref1.setServiceId("DeviceBasic");
+        ref1.setServiceType("DeviceBasic");
+        ref1.setOption("master");
+        TslDocument.TslServiceRef ref2 = new TslDocument.TslServiceRef();
+        ref2.setServiceId("Telemetry");
+        ref2.setServiceType("Telemetry");
+        ref2.setOption("optional");
+        device.setServiceTypeCapabilities(List.of(ref1, ref2));
+
+        doc.setServices(List.of(master, optional));
+        doc.setDevices(List.of(device));
+        return doc;
+    }
+}

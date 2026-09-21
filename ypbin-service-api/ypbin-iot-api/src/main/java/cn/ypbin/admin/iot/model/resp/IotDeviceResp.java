@@ -38,6 +38,18 @@ public class IotDeviceResp {
     /** 端点 URI。 */
     private String endpoint;
 
+    /** 绑定产品 ID。 */
+    private Long productId;
+
+    /** 绑定物模型版本。 */
+    private String productVersion;
+
+    /** 在线状态：online | offline | unknown。 */
+    private String onlineStatus;
+
+    /** 最后心跳/上报时刻。 */
+    private LocalDateTime lastSeenAt;
+
     /** 备注。 */
     private String remark;
 

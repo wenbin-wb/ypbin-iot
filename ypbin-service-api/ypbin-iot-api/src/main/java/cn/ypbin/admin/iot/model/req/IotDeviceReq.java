@@ -45,6 +45,13 @@ public class IotDeviceReq {
     @Size(max = 300, message = "端点长度不能超过 300")
     private String endpoint;
 
+    /** 绑定产品 ID（M-1，§4.1；可选，草稿设备可不绑）。 */
+    private Long productId;
+
+    /** 绑定物模型版本（如 v1.0，§3.8；可选）。 */
+    @Size(max = 32, message = "物模型版本长度不能超过 32")
+    private String productVersion;
+
     /** 备注。 */
     @Size(max = 500, message = "备注长度不能超过 500")
     private String remark;

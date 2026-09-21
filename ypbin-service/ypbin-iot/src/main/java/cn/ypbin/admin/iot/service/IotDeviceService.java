@@ -44,4 +44,12 @@ public interface IotDeviceService {
      * @param id 设备主键
      */
     void removeDevice(Long id);
+
+    /**
+     * 编辑设备（含绑定产品与物模型版本，§4.1；版本须为已发布版本）。
+     *
+     * @param id  设备主键
+     * @param req 设备信息
+     */
+    void updateDevice(Long id, IotDeviceReq req);
 }

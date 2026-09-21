@@ -7,8 +7,9 @@
 > **v1.1（用户反馈驱动的范围调整）**：① 业务表审计字段统一继承 starter 基类（不再自建）；② 规则引擎
 > 可视化编排、大屏/数字孪生从非目标移入目标（远期，数字孪生低优先级）；③ 新增 §2.4 配置化边界（业务层
 > 零代码、新协议类型需一次模块级写码）；④ 基类 `status` 与业务多态状态（model_status/alarm_status）分离。
-> 第三轮复评 **PASS（有条件）**，条件（status 列方案）已落实。未核实项在文中以 ⚠️ 标注（IoTDB 细节：本会话
-> 网络受限，M-2 前须一手补核）。
+> 第三轮复评 **PASS（有条件）**，条件（status 列方案）已落实。未核实项在文中以 ⚠️ 标注。
+> **IoTDB 细节已于 2026-09-21 按一手来源补核完毕**（见 §5.2：推翻原文 4 处描述，含路径缺 `root.`、
+> 树模型无 `MAX`/`MIN` 等）；仍未能核实项在 §5.2 末尾单列，不得当作既定事实。
 > **定位**：自用 / 对外开源的物联网平台脚手架，预留半商用（继承 `IOT-CLOUD-SPEC.md` v4 的定位）。
 > **形态**：`ypbin-iot` = `ypbin-admin` 的 fork + IoT 业务域，按 admin 的「业务域」模式增量添加。
 > **方向（2026-09-20 用户拍板）**：以后不再按「最小可跑通增量」推进，一律以**最完善的功能与设计**展开；
@@ -30,6 +31,16 @@
 | **D0.2** | 物模型语义 | **对齐华为云 IoTDA 官方结构**：`产品(Product) → 服务(Service) → 属性(Property)/命令(Command)`；**事件（Event）为本平台在服务层的扩展**（IoTDA 的事件仅存在于运行期 topic/API payload，不在其 TSL 结构内）；不采用旧 spec A7 的「四类平铺」 |
 | **D0.3** | 交付次序 | 先出完整设计文档 → 外委独立复核（R1–R8）→ 复核通过 → 更新路线 → 分阶段实现 |
 | **D0.4** | 与 3b-2 关系 | 3b-2（协议栈接入）技术路径不变；但其 `DeviceRegistry.loadAll()` 的「采什么点位」依赖本文档 §3（物模型）+ §4（设备台账）⇒ 物模型完整设计**优先于或并行于** 3b-2 落地 |
+
+**D0.5（2026-09-21 追加）｜跨租户访问的契约以「静默过滤 + 不泄露存在性」为准，不再表述为 `R.code=403`**
+
+- **背景（实现 M-1 时发现）**：原文 §10/§13 把越权表述为「A 租户 token 访问 B 租户数据 → HTTP 200 + `R.code=403`」，但**平台当前没有把「跨租户资源」映射成 403 的代码落点**。核实证据：全仓 `FORBIDDEN` 仅由 `SaTokenExceptionHandler`（权限码/角色不足、账号封禁）、`PlatformAccessAspect`（非平台用户访问平台资源）与 `GatewayExceptionHandler` 产生；租户隔离由 MyBatis-Plus 租户插件（`TenantLineInnerInterceptor` + `ignore-tables`）在 **SQL 层静默追加 `tenant_id` 条件**完成，越权访问的结果是「查不到」而非「被拒绝」。
+- **结论**：
+  - 按 id 查详情：`HTTP 200` + `R.code=409`（业务错误「XX 不存在」）；
+  - 列表/分页：`HTTP 200` + `R.code=200`，且只含本租户数据；
+  - `R.code=403` 仅用于**权限码/角色不足**与**平台资源越界**两种场景。
+- **理由**：返回 403 等于告知调用方「该 id 确实存在、只是你无权访问」，属**存在性泄露**；静默过滤更安全，且与既有基座实现一致（为迎合文档去改代码会让安全性变差）。
+- **越权用例的必测断言**（取代「断言等于 403」）：① 读不到对方数据；② 响应体不含对方任何字段；③ 跨租户写**无效果**（不得改动对方任何行）；④ 列表/分页结果只含本租户数据。语义见 §10，验收口径见 §14。
 
 **沿用 spec v4 的既有决策（不再重述推理，只列编号）**：
 A1 access 独立部署 ｜ A2 部署单元收敛 ｜ A3 租户上下文只信网关注入 ｜ A4 租户插件强制注入 +
@@ -213,7 +224,7 @@ business 变更台账（产品/设备/点位映射/凭据）
 | product_id | bigint | 所属产品 |
 | service_id | varchar(64) | 服务标识（PascalCase，产品内唯一） |
 | service_name | varchar(128) | 服务名称 |
-| option | varchar(16) | `master`/`mandatory`/`optional`（对齐 IoTDA） |
+| service_option | varchar(16) | `master`/`mandatory`/`optional`（对齐 IoTDA 的 `option` 字段；**列名不叫 `option`：它是 MySQL 保留字，建表直接语法报错**；TSL 对外契约字段仍为 `option`） |
 | sort | int | 排序 |
 | description | varchar(255) | 描述 |
 
@@ -401,19 +412,53 @@ business 变更台账（产品/设备/点位映射/凭据）
 
 ### 5.2 时序存储（IoTDB，选型 Apache-2.0）
 
-> ⚠️ **核实状态（2026-09-20）**：本会话网络受限（iotdb.apache.org / github 不可达），无法按一手来源复核
-> IoTDB 乱序/TTL/聚合细节；以下基于 `IOT-CLOUD-SPEC.md` v4 §12.5 的记录（含其"乱序 memtable 默认开启"一说，
-> 本会话未能复核该句的一手来源）。**结论强度受限**：设计决策不依赖这些细节；M-2 实现前必须按一手来源补核。
+> ✅ **核实状态（2026-09-21 已按一手来源补核）**：本节原标注「⚠️ 未一手核实」。现已逐条核实官方文档站、
+> 官方文档仓（`apache/iotdb-docs`）与官方源码/发布说明，**推翻原文 4 处描述**（见下「必须修正」）。
+> 引用均为一手来源；**未能核实项在文末单列**，不得当作既定事实。选型（树模型 vs 表模型）见 **Q8**。
 
-| 设计点 | 结论（⚠️ 未一手核实，M-2 前补核） |
+**版本线与许可**
+
+| 项 | 结论 |
 |---|---|
-| 存储布局 | 本平台决策：按租户分 database（多租户时序隔离）；设备时序按 `{tenant}.device.{deviceId}` 组织 |
-| 时间序列 | 每设备每属性一条 time series：`ts, value, quality` |
-| 乱序处理 | spec 记录：1.x 默认接受乱序（乱序 memtable），进独立乱序空间 + 后续与顺序文件合并；代价=写放大/合并压力（M-2 实测项） |
-| 数据保留 | TTL 策略（Q2 开放问题，M-2 前定） |
-| 查询 | 原始值/降采样聚合（AVG/MAX/MIN/SUM/COUNT）/最新值（M-2 前按官方语法补核） |
-| 写入 | access→business 批量写入；单点写放大控制（M-2 实测项） |
-| 许可 | Apache-2.0（spec v4 §7 已一手核实，2026-09-15；本会话网络不可达未能复核，维持 spec 结论） |
+| 版本线 | 2.0.x 最新稳定 **2.0.11（2026-09-11）**；1.3.x 最新 **1.3.7（2026-03-04）**；0.13.x（legacy，0.13.4） |
+| 2.x 模型级变化 | 2.x 引入**树模型 + 表模型双模型**（twin mode，库级隔离），**默认仍为树模型**，可 `sql_dialect` 切换；**2.0.11 起最低 JDK 17**（破坏性变更；本平台 JDK 21 满足） |
+| 许可 | **Apache-2.0** ✅ 确认成立 |
+
+**存储与命名（原文有错）**
+
+| 设计点 | 核实结论 |
+|---|---|
+| 路径布局 | **必须以 `root.` 开头**：`root.{tenant}.device.{deviceId}.{measurement}`。原文 `{tenant}.device.{deviceId}` **字面非法**（`root` 是保留字且只允许出现在路径开头） |
+| 库名长度 | **≤64 字符（含 `root.`）** ⇒ `tenantId` 实际 **≤57 字符**，须在租户注册处校验（注意中文/特殊字符的 UTF-8 长度口径） |
+| 名称字符集 | 非 root 层允许 `a-zA-Z0-9_` 与中文；**库名为纯数字、或含 `.`/`_` 等歧义字符时必须整体加反引号**，且**非 SQL 接口（Session/JDBC 参数）同样要带反引号**；反引号还会**出现在查询结果表头** ⇒ **本平台定：`tenantId` 取非纯数字形式 `t<数字>`**，从根上规避「SQL ↔ Session 参数 ↔ 结果解析」三处不一致 |
+| 保留字 | 代码运行时仅 3 个：`TIME`/`TIMESTAMP`/`ROOT`（文档另列 `PATH`）。**`device`/`value` 不是保留字**（原「避开 `device`」降级为可选风格建议） |
+| 序列模型 | 树模型**没有 `ts` 列**——时间戳是每条序列的隐式主键，**一条 time series = 一个路径节点**。原文「三列 `ts, value, quality`」是**表模型**的说法 ⇒ 树模型下 quality 须**另建 `.quality` 序列**或用 `create aligned timeseries` 对齐 |
+| 性能建模 | 官方建议路径**倒数第二层（设备数）≥1000**（与并发处理能力挂钩）；设备少而测点多时**在路径末尾加 `.value` 层**；层级子节点数无上限 |
+
+**查询（原文有错）**
+
+| 设计点 | 核实结论 |
+|---|---|
+| 聚合 | 原文 `AVG/MAX/MIN/SUM/COUNT` **错误**：树模型**无 `MAX`/`MIN`**，官方名为 **`MAX_VALUE`/`MIN_VALUE`**（1.3.x 与 2.0.x 皆然）；裸 `MAX`/`MIN` 只属 **2.x 表模型** |
+| 降采样 | 树模型**无 `date_bin`**、无 `GROUP BY TIME(...)`；只能用 `GROUP BY ([start, end), interval[, slidingStep])`。`date_bin`/`date_bin_gapfill`/`HOP`/`TUMBLE` **仅 2.x 表模型** |
+| 最新值 | 官方推荐 **`SELECT LAST`**（非 `ORDER BY TIME DESC LIMIT 1`）。**限制**：WHERE 只支持时间过滤，其它过滤条件会抛异常；返回四列且 **`value` 恒为字符串**，必须读 `dataType` 列还原真实类型。需非时间过滤时用 `last_value()`+`max_time()` 组合 |
+
+**写入与保留**
+
+| 设计点 | 核实结论 |
+|---|---|
+| 批量写入 | 官方**明确推荐 `SessionPool`**（非裸 `Session`）；批量接口 `insertRecords`/`insertRecordsOfOneDevice`/`insertTablet(s)`/`insertAligned*`；批内有序时传 `haveSorted`/`sorted=true` 省服务端排序。⚠️ **「`insertTablet` 最快」无官方依据**（未核实，需自测） |
+| 乱序处理 | **seq/unseq 分空间**由配置模板确证（`enable_separate_data=true`：顺序/乱序数据分目录），跨空间合并由 `enable_cross_space_compaction`/`enable_auto_repair_compaction` 收敛；`enable_discard_out_of_order_data`（默认 `false`=不丢弃）存在于 ≤1.2.x，**1.3.0 起移除**；2.x 另有 `enable_delay_analyzer`（乱序水位）。⚠️ 机制描述仅见于**配置模板而非文档手册**（结论强度：较高）。**「代价=写放大」须删**：官方**无此表述**（0 命中），唯一官方代价表述是 **「Out-of-order data will impact the aggregation query a lot.」**（出自 ≤1.2 的配置注释）。**M-2 用官方 Benchmark 乱序参数实测**（`IS_OUT_OF_ORDER` / `OUT_OF_ORDER_MODE=POISSON` / `OUT_OF_ORDER_RATIO=0.5`）替代该表述 |
+| 数据保留（Q2） | TTL 语法与粒度已核实：`SET TTL TO <pathPattern> <毫秒>`（**单位恒为 ms，与 `timestamp_precision` 无关**）；粒度 **device 级**（≥1.3.3）与 pathPattern 级，**最多 1000 条规则**；后台任务 `ttl_check_interval` 默认 **7200000ms（2h）**、改后需重启生效；**过期数据立即不可查且不可写（错误码 607 `OUT_OF_TTL`）**，但**物理删除延迟到 compaction**；**降低/移除 TTL 会让原本不可见的数据重新可见**（合规上须与「删除」语义区分）。树模型库级 TTL 在建库时指定；**表模型不支持修改库级 TTL**。三方案与代价见 **Q2** |
+| ⚠️ 官方文档与出厂配置冲突 | `enable_timed_flush_unseq_memtable`：**文档手册写默认 `false`，出厂配置模板实为 `true`** ⇒ 以实际部署的 `iotdb-system.properties` 为准，勿按文档假设（直接影响小文件与合并压力判断） |
+
+**必须修正的 4 处原文**（已在上面表格修正）
+1. `{tenant}.device.{deviceId}` → **`root.{tenant}.device.{deviceId}.{measurement}`**（原文写法 SQL 全部非法）
+2. 聚合 `AVG/MAX/MIN/SUM/COUNT` → 树模型为 **`AVG/MAX_VALUE/MIN_VALUE/SUM/COUNT`**
+3. 「每设备每属性一条序列 `ts, value, quality`」→ 树模型**无 `ts` 列**，quality 须另建序列或 ALIGNED
+4. 「乱序代价=写放大」→ **删除**（非官方用语），改为官方「影响聚合查询」+ M-2 实测
+
+**未能核实（不得当既定事实）**：单节点名长度上限；database 数量硬上限；Linux 下路径是否保留大小写；乱序代价的量化数据；树模型**运行时**是否真的拒绝裸 `MAX`/`MIN`；官方两个函数参考页（`Function-and-Expression.md` 与 `Operator-and-Expression.md`）聚合表**互相矛盾**（两者均无 MAX/MIN，故核心结论不受影响）；表模型 `SUM` 是否在官方函数表；`insertTablet` 是否最快。
 
 ### 5.3 最新值（Redis）
 
@@ -517,7 +562,7 @@ UI/OpenAPI → business(core.device)
 | 形态 | `ypbin-iot` 内独立 `openapi` 包（或条件触发拆模块），不复用后台会话令牌 |
 | 认证 | API Key（租户维度，只存哈希、可轮换、可撤销）+ 限流（R.code=429） |
 | 能力 | 设备数据查询/命令下发/属性上报（对接第三方系统） |
-| 契约 | 与后台同一套 DTO/R；越权返回 HTTP 200 + R.code=403 |
+| 契约 | 与后台同一套 DTO/R；**跨租户越权表现为「查不到」**（单条查 `HTTP 200 + R.code=409` 业务错误「不存在」、列表查仅返回本租户数据，不泄露存在性；`R.code=403` 仅用于权限码/角色不足与平台资源越界）——语义见 **D0.5** |
 
 ---
 
@@ -527,7 +572,7 @@ UI/OpenAPI → business(core.device)
 |---|---|
 | 租户上下文 | 只信网关注入（A3）；`X-Tenant-Id` 等身份头在网关剥离名单（admin 既有） |
 | 落库强制 | MyBatis-Plus 租户插件 + `ignore-tables` 清单（平台表：tenant/日志/字典/全局配置/`tenant_node_assignment`；`tenant_config_epoch` 落地后同列） |
-| 越权用例 | **每服务必测**：A 租户 token 访问 B 租户数据 → HTTP 200 + R.code=403；access 跨租户订阅拒绝 |
+| 越权用例 | **每服务必测**（断言口径见 **D0.5**）：A 租户 token 访问 B 租户数据 → ① 读不到对方数据；② 响应体不含对方字段；③ 跨租户写无效果；④ 列表只含本租户数据。表现为「查不到」而非 403（单条查 `R.code=409`、列表查 `R.code=200`），以**不泄露存在性**；另需测 access 跨租户订阅拒绝 |
 | 入站可信 | `InternalTokenGuardInterceptor`（fail-closed + 常量时间比较，admin 既有模式） |
 | EMQX ACL | spec §12.4(A) 主题×主体矩阵逐条配平；设备只能 pub 自己的 `$iot/dev/{t}/{d}/**`；除 access 外不得订阅设备树 |
 | 凭据 | `credential_ref` 本地解析、明文不下发；API Key 只存哈希 |
@@ -594,7 +639,7 @@ UI/OpenAPI → business(core.device)
 
 | 里程碑 | 交付（完整规格） | 验收要点 |
 |---|---|---|
-| **M-1 物模型域** | 产品/服务/属性/命令/事件 + 版本化 + TSL 导入导出 + 点位映射 + 影子 + 分组标签（§3/§4/§12 相关表） | 建产品→定义 TSL→绑定设备→映射点位→影子可读可写；越权用例绿 |
+| **M-1 物模型域** | 产品/服务/属性/命令/事件 + 版本化 + TSL 导入导出 + 点位映射 + 影子 + 分组标签（§3/§4/§12 相关表） | 建产品→定义 TSL→绑定设备→映射点位→影子可读可写；越权用例绿（断言口径按 **D0.5**，非断言 `R.code=403`） |
 | **M-2 数据面** | access 协议栈（3b-2）+ 上报链路 + IoTDB + Redis 最新值 + 断档/可用率 + **M0b 收口**（节点注册表落库、可分配租户读台账、真库并发用例、数据库时钟、`tenant_config_epoch` 落地、`ILeaseClient` 超时/重试显式化——完整清单见 §7）+ **EMQX provisioning 选型落地（Q4）**（§4.2/§7/§5） | 真实 socket 采数→页面看值；可用率口径可算；多副本并发单赢家；provisioning 生效 |
 | **M-3 控制面** | 命令下行 + 影子同步 + 在线调试（§6） | 命令有超时与可区分失败；断网重连自动恢复 |
 | **M-4 规则告警** | 规则引擎 + 告警闭环 + 通知（§8）+ **平台自身可观测与告警阈值**（§15.2 Q7） | 规则真触发并通知；抑制窗口生效；平台告警阈值生效 |
@@ -617,12 +662,13 @@ UI/OpenAPI → business(core.device)
 | # | 问题 | 影响 |
 |---|---|---|
 | Q1 | ~~事件是否纳入物模型服务层~~ **已定（2026-09-20）**：纳入，证据见 §3.6 | 物模型表结构 ✅ |
-| Q2 | 数据保留策略（原始点保留多久/是否降采样） | IoTDB TTL 与容量 |
+| Q2 | **数据保留策略**（原始点保留多久/是否降采样）。三个候选与代价（§5.2 已核实的边界）：**(a) 表模型库级 TTL + 表级覆盖**——粒度最好；代价：表模型**不支持改库级 TTL**，调整保留期须重建库或逐表改，改库级**不回溯**已存在的表。**(b) 树模型按租户规则** `SET TTL TO root.t{t}.** <ms>`——语义清晰；代价：**1000 条规则硬上限**，租户数 >1000 即不可行。**(c) 统一规则 + 少数特例** `SET TTL TO root.** <ms>`——无上限风险；代价：失去按租户差异化。**无论选哪个都必须写进设计**：删除不即时（后台 2h + compaction 才物理删）；**降 TTL 会让旧数据复活**（合规风险）；早于 TTL 边界的写入被拒（607） | IoTDB TTL 与容量 |
 | Q3 | 命令超时全局默认值 | §3.5/§6.1 |
 | Q4 | EMQX provisioning 形态三选一（内建/HTTP/mTLS） | §4.2 |
 | Q5 | 通知渠道首期范围（webhook/邮件/短信） | §8.2 |
 | Q6 | 开放 API 是否拆独立模块 | §9 |
 | Q7 | **平台自身可观测与告警阈值**：指标（micrometer+Prometheus）/结构化日志/链路追踪（OTel）范围，以及**平台自告警阈值**（服务不可用/成功率/丢弃率/磁盘水位/租约指标——LEASE.md 已埋 `iot.lease.takeover|expired|revoked` 但阈值未定） | §2.1 部署视图（可观测为平台横切能力）；M-4 收口 |
+| Q8 | **IoTDB 选树模型还是表模型**（2.x 双模型）。**树模型**：路径即模型、写入直观、`SELECT LAST` 有微秒级缓存；代价：聚合无 `MAX`/`MIN`（用 `MAX_VALUE`/`MIN_VALUE`）、降采样只能用 `GROUP BY ([start,end), interval)`、无标准 `date_bin`、quality 需另建序列。**表模型**：标准 SQL（`date_bin`/裸 `MAX`/`MIN`/TAG+FIELD 建模）、TTL 粒度好；代价：模型迁移成本、库级 TTL 不可改。**建议 M-2 前做一次 POC**（`sql_dialect` 切换 + tree-to-table view），避免选型锁死 | §5.2 / §5.4 |
 
 ### 15.3 风险（继承 spec §14 + 新增）
 1. 全平台一次性设计面大，**实现必须分里程碑**（§14），避免「四个半成品」。

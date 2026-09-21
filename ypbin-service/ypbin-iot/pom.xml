@@ -102,6 +102,14 @@
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
+
+        <!-- 集成测试支撑：testcontainers + MySQL 容器 + @EnabledIfMySqlAvailable 条件
+             （与 starter 各模块的 IT 同一套约定：外部实例优先 YPBIN_TEST_MYSQL_URL，否则容器回退） -->
+        <dependency>
+            <groupId>cn.ypbin</groupId>
+            <artifactId>ypbin-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
@@ -121,4 +129,36 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <!-- 集成测试（-Pit）：需要真实 MySQL/Redis（外部实例或 Docker 容器）。
+             默认不激活——单元测试恒为 DB-free；集成测试由 CI 与本地按需显式触发。 -->
+        <profile>
+            <id>it</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
+                        <!-- 与 surefire 同版本族（JUnit 5 支持）：沿用根 pom 的版本属性 -->
+                        <version>${maven-surefire-plugin.version}</version>
+                        <configuration>
+                            <!-- 关键：本模块有 spring-boot-maven-plugin:repackage，failsafe 在 package 之后运行，
+                                 若按默认取「项目制品」会拿到重打包后的 fat jar（类在 BOOT-INF/classes 下，
+                                 普通类加载器看不见）⇒ 测试里 ClassNotFoundException。显式指回 classes 目录。 -->
+                            <classesDirectory>${project.build.outputDirectory}</classesDirectory>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <goals>
+                                    <goal>integration-test</goal>
+                                    <goal>verify</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>
