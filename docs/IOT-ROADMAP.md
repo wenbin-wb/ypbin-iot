@@ -137,6 +137,37 @@
 - **iot-starter 源码树绝不能落在本仓工作目录内**（否则「仓内每个 pom 都必须有归属」门禁转红——旧栈 CI 实测失败）；
 - 依赖接入后需重跑：`ypbin-architecture-tests`（模块归属/发布规则）+ 白名单门禁（`pom.xml` 变更需同步 `SYNC.md`）。
 
+### 四点四、⚠️ 阻塞：协议栈依赖与「不可改的 ci.yml」冲突（2026-09-21 实测，需决策）
+
+**现象**：给 access 加上 iot-starter 依赖后，主 CI（`.github/workflows/ci.yml`，admin 拥有、在白名单内、
+**本仓不允许修改**）会转红。根因不是测试/代码，而是 Maven 的模型解析：
+
+```
+Non-resolvable import POM: Could not find artifact cn.ypbin:ypbin-iot-bom:pom:0.1.0-SNAPSHOT
+  @ cn.ypbin.admin:ypbin-access:pom
+ERROR The build could not read 1 project
+```
+
+即：**reactor 里只要有一个模块的 pom 引用了解析不出来的 BOM，Maven 连「读项目」这一步都会失败**，
+连 `-pl <某模块> -am` 也救不了（实测：`mvn -o -pl ypbin-service/ypbin-iot -am validate` 同样失败）。
+而 `ypbin-iot-starter` 的 `0.1.0-SNAPSHOT` **未发布到任何远程仓库**（其 ROADMAP 的决策是
+「先让 access 用 SNAPSHOT 跑通，再发 0.1.0」），ci.yml 里也没有「装 iot-starter」这一步。
+
+**为什么本仓自己解决不了**：ci.yml 属于 admin 白名单文件，改它会让 `Sync Whitelist` 门禁转红、
+并使 `git merge upstream/main` 的分歧面变大（SYNC.md 第二节）。而本仓能新增的文件（如 `.mvn/maven.config`
++ 自定义 settings）虽然能注入仓库配置，但**造不出制品**——问题在「制品可得性」，不在配置。
+
+**三个可行方向（择一，未擅自实施）**：
+
+| 方案 | 做法 | 代价 / 风险 |
+|---|---|---|
+| **A. 发布制品**（终态） | 把 `ypbin-iot-starter` 发到远程仓库（Central 正式版，或 GitHub Packages） | Central=一次正式发版（其 ROADMAP 本就是这个方向）；GitHub Packages 需在消费侧注入带凭据的 settings（本仓可用新增的 `.mvn/maven.config` 指向自有 settings，但会覆盖开发者本地 settings —— 国内需同时保留 aliyun 镜像，且本地必须能拿到 token） |
+| **B. admin 侧改 ci.yml** | 在 admin 仓的 ci.yml 里加一步「取源并安装 iot-starter」，本仓靠同步获得 | 语义不对（admin 的 CI 不该知道 IoT 协议栈）；需跨仓 PR + 合并 + 同步，周期长 |
+| **C. 依赖移出默认 reactor**（过渡） | 新增 `ypbin-access-stack` 模块承载协议栈装配，并在 `ypbin-service/pom.xml` 里**放进 profile**（默认不激活）；CI 默认构建不含它 ⇒ 不解析 iot BOM；3b-2 的构建/集成测试用 `-Piot-stack` | 主 CI 今天就能绿、零外部依赖；但**部署也必须带该 profile**（install.sh / compose 的构建命令要同步改），否则部署出来的 access 不含协议栈——属于「用构建开关表达能力开关」，需要接受这个形态 |
+
+**倾向**：先按 **C** 过渡（立刻解除对主 CI 的阻塞，且不碰 admin），等 iot-starter 发正式版（A）后把依赖移回
+默认 reactor、去掉 profile。
+
 ### 四点五、实测踩到的两个坑（2026-09-21 实施时发现，务必照抄结论）
 
 1. **导入 `ypbin-iot-bom` 会把 `ypbin-starter-*` 的版本顶成 `0.1.0-SNAPSHOT`（不存在）**：
