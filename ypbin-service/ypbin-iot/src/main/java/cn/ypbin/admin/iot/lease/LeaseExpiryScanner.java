@@ -43,6 +43,6 @@ public class LeaseExpiryScanner {
     /** 周期扫描（间隔由 {@code ypbin.lease.scan-interval-ms} 控制）。 */
     @Scheduled(fixedDelayString = "${ypbin.lease.scan-interval-ms:15000}")
     public void scan() {
-        leaseService.markExpired(LocalDateTime.now());
+        leaseService.markExpired();
     }
 }

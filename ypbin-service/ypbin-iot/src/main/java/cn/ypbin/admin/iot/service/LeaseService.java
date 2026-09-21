@@ -83,5 +83,5 @@ public interface LeaseService {
      * @param now 当前时刻
      * @return 本次置为待接管的租户数
      */
-    int markExpired(LocalDateTime now);
+    int markExpired();
 }

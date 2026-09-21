@@ -129,6 +129,8 @@ class LeaseServiceImplTest {
         properties.setAssignableTenantIds(List.of(11L, 22L));
         lenient().when(mapper.selectList(any())).thenReturn(List.of());
         lenient().when(mapper.selectCount(any())).thenReturn(0L);
+        // M0b-4：服务改用数据库时钟 ⇒ 桩一个固定值（否则 selectNow() 返回 null 会 NPE）
+        lenient().when(mapper.selectNow()).thenReturn(LocalDateTime.of(2026, 9, 21, 12, 0));
         service = new LeaseServiceImpl(mapper, registry, ledgerMapper, properties,
             new SimpleMeterRegistry(), noTx());
     }
@@ -283,7 +285,7 @@ class LeaseServiceImplTest {
     void markExpiredMustSetPendingTakeover() {
         when(mapper.update(isNull(), any())).thenReturn(1);
 
-        service.markExpired(LocalDateTime.now());
+        service.markExpired();
 
         LambdaUpdateWrapper<TenantNodeAssignment> wrapper = capturedUpdate();
         assertMentionsState(wrapper, LeaseState.PENDING_TAKEOVER, "扫描的目标状态必须是待接管");
@@ -418,7 +420,7 @@ class LeaseServiceImplTest {
     void markExpiredShouldUseSingleAtomicUpdate() {
         when(mapper.update(isNull(), any())).thenReturn(3);
 
-        int affected = service.markExpired(LocalDateTime.of(2026, 9, 19, 12, 0));
+        int affected = service.markExpired();
 
         assertThat(affected).isEqualTo(3);
         LambdaUpdateWrapper<TenantNodeAssignment> wrapper = capturedUpdate();
@@ -432,7 +434,7 @@ class LeaseServiceImplTest {
     void markExpiredShouldBeNoopWhenNothingExpired() {
         when(mapper.update(isNull(), any())).thenReturn(0);
 
-        assertThat(service.markExpired(LocalDateTime.now())).isZero();
+        assertThat(service.markExpired()).isZero();
     }
 
     @Test

@@ -153,7 +153,8 @@ public class LeaseServiceImpl implements LeaseService {
         //    本仓真库并发用例实测到 MySQL 死锁（DeadlockLoserDataAccessException）。
         //    锁顺序统一为「先节点行、后归属表」是这里的关键不变量。
         int capacity = nodeRegistry.lockCapacity(node);
-        LocalDateTime now = LocalDateTime.now();
+        // M0b-4：时间基准取**数据库时钟**（多节点时钟漂移会让快的节点提前抢走仍在续约的租户）
+        LocalDateTime now = mapper.selectNow();
         LocalDateTime expireAt = now.plus(properties.getTtl());
 
         // ① 续期自己在采的（单条原子 UPDATE）。**不读 affectedRows**：真实持有的租户以 ② 的批量查询为准
@@ -227,7 +228,8 @@ public class LeaseServiceImpl implements LeaseService {
             log.warn("[iot] 续约来自未注册节点，判定节点失效：node={}", LogSanitizer.sanitize(node));
             return resp;
         }
-        LocalDateTime now = LocalDateTime.now();
+        // M0b-4：时间基准取**数据库时钟**（多节点时钟漂移会让快的节点提前抢走仍在续约的租户）
+        LocalDateTime now = mapper.selectNow();
         LocalDateTime expireAt = now.plus(properties.getTtl());
         List<Long> requested = new ArrayList<>();
         for (LeaseRenewItem item : req.getLeases()) {
@@ -279,7 +281,8 @@ public class LeaseServiceImpl implements LeaseService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void release(LeaseReleaseReq req) {
-        LocalDateTime now = LocalDateTime.now();
+        // M0b-4：时间基准取**数据库时钟**（多节点时钟漂移会让快的节点提前抢走仍在续约的租户）
+        LocalDateTime now = mapper.selectNow();
         int rows = mapper.update(null, Wrappers.<TenantNodeAssignment>lambdaUpdate()
             .eq(TenantNodeAssignment::getAccessNode, req.getAccessNode())
             .in(TenantNodeAssignment::getTenantId, req.getTenantIds())
@@ -320,13 +323,15 @@ public class LeaseServiceImpl implements LeaseService {
         }
         TenantEpochBatchResp resp = new TenantEpochBatchResp();
         resp.setItems(items);
-        resp.setReadAt(LocalDateTime.now());
+        resp.setReadAt(mapper.selectNow());
         return resp;
     }
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public int markExpired(LocalDateTime now) {
+    public int markExpired() {
+        // M0b-4：入参不再由调用方给本机时钟，统一取数据库时钟（调用方给什么就可能给错）
+        LocalDateTime now = mapper.selectNow();
         int rows = mapper.update(null, Wrappers.<TenantNodeAssignment>lambdaUpdate()
             .eq(TenantNodeAssignment::getState, LeaseState.ACTIVE.getCode())
             .le(TenantNodeAssignment::getLeaseExpireAt, now)

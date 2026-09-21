@@ -269,6 +269,30 @@ ERROR The build could not read 1 project
 （而不是普通 IT 的裸 `SqlSessionFactory`）——否则 `FOR UPDATE` 的锁在语句结束即释放，用例会**假绿**。
 另外 `-Pit -pl <模块>` **必须带 `-am`**（不带会从 `~/.m2` 取到旧的兄弟模块 jar，见教训十八）。
 
+### 四点九、M0b-3 / M0b-4：台账写入口与**数据库时钟**
+
+**M0b-3（配置版本号）**
+- 新增 `TenantLedgerService.setAssignable(...)`：新建 ⇒ `config_epoch=1`；变更 ⇒ 一条 UPDATE 内
+  `assignable=? , config_epoch = config_epoch + 1`（**同语句**，否则「台账变了、版本没变」⇒ 接入侧漏拉）；
+  **软删过则复活同一行**（`uk_tenant_ledger(tenant_id)` 不含量删标记 ⇒ 盲目 insert 撞唯一键，与 M-1 的
+  `iot_service` 同类）；并发首次写入撞唯一键退化为复活。
+- 对账契约 `TenantEpochItem` 现同时带 `epoch`（归属：**谁在采**）与 `configEpoch`（配置：**要采什么**），
+  `batchEpoch()` 一并回填 ⇒ 接入侧一次批量拉取即可「不一致才拉全量」。
+- 真库用例 `TenantLedgerIT`：新建=1 → 变更=2 → **软删后重设必须复活且=3**、全程仅一行。
+  **它当场抓到实现者的真 bug**：`BaseEntity.getIsDeleted()` 是 **Integer** 而非 Boolean，
+  `Boolean.TRUE.equals(...)` 恒假 ⇒「复活」被误判成「更新」。
+
+**M0b-4（数据库时钟）**
+- 租约的时间基准统一改为 **`SELECT NOW()`（数据库时钟）**：`doAcquire`/`renew`/`release`/`markExpired`
+  以及 `batchEpoch.readAt` 都取 DB 时间；`markExpired()` 不再接受调用方传入的本机时间（给什么就可能给错）。
+- 原因：写入与过期判定各读本机时钟时，**时钟快的节点会提前抢走仍在正常续约的租户**（表现为莫名频繁的接管，
+  且无显式错误）。
+- 真库用例 `LeaseDbClockIT`：把该用例自己的连接池会话时区设为 `-11:00`，使 DB 的 `NOW()` 与 JVM 时钟
+  相差数小时，再断言落库的 `lease_expire_at` 跟 **DB 时钟**走。
+  **变异验证**：把 `doAcquire` 退回 `LocalDateTime.now()` ⇒ 用例转红，报
+  「到期时间应≈DB 现在(07:42:15)+ttl，实际=18:42:46」**相差 39601 秒**；还原后逐字节一致。
+  （该用例在 JVM 时区恰好等于 -11:00 时会显式跳过「必须偏离」那半条断言，而不是假装通过。）
+
 ### 五、替换缝（3a 已备好，3b-2 只需新增自动配置）
 3a 的 `LoggingTenantLinkManager` 已去掉 `@Component`，由 `AccessLeaseConfiguration`（`@AutoConfiguration`
 + `@Bean @ConditionalOnMissingBean`）装配，并有源码门禁守着（四处变异全咬）。⇒ 3b-2 提供真实现时
