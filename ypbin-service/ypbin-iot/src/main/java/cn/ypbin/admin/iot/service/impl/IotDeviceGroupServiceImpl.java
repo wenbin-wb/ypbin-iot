@@ -25,6 +25,8 @@ import cn.ypbin.starter.core.exception.GlobalErrorCode;
 import cn.ypbin.starter.crud.service.BaseServiceImpl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -91,13 +93,22 @@ public class IotDeviceGroupServiceImpl extends BaseServiceImpl<IotDeviceGroupMap
             new LambdaQueryWrapper<IotDeviceGroupMember>()
                 .eq(IotDeviceGroupMember::getGroupId, groupId)
                 .orderByAsc(IotDeviceGroupMember::getId));
+        if (members.isEmpty()) {
+            return List.of();
+        }
+        List<Long> deviceIds = members.stream()
+            .map(IotDeviceGroupMember::getDeviceId)
+            .distinct()
+            .toList();
+        Map<Long, IotDevice> devices = iotDeviceMapper.selectBatchIds(deviceIds).stream()
+            .collect(Collectors.toMap(IotDevice::getId, device -> device));
         return members.stream().map(member -> {
             IotDeviceGroupMemberResp resp = new IotDeviceGroupMemberResp();
             resp.setId(member.getId());
             resp.setGroupId(member.getGroupId());
             resp.setDeviceId(member.getDeviceId());
             resp.setCreateTime(member.getCreateTime());
-            IotDevice device = iotDeviceMapper.selectById(member.getDeviceId());
+            IotDevice device = devices.get(member.getDeviceId());
             if (device != null) {
                 resp.setDeviceCode(device.getDeviceCode());
                 resp.setDeviceName(device.getDeviceName());
