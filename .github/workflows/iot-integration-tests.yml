@@ -1,0 +1,89 @@
+name: IoT Integration Tests
+
+# 为什么单独一个工作流：本仓的 ci.yml 是 **DB-free** 的 `mvn -B clean verify`，无法承载需要真实
+# 中间件的集成测试；而设计 §15.1 门禁把「集成测试（-Pit）」列为必过项，§10/§14 的越权用例与
+# M-2 的「真库并发用例」都必须跑在真库上。
+#
+# 本工作流用 runner 自带 Docker + Testcontainers 起 MySQL（不依赖任何外部实例、不连生产库），
+# 跑 §5 之外第一优先的那条：**跨租户隔离**（断言口径见设计 D0.5）。
+#
+# ⚠️ 关键防假绿：starter 的容器化 IT 用 @EnabledIfMySqlAvailable，MySQL 不可用时**静默跳过**。
+# 跳过 == 没测，所以下面有一步专门断言「报告存在 + 执行条数 ≥1 + 无跳过」，否则整条工作流转红。
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: ['feat/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    name: 集成测试（-Pit，真 MySQL 容器）
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出 ypbin-iot 代码
+        uses: actions/checkout@v7
+
+      - name: 配置 JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: 读取本仓要求的 starter 版本
+        id: starter_version
+        run: |
+          set -euo pipefail
+          version="$(grep -oP '(?<=<ypbin-starter.version>)[^<]+' pom.xml)"
+          echo "本仓依赖 starter ${version}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      # 必须按 **tag** 取源而不能用 master：master 是下一个 SNAPSHOT（如 3.4.1-SNAPSHOT），
+      # 而集成测试要用的 ypbin-starter-test 模块**未发布到远程仓库**（Central 只有 pom、无 jar），
+      # 只能从与 ypbin-starter.version 同版本的 tag 源码本地安装获得。
+      - name: 检出 ypbin-starter（tag v${{ steps.starter_version.outputs.version }}）
+        uses: actions/checkout@v7
+        with:
+          repository: wenbin-wb/ypbin-starter
+          ref: v${{ steps.starter_version.outputs.version }}
+          path: ypbin-starter
+
+      - name: 本地安装 ypbin-starter（含未发布的 ypbin-starter-test）
+        run: mvn -B clean install -DskipTests -Djacoco.skip=true
+        working-directory: ypbin-starter
+
+      - name: 执行集成测试（-Pit；Testcontainers 用 runner 自带 Docker）
+        run: mvn -B -Pit -pl ypbin-service/ypbin-iot -am verify -Dsurefire.skip=true
+
+      - name: 断言集成测试真的执行了（防 @EnabledIfMySqlAvailable 静默跳过造成假绿）
+        run: |
+          set -euo pipefail
+          report="ypbin-service/ypbin-iot/target/failsafe-reports/cn.ypbin.admin.iot.it.IotTenantIsolationIT.txt"
+          if [ ! -f "$report" ]; then
+            echo "::error::未生成集成测试报告 $report ⇒ 集成测试没有执行（假绿）"
+            exit 1
+          fi
+          echo "--- $report ---"
+          cat "$report"
+          if grep -Eq "Skipped: [1-9]" "$report"; then
+            echo "::error::集成测试被跳过（MySQL 容器不可用）——跳过等于没测，不得以跳过收场"
+            exit 1
+          fi
+          total="$(grep -oP 'Tests run: \K[0-9]+' "$report" | head -1)"
+          if [ -z "$total" ] || [ "$total" -lt 1 ]; then
+            echo "::error::集成测试执行条数为 0"
+            exit 1
+          fi
+          echo "OK：集成测试执行 ${total} 条，无跳过"
+
+      - name: 上传集成测试报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iot-failsafe-reports
+          path: ypbin-service/ypbin-iot/target/failsafe-reports/
+          if-no-files-found: warn
