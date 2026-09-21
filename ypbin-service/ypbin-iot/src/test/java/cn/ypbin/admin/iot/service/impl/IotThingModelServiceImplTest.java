@@ -38,7 +38,7 @@ import cn.ypbin.admin.iot.model.tsl.TslProperty;
 import cn.ypbin.admin.iot.model.tsl.TslService;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
 import java.util.ArrayList;
 import java.util.List;
 import org.apache.ibatis.builder.MapperBuilderAssistant;

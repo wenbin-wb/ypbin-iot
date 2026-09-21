@@ -69,7 +69,7 @@ A11 变更推送以 epoch 为准。
 | 约束 | 影响 |
 |---|---|
 | 本机约 5.8G 内存，不跑容器 IT 与全量前端构建，一次只跑一个重型命令 | 本地不能同时起全部中间件；集成测试外移 CI |
-| `ypbin-iot-starter` 未发布到 Central（实测 404） | CI 显式取源并锁定 SHA；源码树不落仓内 |
+| ~~`ypbin-iot-starter` 未发布到 Central~~ **已解决（2026-09-21）**：`0.1.0` 已发 Maven Central（tag `v0.1.0` + GitHub Release） | 本仓直接依赖正式版 `0.1.0`，无需取源锁 SHA；**若将来切回 SNAPSHOT** 仍需 CI 取源 + 锁 SHA、源码树不落仓内 |
 | 母仓编码铁律（RED） | 见 §10 安全与 §15 门禁 |
 
 ---
@@ -106,7 +106,8 @@ A11 变更推送以 epoch 为准。
 数据面总线：EMQX（$iot/dev/** 设备树 / $iot/svc/** 内部面 / $events/** 连接事件）【目标态】
 基础设施：MySQL(元数据/租约) · IoTDB(时序)【目标态】 · Redis(最新值/影子/缓存) · EMQX【目标态】 · Nacos
 ```
-> **现状差异注（2026-09-20）**：access 目前**未接 iot-starter**（3b-2 未完成），无 EMQX 总线/时序库；
+> **现状差异注（2026-09-21 更新）**：access **已接入 iot-starter**（3b-2 已实现，PR #13；协议先上 tcp），
+> 仍**无 EMQX 总线/时序库**（M-2 数据面）；
 > 图中 EMQX、IoTDB、`$iot/**` 主题、access 协议栈宿主均为**目标态**；另：图中 business 画为单单元是 **A2 收敛目标**，
 > 现状 `deploy/docker-compose.yml` 中 system/auth/iot 为各自独立容器。
 
@@ -673,6 +674,6 @@ UI/OpenAPI → business(core.device)
 ### 15.3 风险（继承 spec §14 + 新增）
 1. 全平台一次性设计面大，**实现必须分里程碑**（§14），避免「四个半成品」。
 2. 物模型结构（产品→服务→属性/命令+事件扩展）与既有 `IotDevice`（无 product_id）的迁移：既有表需增量扩展（SQL 双写纪律）。
-3. iot-starter 未发布：CI 锁 SHA 取源（教训三十二）。
+3. ~~iot-starter 未发布~~ **已解决（2026-09-21）**：`0.1.0` 已发 Central。**将来切回 SNAPSHOT** 时仍需 CI 取源并锁 SHA（教训三十二）。
 4. 影子/最新值/时序三方一致性：允许最终一致窗口，须有对账用例。
 

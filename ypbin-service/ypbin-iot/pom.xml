@@ -72,6 +72,13 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
+        <!-- Reactor 跨线程租户传播（tenant 的 ThreadLocalAccessor，optional 不传递需显式引入）——
+             缺它时 starter 的 TenantAutoConfiguration 直接让应用起不来（实测：ClassNotFoundException
+             io.micrometer.context.ThreadLocalAccessor）。与 ypbin-system 的同款声明对齐。 -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>context-propagation</artifactId>
+        </dependency>
         <!-- 显式声明：@Idempotent 等来自 tools（原本只是传递依赖，传递链一变就断） -->
         <dependency>
             <groupId>cn.ypbin</groupId>
