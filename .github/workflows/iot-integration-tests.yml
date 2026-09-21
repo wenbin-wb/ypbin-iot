@@ -56,6 +56,22 @@ jobs:
         run: mvn -B clean install -DskipTests -Djacoco.skip=true
         working-directory: ypbin-starter
 
+      # 协议栈 0.1.0-SNAPSHOT 同样未发布：而 reactor 里只要有一个模块的 pom 引用了
+      # 解析不出来的 BOM，Maven 连「读项目」这一步都会失败（实测：The build could not read 1 project），
+      # 所以哪怕只测 ypbin-iot 也必须先把 iot-starter 装上。
+      # 两条纪律（教训三十二）：① 必须**锁 SHA**（跟随分支 = 同代码不同时间结果不同）；
+      # ② 源码树**放 workspace 之外**（放进仓库会让「仓内每个 pom 都必须有归属」的架构门禁转红）。
+      - name: 取源并安装 ypbin-iot-starter（锁 SHA，workspace 之外）
+        run: |
+          set -euo pipefail
+          git clone --quiet --no-tags https://github.com/wenbin-wb/ypbin-iot-starter.git /tmp/ypbin-iot-starter
+          git -C /tmp/ypbin-iot-starter checkout --quiet ${IOT_STARTER_SHA}
+          git -C /tmp/ypbin-iot-starter log --oneline -1
+          mvn -B -f /tmp/ypbin-iot-starter/pom.xml clean install -DskipTests -Djacoco.skip=true
+        env:
+          # 与 docs/IOT-ROADMAP.md 记录的已验 SHA 保持一致；升级时同时改这两处
+          IOT_STARTER_SHA: c4b28d1024108e1cc8710a305a63a358d7036ce9
+
       - name: 执行集成测试（-Pit；Testcontainers 用 runner 自带 Docker）
         run: mvn -B -Pit -pl ypbin-service/ypbin-iot -am verify -Dsurefire.skip=true
 
