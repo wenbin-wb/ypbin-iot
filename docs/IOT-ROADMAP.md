@@ -293,6 +293,41 @@ ERROR The build could not read 1 project
   「到期时间应≈DB 现在(07:42:15)+ttl，实际=18:42:46」**相差 39601 秒**；还原后逐字节一致。
   （该用例在 JVM 时区恰好等于 -11:00 时会显式跳过「必须偏离」那半条断言，而不是假装通过。）
 
+### 四点十、M0b 外委复核结论（PASS）与**待接线项**（如实登记，避免把前置件当闭环）
+
+第三次之后又做了一轮 **M0b 专项外委复核**：结论 **PASS（可合并）**，A–E 五组声明全部成立（各由复核者亲跑命令与
+亲读行号支撑），并给出 P1 缺陷与 P2–P10 建议。**已在本分支修掉 P1/P2/P3/P9**：
+
+- **P1（测试可重复性，已修）**：`LeaseConcurrencyIT` 的 `registerNode/purge` 原先用 MyBatis-Plus **逻辑删除**，
+  而 `uk_access_node(access_node)` 不含量删标记 ⇒ 对**持久化** MySQL 第二次运行整类失败
+  （复核者自建实例实测 `Duplicate entry ... uk_access_node`）。改为**物理删除**，并新增用例
+  `purgeMustPhysicallyRemoveNodeSoTestIsRepeatable`（连续注册两次不得撞唯一键）。
+  **变异验证**：把 `registerNode` 退回逻辑删除 ⇒ 该 IT 类 3 条全 ERROR，报的正是复核者的唯一键冲突；
+  还原后逐字节一致。（第一次变异只改了 `purge`，被 `registerNode` 的物理删除掩盖 ⇒ 说明**承重点在 registerNode**。）
+- **P2（代码缺口，已修）**：`AccessNodeRegistry.register` 补「复活软删节点行」分支
+  （`selectIncludingDeleted` + `revive`），与 `TenantLedgerService` 的复活语义对齐；
+  否则软删后注册会抛「并发冲突且无法读取」。
+- **P3（用例顺序耦合，已修）**：`assignableTenantsComeFromLedger` 自行 `registerNode()`，不再偷依赖其它用例。
+- **P9（清理，已修）**：删除死代码 `LeaseServiceImpl.capacityOf`、删除改签名后过期的 `@param now`、
+  删除 `LeaseExpiryScanner` 未用 import。
+
+**⚠️ 必须如实登记的待接线项（复核 P4–P8、P10 —— 现在还不是闭环）**：
+
+| # | 事项 | 现状（勿写成已完成） |
+|---|---|---|
+| **P4** | `config_epoch` **目前无消费方** | 接入侧 `AccessLeaseManager` 只用 register/acquire/renew，**从不调** `batchEpoch`/`/internal/lease/epochs` ⇒ 「不一致才拉全量」的**对账尚未落地**；本分支只交付了列/契约/写入口（前置件） |
+| **P5** | `TenantLedgerService.setAssignable` **无生产调用者/端点** | 「运维可动态增删可分配租户」在运行态**尚不可达**（仅 IT 调用） |
+| **P6** | 台账全置不可分配时会**静默回落配置** | 当前 nacos `assignable-tenant-ids: []` 故无害；一旦填了配置，撤销操作会被静默忽略 ⇒ 接线时须一并处理 |
+| **P7** | 容量只限「新分配」，**不回收存量** | 容量改小/改 0 后，既有 ACTIVE 行仍被续期，旧租户不会自动脱落（设计取舍，需显式说明） |
+| **P8** | `status` 列未参与过滤 | `assignableTenantIds`/`listAssignableTenantIds` 与 `selectByNode/selectForUpdate` 都不过滤 `status`（本仓他处是显式过滤的） |
+| **P10** | 多副本残余死锁面 | `renew/release/markExpired` 不取节点行锁，与 `doAcquire` 可能成环（表现为可重试死锁异常，非数据损坏） |
+
+**M0b-4 的残留面（复核 D 补充，写下来避免误以为已闭环）**：接入侧 `AccessLeaseManager` 仍用**本机时钟**
+做租约语义判定（`LeaseSnapshot` → `needsSelfFence(..., now)`）——服务端已改用 DB 时钟，
+但接入侧「本地到期即自行停采」的比较仍受本机时钟影响（**钟快=提前停采、钟慢=服务端接管后仍多采一段**）。
+彻底闭环需要租约契约带上**服务端时间**（如 `LeaseAcquireResp`/`RenewAck` 增加 serverTime），
+接入侧以「服务端时间 + 本地单调流逝」判断。属 M-2 数据面/契约项，登记在此。
+
 ### 五、替换缝（3a 已备好，3b-2 只需新增自动配置）
 3a 的 `LoggingTenantLinkManager` 已去掉 `@Component`，由 `AccessLeaseConfiguration`（`@AutoConfiguration`
 + `@Bean @ConditionalOnMissingBean`）装配，并有源码门禁守着（四处变异全咬）。⇒ 3b-2 提供真实现时

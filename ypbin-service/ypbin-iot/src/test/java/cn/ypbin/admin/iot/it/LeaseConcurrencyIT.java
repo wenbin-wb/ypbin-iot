@@ -199,6 +199,8 @@ class LeaseConcurrencyIT {
     @Test
     @DisplayName("M0b-2：可分配租户来自租户台账（配置为空时也能分配，证明来源已切换）")
     void assignableTenantsComeFromLedger() {
+        // P3：自行准备前置状态，不依赖其它用例先注册（否则单跑必红）
+        registerNode();
         LeaseServiceImpl replica = newReplica();
         // 台账只放一个可分配租户；properties.assignable-tenant-ids 保持为空
         insertAssignableTenants(List.of(TENANTS.get(0)));
@@ -212,6 +214,20 @@ class LeaseConcurrencyIT {
             .eq(TenantLedger::getAssignable, Boolean.TRUE))).isEqualTo(1L);
     }
 
+    @Test
+    @DisplayName("★ P1：用例必须可重复运行 —— purge/register 要**物理**删除节点行（逻辑删除会撞唯一键）")
+    void purgeMustPhysicallyRemoveNodeSoTestIsRepeatable() {
+        registerNode();
+        // 第二次注册：若 purge 走的是 MyBatis-Plus 逻辑删除，库里会留下 is_deleted=1 的行，
+        // 而 uk_access_node(access_node) 不含量删标记 ⇒ 这里必然 DuplicateKeyException。
+        // 也正因如此，旧实现对**持久化** MySQL 第二次运行会整类失败（外委复核实测）。
+        registerNode();
+
+        assertThat(accessNodeMapper.selectCount(Wrappers.<AccessNode>lambdaQuery()
+            .eq(AccessNode::getAccessNode, NODE)))
+            .as("节点行必须只有一行且未被逻辑删除残留").isEqualTo(1L);
+    }
+
     /** 新建一个「副本」：独立注册表（独立进程内锁），共用同一数据源。 */
     private static LeaseServiceImpl newReplica() {
         AccessNodeRegistry registry = new AccessNodeRegistry(accessNodeMapper);
@@ -223,9 +239,8 @@ class LeaseConcurrencyIT {
     }
 
     private static void registerNode() {
+        deleteAccessNodePhysically();
         transactionTemplate.executeWithoutResult(status -> {
-            accessNodeMapper.delete(Wrappers.<AccessNode>lambdaQuery()
-                .eq(AccessNode::getAccessNode, NODE));
             AccessNode node = new AccessNode();
             node.setAccessNode(NODE);
             node.setMaxTenants(CAPACITY);
@@ -273,8 +288,22 @@ class LeaseConcurrencyIT {
 
     private static void purge() {
         physicalDeleteTenants();
-        accessNodeMapper.delete(Wrappers.<AccessNode>lambdaQuery()
-            .eq(AccessNode::getAccessNode, NODE));
+        // ⚠️ P1（外委复核实测）：必须**物理删除**。access_node 是逻辑删除而 uk_access_node 不含量删标记，
+        //    用 mapper.delete 会留下 is_deleted=1 的行 ⇒ 对**持久化** MySQL 第二次运行必撞唯一键
+        //    （CI 每次新容器所以看不出来，但本 IT Javadoc 推荐的外部实例模式第二次就红）。
+        deleteAccessNodePhysically();
+    }
+
+    /** 物理删除测试节点行（逻辑删除会继续占用唯一键）。 */
+    private static void deleteAccessNodePhysically() {
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement statement = connection.prepareStatement(
+                    "DELETE FROM access_node WHERE access_node = ?")) {
+            statement.setString(1, NODE);
+            statement.executeUpdate();
+        } catch (SQLException ex) {
+            throw new IllegalStateException("清理测试节点失败", ex);
+        }
     }
 
     /** 物理删除测试租户的台账与归属（逻辑删除会让唯一键继续占用）。 */

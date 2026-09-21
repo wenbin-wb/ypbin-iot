@@ -72,6 +72,14 @@ public class AccessNodeRegistry {
         }
         AccessNode existing = selectByNode(accessNode);
         if (existing == null) {
+            // P2：先看有没有**被软删的**同一节点行——uk_access_node 不含量删标记，直接 insert 会撞唯一键
+            AccessNode deleted = mapper.selectIncludingDeleted(accessNode);
+            if (deleted != null) {
+                mapper.revive(accessNode, maxTenants);
+                log.info("[iot] access 节点注册（复活此前被删除的节点行）：node={} capacity={}",
+                    LogSanitizer.sanitize(accessNode), capacityText(maxTenants));
+                return;
+            }
             AccessNode node = new AccessNode();
             node.setAccessNode(accessNode);
             node.setMaxTenants(maxTenants);

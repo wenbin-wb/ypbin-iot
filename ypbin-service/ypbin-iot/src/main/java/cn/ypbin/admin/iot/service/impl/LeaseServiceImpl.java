@@ -383,10 +383,6 @@ public class LeaseServiceImpl implements LeaseService {
         return count == null ? 0 : count.intValue();
     }
 
-    /** 分配容量（注册表已把「不限」映射成哨兵值）。 */
-    private int capacityOf(String node) {
-        return nodeRegistry.capacityOf(node);
-    }
 
     /** 本节点当前的归属清单（按租户排序，便于对账）。 */
     private List<LeaseAssignmentDto> listAssignmentsOf(String node) {
