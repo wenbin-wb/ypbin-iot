@@ -477,6 +477,8 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
         for (TslCommand tsl : commands == null ? List.<TslCommand>of() : commands) {
             IotCommand command = new IotCommand();
             command.setServiceId(serviceId);
+            // TSL 命令只有一个名称字段（§3.7：commandName，UPPER_SNAKE），无独立展示名，
+            // 故 identifier 与 commandName 同值——这不是字段映射，而是契约本身如此
             command.setIdentifier(tsl.getCommandName());
             command.setCommandName(tsl.getCommandName());
             command.setInputParams(tsl.getParas() == null ? null : toJson(tsl.getParas()));
@@ -492,6 +494,7 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
         for (TslEvent tsl : events == null ? List.<TslEvent>of() : events) {
             IotEvent event = new IotEvent();
             event.setServiceId(serviceId);
+            // 同命令：§3.7 的 TSL 事件只有 eventName 一个名称字段，identifier 与 eventName 同值
             event.setIdentifier(tsl.getEventName());
             event.setEventName(tsl.getEventName());
             event.setDataType(tsl.getDataType());
