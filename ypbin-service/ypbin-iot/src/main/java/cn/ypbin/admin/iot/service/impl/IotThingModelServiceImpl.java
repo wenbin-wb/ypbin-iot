@@ -123,7 +123,7 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
         service.setProductId(req.getProductId());
         service.setServiceId(req.getServiceId());
         service.setServiceName(req.getServiceName());
-        service.setOption(req.getOption());
+        service.setServiceOption(req.getServiceOption());
         service.setSort(req.getSort() == null ? 0 : req.getSort());
         service.setDescription(req.getDescription());
         save(service);
@@ -137,7 +137,7 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
         requireProductDraft(service.getProductId());
         service.setServiceId(req.getServiceId());
         service.setServiceName(req.getServiceName());
-        service.setOption(req.getOption());
+        service.setServiceOption(req.getServiceOption());
         service.setSort(req.getSort() == null ? 0 : req.getSort());
         service.setDescription(req.getDescription());
         updateById(service);
@@ -292,7 +292,7 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
             TslDocument.TslServiceRef ref = new TslDocument.TslServiceRef();
             ref.setServiceId(s.getServiceId());
             ref.setServiceType(s.getServiceId());
-            ref.setOption(s.getOption());
+            ref.setOption(s.getServiceOption());
             return ref;
         }).toList());
         doc.setDevices(List.of(device));
@@ -500,7 +500,7 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
             service.setServiceId(tsl.getServiceType());
             service.setServiceName(StringUtils.hasText(tsl.getDescription())
                 ? tsl.getDescription() : tsl.getServiceType());
-            service.setOption(tsl.getOption());
+            service.setServiceOption(tsl.getOption());
             service.setSort(serviceSort++);
             services.add(service);
         }
@@ -582,7 +582,7 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
             TslService tsl = new TslService();
             tsl.setServiceType(service.getServiceId());
             tsl.setDescription(service.getServiceName());
-            tsl.setOption(service.getOption());
+            tsl.setOption(service.getServiceOption());
             tsl.setSort(service.getSort());
             tsl.setProperties(propertiesByService.getOrDefault(service.getId(), List.of()).stream()
                 .map(this::toTslProperty).toList());
@@ -796,7 +796,7 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
         resp.setProductId(entity.getProductId());
         resp.setServiceId(entity.getServiceId());
         resp.setServiceName(entity.getServiceName());
-        resp.setOption(entity.getOption());
+        resp.setServiceOption(entity.getServiceOption());
         resp.setSort(entity.getSort());
         resp.setDescription(entity.getDescription());
         resp.setCreateTime(entity.getCreateTime());

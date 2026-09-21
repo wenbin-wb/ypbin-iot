@@ -40,8 +40,8 @@ public class IotService extends TenantBaseEntity {
     /** 服务名称。 */
     private String serviceName;
 
-    /** 服务选项：master | mandatory | optional。 */
-    private String option;
+    /** 服务选项：master | mandatory | optional（DB 列 service_option：option 是 MySQL 保留字）。 */
+    private String serviceOption;
 
     /** 排序。 */
     private Integer sort;

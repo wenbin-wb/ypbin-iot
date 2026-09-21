@@ -36,7 +36,7 @@ public class IotServiceResp {
     private String serviceName;
 
     /** 服务选项。 */
-    private String option;
+    private String serviceOption;
 
     /** 排序。 */
     private Integer sort;

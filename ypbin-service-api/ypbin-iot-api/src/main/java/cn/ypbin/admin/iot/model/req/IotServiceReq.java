@@ -39,10 +39,10 @@ public class IotServiceReq {
     @Size(max = 128, message = "服务名称长度不能超过 128")
     private String serviceName;
 
-    /** 服务选项：master | mandatory | optional。 */
+    /** 服务选项：master | mandatory | optional（DB 列 service_option：option 是 MySQL 保留字）。 */
     @NotBlank(message = "服务选项不能为空")
     @Pattern(regexp = "master|mandatory|optional", message = "服务选项非法（应为 master|mandatory|optional）")
-    private String option;
+    private String serviceOption;
 
     /** 排序。 */
     private Integer sort;

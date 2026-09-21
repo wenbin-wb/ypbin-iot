@@ -134,7 +134,7 @@ CREATE TABLE iot_service
     product_id   BIGINT       NOT NULL COMMENT '所属产品',
     service_id   VARCHAR(64)  NOT NULL COMMENT '服务标识（PascalCase，产品内唯一）',
     service_name VARCHAR(128) NOT NULL COMMENT '服务名称',
-    option       VARCHAR(16)  NOT NULL DEFAULT 'mandatory' COMMENT '服务选项：master|mandatory|optional（对齐 IoTDA）',
+    service_option VARCHAR(16) NOT NULL DEFAULT 'mandatory' COMMENT '服务选项：master|mandatory|optional（对齐 IoTDA；列名不用 option：MySQL 保留字）',
     sort         INT          NOT NULL DEFAULT 0 COMMENT '排序',
     description  VARCHAR(255) NULL COMMENT '描述',
     create_user  BIGINT       NULL COMMENT '创建人',

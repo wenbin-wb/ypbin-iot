@@ -462,7 +462,7 @@ class IotThingModelServiceImplTest {
         service.setProductId(9L);
         service.setServiceId(serviceId);
         service.setServiceName(serviceId);
-        service.setOption("master".equals(serviceId) || sort == 0 ? "master" : "optional");
+        service.setServiceOption("master".equals(serviceId) || sort == 0 ? "master" : "optional");
         service.setSort(sort);
         return service;
     }
