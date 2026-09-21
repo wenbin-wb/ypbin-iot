@@ -1,2 +1,3 @@
 # ypbin-access 自动配置登记（SRC 门禁要求每个 @AutoConfiguration 都在此登记）
+cn.ypbin.admin.access.config.AccessIotProtocolConfiguration
 cn.ypbin.admin.access.config.AccessLeaseConfiguration

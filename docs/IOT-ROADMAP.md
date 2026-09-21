@@ -137,6 +137,18 @@
 - **iot-starter 源码树绝不能落在本仓工作目录内**（否则「仓内每个 pom 都必须有归属」门禁转红——旧栈 CI 实测失败）；
 - 依赖接入后需重跑：`ypbin-architecture-tests`（模块归属/发布规则）+ 白名单门禁（`pom.xml` 变更需同步 `SYNC.md`）。
 
+### 四点五、实测踩到的两个坑（2026-09-21 实施时发现，务必照抄结论）
+
+1. **导入 `ypbin-iot-bom` 会把 `ypbin-starter-*` 的版本顶成 `0.1.0-SNAPSHOT`（不存在）**：
+   iot-starter 的父链是 `ypbin-starter-dependencies`（用 `${revision}` 托管**全部** starter 制品），
+   BOM 导入时该属性在**其子上下文**插值 ⇒ starter 制品被改写成 iot-starter 自己的版本号；
+   而 dependencyManagement 同键**以先声明者为准** ⇒ access 里必须先 import `ypbin-starter-bom`
+   （版本 `${ypbin-starter.version}`），**再** import `ypbin-iot-bom`。已按此写进 access 的 pom。
+2. **`spring-boot-maven-plugin:repackage` + failsafe 的组合坑**（与 3b-2 无关但同批踩到，属通用）：
+   access/iot 这类**会被 repackage 的模块**上跑集成测试时，failsafe 在 `package` 之后执行，默认会拿到
+   重打包后的 fat jar（类在 `BOOT-INF/classes` 下，普通类加载器看不见）⇒ 测试报
+   `NoClassDefFoundError`。必须在 failsafe 里显式 `<classesDirectory>${project.build.outputDirectory}</classesDirectory>`。
+
 ### 五、替换缝（3a 已备好，3b-2 只需新增自动配置）
 3a 的 `LoggingTenantLinkManager` 已去掉 `@Component`，由 `AccessLeaseConfiguration`（`@AutoConfiguration`
 + `@Bean @ConditionalOnMissingBean`）装配，并有源码门禁守着（四处变异全咬）。⇒ 3b-2 提供真实现时

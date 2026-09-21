@@ -14,6 +14,39 @@
     <name>${project.artifactId}</name>
     <description>IoT 设备接入单元（有状态、独立部署）：租约驱动的采集与 self-fencing</description>
 
+    <properties>
+        <!-- 协议栈框架版本。注意：0.1.0-SNAPSHOT 尚未发布到远程仓库
+             （其 ROADMAP 的决策是"先让 access 用 SNAPSHOT 跑通，再发 0.1.0"），
+             故本机与 CI 都必须从源码安装该版本（CI 已锁 SHA，见 .github/workflows）。 -->
+        <ypbin-iot.version>0.1.0-SNAPSHOT</ypbin-iot.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <!-- ⚠️ 顺序有意义，starter BOM 必须在 iot BOM **之前**：
+                 ypbin-iot-starter 的父链是 ypbin-starter-dependencies，而它用 ${revision}
+                 托管**全部** ypbin-starter-* 制品；导入 iot BOM 时该属性在其子上下文插值，
+                 于是这些制品被改写成 0.1.0-SNAPSHOT（并不存在），把本仓的 starter 版本顶掉。
+                 dependencyManagement 同键以「先声明者」为准，故这里先钉回 starter BOM。 -->
+            <dependency>
+                <groupId>cn.ypbin</groupId>
+                <artifactId>ypbin-starter-bom</artifactId>
+                <version>${ypbin-starter.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <!-- 只在本模块 import BOM：既不碰白名单内的 ypbin-service/pom.xml，
+                 也把 IoT 协议栈的版本收在 access 一处。 -->
+            <dependency>
+                <groupId>cn.ypbin</groupId>
+                <artifactId>ypbin-iot-bom</artifactId>
+                <version>${ypbin-iot.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
     <dependencies>
         <dependency>
             <groupId>cn.ypbin</groupId>
@@ -48,6 +81,16 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
+        <!-- IoT 协议栈框架（3b-2）：装配 + 运行时；协议先上 tcp（Modbus/MQTT/OPC UA 后续按需加模块） -->
+        <dependency>
+            <groupId>cn.ypbin</groupId>
+            <artifactId>ypbin-iot-spring-boot-starter</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>cn.ypbin</groupId>
+            <artifactId>ypbin-iot-protocol-tcp</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
