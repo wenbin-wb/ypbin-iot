@@ -148,7 +148,11 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
     public void removeService(Long id) {
         IotService service = requireService(id);
         requireProductDraft(service.getProductId());
-        removeById(id);
+        // 物理删除并与全量替换同口径；同时级联清掉子表，避免留下指向已删服务的活子行
+        iotPropertyMapper.physicalDeleteByServiceIds(List.of(id));
+        iotCommandMapper.physicalDeleteByServiceIds(List.of(id));
+        iotEventMapper.physicalDeleteByServiceIds(List.of(id));
+        baseMapper.physicalDeleteByIds(List.of(id));
     }
 
     // ---------- 属性 ----------
@@ -187,7 +191,7 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
     public void removeProperty(Long id) {
         IotProperty property = requireProperty(id);
         requireDraftByServiceId(property.getServiceId());
-        iotPropertyMapper.deleteById(id);
+        iotPropertyMapper.physicalDeleteByIds(List.of(id));
     }
 
     // ---------- 命令 ----------
@@ -226,7 +230,7 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
     public void removeCommand(Long id) {
         IotCommand command = requireCommand(id);
         requireDraftByServiceId(command.getServiceId());
-        iotCommandMapper.deleteById(id);
+        iotCommandMapper.physicalDeleteByIds(List.of(id));
     }
 
     // ---------- 事件 ----------
@@ -265,7 +269,7 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
     public void removeEvent(Long id) {
         IotEvent event = requireEvent(id);
         requireDraftByServiceId(event.getServiceId());
-        iotEventMapper.deleteById(id);
+        iotEventMapper.physicalDeleteByIds(List.of(id));
     }
 
     // ---------- TSL 导出 ----------

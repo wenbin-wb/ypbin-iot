@@ -366,6 +366,139 @@ class IotThingModelServiceImplTest {
         assertThat(errors).anyMatch(e -> e.contains("非数值"));
     }
 
+    @Test
+    @DisplayName("单条删服务也必须物理删除（含级联子表）：软删残留行仍占用 uk_iot_service")
+    void removeServiceMustPhysicallyDeleteWithChildren() {
+        IotService existing = new IotService();
+        existing.setId(801L);
+        existing.setProductId(9L);
+        when(serviceMapper.selectById(801L)).thenReturn(existing);
+        when(productMapper.selectById(9L)).thenReturn(draftProduct(9L));
+
+        service.removeService(801L);
+
+        verify(propertyMapper).physicalDeleteByServiceIds(List.of(801L));
+        verify(commandMapper).physicalDeleteByServiceIds(List.of(801L));
+        verify(eventMapper).physicalDeleteByServiceIds(List.of(801L));
+        verify(serviceMapper).physicalDeleteByIds(List.of(801L));
+        // 绝不走逻辑删除：残留行会让「手工删服务 → 再导入同名 TSL」主键冲突
+        verify(serviceMapper, never()).deleteById(any(Long.class));
+    }
+
+    @Test
+    @DisplayName("单条删属性/命令/事件同样物理删除")
+    void removeChildElementsMustPhysicallyDelete() {
+        when(productMapper.selectById(9L)).thenReturn(draftProduct(9L));
+        IotProperty property = new IotProperty();
+        property.setId(901L);
+        property.setServiceId(1000L);
+        when(propertyMapper.selectById(901L)).thenReturn(property);
+        when(serviceMapper.selectById(1000L)).thenReturn(draftService(1000L));
+        service.removeProperty(901L);
+        verify(propertyMapper).physicalDeleteByIds(List.of(901L));
+
+        IotCommand command = new IotCommand();
+        command.setId(902L);
+        command.setServiceId(1000L);
+        when(commandMapper.selectById(902L)).thenReturn(command);
+        service.removeCommand(902L);
+        verify(commandMapper).physicalDeleteByIds(List.of(902L));
+
+        IotEvent event = new IotEvent();
+        event.setId(903L);
+        event.setServiceId(1000L);
+        when(eventMapper.selectById(903L)).thenReturn(event);
+        service.removeEvent(903L);
+        verify(eventMapper).physicalDeleteByIds(List.of(903L));
+    }
+
+    @Test
+    @DisplayName("导出走批量：子结构一次 IN 取回（查询数与服务数无关），按父服务分组装配")
+    void exportShouldBatchLoadChildren() {
+        IotProduct product = draftProduct(9L);
+        when(productMapper.selectById(9L)).thenReturn(product);
+        when(serviceMapper.selectList(any())).thenReturn(List.of(
+            serviceEntity(1000L, "DeviceBasic", 0), serviceEntity(1001L, "Telemetry", 1)));
+        // 两个服务各一个属性 → 若逐服务查询会调用 2 次；批量应只有 1 次
+        when(propertyMapper.selectList(any())).thenReturn(List.of(
+            propertyEntity(11L, 1000L, "temperature"), propertyEntity(12L, 1001L, "battery")));
+        when(commandMapper.selectList(any())).thenReturn(List.of(
+            commandEntity(21L, 1000L, "SET_VALUE")));
+        when(eventMapper.selectList(any())).thenReturn(List.of(
+            eventEntity(31L, 1001L, "alarm")));
+
+        TslDocument doc = service.exportTsl(9L);
+
+        assertThat(doc.getServices()).hasSize(2);
+        assertThat(doc.getServices().get(0).getServiceType()).isEqualTo("DeviceBasic");
+        assertThat(doc.getServices().get(0).getProperties())
+            .extracting(TslProperty::getPropertyName).containsExactly("temperature");
+        assertThat(doc.getServices().get(0).getCommands())
+            .extracting(TslCommand::getCommandName).containsExactly("SET_VALUE");
+        assertThat(doc.getServices().get(0).getEvents()).isEmpty();
+        assertThat(doc.getServices().get(1).getProperties())
+            .extracting(TslProperty::getPropertyName).containsExactly("battery");
+        assertThat(doc.getServices().get(1).getEvents())
+            .extracting(TslEvent::getEventName).containsExactly("alarm");
+        assertThat(doc.getDevices()).hasSize(1);
+        assertThat(doc.getDevices().getFirst().getServiceTypeCapabilities()).hasSize(2);
+
+        // 查询次数与 TSL 规模无关：每个子表各 1 次
+        verify(propertyMapper).selectList(any());
+        verify(commandMapper).selectList(any());
+        verify(eventMapper).selectList(any());
+    }
+
+    private static IotService draftService(Long id) {
+        IotService service = new IotService();
+        service.setId(id);
+        service.setProductId(9L);
+        return service;
+    }
+
+    private static IotService serviceEntity(Long id, String serviceId, int sort) {
+        IotService service = new IotService();
+        service.setId(id);
+        service.setProductId(9L);
+        service.setServiceId(serviceId);
+        service.setServiceName(serviceId);
+        service.setOption("master".equals(serviceId) || sort == 0 ? "master" : "optional");
+        service.setSort(sort);
+        return service;
+    }
+
+    private static IotProperty propertyEntity(Long id, Long serviceId, String identifier) {
+        IotProperty property = new IotProperty();
+        property.setId(id);
+        property.setServiceId(serviceId);
+        property.setIdentifier(identifier);
+        property.setDataType("int");
+        property.setAccessMode("R");
+        property.setSort(0);
+        return property;
+    }
+
+    private static IotCommand commandEntity(Long id, Long serviceId, String identifier) {
+        IotCommand command = new IotCommand();
+        command.setId(id);
+        command.setServiceId(serviceId);
+        command.setIdentifier(identifier);
+        command.setCommandName(identifier);
+        command.setSort(0);
+        return command;
+    }
+
+    private static IotEvent eventEntity(Long id, Long serviceId, String identifier) {
+        IotEvent event = new IotEvent();
+        event.setId(id);
+        event.setServiceId(serviceId);
+        event.setIdentifier(identifier);
+        event.setEventName(identifier);
+        event.setDataType("string");
+        event.setSort(0);
+        return event;
+    }
+
     /** 构造草稿态产品（importTsl 前置校验用）。 */
     private static IotProduct draftProduct(Long id) {
         IotProduct product = new IotProduct();
