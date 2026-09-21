@@ -192,6 +192,32 @@ ERROR The build could not read 1 project
    重打包后的 fat jar（类在 `BOOT-INF/classes` 下，普通类加载器看不见）⇒ 测试报
    `NoClassDefFoundError`。必须在 failsafe 里显式 `<classesDirectory>${project.build.outputDirectory}</classesDirectory>`。
 
+### 四点六、真 socket 端到端验收结果（2026-09-21，远程机实测）
+
+在远程机（8 核 / 7.8G，复用其 MySQL + Redis + Nacos）按 `deploy/` 的方式跑起 **ypbin-iot + ypbin-access**
+（源码由本机 tar 推过去：该机 **github 不可达**），造了 1 产品(已发布, tcp) / 1 服务 / 1 属性 / 1 设备
+(`tcp://172.20.0.1:19001`) / 1 点位映射 / 1 租户归属(`access-1`, active)，用宿主机 python TCP 桩每 2s 推一帧。
+
+| 验收项 | 结果 | 关键证据 |
+|---|---|---|
+| 会话 0→1 | ✅ | iot 注册 Nacos；access 领取租约 → `订阅成功：deviceId=900001 点位数=1` |
+| **真出数** | ✅ | 每 2s 一条 `读数：device=900001 property=900001 quality=GOOD`，值即 TCP 桩发的 `E2E-DATA-n,` 字节数组 |
+| **断链→重连→仍出数（证 B2）** | ✅ | 杀桩后窗口内读数 **0**；重启桩后 **15 条/30s**，且日志出现**新的** `订阅成功`（新会话实例被重新订阅） |
+| **启动期空清单自愈（证 N-1）** | ✅ | 以「设备停用」重启 access：读数 **0** + 两次 `租户设备清单为空，本轮不缓存并等待下轮重取`；恢复设备后 **30 条/60s**（若空清单被缓存则永不恢复） |
+| fence | ✅ | 停 iot → `续约失败…到期后将自行停采` → `协议栈断链停采：tenantId=1 reason=本地租约已过期`，读数 **0** |
+| 恢复 | ✅ | 重启 iot 后 access 自动重新领取并出数 |
+
+**e2e 一跑就抓到两个「单测与 CI 全绿、服务却根本起不来」的真缺陷**（均已修，见 `79356f1`/`a31ad2d`）：
+
+1. **缺 `io.micrometer:context-propagation`**：starter 的 `TenantAutoConfiguration` 需要 tenant 的
+   `ThreadLocalAccessor`，而该依赖在 starter 侧 optional 不传递 ⇒ `ClassNotFoundException`，应用启动即失败。
+   admin 的 `ypbin-system` 一直显式声明（`:171-172`），我们两个新服务漏了。
+2. **Jackson 2/3 用错**：本栈是 Spring Boot 4，只自动配置 **Jackson 3**（`tools.jackson.databind.ObjectMapper`），
+   而我 M-1/3b-2 的代码注入的是 Jackson 2 的 `com.fasterxml...ObjectMapper` ⇒ 无该 Bean，启动失败。
+
+> **结论（写给未来的自己）**：这两类缺陷**单测与 `mvn verify` 都抓不到**（它们不启动完整应用上下文）。
+> 「真 socket 端到端」不是可选项，而是这类缺陷**唯一**的暴露面——这正是外委复核坚持把它列为放行条件的理由。
+
 ### 四点六、3b-2 的已知限制（外委复核提出，**M-2 前必须处置**）
 
 > 以下是 3b-2 交付时**刻意保留**的占位/边界。它们不影响「当前只装 TCP」的可用性，
