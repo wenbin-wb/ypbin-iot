@@ -22,7 +22,7 @@ import cn.ypbin.admin.iot.mapper.IotShadowMapper;
 import cn.ypbin.admin.iot.model.resp.IotShadowResp;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
 import java.time.LocalDateTime;
 import java.util.Map;
 import org.apache.ibatis.builder.MapperBuilderAssistant;

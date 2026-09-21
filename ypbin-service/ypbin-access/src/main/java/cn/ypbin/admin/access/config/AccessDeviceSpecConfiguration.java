@@ -12,7 +12,7 @@ package cn.ypbin.admin.access.config;
 import cn.ypbin.admin.access.link.DeviceSpecSource;
 import cn.ypbin.admin.access.link.HttpDeviceSpecSource;
 import cn.ypbin.admin.iot.device.IDeviceSpecClient;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;

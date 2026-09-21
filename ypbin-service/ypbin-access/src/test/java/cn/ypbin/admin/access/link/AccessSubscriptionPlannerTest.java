@@ -20,7 +20,7 @@ import cn.ypbin.iot.core.model.DeviceSpec;
 import cn.ypbin.iot.core.model.SubscribeRequest;
 import cn.ypbin.iot.core.protocol.DeviceSession;
 import cn.ypbin.iot.core.protocol.ProtocolCode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;

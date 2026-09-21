@@ -17,8 +17,8 @@ import cn.ypbin.iot.core.model.DeviceSpec;
 import cn.ypbin.iot.core.model.Endpoint;
 import cn.ypbin.iot.core.protocol.ProtocolCode;
 import cn.ypbin.starter.core.model.R;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.ObjectMapper;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -127,7 +127,7 @@ public class HttpDeviceSpecSource implements DeviceSpecSource {
     private String writePoints(List<AccessPointMappingDto> points) {
         try {
             return objectMapper.writeValueAsString(points == null ? List.of() : points);
-        } catch (JsonProcessingException ex) {
+        } catch (JacksonException ex) {
             // 点位序列化失败属编程/模型错误：暴露出来，不静默降级成「没有点位」
             throw new IllegalStateException("点位清单序列化失败：device spec 无法交给协议栈", ex);
         }

@@ -25,7 +25,7 @@ import cn.ypbin.iot.core.spi.ConnectionSpecProvider;
 import cn.ypbin.iot.core.spi.DataSink;
 import cn.ypbin.iot.core.spi.DeviceRegistry;
 import cn.ypbin.iot.spring.autoconfigure.IotLifecycle;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Supplier;
