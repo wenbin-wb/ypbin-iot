@@ -215,26 +215,35 @@ public class AvailabilityServiceImpl implements AvailabilityService {
             .eq(DeviceLiveness::getDeviceId, deviceId));
         long intervalMs = OutageDetector.effectiveIntervalMs(
             liveness == null ? null : liveness.getPollIntervalMs(), properties.getFallbackIntervalMs());
-        List<OutageEvent> rows = outageMapper.selectList(Wrappers.<OutageEvent>lambdaQuery()
+        // 汇总走**精确聚合**（与明细条数无关）：明细有返回上限，够不到时求和会低估断档 ⇒ 可用率偏高
+        Long tenantId = TenantContext.getTenantId().orElse(null);
+        if (tenantId == null) {
+            // 查询路径必然有租户身份（网关注入）；缺失时不猜、不查全表，直接暴露
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "缺少租户上下文，无法统计可用率");
+        }
+        Map<String, Object> aggregate = outageMapper.summarizeInWindow(tenantId, deviceId, windowFrom, windowTo,
+            now);
+        long outageSeconds = toLong(aggregate == null ? null : aggregate.get("outageSeconds"));
+        long longestOutageSeconds = toLong(aggregate == null ? null : aggregate.get("longestOutageSeconds"));
+        int outageCount = (int) toLong(aggregate == null ? null : aggregate.get("outageCount"));
+        long windowSeconds = Math.max(0L, Duration.between(windowFrom, windowTo).getSeconds());
+        boolean truncated = outageCount > AvailabilityRules.MAX_OUTAGE_ROWS;
+        if (truncated) {
+            log.warn("[iot] 窗口内断档 {} 条超过明细上限 {}：明细按**最新优先**截断展示，"
+                + "可用率/最长断档仍由精确聚合给出（不因截断偏高）：deviceId={} from={} to={}",
+                outageCount, AvailabilityRules.MAX_OUTAGE_ROWS, LogSanitizer.sanitize(deviceId), windowFrom,
+                windowTo);
+        }
+        AvailabilityCalculator.Summary summary = AvailabilityCalculator.summarize(windowSeconds, outageSeconds,
+            longestOutageSeconds, outageCount, intervalMs, truncated);
+        // 明细：**最新优先**（截断时保留最近的断档，比丢最新更有用）
+        List<OutageEvent> limited = outageMapper.selectList(Wrappers.<OutageEvent>lambdaQuery()
             .eq(OutageEvent::getDeviceId, deviceId)
             .lt(OutageEvent::getStartTs, windowTo)
             .and(wrapper -> wrapper.isNull(OutageEvent::getEndTs)
                 .or().gt(OutageEvent::getEndTs, windowFrom))
-            .orderByAsc(OutageEvent::getStartTs)
-            .last("LIMIT " + (AvailabilityRules.MAX_OUTAGE_ROWS + 1)));
-        boolean truncated = rows.size() > AvailabilityRules.MAX_OUTAGE_ROWS;
-        List<OutageEvent> limited = truncated
-            ? new ArrayList<>(rows.subList(0, AvailabilityRules.MAX_OUTAGE_ROWS)) : rows;
-        if (truncated) {
-            log.warn("[iot] 断档明细超过 {} 条已截断（可用率会被低估断档 ⇒ 偏高）：deviceId={} from={} to={}",
-                AvailabilityRules.MAX_OUTAGE_ROWS, LogSanitizer.sanitize(deviceId), windowFrom, windowTo);
-        }
-        List<AvailabilityCalculator.OutageWindow> windows = new ArrayList<>(limited.size());
-        for (OutageEvent row : limited) {
-            windows.add(new AvailabilityCalculator.OutageWindow(row.getStartTs(), row.getEndTs()));
-        }
-        AvailabilityCalculator.Summary summary = AvailabilityCalculator.summarize(windowFrom, windowTo, now,
-            windows, intervalMs, truncated);
+            .orderByDesc(OutageEvent::getStartTs)
+            .last("LIMIT " + AvailabilityRules.MAX_OUTAGE_ROWS));
         AvailabilityResp resp = new AvailabilityResp();
         resp.setDeviceId(deviceId);
         resp.setFrom(windowFrom);
@@ -411,6 +420,22 @@ public class AvailabilityServiceImpl implements AvailabilityService {
             resp.setDurationSec(Math.max(0L, Duration.between(row.getStartTs(), now).getSeconds()));
         }
         return resp;
+    }
+
+    /**
+     * 聚合结果取值（驱动差异：MySQL 的 COUNT 是 Long、SUM 可能是 BigDecimal/Integer）。
+     *
+     * @param value 聚合值（可空）
+     * @return 长整型；空返回 0
+     */
+    private static long toLong(Object value) {
+        if (value == null) {
+            return 0L;
+        }
+        if (value instanceof Number number) {
+            return number.longValue();
+        }
+        return Long.parseLong(value.toString());
     }
 
     /** 取两个时刻里较早的非空值。 */

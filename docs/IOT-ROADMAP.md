@@ -416,6 +416,8 @@ ERROR The build could not read 1 project
 | 乱序/重放防护 | 有效数据**早于断档起点**时**不闭合**（否则写出 `start > end`、`duration=0` 的假恢复并清掉标记）；状态字段只在单次调用内保证「只前进」 |
 | 候选清理（防饥饿） | 设备已删除/停用的活性行**清理掉**而不是只跳过：候选查询按 `id` 升序 + `LIMIT 扫描批次`，这类行永远满足条件、永远占住前段 ⇒ 累积 ≥ 批次上限后**其它设备的断档再也不会被发现**（是饥饿，不是延迟） |
 | 生效周期口径统一 | SQL 与 `OutageDetector.effectiveIntervalMs` 统一为「上报了正周期就用它，否则用兜底」；并把纯逻辑 `isOutage` **接进生产路径**（开断档前用同一套规则复核，两处口径不一致会先暴露）——此前它是死代码 |
+| **观测状态数据库级单调**（A14 闭环） | `reviveAndUpdate` 的时间戳比较**移到 SQL 的 `CASE` 里**：`last_good_at`/`last_observed_at` 取较大值、`first_observed_at` 取较小值、`poll_interval_ms` 只在正数时更新。Java 侧 `latest()/earliest()` 只保证**单次调用内**正确；两个副本各自拿旧快照写回时旧时间戳会覆盖新的（可用率被算高），只有数据库级比较才是不变量。可空参数一律带 `jdbcType=TIMESTAMP`（否则 MyBatis 拼不出可执行语句） |
+| **可用率汇总精确化**（A11 闭环） | 汇总改由 `OutageEventMapper.summarizeInWindow` 的**一次聚合**给出（`COUNT`/`SUM`/`MAX` + SQL 侧窗口裁剪 `GREATEST(start_ts, from)` / `LEAST(COALESCE(end_ts, now), to)`、单条 `GREATEST(0, …)` 防负）；`AvailabilityCalculator` 退化为「拿到精确输入后的三件防御（窗口 0、下限 0、封顶到窗口）+ 双条件」。明细改为**最新优先**并仍按上限截断，但**截断不再影响可用率**（此前「明细求和」会在超过上限时低估断档 ⇒ 可用率偏高） |
 | 假断档过滤 | 扫描候选必须「设备仍存在且启用」（一次批量查设备，非循环查）：设备删除/停用后活性行不会自己消失，不筛就会产生**永远消不掉的假断档** |
 | **接入侧上报（A1，已落地）** | access 的读数出口从「日志占位」换成 `HttpAccessReadingSink`：**有界队列 → 微批（默认 200 条 / 1s）→ `POST /internal/readings`**；入队 `offer`（队满**丢弃并计数**，绝不阻塞采集线程）、Feign 超时显式（connect 1s / read 5s / **不重试**）、失败与非法读数分别计数（`iot.access.egress.dropped/failed/invalid`）、停机前尽力刷出队尾；没有内部客户端或显式关闭时**退化为日志占位并打 WARN**（不静默降级）。设备级周期随读数带出（断档用真周期）；上报时刻用 **epoch 毫秒**（跨服务不用字符串时间，避免两端时区/格式配置不一致）。S6（日志占位）至此收口；EMQX 替换待 Q4 |
 | 参数自检 | `IotAvailabilityConfiguration` 启动期校验 K ≥ 1、兜底周期/扫描周期/批次/默认窗口为正：K=0 会让「任何时刻都算断档」，只会在运行期以「数据全错」暴露 |
@@ -423,13 +425,13 @@ ERROR The build could not read 1 project
 
 **验收证据（本轮，本机实跑）**
 
-- `ypbin-iot` 单测 **123/0**（原 90 → +33：`OutageDetectorTest` 5、`AvailabilityCalculatorTest` 8、
-  `AvailabilityServiceImplTest` 16、`AvailabilityMapperContractTest` 3、`NacosTenantIgnoreConfigTest` +1（反向门禁））；`ypbin-access` **68/0**（原 61 → +7：`HttpAccessReadingSinkTest`）；
+- `ypbin-iot` 单测 **125/0**（相对 main `2caf844` 的 90 → +35：`OutageDetectorTest` 5、`AvailabilityCalculatorTest` 7、
+  `AvailabilityServiceImplTest` 17、`AvailabilityMapperContractTest` 5、`NacosTenantIgnoreConfigTest` +1（反向门禁））；`ypbin-access` **68/0**（原 61 → +7：`HttpAccessReadingSinkTest`）；
   `ypbin-architecture-tests` 41/0；`tools/check-iot-sql-equivalence.sh` OK；
-- **真库 IT 由 CI 执行**（`-Pit`；本机不跑容器）：`OutageAvailabilityIT` 现 **8 例**——完整闭环、新鲜设备不误判、
+- **真库 IT 由 CI 执行**（`-Pit`；本机不跑容器）：`OutageAvailabilityIT` 现 **11 例**——完整闭环、新鲜设备不误判、
   从未有有效数据用首次观测当起点、软删活性行复活、**无租户上下文 fail-closed**，外加本轮复核补的
   **多副本谓词**（`markOpenOutageMustBeConditionalOnNullInRealSql`）、**扫描饥饿**（`garbageCandidatesMustNotStarveRealOutages`）、
-  **周期口径**（`pollIntervalBelowFallbackMustUseReportedInterval`）；IT 合计 23 例。
+  **周期口径**（`pollIntervalBelowFallbackMustUseReportedInterval`）、**A14 时间戳单调**（`livenessTimestampsMustNotRegressWhenWrittenOutOfOrder`）、**A11 汇总精确**（`summaryMustBeExactWhenDetailsAreTruncated`、`summaryMustClampOutagesToWindow`）；IT 合计 26 例。
   **过程如实记录**：该 IT 在 CI 上红过两次，都暴露了真问题或真错误——① `a79b5a2`：
   `filterCollectible` 的批量清理没包 `executeIgnore` ⇒ 租户插件 fail-closed 把整轮扫描打断（**产品缺陷**，已修）；
   ② `eca67a8`：新用例的两条垃圾活性行共用 `device_id` ⇒ 撞 `uk_device_liveness(tenant_id, device_id)`
@@ -446,9 +448,7 @@ ERROR The build could not read 1 project
 | **A1** | ~~access 侧上报接线~~ **已落地**（`HttpAccessReadingSink`）：有界队列 → 微批 → `/internal/readings`，含丢弃/失败/非法计数与超时；EMQX 传输**待 Q4** | 已收口；仍有限制见 A9/A10 |
 | **A9** | **上报失败不重试**（本批丢弃） | 刻意为之：重试会占住 flush 线程并放大远端压力；代价是读数丢失会让断档缺口被算长一些 ⇒ 以 `iot.access.egress.failed`/`dropped` 暴露。彻底解决要等 EMQX/MQ 的持久化通道（Q4）与「断档判定对丢失不敏感」的补偿口径 |
 | **A10** | **扫描无租约/归属联动**（= A6 的另一面） | 租户被接管到别的节点后，本节点的活性行停止更新 ⇒ 会被算成断档。需要判据（如「本节点仍持有该租户」）或上报里带「本节点是否在采」 |
-| **A11** | 断档明细**截断取最旧** | 查询按 `start_ts` 升序 + `LIMIT 201`，截断时丢的是**最新**断档；响应 `truncated=true`、代码 `log.warn`，但**未进本表**（复核 R8 点出）⇒ 记在此处：截断会让可用率偏高，需改成按窗口内时长排序或分页 |
 | **A12** | 指标**未接大盘/告警** | `iot.access.egress.*`（accepted/dropped/sent/failed/invalid/pending）与可用率侧无 Prometheus 抓取/告警/大盘定义，仅文档提及名字（复核 R8 未核实项） |
-| **A14** | `lastGoodAt` 跨副本仍可回退 | `reviveAndUpdate` 无条件写 `last_good_at = #{lastGoodAt}`（值取自进入方法前的旧读）⇒ 两个副本并发上报时，旧时间戳可能覆盖新的（「只前进」只在**单次调用内**成立）。影响是可用率偏高（缺口被算短）；需要改成 SQL 侧 `GREATEST` 或条件更新。复核第三轮点出，登记在此 |
 | **A13** | 多副本相关用例的成本面 | 谓词与饥饿两条用例是**真库 IT**（CI 才跑）；本地由源码级门禁 `AvailabilityMapperContractTest` 兜底（它只断言 SQL 文本，不执行 SQL） |
 | **A2** | 读数**值**不落库、Redis 最新值未做 | 依赖 Q8（IoTDB 树/表模型）；本轮刻意只上报「质量+时刻」，不发明取值契约 |
 | **A3** | 维护窗口排除未做 | spec 口径里「统计总时长排除可配置维护窗口」尚未实现，当前窗口时长 = `to - from` |

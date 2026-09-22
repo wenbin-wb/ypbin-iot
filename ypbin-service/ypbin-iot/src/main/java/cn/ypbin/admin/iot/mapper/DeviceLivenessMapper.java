@@ -43,16 +43,35 @@ public interface DeviceLivenessMapper extends BaseMapper<DeviceLiveness> {
     /**
      * 复活软删行并刷新**观测状态**（一条语句内完成，避免「先删后插」撞唯一键）。
      *
-     * <p><b>刻意不写 {@code open_outage_id}</b>：该字段的写权分属两方——扫描负责「开」（从 NULL 改成新值），
-     * 上报负责「闭」（清空）。上报侧手里的行是**进入本方法前读到的旧快照**，若无条件整行回写，
-     * 就会把扫描刚开的断档覆盖回 NULL（断档变孤儿、永不闭合），或把状态拉回旧值。
-     * 这类读-改-写丢失更新在单副本下看不出来，多副本/定时任务交错时才会出现。</p>
+     * <p><b>两条不变量写在 SQL 里，而不是靠 Java 侧先读再比</b>：</p>
+     * <ol>
+     *   <li><b>刻意不写 {@code open_outage_id}</b>：该字段的写权分属两方——扫描负责「开」（从 NULL 改成新值），
+     *       上报负责「闭」（{@link #clearOpenOutage}）。上报侧手里的行是**进入本方法前读到的旧快照**，
+     *       无条件整行回写会把扫描刚开的断档覆盖回 NULL（孤儿断档、永不闭合）。</li>
+     *   <li><b>时间戳只前进</b>：{@code last_good_at}/{@code last_observed_at} 取较大值、
+     *       {@code first_observed_at} 取较小值。Java 侧的 {@code latest()/earliest()} 只保证**单次调用内**
+     *       的正确性；两个副本各自读到旧快照再写回时，旧时间戳会覆盖新的（可用率被算高）。
+     *       放到 SQL 的 {@code CASE} 里比较，才是数据库级不变量。</li>
+     * </ol>
+     *
+     * <p>{@code jdbcType=TIMESTAMP} 是必需的：参数可能为 {@code null}，MyBatis 在 null 且无 jdbcType 时
+     * 对部分驱动会拼不出可执行语句。</p>
      *
      * @param row 携带 id 与最新观测状态的实体
      * @return 受影响行数
      */
-    @Update("UPDATE device_liveness SET poll_interval_ms = #{pollIntervalMs}, last_good_at = #{lastGoodAt}, "
-        + "first_observed_at = #{firstObservedAt}, last_observed_at = #{lastObservedAt}, "
+    @Update("UPDATE device_liveness SET "
+        + "poll_interval_ms = CASE WHEN COALESCE(#{pollIntervalMs,jdbcType=INTEGER}, 0) > 0 "
+        + "THEN #{pollIntervalMs,jdbcType=INTEGER} ELSE poll_interval_ms END, "
+        + "last_good_at = CASE WHEN #{lastGoodAt,jdbcType=TIMESTAMP} IS NULL THEN last_good_at "
+        + "WHEN last_good_at IS NULL OR #{lastGoodAt,jdbcType=TIMESTAMP} > last_good_at "
+        + "THEN #{lastGoodAt,jdbcType=TIMESTAMP} ELSE last_good_at END, "
+        + "first_observed_at = CASE WHEN #{firstObservedAt,jdbcType=TIMESTAMP} IS NULL THEN first_observed_at "
+        + "WHEN first_observed_at IS NULL OR #{firstObservedAt,jdbcType=TIMESTAMP} < first_observed_at "
+        + "THEN #{firstObservedAt,jdbcType=TIMESTAMP} ELSE first_observed_at END, "
+        + "last_observed_at = CASE WHEN #{lastObservedAt,jdbcType=TIMESTAMP} IS NULL THEN last_observed_at "
+        + "WHEN last_observed_at IS NULL OR #{lastObservedAt,jdbcType=TIMESTAMP} > last_observed_at "
+        + "THEN #{lastObservedAt,jdbcType=TIMESTAMP} ELSE last_observed_at END, "
         + "is_deleted = 0, update_time = NOW() WHERE id = #{id}")
     int reviveAndUpdate(DeviceLiveness row);
 

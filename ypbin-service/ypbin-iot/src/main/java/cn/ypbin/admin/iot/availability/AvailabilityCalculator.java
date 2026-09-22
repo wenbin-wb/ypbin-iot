@@ -36,25 +36,16 @@ public final class AvailabilityCalculator {
     }
 
     /**
-     * 断档窗口：{@code end} 为 {@code null} 表示进行中（按 {@code now} 结算）。
-     *
-     * @param start 断档开始
-     * @param end   断档结束（可空=进行中）
-     */
-    public record OutageWindow(LocalDateTime start, LocalDateTime end) {
-    }
-
-    /**
      * 可用率汇总。
      *
      * @param windowSeconds          窗口时长（秒）
-     * @param outageSeconds          窗口内断档合计（秒，已裁剪）
+     * @param outageSeconds          窗口内断档合计（秒，已由 SQL 按窗口裁剪）
      * @param longestOutageSeconds   窗口内最长单次断档（秒，已裁剪）
-     * @param outageCount            窗口内断档次数
+     * @param outageCount            窗口内断档次数（精确值，与明细条数无关）
      * @param availability           可用率
      * @param meetsTarget            是否达标（双条件）
      * @param maxAllowedOutageSeconds 最长单次断档上限（秒）
-     * @param truncated              明细是否被截断（可能低估断档 ⇒ 可用率偏高）
+     * @param truncated              断档**明细**是否被截断（不影响本汇总的精确性）
      */
     public record Summary(long windowSeconds, long outageSeconds, long longestOutageSeconds, int outageCount,
                           BigDecimal availability, boolean meetsTarget, long maxAllowedOutageSeconds,
@@ -62,41 +53,34 @@ public final class AvailabilityCalculator {
     }
 
     /**
-     * 计算可用率汇总。
+     * 由**精确的**窗口与断档秒数算可用率。
      *
-     * @param from       统计窗口起点
-     * @param to         统计窗口终点
-     * @param now        当前时刻（进行中的断档结算到它；通常取数据库时钟）
-     * @param windows    断档窗口清单（可空=无断档）
-     * @param intervalMs 生效采集周期（毫秒）
-     * @param truncated  明细是否被截断
+     * <p>断档秒数由 SQL 聚合按窗口裁剪后给出（{@code OutageEventMapper.summarizeInWindow}）——
+     * 不再从「最多 N 条」的明细里求和：明细一截断，求和就会低估断档 ⇒ 可用率偏高。这里只做三件防御：</p>
+     * <ol>
+     *   <li><b>窗口时长为 0</b>（{@code from >= to}，通常是把区间给反了，调用方已先拦一次）：
+     *       不判不达标、可用率记 100%——否则「参数写错」会伪装成「设备全窗口断档」；</li>
+     *   <li><b>逐项下限 0</b>：脏数据（{@code end < start}）不得让断档为负、进而把可用率抬高；</li>
+     *   <li><b>封顶到窗口</b>：明细重叠等脏数据导致断档合计超过窗口时按窗口截断，保证可用率 ≥ 0。</li>
+     * </ol>
+     *
+     * @param windowSeconds        窗口时长（秒）
+     * @param outageSeconds        窗口内断档合计（秒，可为负=脏数据）
+     * @param longestOutageSeconds 最长单次断档（秒）
+     * @param outageCount          断档次数
+     * @param intervalMs           生效采集周期（毫秒）
+     * @param truncated            明细是否被截断
      * @return 汇总
      */
-    public static Summary summarize(LocalDateTime from, LocalDateTime to, LocalDateTime now,
-                                    List<OutageWindow> windows, long intervalMs, boolean truncated) {
+    public static Summary summarize(long windowSeconds, long outageSeconds, long longestOutageSeconds,
+                                    int outageCount, long intervalMs, boolean truncated) {
         long maxAllowed = AvailabilityRules.maxAllowedOutageSeconds(intervalMs);
-        long windowSeconds = Math.max(0L, Duration.between(from, to).getSeconds());
-        if (windowSeconds == 0L) {
+        if (windowSeconds <= 0L) {
             return new Summary(0L, 0L, 0L, 0, BigDecimal.ONE.setScale(AvailabilityRules.AVAILABILITY_SCALE),
                 true, maxAllowed, truncated);
         }
-        long total = 0L;
-        long longest = 0L;
-        int count = 0;
-        if (windows != null) {
-            for (OutageWindow window : windows) {
-                long overlap = overlapSeconds(window, from, to, now);
-                if (overlap <= 0L) {
-                    continue;
-                }
-                total += overlap;
-                count++;
-                longest = Math.max(longest, overlap);
-            }
-        }
-        if (total > windowSeconds) {
-            total = windowSeconds;
-        }
+        long total = Math.max(0L, Math.min(outageSeconds, windowSeconds));
+        long longest = Math.max(0L, Math.min(longestOutageSeconds, total));
         BigDecimal availability = BigDecimal.ONE.subtract(BigDecimal.valueOf(total)
             .divide(BigDecimal.valueOf(windowSeconds), AvailabilityRules.AVAILABILITY_SCALE,
                 RoundingMode.HALF_UP));
@@ -105,26 +89,7 @@ public final class AvailabilityCalculator {
         }
         boolean meets = availability.compareTo(AvailabilityRules.TARGET_AVAILABILITY) >= 0
             && longest <= maxAllowed;
-        return new Summary(windowSeconds, total, longest, count, availability, meets, maxAllowed, truncated);
-    }
-
-    /**
-     * 单个断档窗口与统计窗口的交集秒数。
-     *
-     * @param window 断档窗口
-     * @param from   统计窗口起点
-     * @param to     统计窗口终点
-     * @param now    当前时刻（进行中的断档用它当结束）
-     * @return 交集秒数（≤0 表示无交集）
-     */
-    private static long overlapSeconds(OutageWindow window, LocalDateTime from, LocalDateTime to,
-                                       LocalDateTime now) {
-        if (window == null || window.start() == null || now == null) {
-            return 0L;
-        }
-        LocalDateTime end = window.end() != null ? window.end() : now;
-        LocalDateTime clampStart = window.start().isBefore(from) ? from : window.start();
-        LocalDateTime clampEnd = end.isAfter(to) ? to : end;
-        return Duration.between(clampStart, clampEnd).getSeconds();
+        return new Summary(windowSeconds, total, longest, Math.max(0, outageCount), availability, meets,
+            maxAllowed, truncated);
     }
 }

@@ -43,6 +43,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -73,6 +74,10 @@ class OutageAvailabilityIT {
     private static final Long TENANT = 920001L;
     private static final Long DEVICE = 920101L;
     private static final Long OTHER_DEVICE = 920102L;
+    /** 原生 SQL 里的 DATETIME 字面量格式（LocalDateTime.toString() 带 `T`，MySQL 不认——CI 实测过）。 */
+    private static final DateTimeFormatter SQL_DATE_TIME =
+        DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
     private static final Path REPO_ROOT = Path.of("..", "..").toAbsolutePath().normalize();
 
     private static HikariDataSource dataSource;
@@ -289,6 +294,83 @@ class OutageAvailabilityIT {
             livenessMapper.insert(orphan);
             return 1;
         });
+    }
+
+    @Test
+    @DisplayName("★ A14：观测时间戳在**数据库层**只前进——旧快照（另一个副本）写回不得回退")
+    void livenessTimestampsMustNotRegressWhenWrittenOutOfOrder() {
+        LocalDateTime dbNow = livenessMapper.selectNow().withNano(0);
+        service.ingest(req(observation(DEVICE, 5_000, AvailabilityRules.QUALITY_GOOD, dbNow)));
+        DeviceLiveness row = inTenant(() -> livenessMapper.selectOne(Wrappers.<DeviceLiveness>lambdaQuery()
+            .eq(DeviceLiveness::getDeviceId, DEVICE)));
+
+        // 模拟另一个副本：它手里是更早的快照（Java 侧「latest」管不到跨副本），直接写回
+        DeviceLiveness stale = new DeviceLiveness();
+        stale.setId(row.getId());
+        stale.setPollIntervalMs(5_000);
+        stale.setLastGoodAt(dbNow.minusMinutes(10));
+        stale.setFirstObservedAt(dbNow.minusMinutes(10));
+        stale.setLastObservedAt(dbNow.minusMinutes(10));
+        inTenant(() -> {
+            livenessMapper.reviveAndUpdate(stale);
+            return 1;
+        });
+
+        DeviceLiveness after = inTenant(() -> livenessMapper.selectOne(Wrappers.<DeviceLiveness>lambdaQuery()
+            .eq(DeviceLiveness::getDeviceId, DEVICE)));
+        assertThat(after.getLastGoodAt()).as("旧时间戳不得覆盖新值（靠 SQL 的 CASE 比较）").isEqualTo(dbNow);
+        assertThat(after.getLastObservedAt()).as("最近观测同样只前进").isEqualTo(dbNow);
+        assertThat(after.getFirstObservedAt()).as("首次观测取较小值").isEqualTo(dbNow.minusMinutes(10));
+    }
+
+    @Test
+    @DisplayName("★ A11：明细超过上限被截断时，可用率/次数仍取**精确聚合**值（不因截断偏高）")
+    void summaryMustBeExactWhenDetailsAreTruncated() {
+        LocalDateTime dbNow = livenessMapper.selectNow().withNano(0);
+        service.ingest(req(observation(DEVICE, 5_000, AvailabilityRules.QUALITY_GOOD, dbNow)));
+        // 201 条各 30 秒、相邻不重叠（步长=时长），全部落在窗口内；一条 SQL 插完
+        LocalDateTime firstStart = dbNow.minusHours(2);
+        StringBuilder sql = new StringBuilder("INSERT INTO outage_event (id, tenant_id, device_id, start_ts, "
+            + "end_ts, duration_sec, reason, create_time, update_time) VALUES ");
+        for (int i = 0; i <= AvailabilityRules.MAX_OUTAGE_ROWS; i++) {
+            LocalDateTime start = firstStart.plusSeconds(i * 30L);
+            if (i > 0) {
+                sql.append(", ");
+            }
+            sql.append("(").append(10_000 + i).append(", ").append(TENANT).append(", ").append(DEVICE)
+                .append(", '").append(start.format(SQL_DATE_TIME)).append("', '")
+                .append(start.plusSeconds(30).format(SQL_DATE_TIME)).append("', 30, 'NO_GOOD_DATA', "
+                    + "NOW(), NOW())");
+        }
+        execute(sql.toString());
+
+        AvailabilityResp resp = inTenant(() -> service.query(DEVICE, dbNow.minusHours(4), dbNow));
+
+        assertThat(resp.getOutageCount()).as("次数是精确值（201），不是明细条数").isEqualTo(201);
+        assertThat(resp.getOutageSeconds()).as("合计 201×30s，来自聚合而非明细求和").isEqualTo(6_030L);
+        assertThat(resp.getOutages()).as("明细按最新优先截断到上限").hasSize(AvailabilityRules.MAX_OUTAGE_ROWS);
+        assertThat(resp.getTruncated()).isTrue();
+        assertThat(resp.getAvailability()).as("1 - 6030/14400").isEqualByComparingTo(new BigDecimal("0.581250"));
+    }
+
+    @Test
+    @DisplayName("★ A11：跨窗口边界的断档只算交集（SQL 侧裁剪），可用率不被高估")
+    void summaryMustClampOutagesToWindow() {
+        LocalDateTime dbNow = livenessMapper.selectNow().withNano(0);
+        service.ingest(req(observation(DEVICE, 5_000, AvailabilityRules.QUALITY_GOOD,
+            dbNow.minusMinutes(30))));
+        // 断档 [now-20min, now-5min]，窗口 [now-10min, now] ⇒ 只算 [now-10min, now-5min] = 300s
+        execute("INSERT INTO outage_event (id, tenant_id, device_id, start_ts, end_ts, duration_sec, reason, "
+            + "create_time, update_time) VALUES (20_001, " + TENANT + ", " + DEVICE + ", '"
+            + dbNow.minusMinutes(20).format(SQL_DATE_TIME) + "', '"
+            + dbNow.minusMinutes(5).format(SQL_DATE_TIME) + "', 900, 'NO_GOOD_DATA', NOW(), NOW())");
+
+        AvailabilityResp resp = inTenant(() -> service.query(DEVICE, dbNow.minusMinutes(10), dbNow));
+
+        assertThat(resp.getWindowSeconds()).isEqualTo(600L);
+        assertThat(resp.getOutageSeconds()).as("只算窗口内那 300 秒").isEqualTo(300L);
+        assertThat(resp.getLongestOutageSeconds()).isEqualTo(300L);
+        assertThat(resp.getAvailability()).isEqualByComparingTo(new BigDecimal("0.500000"));
     }
 
     @Test

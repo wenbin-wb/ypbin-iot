@@ -64,14 +64,56 @@ class AvailabilityMapperContractTest {
         assertThat(sql).contains("open_outage_id = #{outageId}");
     }
 
-    /** 抽取某个 Mapper 方法注解里的 SQL 文本（把 Java 字符串拼接还原成一行）。 */
+    @Test
+    @DisplayName("★ A14：观测状态的时间戳必须**在 SQL 里**只前进（跨副本写回旧值不得回退）")
+    void observedStateUpdateMustBeMonotonic() throws IOException {
+        String sql = methodSql("reviveAndUpdate");
+
+        assertThat(sql).as("last_good_at 必须取较大值（否则两个副本各自读旧快照再写回，旧时间戳会覆盖新的 ⇒ 可用率被算高）")
+            .contains("WHEN last_good_at IS NULL OR #{lastGoodAt,jdbcType=TIMESTAMP} > last_good_at");
+        assertThat(sql).as("first_observed_at 必须取较小值")
+            .contains("WHEN first_observed_at IS NULL OR #{firstObservedAt,jdbcType=TIMESTAMP} < first_observed_at");
+        assertThat(sql).as("last_observed_at 必须取较大值")
+            .contains("WHEN last_observed_at IS NULL OR #{lastObservedAt,jdbcType=TIMESTAMP} > last_observed_at");
+        assertThat(sql).as("null 参数必须有 jdbcType，否则 MyBatis 拼不出可执行语句")
+            .contains("jdbcType=TIMESTAMP");
+    }
+
+    @Test
+    @DisplayName("★ A11：窗口汇总必须是聚合 SQL，且显式带 tenant_id 与 is_deleted=0（原生 SQL 绕过自动追加）")
+    void windowSummaryMustBeExactAggregate() throws IOException {
+        String sql = outageMapperSql("summarizeInWindow");
+
+        assertThat(sql).as("抽取到的 SQL 不能为空").isNotBlank();
+        assertThat(sql).as("必须一次聚合出精确值（明细截断不影响汇总）").contains("SUM(").contains("MAX(")
+            .contains("COUNT(*)");
+        assertThat(sql).as("原生聚合 SQL 绕过了逻辑删除与租户条件 ⇒ 必须显式写")
+            .contains("tenant_id = #{tenantId}").contains("is_deleted = 0");
+        assertThat(sql).as("单条断档不得为负（否则脏数据会把可用率抬高）").contains("GREATEST(0,");
+        assertThat(sql).as("窗口裁剪必须在 SQL 里做").contains("GREATEST(start_ts, #{from})")
+            .contains("LEAST(COALESCE(end_ts, #{now}), #{to})");
+    }
+
+    /** 抽取某个 Mapper 方法注解里的 SQL 文本（把 Java 字符串拼接还原成一行；支持 @Update 与 @Select）。 */
     private static String methodSql(String methodName) throws IOException {
-        String source = Files.readString(MAPPER, StandardCharsets.UTF_8);
+        return methodSql(MAPPER, methodName, "@Update");
+    }
+
+    /** 抽取 OutageEventMapper 的 SQL（@Select 聚合）。 */
+    private static String outageMapperSql(String methodName) throws IOException {
+        return methodSql(REPO_ROOT.resolve(
+            "ypbin-service/ypbin-iot/src/main/java/cn/ypbin/admin/iot/mapper/OutageEventMapper.java"),
+            methodName, "@Select");
+    }
+
+    private static String methodSql(Path mapperPath, String methodName, String annotation)
+            throws IOException {
+        String source = Files.readString(mapperPath, StandardCharsets.UTF_8);
         int methodIndex = source.indexOf(" " + methodName + "(");
         assertThat(methodIndex).as("Mapper 里找不到方法 %s（门禁失效）", methodName).isPositive();
-        int annotationIndex = source.lastIndexOf("@Update", methodIndex);
-        assertThat(annotationIndex).as("方法 %s 前找不到 @Update（门禁失效）", methodName).isPositive();
-        String block = source.substring(annotationIndex + "@Update(".length(), methodIndex);
+        int annotationIndex = source.lastIndexOf(annotation, methodIndex);
+        assertThat(annotationIndex).as("方法 %s 前找不到 %s（门禁失效）", methodName, annotation).isPositive();
+        String block = source.substring(annotationIndex + annotation.length() + 1, methodIndex);
         int lastQuote = block.lastIndexOf('"');
         assertThat(lastQuote).as("@Update 参数里找不到字符串字面量（门禁失效）").isPositive();
         // 把「多行字符串拼接」还原成一行 SQL：去掉加号/引号/换行
