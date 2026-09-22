@@ -57,6 +57,11 @@ public interface DeviceLivenessMapper extends BaseMapper<DeviceLiveness> {
      * <p>{@code jdbcType=TIMESTAMP} 是必需的：参数可能为 {@code null}，MyBatis 在 null 且无 jdbcType 时
      * 对部分驱动会拼不出可执行语句。</p>
      *
+     * <p><b>{@code poll_interval_ms} 为什么**不**做成单调</b>：它是**配置**（采集周期），不是时间戳——
+     * 配置合法地会变大或变小，取单调值会让「把周期从 1s 调成 10s」这类正常变更被静默忽略。
+     * 代价是：另一个副本手里的**过期但为正**的旧周期仍可能写回（阈值 K×周期随之偏大、检测略滞后、
+     * 可用率略偏高）。已登记为 ROADMAP 四点十二的 A15。</p>
+     *
      * @param row 携带 id 与最新观测状态的实体
      * @return 受影响行数
      */

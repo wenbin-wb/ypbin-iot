@@ -63,7 +63,10 @@ public class AvailabilityResp {
     /** 最长单次断档上限（秒）。 */
     private long maxAllowedOutageSeconds;
 
-    /** 断档明细（按开始时间升序；超过上限时截断，见 {@link #truncated}）。 */
+    /**
+     * 断档明细（**最新优先**：按开始时间倒序），最多返回 {@code AvailabilityRules.MAX_OUTAGE_ROWS} 条；
+     * 超出时置 {@link #truncated}——注意**汇总（可用率/次数/总时长）不受截断影响**（来自精确聚合）。
+     */
     private List<OutageEventResp> outages = new ArrayList<>();
 
     /** 断档明细是否被截断（窗口内事件数超过返回上限）。 */

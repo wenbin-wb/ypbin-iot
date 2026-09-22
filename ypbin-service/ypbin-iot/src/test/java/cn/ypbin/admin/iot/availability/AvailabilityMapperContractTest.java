@@ -69,12 +69,16 @@ class AvailabilityMapperContractTest {
     void observedStateUpdateMustBeMonotonic() throws IOException {
         String sql = methodSql("reviveAndUpdate");
 
+        // 断言到「THEN/ELSE 的极性」而不只是子串：反转变异（THEN 与 ELSE 对调）也必须被咬住
         assertThat(sql).as("last_good_at 必须取较大值（否则两个副本各自读旧快照再写回，旧时间戳会覆盖新的 ⇒ 可用率被算高）")
-            .contains("WHEN last_good_at IS NULL OR #{lastGoodAt,jdbcType=TIMESTAMP} > last_good_at");
-        assertThat(sql).as("first_observed_at 必须取较小值")
-            .contains("WHEN first_observed_at IS NULL OR #{firstObservedAt,jdbcType=TIMESTAMP} < first_observed_at");
+            .contains("WHEN last_good_at IS NULL OR #{lastGoodAt,jdbcType=TIMESTAMP} > last_good_at "
+                + "THEN #{lastGoodAt,jdbcType=TIMESTAMP} ELSE last_good_at END");
+        assertThat(sql).as("first_observed_at 必须取较小值（极性同样要在断言里体现）")
+            .contains("WHEN first_observed_at IS NULL OR #{firstObservedAt,jdbcType=TIMESTAMP} < first_observed_at "
+                + "THEN #{firstObservedAt,jdbcType=TIMESTAMP} ELSE first_observed_at END");
         assertThat(sql).as("last_observed_at 必须取较大值")
-            .contains("WHEN last_observed_at IS NULL OR #{lastObservedAt,jdbcType=TIMESTAMP} > last_observed_at");
+            .contains("WHEN last_observed_at IS NULL OR #{lastObservedAt,jdbcType=TIMESTAMP} > last_observed_at "
+                + "THEN #{lastObservedAt,jdbcType=TIMESTAMP} ELSE last_observed_at END");
         assertThat(sql).as("null 参数必须有 jdbcType，否则 MyBatis 拼不出可执行语句")
             .contains("jdbcType=TIMESTAMP");
     }
@@ -89,9 +93,19 @@ class AvailabilityMapperContractTest {
             .contains("COUNT(*)");
         assertThat(sql).as("原生聚合 SQL 绕过了逻辑删除与租户条件 ⇒ 必须显式写")
             .contains("tenant_id = #{tenantId}").contains("is_deleted = 0");
-        assertThat(sql).as("单条断档不得为负（否则脏数据会把可用率抬高）").contains("GREATEST(0,");
-        assertThat(sql).as("窗口裁剪必须在 SQL 里做").contains("GREATEST(start_ts, #{from})")
-            .contains("LEAST(COALESCE(end_ts, #{now}), #{to})");
+        // SUM 与 MAX **各自**都要有防负（只给 SUM 加会被漏掉一条路径）
+        assertThat(sql).as("SUM 侧的单条防负不得缺失（否则脏数据会把可用率抬高）")
+            .contains("SUM(GREATEST(0, TIMESTAMPDIFF");
+        assertThat(sql).as("MAX 侧的单条防负不得缺失").contains("MAX(GREATEST(0, TIMESTAMPDIFF");
+        // 窗口裁剪要**两端都在**，且整段窗口谓词不得被删掉（否则汇总会变成「该设备全历史断档」）
+        assertThat(sql).as("窗口裁剪：起点侧").contains("GREATEST(start_ts, #{from,jdbcType=TIMESTAMP})");
+        assertThat(sql).as("窗口裁剪：终点侧（进行中的断档结算到 now，now 缺失时退回数据库时钟）")
+            .contains("LEAST(COALESCE(end_ts, COALESCE(#{now,jdbcType=TIMESTAMP}, NOW())), "
+                + "#{to,jdbcType=TIMESTAMP})");
+        assertThat(sql).as("窗口谓词不得被删掉").contains("start_ts < #{to,jdbcType=TIMESTAMP}")
+            .contains("(end_ts IS NULL OR end_ts > #{from,jdbcType=TIMESTAMP})");
+        assertThat(sql).as("可空时间参数必须带 jdbcType（与观测状态更新同一条纪律）")
+            .contains("jdbcType=TIMESTAMP");
     }
 
     /** 抽取某个 Mapper 方法注解里的 SQL 文本（把 Java 字符串拼接还原成一行；支持 @Update 与 @Select）。 */

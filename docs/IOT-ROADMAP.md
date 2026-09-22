@@ -413,7 +413,7 @@ ERROR The build could not read 1 project
 | 静默设备检出 | 周期扫描 `OutageScanner`（`ypbin.availability.scan-interval-ms`）：SQL 里用 `TIMESTAMPADD(MICROSECOND, (CASE WHEN 周期>0 THEN 周期 ELSE 兜底 END) × K × 1000, COALESCE(last_good_at, first_observed_at)) < NOW()` 选候选（生效周期口径与 `OutageDetector.effectiveIntervalMs` **完全一致**；早期版本误用 `GREATEST(周期, 兜底)`，会把 1s 周期的设备抬到 5s，与 spec 的「K × 采集周期」不符） ⇒ **设备彻底不再上报也能发现**（这正是断档判定的核心场景，只靠上报事件永远发现不了） |
 | 多副本安全 | 打开断档 = 插入事件 + `UPDATE device_liveness SET open_outage_id=? WHERE id=? **AND open_outage_id IS NULL**`；受影响行数为 0 时**撤销刚插入的事件** ⇒ 同一段断档不会被两个副本记两次。⚠️ 第一版提交时**这个谓词漏了**（文档/Javadoc 都声称有、SQL 里没有），被外委复核实测抓出：所有 mock 级用例（含变异）都咬不到 SQL 文本 ⇒ 已补谓词，并新增① 源码级门禁 `AvailabilityMapperContractTest`（断言 SQL 含该谓词、且上报路径不得回写 `open_outage_id`）、② 真库用例 `markOpenOutageMustBeConditionalOnNullInRealSql`（第二次标记必须返回 0） |
 | **写权分离** | `open_outage_id` 的写权一分为二：**扫描负责开**（`... WHERE open_outage_id IS NULL`）、**上报负责闭**（`... WHERE id=? AND open_outage_id=?`，只清自己那一条）。上报侧不再整行回写该字段 ⇒ 消除「上报手里是旧快照、把扫描刚开的断档覆盖成 NULL」的丢失更新（会变成永不闭合的孤儿断档） |
-| 乱序/重放防护 | 有效数据**早于断档起点**时**不闭合**（否则写出 `start > end`、`duration=0` 的假恢复并清掉标记）；状态字段只在单次调用内保证「只前进」 |
+| 乱序/重放防护 | 有效数据**早于断档起点**时**不闭合**（否则写出 `start > end`、`duration=0` 的假恢复并清掉标记）（状态字段的「只前进」已由 A14 提升为**数据库级**保证，见「观测状态数据库级单调」行） |
 | 候选清理（防饥饿） | 设备已删除/停用的活性行**清理掉**而不是只跳过：候选查询按 `id` 升序 + `LIMIT 扫描批次`，这类行永远满足条件、永远占住前段 ⇒ 累积 ≥ 批次上限后**其它设备的断档再也不会被发现**（是饥饿，不是延迟） |
 | 生效周期口径统一 | SQL 与 `OutageDetector.effectiveIntervalMs` 统一为「上报了正周期就用它，否则用兜底」；并把纯逻辑 `isOutage` **接进生产路径**（开断档前用同一套规则复核，两处口径不一致会先暴露）——此前它是死代码 |
 | **观测状态数据库级单调**（A14 闭环） | `reviveAndUpdate` 的时间戳比较**移到 SQL 的 `CASE` 里**：`last_good_at`/`last_observed_at` 取较大值、`first_observed_at` 取较小值、`poll_interval_ms` 只在正数时更新。Java 侧 `latest()/earliest()` 只保证**单次调用内**正确；两个副本各自拿旧快照写回时旧时间戳会覆盖新的（可用率被算高），只有数据库级比较才是不变量。可空参数一律带 `jdbcType=TIMESTAMP`（否则 MyBatis 拼不出可执行语句） |
@@ -436,7 +436,9 @@ ERROR The build could not read 1 project
   `filterCollectible` 的批量清理没包 `executeIgnore` ⇒ 租户插件 fail-closed 把整轮扫描打断（**产品缺陷**，已修）；
   ② `eca67a8`：新用例的两条垃圾活性行共用 `device_id` ⇒ 撞 `uk_device_liveness(tenant_id, device_id)`
   （**用例自身数据错误**，已改为不同 device_id）。以 PR #17 最新一次 `IoT Integration Tests` 的结论为准；
-- 变异 **16 处**全部精确转红（iot 侧 7：阈值非严格 / 不做窗口裁剪 / 达标只看可用率 / 去掉多副本守卫 /
+- 变异累计 **22 处**全部精确转红（本轮 +6，行号逐一经复核实测复现：`observedStateUpdateMustBeMonotonic:73`、
+  `windowSummaryMustBeExactAggregate:91/:92/:93`、`AvailabilityServiceImplTest…:338`、`:349`）；
+  此前 16 处为（iot 侧 7：阈值非严格 / 不做窗口裁剪 / 达标只看可用率 / 去掉多副本守卫 /
   去掉设备存在性过滤 / 状态可回退 / 有效数据不闭合断档；access 侧 3：队满改为阻塞 / 失败后仍抛 /
   上报时刻不用 epoch 毫秒）。复核后新增的门禁也做了变异（去掉 SQL 谓词 / 上报路径回写 open_outage_id /
   清空不判 outageId / 停机只刷一批 / 乱序仍闭合 / 设备消失只跳过不清理 —— 见四点十二的提交信息与本节）。
@@ -449,6 +451,8 @@ ERROR The build could not read 1 project
 | **A9** | **上报失败不重试**（本批丢弃） | 刻意为之：重试会占住 flush 线程并放大远端压力；代价是读数丢失会让断档缺口被算长一些 ⇒ 以 `iot.access.egress.failed`/`dropped` 暴露。彻底解决要等 EMQX/MQ 的持久化通道（Q4）与「断档判定对丢失不敏感」的补偿口径 |
 | **A10** | **扫描无租约/归属联动**（= A6 的另一面） | 租户被接管到别的节点后，本节点的活性行停止更新 ⇒ 会被算成断档。需要判据（如「本节点仍持有该租户」）或上报里带「本节点是否在采」 |
 | **A12** | 指标**未接大盘/告警** | `iot.access.egress.*`（accepted/dropped/sent/failed/invalid/pending）与可用率侧无 Prometheus 抓取/告警/大盘定义，仅文档提及名字（复核 R8 未核实项） |
+| **A15** | `poll_interval_ms` 可被**过期但为正**的旧快照回退 | 该列是**配置**不是时间戳（1s→10s 是合法变更），故刻意不做单调；代价是另一副本的旧周期写回后阈值 `K×周期` 偏大 ⇒ 检测略滞后、可用率略偏高。若要收口需引入「配置版本号」判新旧（与 `config_epoch` 同类机制） |
+| **A16** | `outageCount` 口径含「裁剪后重叠 0 秒」的行 | 聚合用 `COUNT(*)`（满足窗口重叠条件的行都计），而旧的 Java 求和会跳过重叠 ≤0 的行 ⇒ 次数可能比旧实现大（只影响展示的次数，不影响秒数与可用率）。已在 Mapper Javadoc 写明 |
 | **A13** | 多副本相关用例的成本面 | 谓词与饥饿两条用例是**真库 IT**（CI 才跑）；本地由源码级门禁 `AvailabilityMapperContractTest` 兜底（它只断言 SQL 文本，不执行 SQL） |
 | **A2** | 读数**值**不落库、Redis 最新值未做 | 依赖 Q8（IoTDB 树/表模型）；本轮刻意只上报「质量+时刻」，不发明取值契约 |
 | **A3** | 维护窗口排除未做 | spec 口径里「统计总时长排除可配置维护窗口」尚未实现，当前窗口时长 = `to - from` |
