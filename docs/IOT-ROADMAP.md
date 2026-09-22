@@ -479,16 +479,16 @@ ERROR The build could not read 1 project
 
 | 面 | 实现 |
 |---|---|
-| 重发 ADD（N-2） | `TenantLinkManager#reconcile` 之外新增链路：每轮对账后查「仍无会话」的设备（`SubscriptionPlanner#devicesWithoutSession`，默认空实现给日志桩/测试替身）并**重发 ADD**（新 revision）让框架重新 bind。三重节制：逐设备指数退避 **30s→2min**、每轮上限 **20**（超出计 `iot.access.device.rebind.deferred`）、**首次 ADD 当轮先预置一次退避**（建链结果下一轮才看得出来，同轮再发纯属浪费）。会话建立即清退避；fence/设备下架同步清理 |
+| 重发 ADD（N-2） | 新增链路：**每次 `startCollecting`**（由采集周期驱动，默认 15s；`reconcile` 不调用）查「仍无会话」的设备（`SubscriptionPlanner#devicesWithoutSession`，默认空实现给日志桩/测试替身）并**重发 ADD**（新 revision）让框架重新 bind。三重节制：逐设备指数退避 **30s→2min**、每轮上限 **20**（超出计 `iot.access.device.rebind.deferred`）、**首次 ADD 当轮先预置一次退避**（建链结果下一轮才看得出来，同轮再发纯属浪费）。会话建立即清退避；fence/设备下架同步清理 |
 | 订阅失败退避（G1） | `AccessSubscriptionPlanner` 记 `{会话实例, 连续失败次数, 下次可重试时刻}`，指数退避 30s→2min；**会话实例变化即作废退避**（框架重连说明换了链路，立刻重试才对——否则一次失败会把「设备恢复」也挡在窗口外）；成功即清除；新增跳过计数 `iot.access.subscribe.backoff.skipped` |
 | 在途去重（G1） | `Set<String> inFlight`：`subscribe` 发起后加入、`whenComplete` **无论成败**都移除（不移除会让该设备再也不能被订阅，比重复订阅更糟）；在途期间下一轮直接跳过并计 `iot.access.subscribe.inflight.skipped` |
 
 **验收证据（本机实跑）**
 
-- `ypbin-access` 单测 **76/0**（原 68 → +8：`AccessSubscriptionPlannerTest` 3→7、`IotProtocolTenantLinkManagerTest` 14→18）；
+- `ypbin-access` 单测 **82/0**（原 68 → **+14**：`AccessSubscriptionPlannerTest` 3→10、`IotProtocolTenantLinkManagerTest` 14→21；含复核整改后补的公平轮转、退避封顶、同步抛出、下架清退避 4 条）；
 - `ypbin-iot` 125/0、`ypbin-architecture-tests` 41/0、`tools/check-iot-sql-equivalence.sh` OK；
 - 变异 **5 处**全部精确转红（见本节提交信息与验收证据段）：去掉在途去重、去掉失败退避、去掉「会话实例变化作废退避」、
-  去掉重发 ADD、去掉重发退避判断——各自只让目标用例失败；
+  去掉重发 ADD、去掉重发退避判断——各自只让目标用例失败；复核整改后又补 5 处（去掉公平轮转排序 / 去掉 reconcile 的退避清理 / 去掉同步抛出的 try-catch / 去掉 forget 清在途 / 去掉退避封顶），同样各自精确转红；
 - 无需真库（本片全是 access 侧内存态逻辑，不涉及 SQL/租户）。
 
 **仍未闭环（本片相关）**
@@ -496,8 +496,12 @@ ERROR The build could not read 1 project
 | # | 事项 | 现状 |
 |---|---|---|
 | **L1** | 重发 ADD 是「重建链」而非「重试订阅」 | 设备离线时框架 bind 会失败并每 30s 重试一次；若未来出现「bind 成功但 subscribe 永远失败」的协议侧问题，靠 G1 的退避重试覆盖（不会自愈到「换协议参数」的程度） |
-| **L2** | 每轮上限 20 只保证「不会一次打爆」 | 大规模离线（>20 台同时无会话）时其余设备**按轮次顺延**（每轮 10s ⇒ 200 台最坏 ~100s 才轮完一轮重发）；已用 `rebind.deferred` 暴露 |
+| **L2** | 每轮上限 20 只保证「不会一次打爆」 | 大规模离线（>20 台同时无会话）时其余设备**按轮次顺延**，节奏由**采集周期**（默认 15s）驱动、200 台约需 10 轮 ≈ 150s；已用 `rebind.deferred` 暴露。⚠️ **外委复核实测过一个真缺陷**：配额原先按设备列表顺序取，当 `acquire-interval-ms` > 退避上限（如 5 分钟 > 2 分钟）时前 20 台每轮都吃掉配额 ⇒ 第 21 台起**永久零数据**；已改为**按「下次可重试时刻」升序取配额**（刚发过的自动排到队尾），并有回归用例 `rebindMustRotateAcrossCyclesToAvoidStarvation`（25 台 / 5 分钟间隔 / 3 轮内每台至少重发一次） |
 | **L3** | 会话实例判等依赖框架「重连必换实例」 | 与本仓既有的 B2 防线同一前提；若框架某天复用实例，G1 的退避会挡住恢复（需真 socket e2e 长期观测） |
+| **L4** | `devicesWithoutSession` 默认空实现 | 任何**未覆写**它的规划器实现都会**静默失去 N-2 自愈**（无日志/指标/启动自检）。当前唯一生产实现已覆写；建议后续给默认实现加「一次性 WARN」或启动自检 |
+| **L5** | 会话表**全量拷贝**的开销 | `AccessSubscriptionPlanner.devicesWithoutSession` 每租户每周期调一次 `IotLifecycle.sessions()`（内部 `Map.copyOf` 全量会话表）⇒ N 租户 × M 设备为 O(N×M) 条目拷贝/周期。设备规模上千时需改为按租户切片或让框架提供按设备查询 |
+| **L6** | 宿主 re-ADD 与框架 reconnect 的并发 bind | 两者可能同时 `bind` 同一设备（框架 `reconnect()` 不持 `deviceLocks`）——**仅代码推理，未实测**；需真 socket 长跑观测 |
+| **L7** | 订阅 Future **永不完成**时仍会锁死 | 同步抛出已用 `try/catch` 覆盖（+ `forget` 清在途）；但若适配器返回一个永不完成的 Future，`whenComplete` 不回调 ⇒ 该设备仍永久无法订阅。当前 tcp 实现是同步完成 Future，风险在接 mqtt/opcua 后兑现 |
 
 ### 五、替换缝（3a 已备好，3b-2 只需新增自动配置）
 3a 的 `LoggingTenantLinkManager` 已去掉 `@Component`，由 `AccessLeaseConfiguration`（`@AutoConfiguration`

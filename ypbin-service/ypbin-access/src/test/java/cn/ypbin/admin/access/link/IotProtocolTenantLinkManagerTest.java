@@ -26,7 +26,6 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -283,6 +282,75 @@ class IotProtocolTenantLinkManagerTest {
         linkManager.startCollecting(TENANT_A);
 
         assertThat(framework.actions).as("清掉退避后应立刻重发").containsExactly("ADD:d1", "ADD:d1");
+    }
+
+    @Test
+    @DisplayName("★ 公平性：采集间隔大于退避上限时，被每轮上限挡住的设备**下一轮必须轮到**（不得永久饿死）")
+    void rebindMustRotateAcrossCyclesToAvoidStarvation() {
+        int total = IotProtocolTenantLinkManager.REBIND_MAX_PER_CYCLE + 5;
+        List<DeviceSpec> many = new ArrayList<>();
+        for (int i = 1; i <= total; i++) {
+            many.add(device("d" + i));
+            planner.missingSessions.add("d" + i);
+        }
+        source.devices.put(TENANT_A, many);
+
+        // 采集间隔 5 分钟 > 退避上限 2 分钟：用户把 acquire-interval-ms 调大后的合法配置
+        linkManager.startCollecting(TENANT_A);
+        clock.advance(Duration.ofMinutes(5));
+        linkManager.startCollecting(TENANT_A);
+        clock.advance(Duration.ofMinutes(5));
+        linkManager.startCollecting(TENANT_A);
+
+        // 每台设备至少出现两次 ADD（首次采集 1 次 + 至少 1 次重发）
+        Map<String, Long> addCount = framework.actions.stream()
+            .filter(action -> action.startsWith("ADD:"))
+            .collect(java.util.stream.Collectors.groupingBy(action -> action.substring(4),
+                java.util.stream.Collectors.counting()));
+        assertThat(addCount).hasSize(total);
+        assertThat(addCount.values()).as("每台都必须被重发过（轮转而非按列表顺序吃配额）")
+            .allMatch(count -> count >= 2L, "count>=2");
+    }
+
+    @Test
+    @DisplayName("★ N-2：重发退避必须封顶（连续无会话时重试间隔不得无限翻倍）")
+    void rebindBackoffMustCapAtConfiguredMax() {
+        source.devices.put(TENANT_A, List.of(device("d1")));
+        planner.missingSessions.add("d1");
+
+        linkManager.startCollecting(TENANT_A);                                   // 预置 30s
+        clock.advance(IotProtocolTenantLinkManager.REBIND_BACKOFF_BASE.plusSeconds(1));
+        linkManager.startCollecting(TENANT_A);                                   // 第 1 次重发 ⇒ 60s
+        clock.advance(Duration.ofSeconds(61));
+        linkManager.startCollecting(TENANT_A);                                   // 第 2 次 ⇒ 120s
+        clock.advance(Duration.ofSeconds(121));
+        linkManager.startCollecting(TENANT_A);                                   // 第 3 次 ⇒ 仍 120s
+        int before = framework.actions.size();
+
+        clock.advance(IotProtocolTenantLinkManager.REBIND_BACKOFF_MAX.minusSeconds(1));
+        linkManager.startCollecting(TENANT_A);
+        assertThat(framework.actions.size()).as("封顶内不得重发").isEqualTo(before);
+        clock.advance(Duration.ofSeconds(2));
+        linkManager.startCollecting(TENANT_A);
+        assertThat(framework.actions.size()).as("封顶恰为 2 分钟：超过即重发").isEqualTo(before + 1);
+    }
+
+    @Test
+    @DisplayName("★ C2：设备下架（reconcile 单设备删除）必须清掉重发退避，避免 Map 无界增长与陈旧退避")
+    void removedDeviceMustDropRebindBackoff() {
+        source.devices.put(TENANT_A, List.of(device("d1"), device("d2")));
+        planner.missingSessions.add("d1");
+        planner.missingSessions.add("d2");
+        linkManager.startCollecting(TENANT_A);
+        assertThat(linkManager.rebindBackoffCount()).as("两台都登记了退避").isEqualTo(2);
+
+        // 台账去掉 d1 ⇒ reconcile 走「单设备下架」分支
+        source.devices.put(TENANT_A, List.of(device("d2")));
+        assertThat(linkManager.reconcile(TENANT_A)).isTrue();
+
+        assertThat(linkManager.rebindBackoffCount())
+            .as("d1 下架后必须只剩 d2 的退避（否则设备长期更替会让 Map 无界增长）").isEqualTo(1);
+        assertThat(planner.forgotten).contains("d1");
     }
 
     @Test

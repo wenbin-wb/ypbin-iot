@@ -178,6 +178,76 @@ class AccessSubscriptionPlannerTest {
     }
 
     @Test
+    @DisplayName("★ 同步抛出不得把设备永久锁死（在途标记必须清掉）")
+    void synchronousThrowMustNotLockDeviceForever() {
+        DeviceSession flaky = mock(DeviceSession.class);
+        // 第一次同步抛出、第二次成功：若「在途」标记没被清掉，第二次会一直被挡 ⇒ 设备永久无法订阅
+        when(flaky.subscribe(any(SubscribeRequest.class), any()))
+            .thenThrow(new IllegalStateException("适配器同步抛出"))
+            .thenReturn(CompletableFuture.completedFuture(null));
+        AtomicReference<Map<String, DeviceSession>> bound =
+            new AtomicReference<>(Map.of("d1", flaky));
+        AccessSubscriptionPlanner planner = planner(bound);
+
+        assertThat(planner.subscribe(List.of(device("d1"))))
+            .as("同步抛出视为发起失败").isZero();
+        assertThat(planner.subscribe(List.of(device("d1"))))
+            .as("紧接着的一轮在退避窗口内，跳过").isZero();
+
+        // 退避到期后必须能再次尝试并成功：若在途标记没被清掉，这里会返回 0（永久无法订阅）
+        clock.advance(AccessSubscriptionPlanner.SUBSCRIBE_BACKOFF_BASE.plusSeconds(1));
+        assertThat(planner.subscribe(List.of(device("d1"))))
+            .as("在途标记必须已清除，否则设备永久无法订阅").isEqualTo(1);
+        verify(flaky, times(2)).subscribe(any(SubscribeRequest.class), any());
+        assertThat(planner.trackedSessionCount()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("★ forget 必须同时清掉在途标记（同 id 复现不得被旧在途挡住）")
+    void forgetMustClearInFlight() {
+        DeviceSession pendingSession = mock(DeviceSession.class);
+        when(pendingSession.subscribe(any(SubscribeRequest.class), any()))
+            .thenReturn(new CompletableFuture<>());
+        AtomicReference<Map<String, DeviceSession>> bound =
+            new AtomicReference<>(Map.of("d1", pendingSession));
+        AccessSubscriptionPlanner planner = planner(bound);
+
+        assertThat(planner.subscribe(List.of(device("d1")))).isEqualTo(1);
+        planner.forget("d1");
+
+        DeviceSession healthy = subscribeReturnsFuture();
+        bound.set(Map.of("d1", healthy));
+        assertThat(planner.subscribe(List.of(device("d1"))))
+            .as("forget 后不得还被旧的在途标记挡住").isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("★ G1：失败退避必须封顶（3 次失败后恒为 2 分钟，不得无限翻倍）")
+    void failureBackoffMustCapAtConfiguredMax() {
+        DeviceSession failing = mock(DeviceSession.class);
+        CompletableFuture<SubscriptionHandle> failed = new CompletableFuture<>();
+        failed.completeExceptionally(new IllegalStateException("boom"));
+        when(failing.subscribe(any(SubscribeRequest.class), any())).thenReturn(failed);
+        AtomicReference<Map<String, DeviceSession>> bound =
+            new AtomicReference<>(Map.of("d1", failing));
+        AccessSubscriptionPlanner planner = planner(bound);
+
+        planner.subscribe(List.of(device("d1")));                    // 失败 1 ⇒ 30s
+        clock.advance(Duration.ofSeconds(31));
+        planner.subscribe(List.of(device("d1")));                    // 失败 2 ⇒ 60s
+        clock.advance(Duration.ofSeconds(61));
+        planner.subscribe(List.of(device("d1")));                    // 失败 3 ⇒ 封顶 120s
+
+        clock.advance(AccessSubscriptionPlanner.SUBSCRIBE_BACKOFF_MAX.minusSeconds(1));
+        assertThat(planner.subscribe(List.of(device("d1"))))
+            .as("封顶后只差 1 秒不得重试（若封顶被去掉会退化成 240s，这里同样为 0——故下一条才是关键）")
+            .isZero();
+        clock.advance(Duration.ofSeconds(2));
+        assertThat(planner.subscribe(List.of(device("d1"))))
+            .as("封顶恰为 120s：超过即必须重试").isEqualTo(1);
+    }
+
+    @Test
     @DisplayName("★ N-2：devicesWithoutSession 必须报出没有会话的设备（宿主据此重发 ADD）")
     void devicesWithoutSessionMustReportMissing() {
         AtomicReference<Map<String, DeviceSession>> bound =

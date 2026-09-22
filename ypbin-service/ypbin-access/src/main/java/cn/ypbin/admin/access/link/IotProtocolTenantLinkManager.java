@@ -18,6 +18,8 @@ import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -215,21 +217,44 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
      */
     private void retryDevicesWithoutSession(Long tenantId, List<DeviceSpec> devices) {
         Set<String> missing = planner.devicesWithoutSession(devices);
-        int emitted = 0;
+        if (missing.isEmpty()) {
+            for (DeviceSpec device : devices) {
+                rebindBackoff.remove(device.deviceId());
+            }
+            return;
+        }
+        List<DeviceSpec> candidates = new ArrayList<>();
         for (DeviceSpec device : devices) {
             String deviceId = device.deviceId();
             if (!missing.contains(deviceId)) {
                 rebindBackoff.remove(deviceId);
                 continue;
             }
-            if (emitted >= REBIND_MAX_PER_CYCLE) {
-                rebindDeferredCounter.increment();
-                continue;
-            }
             Backoff backoff = rebindBackoff.get(deviceId);
             if (backoff != null && clock.instant().isBefore(backoff.nextRetryAt())) {
                 continue;
             }
+            candidates.add(device);
+        }
+        if (candidates.isEmpty()) {
+            return;
+        }
+        // ⚠️ 公平性（外委复核实测的缺陷）：**按「下次可重试时刻」升序**取本轮配额，而不是按设备列表顺序。
+        //    否则当采集间隔 > 退避上限（例如 acquire-interval-ms=5min、退避封顶 2min）时，列表前 20 台每轮
+        //    退避都已过期、永远先吃掉配额 ⇒ 第 21 台起**永久零数据**（正是 N-2 要消灭的静默失效）。
+        //    按时刻升序后，刚发过的设备时刻最新 ⇒ 自动排到队尾，被挡住的下一轮必然排到前面。
+        candidates.sort(Comparator.comparing(device -> {
+            Backoff backoff = rebindBackoff.get(device.deviceId());
+            return backoff == null ? Instant.MIN : backoff.nextRetryAt();
+        }));
+        int emitted = 0;
+        for (DeviceSpec device : candidates) {
+            if (emitted >= REBIND_MAX_PER_CYCLE) {
+                rebindDeferredCounter.increment();
+                continue;
+            }
+            String deviceId = device.deviceId();
+            Backoff backoff = rebindBackoff.get(deviceId);
             int attempts = backoff == null ? 1 : backoff.attempts() + 1;
             Duration delay = backoffDelay(attempts, REBIND_BACKOFF_BASE, REBIND_BACKOFF_MAX);
             rebindBackoff.put(deviceId, new Backoff(attempts, clock.instant().plus(delay)));
@@ -240,6 +265,11 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
                 + "第 {} 次 下次重试={} 秒后（若持续无会话请查设备端点与网络）",
                 LogSanitizer.sanitize(tenantId), deviceId, attempts, delay.toSeconds());
         }
+    }
+
+    /** 当前登记的「重发 ADD」退避条数（观测/测试用；正常应随设备下架/会话建立而回落）。 */
+    int rebindBackoffCount() {
+        return rebindBackoff.size();
     }
 
     /**
@@ -296,6 +326,8 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
                 registry.emit(new DeviceChange(ChangeType.REMOVE, entry.getValue(),
                     registry.nextRevision(entry.getKey())));
                 planner.forget(entry.getKey());
+                // C2：单设备下架同样要清「重发 ADD」退避（否则 Map 无界增长 + 同 id 复现吃陈旧退避）
+                rebindBackoff.remove(entry.getKey());
                 removed++;
             }
         }
@@ -306,6 +338,9 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
             if (previous == null) {
                 registry.emit(new DeviceChange(ChangeType.ADD, entry.getValue(),
                     registry.nextRevision(entry.getKey())));
+                // 与首次采集同一取向：刚发过 ADD 先预置一次退避，避免同轮/下一轮立刻再发一次
+                rebindBackoff.put(entry.getKey(),
+                    new Backoff(1, clock.instant().plus(REBIND_BACKOFF_BASE)));
                 added++;
             } else if (!previous.equals(entry.getValue())) {
                 // 规格变了：重新 ADD（框架会先解绑再绑定），revision 必须继续递增
@@ -338,6 +373,7 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
             registry.emit(new DeviceChange(ChangeType.REMOVE, entry.getValue(),
                 registry.nextRevision(entry.getKey())));
             planner.forget(entry.getKey());
+            // 下架即清「重发 ADD」退避：否则设备被删后该 Map 无界增长，且同 id 重新出现会吃陈旧退避
             rebindBackoff.remove(entry.getKey());
         }
         // 不缓存空清单：交给 startCollecting 的「空清单不缓存 + 退避重取」路径，
@@ -459,14 +495,6 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
         return Set.copyOf(collecting);
     }
 
-    /**
-     * 空清单退避状态。
-     *
-     * @param attempts    连续为空的次数
-     * @param nextRetryAt 下一次允许重取的时刻
-     * @author wenbin
-     * @since 2026-09-21
-     */
     /**
      * 退避状态（空清单与「重发 ADD」共用）。
      *

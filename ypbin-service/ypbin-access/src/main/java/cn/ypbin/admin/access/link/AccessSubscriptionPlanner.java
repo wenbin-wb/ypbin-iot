@@ -156,28 +156,60 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
             //    对账会认为无需重试 ⇒ 该设备**永久停止采集**且只有一行 ERROR 日志。
             //    现在失败不写 ⇒ 下一个租约周期自动重试。
             inFlight.add(device.deviceId());
-            session.subscribe(request, listener).whenComplete((handle, error) -> {
-                // 无论成败都要摘掉「在途」标记，否则该设备再也不会被订阅（比重复订阅更糟）
+            boolean started;
+            try {
+                started = startSubscribe(session, request, listener, device, addresses);
+            } catch (RuntimeException ex) {
+                // ⚠️ 同步抛出（适配器契约并不禁止）：必须立刻摘掉在途标记，否则该设备**永久无法订阅**
+                //    ——注释自己说了「不移除比重复订阅更糟」，那就不能只防异步失败这条路径。
                 inFlight.remove(device.deviceId());
-                if (error != null) {
-                    subscribeFailure.increment();
-                    armFailureBackoff(device.deviceId(), session);
-                    // 订阅失败要暴露：否则表现为「采了但没数据」
-                    log.error("[access] 订阅失败（退避后重试）：deviceId={} addresses={} 下次重试={}秒后",
-                        device.deviceId(), addresses.size(),
-                        currentBackoffSeconds(device.deviceId()), error);
-                } else {
-                    failureBackoff.remove(device.deviceId());
-                    subscribedSessions.put(device.deviceId(), session);
-                    subscribeSuccess.increment();
-                    log.info("[access] 订阅成功：deviceId={} 点位数={}", device.deviceId(),
-                        addresses.size());
-                }
-            });
+                subscribeFailure.increment();
+                armFailureBackoff(device.deviceId(), session);
+                log.error("[access] 订阅调用同步抛出异常（退避后重试）：deviceId={} addresses={}",
+                    device.deviceId(), addresses.size(), ex);
+                continue;
+            }
+            if (!started) {
+                continue;
+            }
             // 返回值是「本次**发起**的订阅数」：完成与否是异步的，调用方不得据此判断成功
             subscribed++;
         }
         return subscribed;
+    }
+
+    /**
+     * 发起订阅并挂完成回调（回调里维护跟踪/退避/在途状态）。
+     *
+     * @param session   会话
+     * @param request   订阅请求
+     * @param listener  数据监听器
+     * @param device    设备规格
+     * @param addresses 点位地址（日志用）
+     * @return 是否真的发起了订阅（无点位时为 {@code false}）
+     */
+    private boolean startSubscribe(DeviceSession session, SubscribeRequest request,
+                                   PointMappingDataListener listener, DeviceSpec device,
+                                   List<PointAddress> addresses) {
+        session.subscribe(request, listener).whenComplete((handle, error) -> {
+            // 无论成败都要摘掉「在途」标记，否则该设备再也不会被订阅（比重复订阅更糟）
+            inFlight.remove(device.deviceId());
+            if (error != null) {
+                subscribeFailure.increment();
+                armFailureBackoff(device.deviceId(), session);
+                // 订阅失败要暴露：否则表现为「采了但没数据」
+                log.error("[access] 订阅失败（退避后重试）：deviceId={} addresses={} 下次重试={}秒后",
+                    device.deviceId(), addresses.size(),
+                    currentBackoffSeconds(device.deviceId()), error);
+            } else {
+                failureBackoff.remove(device.deviceId());
+                subscribedSessions.put(device.deviceId(), session);
+                subscribeSuccess.increment();
+                log.info("[access] 订阅成功：deviceId={} 点位数={}", device.deviceId(),
+                    addresses.size());
+            }
+        });
+        return true;
     }
 
     /**
@@ -188,6 +220,8 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
     @Override
     public void forget(String deviceId) {
         failureBackoff.remove(deviceId);
+        // 设备被移除时在途标记也要清：否则同 id 重新出现会一直被「在途」挡住
+        inFlight.remove(deviceId);
         if (subscribedSessions.remove(deviceId) != null) {
             log.debug("[access] 设备已移除，清理订阅跟踪：deviceId={}", deviceId);
         }
