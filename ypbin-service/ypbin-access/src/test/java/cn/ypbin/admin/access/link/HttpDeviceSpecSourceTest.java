@@ -10,6 +10,7 @@
 package cn.ypbin.admin.access.link;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
@@ -34,8 +35,9 @@ import org.junit.jupiter.api.Test;
 /**
  * access 取数实现单测。
  *
- * <p>守四件事：① 点位随 {@code properties} 传到协议栈（订阅规划器的输入）；② 失败**不静默**——
- * 非成功信封/调用异常都记 ERROR 且本轮按「无设备」处理；③ {@code connectionId} 能解析出租户，
+ * <p>守四件事：① 点位随 {@code properties} 传到协议栈（订阅规划器的输入）；② 失败**不静默且与「空」可区分**
+ * ——非成功信封/调用异常一律抛 {@link DeviceSpecLoadException}（调用方据此区分「接口挂了」与「确实没有设备」），
+ * 且失败结果**不进缓存**；③ {@code connectionId} 能解析出租户，
  * 非法一律返回 {@code Optional.empty()}（框架据此跳过设备，而不是抛断整轮引导）；
  * ④ 一次租户拉取 + 建链回调**只打一次远端**（缓存生效）。</p>
  *
@@ -73,20 +75,34 @@ class HttpDeviceSpecSourceTest {
     }
 
     @Test
-    @DisplayName("非成功信封：本轮按无设备处理（不抛），且不污染缓存")
-    void failedEnvelopeShouldYieldNoDevice() {
+    @DisplayName("非成功信封：抛 DeviceSpecLoadException（可重试语义），且不污染缓存、连接参数返回 empty")
+    void failedEnvelopeShouldThrowAndNotPoisonCache() {
         when(client.listByTenant(TENANT)).thenReturn(R.fail(500, "boom"));
 
-        assertThat(source.loadByTenant(TENANT)).isEmpty();
+        assertThatThrownBy(() -> source.loadByTenant(TENANT))
+            .isInstanceOf(DeviceSpecLoadException.class)
+            .hasMessageContaining("失败信封");
         assertThat(source.findConnection("t11-d100")).as("失败不得留下半份缓存").isEmpty();
         // 可证伪性：若失败结果被写进缓存，findConnection 就不会再拉一次 —— 只断言 isEmpty() 是咬不住的
         verify(client, times(2)).listByTenant(TENANT);
     }
 
     @Test
-    @DisplayName("调用异常：同样按无设备处理（记 ERROR），不把异常抛给租约调度线程")
-    void clientExceptionShouldYieldNoDevice() {
+    @DisplayName("调用异常：同样抛 DeviceSpecLoadException（保留根因），不把「失败」伪装成「没有设备」")
+    void clientExceptionShouldThrowDeviceSpecLoadException() {
         when(client.listByTenant(anyLong())).thenThrow(new IllegalStateException("network down"));
+
+        assertThatThrownBy(() -> source.loadByTenant(TENANT))
+            .isInstanceOf(DeviceSpecLoadException.class)
+            .hasMessageContaining("传输异常")
+            .hasRootCauseInstanceOf(IllegalStateException.class);
+        assertThat(source.findConnection("t11-d100")).as("建链路径不得抛异常，按连接不可用处理").isEmpty();
+    }
+
+    @Test
+    @DisplayName("成功但为空列表：这是「确实没有设备」的有效答案（不得抛异常）")
+    void emptyListIsAValidAnswer() {
+        when(client.listByTenant(TENANT)).thenReturn(R.ok(List.of()));
 
         assertThat(source.loadByTenant(TENANT)).isEmpty();
     }

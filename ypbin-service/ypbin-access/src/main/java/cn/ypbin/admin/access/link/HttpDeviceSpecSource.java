@@ -36,9 +36,11 @@ import org.slf4j.LoggerFactory;
  * {@code t{tenantId}-d{deviceId}}（服务端生成，自带租户信息），并缓存「按租户拉到的规格」：
  * 建链时只查缓存/最多补一次拉取，不重复打远端。</p>
  *
- * <p><b>失败语义（不静默）</b>：内部接口返回非成功信封或调用异常时，记 ERROR 日志并**返回空集合**——
- * 让本轮引导「少采」而不是让租约调度线程被远端拖挂；失败原因在日志里可见，下一轮会自然重试。
- * 这一点与「连接参数缺失返回 {@code Optional.empty()} 让框架跳过设备」是同一取向。</p>
+ * <p><b>失败语义（不静默，且与「空」可区分）</b>：内部接口返回非成功信封或调用异常时抛
+ * {@link DeviceSpecLoadException}，由调用方决定处置——引导路径（{@code AccessDeviceRegistry.loadAll}）
+ * 捕获并跳过该租户，运行期对账路径据「失败」进入退避重试。返回空集合**只**表示该租户确实没有设备。
+ * {@code findConnection} 是框架建链路径（抛异常会中断整轮绑定），故它单独捕获异常并返回
+ * {@code Optional.empty()}，让框架走「跳过并告警」。</p>
  *
  * @author wenbin
  * @since 2026-09-21
@@ -80,7 +82,13 @@ public class HttpDeviceSpecSource implements DeviceSpecSource {
         }
         Map<String, AccessDeviceSpecResp> specs = cache.get(tenantId);
         if (specs == null) {
-            specs = fetch(tenantId);
+            try {
+                specs = fetch(tenantId);
+            } catch (DeviceSpecLoadException ex) {
+                // 建链路径不得因取数失败而抛断整轮绑定：按「连接不可用」处理，框架会跳过该设备
+                log.error("[access] 连接参数取数失败，本轮按「连接不可用」处理：connectionId={}", connectionId, ex);
+                return Optional.empty();
+            }
         }
         AccessDeviceSpecResp spec = specs.get(connectionId);
         if (spec == null) {
@@ -92,20 +100,18 @@ public class HttpDeviceSpecSource implements DeviceSpecSource {
             null, null, null, spec.getCredentialRef(), Map.of()));
     }
 
-    /** 拉取并缓存；失败返回空表（已记 ERROR，不静默）。 */
+    /** 拉取并缓存；**失败抛 {@link DeviceSpecLoadException}**（不写入缓存），只有成功结果才进缓存。 */
     private Map<String, AccessDeviceSpecResp> fetch(Long tenantId) {
         R<List<AccessDeviceSpecResp>> response;
         try {
             response = client.listByTenant(tenantId);
         } catch (RuntimeException ex) {
-            log.error("[access] 拉取设备规格失败（本轮该租户按无设备处理）：tenantId={}", tenantId, ex);
-            return Map.of();
+            throw new DeviceSpecLoadException("拉取设备规格失败（传输异常）：tenantId=" + tenantId, ex);
         }
         if (response == null || !response.isSuccess() || response.getData() == null) {
-            log.error("[access] 设备规格内部接口返回失败信封（本轮该租户按无设备处理）：tenantId={} code={} msg={}",
-                tenantId, response == null ? null : response.getCode(),
-                response == null ? null : response.getMessage());
-            return Map.of();
+            throw new DeviceSpecLoadException("设备规格内部接口返回失败信封：tenantId=" + tenantId
+                + " code=" + (response == null ? null : response.getCode())
+                + " msg=" + (response == null ? null : response.getMessage()));
         }
         Map<String, AccessDeviceSpecResp> byConnection = new LinkedHashMap<>();
         for (AccessDeviceSpecResp spec : response.getData()) {

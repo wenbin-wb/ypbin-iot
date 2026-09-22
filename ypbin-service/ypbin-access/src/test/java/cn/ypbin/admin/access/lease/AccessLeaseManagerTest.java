@@ -13,6 +13,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -29,6 +30,8 @@ import cn.ypbin.admin.iot.lease.LeaseRenewItem;
 import cn.ypbin.admin.iot.lease.LeaseRenewReq;
 import cn.ypbin.admin.iot.lease.LeaseRenewResp;
 import cn.ypbin.admin.iot.lease.LeaseState;
+import cn.ypbin.admin.iot.lease.TenantEpochBatchResp;
+import cn.ypbin.admin.iot.lease.TenantEpochItem;
 import cn.ypbin.starter.core.model.R;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.LocalDateTime;
@@ -40,7 +43,7 @@ import org.mockito.ArgumentCaptor;
 
 /**
  * access 租约状态机的四条硬要求（spec §3.1①）：启动握手 fail-fast、周期续约、
- * self-fencing（撤销/节点级失效/本地过期）、周期重领。
+ * self-fencing（撤销/节点级失效/本地过期）、周期重领；外加 M-2 的配置版本对账接线。
  *
  * @author wenbin
  * @since 2026-09-20
@@ -55,17 +58,23 @@ class AccessLeaseManagerTest {
     private TenantLinkManager linkManager;
     private AccessProperties properties;
     private SimpleMeterRegistry meterRegistry;
+    private ConfigEpochReconciler reconciler;
     private AccessLeaseManager manager;
 
     @BeforeEach
     void setUp() {
         client = mock(ILeaseClient.class);
-        linkManager = new LoggingTenantLinkManager();
+        // spy：既保留 LoggingTenantLinkManager 的真实行为（既有断言依赖它），又能断言对账调用
+        linkManager = spy(new LoggingTenantLinkManager());
         properties = new AccessProperties();
         properties.setNodeId(NODE);
         properties.setAcquireIntervalMs(Long.MAX_VALUE);
         meterRegistry = new SimpleMeterRegistry();
-        manager = new AccessLeaseManager(client, linkManager, properties, meterRegistry);
+        reconciler = new ConfigEpochReconciler(client, linkManager, meterRegistry);
+        manager = new AccessLeaseManager(client, linkManager, properties, meterRegistry, reconciler);
+        // 每个租约周期都会打一次 epoch 对账：默认给「没有任何条目」的成功信封，
+        // 避免用例里出现 null 信封的错误日志（影响可读性，也会掩盖真问题）
+        when(client.batchEpoch()).thenReturn(R.ok(epochBatch()));
     }
 
     @Test
@@ -185,6 +194,46 @@ class AccessLeaseManagerTest {
     }
 
     @Test
+    @DisplayName("★ 配置版本变化必须触达链路管理器（P4 接线）；版本不变则不再触发")
+    void configEpochChangeShouldReachLinkManager() {
+        when(client.batchEpoch()).thenReturn(R.ok(epochBatch(epochItem(TENANT_A, 1L))));
+        startWith(TENANT_A);
+
+        manager.renewAndSelfCheck();
+        assertThat(reconciler.trackedTenantCount()).as("首次观测必须对账一次").isEqualTo(1);
+        verify(linkManager, times(1)).reconcile(TENANT_A);
+
+        manager.renewAndSelfCheck();
+        verify(linkManager, times(1)).reconcile(TENANT_A);
+        assertThat(meterRegistry.get("iot.access.config.changed").counter().count())
+            .as("版本号没变不得重复对账").isZero();
+
+        when(client.batchEpoch()).thenReturn(R.ok(epochBatch(epochItem(TENANT_A, 2L))));
+        manager.renewAndSelfCheck();
+        verify(linkManager, times(2)).reconcile(TENANT_A);
+        assertThat(meterRegistry.get("iot.access.config.changed").counter().count()).isEqualTo(1.0d);
+    }
+
+    @Test
+    @DisplayName("★ 租户被回收时必须忘掉配置版本号：重新领取后要重新对账（fence 期间上游可能改过配置）")
+    void revokedTenantMustForgetConfigEpoch() {
+        when(client.batchEpoch()).thenReturn(R.ok(epochBatch(epochItem(TENANT_A, 1L))));
+        startWith(TENANT_A);
+        manager.renewAndSelfCheck();
+        assertThat(reconciler.trackedTenantCount()).isEqualTo(1);
+
+        LeaseRenewResp resp = new LeaseRenewResp();
+        resp.setRenewedLeases(List.of());
+        resp.setRevokedTenantIds(List.of(TENANT_A));
+        when(client.renew(any())).thenReturn(R.ok(resp));
+
+        manager.renewAndSelfCheck();
+
+        assertThat(manager.heldTenants()).isEmpty();
+        assertThat(reconciler.trackedTenantCount()).as("回收后必须清掉版本号记录").isZero();
+    }
+
+    @Test
     @DisplayName("握手完成前：既不重领也**不补注册**（防调度器抢跑；补注册会让抢跑窗口重新打开）")
     void refreshMustNotRunBeforeHandshake() {
         // register 必须 stub 成成功：否则本用例会靠「mock 返回 null 信封 → registerOrFail 抛错早退」而绿，
@@ -196,6 +245,7 @@ class AccessLeaseManagerTest {
         verify(client, times(0)).register(any());
         verify(client, times(0)).acquire(any());
         verify(client, times(0)).renew(any());
+        verify(client, times(0)).batchEpoch();
     }
 
     private void startWith(Long... tenantIds) {
@@ -228,6 +278,21 @@ class AccessLeaseManagerTest {
         dto.setEpoch(1L);
         dto.setState(LeaseState.ACTIVE);
         return dto;
+    }
+
+    private TenantEpochBatchResp epochBatch(TenantEpochItem... items) {
+        TenantEpochBatchResp resp = new TenantEpochBatchResp();
+        resp.setItems(List.of(items));
+        resp.setReadAt(LocalDateTime.now());
+        return resp;
+    }
+
+    private TenantEpochItem epochItem(Long tenantId, long configEpoch) {
+        TenantEpochItem item = new TenantEpochItem();
+        item.setTenantId(tenantId);
+        item.setEpoch(1L);
+        item.setConfigEpoch(configEpoch);
+        return item;
     }
 
     private LeaseRenewAck ack(Long tenantId, LocalDateTime expireAt, long epoch) {

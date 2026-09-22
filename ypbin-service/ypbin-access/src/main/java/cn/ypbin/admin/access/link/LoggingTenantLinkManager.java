@@ -55,6 +55,17 @@ public class LoggingTenantLinkManager implements TenantLinkManager {
     }
 
     @Override
+    public boolean reconcile(Long tenantId) {
+        // 本实现只在「谁在采」的层面记账（不持有设备清单），故没有可重取的东西。
+        // 返回 true 是契约要求：否则租约侧会认为「本轮没对账」并每周期重试一次无意义的调用。
+        if (collecting.contains(tenantId)) {
+            log.debug("配置变更对账：tenantId={}（3a 日志实现无设备清单可对账）",
+                LogSanitizer.sanitize(tenantId));
+        }
+        return true;
+    }
+
+    @Override
     public boolean isCollecting(Long tenantId) {
         return collecting.contains(tenantId);
     }

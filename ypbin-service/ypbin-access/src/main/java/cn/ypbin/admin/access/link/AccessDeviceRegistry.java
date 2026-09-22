@@ -13,6 +13,7 @@ import cn.ypbin.iot.core.model.DeviceSpec;
 import cn.ypbin.iot.core.spi.DeviceChange;
 import cn.ypbin.iot.core.spi.DeviceRegistry;
 import cn.ypbin.iot.core.spi.ValidationResult;
+import cn.ypbin.starter.core.util.LogSanitizer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -71,7 +72,14 @@ public class AccessDeviceRegistry implements DeviceRegistry {
         }
         List<DeviceSpec> devices = new ArrayList<>();
         for (Long tenantId : tenants) {
-            devices.addAll(source.loadByTenant(tenantId));
+            try {
+                devices.addAll(source.loadByTenant(tenantId));
+            } catch (DeviceSpecLoadException ex) {
+                // 引导是框架 ApplicationReadyEvent 的一次性调用：单个租户取数失败不得让整个协议栈起不来
+                // （与 N-1 同一取向——「本轮少采」而不是「整体失败」）。运行期由配置变更对账补齐。
+                log.error("[access] 协议栈引导取数失败，本轮跳过该租户：tenantId={}",
+                    LogSanitizer.sanitize(tenantId), ex);
+            }
         }
         log.info("[access] 协议栈引导取数：租户数={} 设备数={}", tenants.size(), devices.size());
         return devices;

@@ -39,14 +39,17 @@ import org.slf4j.LoggerFactory;
 /**
  * access 的租约状态机：注册 → 领取 → 周期续约 → **self-fencing** → 周期重领。
  *
- * <p>四条硬要求（spec §3.1①）：</p>
+ * <p>五条硬要求（spec §3.1① + M-2 的配置对账）：</p>
  * <ol>
  *   <li><b>启动握手 fail-fast</b>：注册/领取任何非成功信封或传输异常都让应用启动失败——
  *       节点绝不在「没有归属」的状态下开始采集；</li>
  *   <li><b>周期续约</b>：拿到回执就刷新本地快照（含服务端 epoch）；</li>
  *   <li><b>self-fencing</b>：{@code revokedTenantIds} 逐租户停采、{@code nodeFenced} 整体停采后
  *       重新注册并重新领取、**本地过期自检**（续约失败/超时后，到期就自己停采，不等业务侧）；</li>
- *   <li><b>周期重领</b>：只在启动时领取会让「待接管」的租户永远无人接手，到点必须再领。</li>
+ *   <li><b>周期重领</b>：只在启动时领取会让「待接管」的租户永远无人接手，到点必须再领；</li>
+ *   <li><b>配置版本对账</b>（M-2）：每轮结束后把「本节点持有的租户」交给
+ *       {@link ConfigEpochReconciler}——台账版本号变了才重取设备清单（「不一致才拉全量」）。
+ *       停采/回收时同步 {@code forget}，保证重新领取后一定重新对账。</li>
  * </ol>
  *
  * @author wenbin
@@ -62,6 +65,7 @@ public class AccessLeaseManager {
     private final ILeaseClient leaseClient;
     private final TenantLinkManager linkManager;
     private final AccessProperties properties;
+    private final ConfigEpochReconciler reconciler;
     private final Map<Long, LeaseSnapshot> holdings = new ConcurrentHashMap<>();
     private final AtomicReference<LocalDateTime> lastAcquireAt = new AtomicReference<>();
     private final AtomicBoolean registered = new AtomicBoolean(false);
@@ -79,12 +83,15 @@ public class AccessLeaseManager {
      * @param linkManager  链路控制端口
      * @param properties   节点参数
      * @param meterRegistry 指标注册表
+     * @param reconciler   配置版本对账器（M-2：把 {@code config_epoch} 变化变成「拉一次全量设备清单」）
      */
     public AccessLeaseManager(ILeaseClient leaseClient, TenantLinkManager linkManager,
-            AccessProperties properties, MeterRegistry meterRegistry) {
+            AccessProperties properties, MeterRegistry meterRegistry,
+            ConfigEpochReconciler reconciler) {
         this.leaseClient = leaseClient;
         this.linkManager = linkManager;
         this.properties = properties;
+        this.reconciler = reconciler;
         this.renewSuccess = Counter.builder(METRIC_PREFIX + "renew.success").register(meterRegistry);
         this.renewFailure = Counter.builder(METRIC_PREFIX + "renew.failure").register(meterRegistry);
         this.revokedCounter = Counter.builder(METRIC_PREFIX + "revoked").register(meterRegistry);
@@ -120,6 +127,8 @@ public class AccessLeaseManager {
             renew(now);
         }
         refreshAssignmentsIfDue(now);
+        // 放在最后：本轮新领到的租户也要参与对账（否则要等下一个周期才知道配置变没变）
+        reconciler.reconcile(Set.copyOf(holdings.keySet()));
     }
 
     /**
@@ -134,6 +143,8 @@ public class AccessLeaseManager {
             .toList();
         for (Long tenantId : expired) {
             holdings.remove(tenantId);
+            // 同时忘掉配置版本号：重新领取后必须重新对账（期间上游可能已经改过配置）
+            reconciler.forget(tenantId);
             linkManager.fence(tenantId, "本地租约已过期（未成功续约）");
             selfFencedCounter.increment();
             log.warn("本地租约过期，自行停采：tenantId={}", LogSanitizer.sanitize(tenantId));
@@ -195,6 +206,8 @@ public class AccessLeaseManager {
             // 无条件停采 + 计数：fence 是幂等的；3b 换真实现后本地快照可能已无该租户，
             // 但「服务端要求停采」这件事必须执行（否则会漏停采）
             holdings.remove(tenantId);
+            // 同 fence：忘掉配置版本号，重新领取后必须重新对账
+            reconciler.forget(tenantId);
             revokedCounter.increment();
             linkManager.fence(tenantId, "business 判定该租户已失效/被接管");
             log.warn("租户被回收，断链停采：tenantId={}", LogSanitizer.sanitize(tenantId));
@@ -211,6 +224,10 @@ public class AccessLeaseManager {
         log.error("business 判定本节点已失效（nodeFenced）：整体停采并重新注册：node={}",
             LogSanitizer.sanitize(properties.getNodeId()));
         linkManager.fenceAll("business 判定节点失效");
+        // 整体停采：全部租户的配置版本号一并忘掉（重新领取即重新对账）
+        for (Long tenantId : List.copyOf(holdings.keySet())) {
+            reconciler.forget(tenantId);
+        }
         holdings.clear();
         lastAcquireAt.set(now);
         try {

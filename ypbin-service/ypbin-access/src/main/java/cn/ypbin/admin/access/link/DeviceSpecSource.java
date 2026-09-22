@@ -29,8 +29,13 @@ public interface DeviceSpecSource {
     /**
      * 取某租户当前**启用**的全部设备规格（含连接标识与点位属性）。
      *
+     * <p><b>失败与「空」必须可区分</b>：取数失败一律抛 {@link DeviceSpecLoadException}，返回空集合只表示
+     * 「该租户确实没有设备」。若把失败也返回空集合，调用方就无法区分「接口挂了」与「设备都删了」——
+     * 前者应当短周期重试，后者应当把设备全部下架。</p>
+     *
      * @param tenantId 租户 ID
      * @return 设备规格列表；无设备返回空集合，绝不返回 {@code null}
+     * @throws DeviceSpecLoadException 取数失败（传输异常或内部接口返回失败信封）
      */
     List<DeviceSpec> loadByTenant(Long tenantId);
 

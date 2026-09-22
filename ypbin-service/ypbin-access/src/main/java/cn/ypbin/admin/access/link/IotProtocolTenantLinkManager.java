@@ -48,7 +48,11 @@ import org.slf4j.LoggerFactory;
  * 也避免为「删除」发明占位协议值。幂等：重复 start / 重复 fence 都不产生重复变更。</p>
  *
  * <p>线程模型：租约调度是单线程（{@code LeaseRenewScheduler}），故这里用 {@code synchronized}
- * 保证 start/fence 的成对语义，不追求高并发。</p>
+ * 保证 start/fence/reconcile 的成对语义，不追求高并发。</p>
+ *
+ * <p><b>配置变更对账（M-2）</b>：{@link #reconcile(Long)} 由租约管理器在台账 {@code config_epoch}
+ * 变化时调用，重取一次清单并应用差异。它是「上游改了设备/点位之后接入侧能跟上」的<b>唯一</b>路径——
+ * 此前清单只在首次采集时取一次，租约持续续约时连 fence 都不会发生，于是变更永远不被发现。</p>
  *
  * @author wenbin
  * @since 2026-09-21
@@ -76,8 +80,14 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
 
     private final Counter emptySpecCounter;
 
+    /** 取数**失败**次数（与「确实没有设备」分开计数：失败必须在大盘上可见，见复核 G3）。 */
+    private final Counter specFailureCounter;
+
     /** 因退避跳过的取数次数（观测「省了多少次远端调用」）。 */
     private final Counter backoffSkippedCounter;
+
+    /** 配置变更对账**已完成**的次数（含「确实没有设备」）。 */
+    private final Counter reconcileAppliedCounter;
 
     /** 每个租户的空清单退避状态（有设备即移除）。 */
     private final Map<Long, EmptyBackoff> emptyBackoff = new ConcurrentHashMap<>();
@@ -100,8 +110,11 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
         this.registry = registry;
         this.planner = planner;
         this.clock = clock;
-        this.emptySpecCounter = meterRegistry.counter("ypbin.access.spec.empty");
-        this.backoffSkippedCounter = meterRegistry.counter("ypbin.access.spec.backoff.skipped");
+        // 指标前缀统一为 `iot.access.*`（与既有的 `iot.access.lease.*` 一致）
+        this.emptySpecCounter = meterRegistry.counter("iot.access.spec.empty");
+        this.specFailureCounter = meterRegistry.counter("iot.access.spec.failure");
+        this.backoffSkippedCounter = meterRegistry.counter("iot.access.spec.backoff.skipped");
+        this.reconcileAppliedCounter = meterRegistry.counter("iot.access.spec.reconcile.applied");
     }
 
     /**
@@ -124,7 +137,16 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
                 return;
             }
             devices = new LinkedHashMap<>();
-            for (DeviceSpec device : source.loadByTenant(tenantId)) {
+            List<DeviceSpec> loaded;
+            try {
+                loaded = source.loadByTenant(tenantId);
+            } catch (DeviceSpecLoadException ex) {
+                // 取数失败**不是**「没有设备」：不能缓存、不能下架既有设备，按失败退避后重试。
+                // 与「确实没有设备」（返回空集合）分开计数与日志，否则 G3 的「失败不可观测」会一直存在。
+                onLoadFailure(tenantId, ex);
+                return;
+            }
+            for (DeviceSpec device : loaded) {
                 devices.put(device.deviceId(), device);
             }
             if (devices.isEmpty()) {
@@ -150,6 +172,110 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
         }
     }
 
+    /**
+     * 按最新配置对账该租户的设备清单（M-2：{@code config_epoch} 变化时由租约管理器触发，修 G7）。
+     *
+     * <p>差异处理：<b>新增</b> ⇒ ADD；<b>消失</b> ⇒ REMOVE 并清理订阅跟踪；<b>规格变化</b>（点位/端点/周期）
+     * ⇒ 重新 ADD（框架对同一设备的变更走「先解绑再绑定」，新会话随后会触发重订阅）。</p>
+     *
+     * <p><b>取数失败与「确实没有设备」严格分开</b>：失败抛 {@link DeviceSpecLoadException} ⇒ 本轮不下架任何设备、
+     * 不进版本号、退避后重试；成功信封 + 空列表 ⇒ 该租户确实没有设备，全部下架。</p>
+     *
+     * <p><b>全部下架后不缓存空清单</b>（与 N-1 同一取向）：把清单条目移除，交还给
+     * {@code startCollecting} 的「空清单不缓存 + 退避重取」路径——设备重新出现时无需等台账版本号变化即可恢复。</p>
+     *
+     * @param tenantId 租户 ID
+     * @return 已完成对账返回 {@code true}（含「确实没有设备」）；未采集/取数失败/退避中返回 {@code false}
+     */
+    @Override
+    public synchronized boolean reconcile(Long tenantId) {
+        if (!collecting.contains(tenantId)) {
+            // 已 fence 或尚未开始采集：不得推设备（否则会「复活」一个本节点不负责的租户）
+            return false;
+        }
+        Map<String, DeviceSpec> current = collected.get(tenantId);
+        if (current == null) {
+            // 尚未成功取过清单（启动期为空的租户）：交给 startCollecting 的退避重取路径，
+            // 这里再拉一次只会与它重复打同一个远端接口。
+            return false;
+        }
+        if (inEmptyBackoff(tenantId)) {
+            backoffSkippedCounter.increment();
+            return false;
+        }
+        List<DeviceSpec> latest;
+        try {
+            latest = source.loadByTenant(tenantId);
+        } catch (DeviceSpecLoadException ex) {
+            onLoadFailure(tenantId, ex);
+            return false;
+        }
+        Map<String, DeviceSpec> next = new LinkedHashMap<>();
+        for (DeviceSpec device : latest) {
+            next.put(device.deviceId(), device);
+        }
+        clearEmptyBackoff(tenantId);
+        if (next.isEmpty()) {
+            removeAllDevices(tenantId, current);
+            reconcileAppliedCounter.increment();
+            return true;
+        }
+        int removed = 0;
+        for (Map.Entry<String, DeviceSpec> entry : current.entrySet()) {
+            if (!next.containsKey(entry.getKey())) {
+                registry.emit(new DeviceChange(ChangeType.REMOVE, entry.getValue(),
+                    registry.nextRevision(entry.getKey())));
+                planner.forget(entry.getKey());
+                removed++;
+            }
+        }
+        int added = 0;
+        int changed = 0;
+        for (Map.Entry<String, DeviceSpec> entry : next.entrySet()) {
+            DeviceSpec previous = current.get(entry.getKey());
+            if (previous == null) {
+                registry.emit(new DeviceChange(ChangeType.ADD, entry.getValue(),
+                    registry.nextRevision(entry.getKey())));
+                added++;
+            } else if (!previous.equals(entry.getValue())) {
+                // 规格变了：重新 ADD（框架会先解绑再绑定），revision 必须继续递增
+                registry.emit(new DeviceChange(ChangeType.ADD, entry.getValue(),
+                    registry.nextRevision(entry.getKey())));
+                changed++;
+            }
+        }
+        collected.put(tenantId, next);
+        int subscribed = planner.subscribe(List.copyOf(next.values()));
+        reconcileAppliedCounter.increment();
+        if (removed > 0 || added > 0 || changed > 0) {
+            log.info("[access] 配置变更对账完成：tenantId={} 新增={} 变更={} 删除={} 发起订阅={}",
+                LogSanitizer.sanitize(tenantId), added, changed, removed, subscribed);
+        } else {
+            log.debug("[access] 配置变更对账完成（清单无差异）：tenantId={} 设备数={}",
+                LogSanitizer.sanitize(tenantId), next.size());
+        }
+        return true;
+    }
+
+    /**
+     * 把某租户的设备全部下架（上游确认「确实没有设备」时）。
+     *
+     * @param tenantId 租户 ID
+     * @param current  已推给框架的清单
+     */
+    private void removeAllDevices(Long tenantId, Map<String, DeviceSpec> current) {
+        for (Map.Entry<String, DeviceSpec> entry : current.entrySet()) {
+            registry.emit(new DeviceChange(ChangeType.REMOVE, entry.getValue(),
+                registry.nextRevision(entry.getKey())));
+            planner.forget(entry.getKey());
+        }
+        // 不缓存空清单：交给 startCollecting 的「空清单不缓存 + 退避重取」路径，
+        // 设备重新出现时无需依赖台账版本号变化即可恢复（与 N-1 的取向一致）
+        collected.remove(tenantId);
+        log.info("[access] 上游确认该租户已无设备，全部下架：tenantId={} 下架数={}",
+            LogSanitizer.sanitize(tenantId), current.size());
+    }
+
     /** 是否处于空清单退避窗口内。 */
     private boolean inEmptyBackoff(Long tenantId) {
         EmptyBackoff state = emptyBackoff.get(tenantId);
@@ -170,6 +296,30 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
         } else {
             log.debug("[access] 租户设备清单仍为空，退避中：tenantId={} 已连续={} 次 下次重取={} 秒后",
                 LogSanitizer.sanitize(tenantId), attempts, delay.toSeconds());
+        }
+    }
+
+    /**
+     * 记一次取数**失败**：计数、推进退避、分级日志（首次 WARN 带完整堆栈，之后 DEBUG 带引用以免日志洪水）。
+     *
+     * <p>与 {@link #onEmptySpec} 共用同一份退避状态：两者对远端而言都是「本轮没拿到可用清单」，
+     * 分开计数是为了让「接口持续失败」在大盘上看得见（G3）。</p>
+     *
+     * @param tenantId 租户 ID
+     * @param ex       取数异常
+     */
+    private void onLoadFailure(Long tenantId, DeviceSpecLoadException ex) {
+        specFailureCounter.increment();
+        EmptyBackoff previous = emptyBackoff.get(tenantId);
+        int attempts = previous == null ? 1 : previous.attempts() + 1;
+        Duration delay = backoffDelay(attempts);
+        emptyBackoff.put(tenantId, new EmptyBackoff(attempts, clock.instant().plus(delay)));
+        if (attempts == 1) {
+            log.warn("[access] 拉取设备清单失败（本轮不缓存、不下架既有设备；{} 秒后重试）：tenantId={}",
+                delay.toSeconds(), LogSanitizer.sanitize(tenantId), ex);
+        } else {
+            log.debug("[access] 拉取设备清单持续失败（退避中）：tenantId={} 已连续={} 次 {} 秒后重试",
+                LogSanitizer.sanitize(tenantId), attempts, delay.toSeconds(), ex);
         }
     }
 

@@ -10,6 +10,7 @@
 package cn.ypbin.admin.access.config;
 
 import cn.ypbin.admin.access.lease.AccessLeaseManager;
+import cn.ypbin.admin.access.lease.ConfigEpochReconciler;
 import cn.ypbin.admin.access.link.LoggingTenantLinkManager;
 import cn.ypbin.admin.access.link.TenantLinkManager;
 import cn.ypbin.admin.iot.lease.ILeaseClient;
@@ -45,18 +46,38 @@ public class AccessLeaseConfiguration {
     }
 
     /**
+     * 配置版本对账器（M-2）：把台账 {@code config_epoch} 的变化翻译成「按最新配置重取设备清单」。
+     *
+     * <p>它依赖 {@link TenantLinkManager}：协议栈生效时是 {@code IotProtocolTenantLinkManager}（真有清单可对账），
+     * 否则是日志实现（无清单、直接返回已完成）。</p>
+     *
+     * @param leaseClient   租约客户端（批量 epoch 接口）
+     * @param linkManager   链路控制端口
+     * @param meterRegistry 指标注册表
+     * @return 配置版本对账器
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public ConfigEpochReconciler configEpochReconciler(ILeaseClient leaseClient,
+            TenantLinkManager linkManager, MeterRegistry meterRegistry) {
+        return new ConfigEpochReconciler(leaseClient, linkManager, meterRegistry);
+    }
+
+    /**
      * 租约状态机。
      *
      * @param leaseClient   租约客户端
      * @param linkManager   链路控制端口
      * @param properties    节点参数
      * @param meterRegistry 指标注册表
+     * @param reconciler    配置版本对账器
      * @return 租约状态机
      */
     @Bean
     @ConditionalOnMissingBean
     public AccessLeaseManager accessLeaseManager(ILeaseClient leaseClient, TenantLinkManager linkManager,
-            AccessProperties properties, MeterRegistry meterRegistry) {
-        return new AccessLeaseManager(leaseClient, linkManager, properties, meterRegistry);
+            AccessProperties properties, MeterRegistry meterRegistry,
+            ConfigEpochReconciler reconciler) {
+        return new AccessLeaseManager(leaseClient, linkManager, properties, meterRegistry, reconciler);
     }
 }
