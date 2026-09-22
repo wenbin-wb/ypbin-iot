@@ -17,9 +17,12 @@ import cn.ypbin.iot.core.model.DeviceSpec;
 import cn.ypbin.iot.core.model.Endpoint;
 import cn.ypbin.iot.core.protocol.ProtocolCode;
 import cn.ypbin.starter.core.model.R;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import tools.jackson.core.JacksonException;
 import tools.jackson.databind.ObjectMapper;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -36,11 +39,16 @@ import org.slf4j.LoggerFactory;
  * {@code t{tenantId}-d{deviceId}}（服务端生成，自带租户信息），并缓存「按租户拉到的规格」：
  * 建链时只查缓存/最多补一次拉取，不重复打远端。</p>
  *
- * <p><b>失败语义（不静默，且与「空」可区分）</b>：内部接口返回非成功信封或调用异常时抛
+ * <p><b>失败语义（不静默，且与「空」可区分）</b>：内部接口返回非成功信封、调用异常**或把答案转成规格失败**
+ * （协议码非法、点位清单序列化失败）时，{@link #loadByTenant(Long)} 一律抛
  * {@link DeviceSpecLoadException}，由调用方决定处置——引导路径（{@code AccessDeviceRegistry.loadAll}）
- * 捕获并跳过该租户，运行期对账路径据「失败」进入退避重试。返回空集合**只**表示该租户确实没有设备。
- * {@code findConnection} 是框架建链路径（抛异常会中断整轮绑定），故它单独捕获异常并返回
- * {@code Optional.empty()}，让框架走「跳过并告警」。</p>
+ * 捕获并跳过该租户，运行期对账路径据「失败」进入退避重试。返回空集合**只**表示该租户确实没有设备。</p>
+ *
+ * <p>{@code findConnection} 是框架建链路径（抛异常会中断整轮绑定），故它把「取数失败」与
+ * 「端点/协议值非法」都收敛为 {@code Optional.empty()} 并计数（{@code iot.access.connection.invalid}），
+ * 让框架走「跳过并告警」。注意**端点只在建链时解析**：{@link cn.ypbin.iot.core.model.DeviceSpec}
+ * 不解析端点，所以端点非法不会让 {@code loadByTenant} 失败——写入侧的 {@code @Pattern}
+ * （见 {@code IotDeviceReq#endpoint}）是第一道防线，这里是第二道。</p>
  *
  * @author wenbin
  * @since 2026-09-21
@@ -62,15 +70,32 @@ public class HttpDeviceSpecSource implements DeviceSpecSource {
     /** 最近一次成功拉取结果：tenantId → (connectionId → 规格)。 */
     private final Map<Long, Map<String, AccessDeviceSpecResp>> cache = new ConcurrentHashMap<>();
 
-    public HttpDeviceSpecSource(IDeviceSpecClient client, ObjectMapper objectMapper) {
+    /** 端点/协议值非法（无法转成框架的 Endpoint/ProtocolCode）的次数。 */
+    private final Counter invalidConnectionCounter;
+
+    public HttpDeviceSpecSource(IDeviceSpecClient client, ObjectMapper objectMapper,
+                                MeterRegistry meterRegistry) {
         this.client = client;
         this.objectMapper = objectMapper;
+        this.invalidConnectionCounter = meterRegistry.counter("iot.access.connection.invalid");
     }
 
     @Override
     public List<DeviceSpec> loadByTenant(Long tenantId) {
         Map<String, AccessDeviceSpecResp> specs = fetch(tenantId);
-        return specs.values().stream().map(this::toDeviceSpec).toList();
+        List<DeviceSpec> devices = new ArrayList<>(specs.size());
+        for (AccessDeviceSpecResp spec : specs.values()) {
+            try {
+                devices.add(toDeviceSpec(spec));
+            } catch (RuntimeException ex) {
+                // 转换失败（协议码非法、点位清单写不出去）也是「这一轮没拿到可用清单」：
+                // 必须归一到 DeviceSpecLoadException，否则它会穿透调用方的 catch，把整轮引导/对账打断
+                // （表现为「协议栈起不来」或「对账 tick 中断」——正是本类要防的静默失效）。
+                throw new DeviceSpecLoadException("设备规格转换失败：tenantId=" + tenantId
+                    + " deviceId=" + spec.getDeviceId(), ex);
+            }
+        }
+        return devices;
     }
 
     @Override
@@ -94,10 +119,20 @@ public class HttpDeviceSpecSource implements DeviceSpecSource {
         if (spec == null) {
             return Optional.empty();
         }
-        // connectTimeout/requestTimeout/tls 传 null：record 的紧凑构造器会填框架默认值
-        return Optional.of(new ConnectionSpec(spec.getConnectionId(),
-            ProtocolCode.of(spec.getProtocol()), Endpoint.of(spec.getEndpoint()),
-            null, null, null, spec.getCredentialRef(), Map.of()));
+        try {
+            // connectTimeout/requestTimeout/tls 传 null：record 的紧凑构造器会填框架默认值
+            return Optional.of(new ConnectionSpec(spec.getConnectionId(),
+                ProtocolCode.of(spec.getProtocol()), Endpoint.of(spec.getEndpoint()),
+                null, null, null, spec.getCredentialRef(), Map.of()));
+        } catch (RuntimeException ex) {
+            // 端点/协议值非法（如 `endpoint` 漏了 scheme `tcp://`）：这是**建链路径**，
+            // 抛出去会中断整轮绑定；按「该连接不可用」处理并计数，让框架跳过这台设备。
+            // 写入侧另有 @Pattern 校验（IotDeviceReq.endpoint），这里防的是历史脏数据与直连 DB 的写入。
+            invalidConnectionCounter.increment();
+            log.error("[access] 连接参数非法（端点/协议无法解析），按「连接不可用」处理：connectionId={} protocol={} endpoint={}",
+                connectionId, spec.getProtocol(), spec.getEndpoint(), ex);
+            return Optional.empty();
+        }
     }
 
     /** 拉取并缓存；**失败抛 {@link DeviceSpecLoadException}**（不写入缓存），只有成功结果才进缓存。 */

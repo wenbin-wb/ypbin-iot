@@ -24,6 +24,7 @@ import cn.ypbin.admin.iot.device.IDeviceSpecClient;
 import cn.ypbin.iot.core.model.ConnectionSpec;
 import cn.ypbin.iot.core.model.DeviceSpec;
 import cn.ypbin.starter.core.model.R;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.ObjectMapper;
 import java.time.Duration;
@@ -50,7 +51,9 @@ class HttpDeviceSpecSourceTest {
 
     private final IDeviceSpecClient client = mock(IDeviceSpecClient.class);
     private final ObjectMapper objectMapper = new ObjectMapper();
-    private final HttpDeviceSpecSource source = new HttpDeviceSpecSource(client, objectMapper);
+    private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+    private final HttpDeviceSpecSource source =
+        new HttpDeviceSpecSource(client, objectMapper, meterRegistry);
 
     @Test
     @DisplayName("loadByTenant：连同点位清单一起交给协议栈（properties.points 可反序列化回 DTO）")
@@ -105,6 +108,44 @@ class HttpDeviceSpecSourceTest {
         when(client.listByTenant(TENANT)).thenReturn(R.ok(List.of()));
 
         assertThat(source.loadByTenant(TENANT)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("★ 端点漏了 scheme：findConnection **不得抛**（建链路径抛出去会中断整轮绑定），按连接不可用处理并计数")
+    void invalidEndpointMustNotThrowFromFindConnection() {
+        AccessDeviceSpecResp broken = spec();
+        broken.setEndpoint("127.0.0.1:15002");
+        when(client.listByTenant(TENANT)).thenReturn(R.ok(List.of(broken)));
+
+        assertThat(source.findConnection("t11-d100")).isEmpty();
+        assertThat(meterRegistry.get("iot.access.connection.invalid").counter().count()).isEqualTo(1.0d);
+    }
+
+    @Test
+    @DisplayName("★ 转换失败（协议码非法）必须归一到 DeviceSpecLoadException（否则会穿透引导/对账的 catch，把 tick 打断）")
+    void conversionFailureMustSurfaceAsLoadException() {
+        AccessDeviceSpecResp badProtocol = spec();
+        badProtocol.setProtocol("TCP");
+        when(client.listByTenant(TENANT)).thenReturn(R.ok(List.of(badProtocol)));
+
+        assertThatThrownBy(() -> source.loadByTenant(TENANT))
+            .isInstanceOf(DeviceSpecLoadException.class)
+            .hasMessageContaining("设备规格转换失败");
+        assertThat(meterRegistry.get("iot.access.connection.invalid").counter().count())
+            .as("loadByTenant 的转换失败由调用方按「取数失败」计数，不在这里重复计数").isZero();
+    }
+
+    @Test
+    @DisplayName("端点非法**不影响** loadByTenant（DeviceSpec 不解析端点），只影响建链：这条边界必须钉住")
+    void invalidEndpointMustNotBreakLoadByTenant() {
+        AccessDeviceSpecResp broken = spec();
+        broken.setEndpoint("127.0.0.1:15002");
+        when(client.listByTenant(TENANT)).thenReturn(R.ok(List.of(broken)));
+
+        // 取数可以成功（规格里的端点只是原样带着走）；真正的失败发生在协议栈建链问连接参数时，
+        // 由 findConnection 收敛为「连接不可用」。写入侧的 @Pattern 才是第一道防线。
+        assertThat(source.loadByTenant(TENANT)).hasSize(1);
+        assertThat(source.findConnection("t11-d100")).isEmpty();
     }
 
     @Test

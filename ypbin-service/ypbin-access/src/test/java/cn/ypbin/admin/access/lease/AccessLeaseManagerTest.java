@@ -34,6 +34,7 @@ import cn.ypbin.admin.iot.lease.TenantEpochBatchResp;
 import cn.ypbin.admin.iot.lease.TenantEpochItem;
 import cn.ypbin.starter.core.model.R;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.time.Clock;
 import java.time.LocalDateTime;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
@@ -70,7 +71,9 @@ class AccessLeaseManagerTest {
         properties.setNodeId(NODE);
         properties.setAcquireIntervalMs(Long.MAX_VALUE);
         meterRegistry = new SimpleMeterRegistry();
-        reconciler = new ConfigEpochReconciler(client, linkManager, meterRegistry);
+        // spy：既要它真实工作（按版本号触发对账），又要能断言停采路径确实调了 forget
+        reconciler = spy(new ConfigEpochReconciler(client, linkManager, meterRegistry,
+            Clock.systemUTC(), 300_000L));
         manager = new AccessLeaseManager(client, linkManager, properties, meterRegistry, reconciler);
         // 每个租约周期都会打一次 epoch 对账：默认给「没有任何条目」的成功信封，
         // 避免用例里出现 null 信封的错误日志（影响可读性，也会掩盖真问题）
@@ -153,6 +156,8 @@ class AccessLeaseManagerTest {
         assertThat(manager.heldTenants()).doesNotContain(TENANT_A);
         verify(client, times(2)).register(any());
         assertThat(meterRegistry.get("iot.access.lease.node_fenced").counter().count()).isEqualTo(1.0d);
+        // 节点级失效整体停采时也要逐个忘掉版本号（重领后必须重新对账）
+        verify(reconciler).forget(TENANT_A);
     }
 
     @Test
@@ -173,6 +178,8 @@ class AccessLeaseManagerTest {
         assertThat(manager.heldTenants()).isEmpty();
         assertThat(linkManager.isCollecting(TENANT_A)).isFalse();
         assertThat(meterRegistry.get("iot.access.lease.self_fenced").counter().count()).isEqualTo(1.0d);
+        // 本地过期自停采也必须忘掉配置版本号，否则重新领取后会拿旧版本号「以为不用对账」
+        verify(reconciler).forget(TENANT_A);
     }
 
     @Test
