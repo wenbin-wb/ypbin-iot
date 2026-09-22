@@ -361,7 +361,7 @@ class OutageAvailabilityIT {
             dbNow.minusMinutes(30))));
         // 断档 [now-20min, now-5min]，窗口 [now-10min, now] ⇒ 只算 [now-10min, now-5min] = 300s
         execute("INSERT INTO outage_event (id, tenant_id, device_id, start_ts, end_ts, duration_sec, reason, "
-            + "create_time, update_time) VALUES (20_001, " + TENANT + ", " + DEVICE + ", '"
+            + "create_time, update_time) VALUES (20001, " + TENANT + ", " + DEVICE + ", '"
             + dbNow.minusMinutes(20).format(SQL_DATE_TIME) + "', '"
             + dbNow.minusMinutes(5).format(SQL_DATE_TIME) + "', 900, 'NO_GOOD_DATA', NOW(), NOW())");
 
