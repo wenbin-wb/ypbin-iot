@@ -259,8 +259,8 @@ class OutageAvailabilityIT {
         AvailabilityServiceImpl tightScan = new AvailabilityServiceImpl(livenessMapper, outageMapper,
             deviceMapper, oneByOne);
         // 两个「设备不存在」的垃圾活性行（id 更小 ⇒ 优先被候选查询选中）+ 一个真断档设备
-        insertOrphanLiveness(DEVICE, 1L, dbNow.minusHours(1));
-        insertOrphanLiveness(DEVICE, 2L, dbNow.minusHours(1));
+        insertOrphanLiveness(1L, dbNow.minusHours(1));
+        insertOrphanLiveness(2L, dbNow.minusHours(1));
         service.ingest(req(observation(DEVICE, 5_000, AvailabilityRules.QUALITY_GOOD,
             dbNow.minusHours(1))));
 
@@ -269,12 +269,24 @@ class OutageAvailabilityIT {
         assertThat(tightScan.scanAndOpenOutages()).as("垃圾被清理后必须能发现真断档").isEqualTo(1);
     }
 
-    /** 插一条「设备不存在」的活性行（模拟设备已删除但活性行遗留）。 */
-    private static void insertOrphanLiveness(Long tenantId, Long rowId, LocalDateTime lastGoodAt) {
-        execute("INSERT INTO device_liveness (id, tenant_id, device_id, poll_interval_ms, last_good_at, "
-            + "first_observed_at, last_observed_at, create_time, update_time) VALUES (" + rowId + ", "
-            + tenantId + ", 999999, 5000, '" + lastGoodAt + "', '" + lastGoodAt + "', '" + lastGoodAt
-            + "', NOW(), NOW())");
+    /**
+     * 插一条「设备不存在」的活性行（模拟设备已删除但活性行遗留）。
+     *
+     * <p>用 Mapper 而不是原生 SQL：{@code LocalDateTime.toString()} 是 {@code 2026-09-22T01:59:59}
+     * （带 T），MySQL 的 DATETIME 字面量不认——CI 上一轮就是这么失败的（测试代码问题，不是产品问题）。</p>
+     */
+    private static void insertOrphanLiveness(Long rowId, LocalDateTime lastGoodAt) {
+        DeviceLiveness orphan = new DeviceLiveness();
+        orphan.setId(rowId);
+        orphan.setDeviceId(999_999L);
+        orphan.setPollIntervalMs(5_000);
+        orphan.setLastGoodAt(lastGoodAt);
+        orphan.setFirstObservedAt(lastGoodAt);
+        orphan.setLastObservedAt(lastGoodAt);
+        inTenant(() -> {
+            livenessMapper.insert(orphan);
+            return 1;
+        });
     }
 
     @Test
