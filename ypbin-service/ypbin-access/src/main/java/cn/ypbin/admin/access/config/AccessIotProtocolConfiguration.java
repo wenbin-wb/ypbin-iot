@@ -10,7 +10,6 @@
 package cn.ypbin.admin.access.config;
 
 import cn.ypbin.admin.access.egress.AccessReadingSink;
-import cn.ypbin.admin.access.egress.LoggingAccessReadingSink;
 import cn.ypbin.admin.access.egress.LoggingDataSink;
 import cn.ypbin.admin.access.lease.AccessLeaseManager;
 import cn.ypbin.admin.access.link.AccessConnectionSpecProvider;
@@ -108,17 +107,6 @@ public class AccessIotProtocolConfiguration {
         // Clock 直接给系统时钟：它是「空清单退避」的时间基准，单测里注入可推进的假时钟
         return new IotProtocolTenantLinkManager(specSource, registry, planner, meterRegistry,
             Clock.systemUTC());
-    }
-
-    /**
-     * 映射后读数出口（3b-2 用日志占位；M-2 换成有界队列 → 微批 → EMQX）。
-     *
-     * @return 读数出口
-     */
-    @Bean
-    @ConditionalOnMissingBean
-    public AccessReadingSink accessReadingSink() {
-        return new LoggingAccessReadingSink();
     }
 
     /**

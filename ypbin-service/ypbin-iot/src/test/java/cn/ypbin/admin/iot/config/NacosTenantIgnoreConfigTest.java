@@ -112,6 +112,38 @@ class NacosTenantIgnoreConfigTest {
             .isEmpty();
     }
 
+    @Test
+    @DisplayName("★ 反向门禁：**租户表**（继承 TenantBaseEntity）绝不能被登记进 ignore-tables")
+    void tenantEntitiesMustNeverBeIgnored() throws IOException {
+        Map<String, Object> tenant = section(loadYaml(REPO_ROOT.resolve("deploy/nacos/ypbin-iot.yaml")),
+            "tenant");
+        List<String> ignored = asStringList(tenant.get("ignore-tables"));
+
+        Path entityDir = REPO_ROOT.resolve(
+            "ypbin-service-api/ypbin-iot-api/src/main/java/cn/ypbin/admin/iot/entity");
+        List<String> offenders = new java.util.ArrayList<>();
+        int scanned = 0;
+        try (var files = Files.list(entityDir)) {
+            for (Path file : files.filter(p -> p.toString().endsWith(".java")).toList()) {
+                String code = Files.readString(file, StandardCharsets.UTF_8);
+                Matcher tableName = Pattern.compile("@TableName\\(\\s*\"([^\"]+)\"\\s*\\)").matcher(code);
+                if (!tableName.find() || !code.contains("extends TenantBaseEntity")) {
+                    continue;
+                }
+                scanned++;
+                if (ignored.contains(tableName.group(1))) {
+                    offenders.add(tableName.group(1));
+                }
+            }
+        }
+        // 自检：本仓租户表很多（iot_device 等），扫不到就是空跑
+        assertThat(scanned).as("一个租户实体都没扫到 ⇒ 本门禁是空跑（假绿）").isPositive();
+        assertThat(offenders)
+            .as("这些租户表被登记进 ignore-tables ⇒ 租户插件不再给它们追加 tenant_id 条件"
+                + "（跨租户可见/可写，且无上下文时不再 fail-closed）：%s", offenders)
+            .isEmpty();
+    }
+
     @SuppressWarnings("unchecked")
     private Map<String, Object> section(Map<String, Object> root, String name) {
         Object ypbin = root.get("ypbin");

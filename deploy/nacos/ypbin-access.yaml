@@ -37,3 +37,14 @@ ypbin:
     acquire-interval-ms: 15000
     # 启动握手：生产必须为 true（关掉时节点零采集，仅用于验装配）
     startup-handshake-enabled: true
+    # 读数出口（M-2）：把协议栈采到的读数**微批上报**给 iot 的 /internal/readings，
+    # 断档/可用率判定靠它拿输入（关掉或没有内部客户端时会退化为日志占位并打 WARN，
+    # 那种部署下可用率报表会一直显示「无断档」）。EMQX 传输待 Q4 决策后替换本实现。
+    egress:
+      enabled: true
+      # 有界队列：满了丢弃并计数（iot.access.egress.dropped），绝不阻塞采集线程
+      queue-capacity: 10000
+      # 微批大小（服务端单批上限 500，启动自检会拒绝更大的值）
+      batch-size: 200
+      # 微批周期（毫秒）
+      flush-interval-ms: 1000

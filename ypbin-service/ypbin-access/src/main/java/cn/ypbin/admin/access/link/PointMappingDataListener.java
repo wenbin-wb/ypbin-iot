@@ -41,14 +41,19 @@ public class PointMappingDataListener implements DataListener {
     private static final Logger log = LoggerFactory.getLogger(PointMappingDataListener.class);
 
     private final String deviceId;
+
+    /** 设备级采集周期（毫秒，未知为 {@code null}）：随读数一起上报，供断档判定用真周期。 */
+    private final Integer pollIntervalMs;
+
     private final Map<String, AccessPointMappingDto> pointByAddress;
     private final AccessReadingSink sink;
 
     private long unmappedCount;
 
-    public PointMappingDataListener(String deviceId, List<AccessPointMappingDto> points,
-                                    AccessReadingSink sink) {
+    public PointMappingDataListener(String deviceId, Integer pollIntervalMs,
+                                    List<AccessPointMappingDto> points, AccessReadingSink sink) {
         this.deviceId = deviceId;
+        this.pollIntervalMs = pollIntervalMs;
         this.sink = sink;
         Map<String, AccessPointMappingDto> byAddress = new LinkedHashMap<>();
         if (points != null) {
@@ -74,7 +79,7 @@ public class PointMappingDataListener implements DataListener {
         Object mapped = AccessReading.applyScale(value.value(), point.getScaleFactor(),
             point.getOffsetValue());
         sink.accept(new AccessReading(deviceId, point.getPropertyId(), mapped,
-            value.quality().name(), value.timestamp()));
+            value.quality().name(), value.timestamp(), pollIntervalMs));
     }
 
     /** 本设备被丢弃的未映射读数条数（供自检与测试断言）。 */

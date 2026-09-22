@@ -19,6 +19,7 @@ import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -106,8 +107,8 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
                 ? SubscribeRequest.of(addresses)
                 : new SubscribeRequest(addresses, device.pollInterval(), device.pollInterval(), null,
                     Map.of());
-            PointMappingDataListener listener =
-                new PointMappingDataListener(device.deviceId(), points, readingSink);
+            PointMappingDataListener listener = new PointMappingDataListener(device.deviceId(),
+                pollIntervalMs(device), points, readingSink);
             // ⚠️ S5 修复：**订阅成功之后**才记录跟踪。
             //    此前是先写 `subscribedSessions` 再 subscribe ⇒ 异步失败时跟踪表已记上「已订阅」，
             //    对账会认为无需重试 ⇒ 该设备**永久停止采集**且只有一行 ERROR 日志。
@@ -141,6 +142,21 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
         if (subscribedSessions.remove(deviceId) != null) {
             log.debug("[access] 设备已移除，清理订阅跟踪：deviceId={}", deviceId);
         }
+    }
+
+    /**
+     * 设备级采集周期（毫秒）：断档判定要用**真周期**（不然只能用兜底值，阈值会偏大或偏小）。
+     *
+     * @param device 设备规格
+     * @return 周期毫秒；未指定（ZERO）返回 {@code null}
+     */
+    private static Integer pollIntervalMs(DeviceSpec device) {
+        Duration interval = device.pollInterval();
+        if (interval == null || interval.isZero() || interval.isNegative()) {
+            return null;
+        }
+        // 上限钳到 Integer.MAX_VALUE：超过 ~24.8 天的周期在协议上无意义，静默溢出成负数才是坑
+        return (int) Math.min(interval.toMillis(), Integer.MAX_VALUE);
     }
 
     /** 已跟踪会话数的观测入口（测试/自检）。 */

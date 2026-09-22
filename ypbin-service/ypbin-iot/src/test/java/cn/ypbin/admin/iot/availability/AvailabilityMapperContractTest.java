@@ -1,0 +1,84 @@
+/*
+ * Copyright (c) 2026-present ypbin-admin authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ */
+package cn.ypbin.admin.iot.availability;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+
+/**
+ * 活性表 Mapper 的**源码级契约门禁**（M-2）。
+ *
+ * <p>为什么必须是源码级而不是行为级：这两条约束都写在 SQL 文本里，而 MyBatis 的原生 SQL
+ * 不会被任何单测执行（单测只 mock Mapper）。上一轮外委复核正是因此漏过了一个真缺陷——
+ * 文档与 Javadoc 都声称「多副本安全靠 {@code AND open_outage_id IS NULL}」，而 SQL 里根本没有这个谓词，
+ * 所有 mock 级用例（含变异）都咬不到它。真库并发用例成本高且在 CI 才跑，这里用源码断言把它钉在本地。</p>
+ *
+ * @author wenbin
+ * @since 2026-09-22
+ */
+class AvailabilityMapperContractTest {
+
+    private static final Path REPO_ROOT = Path.of("..", "..").toAbsolutePath().normalize();
+    private static final Path MAPPER = REPO_ROOT.resolve(
+        "ypbin-service/ypbin-iot/src/main/java/cn/ypbin/admin/iot/mapper/DeviceLivenessMapper.java");
+
+    @Test
+    @DisplayName("★ markOpenOutage 必须带 `AND open_outage_id IS NULL`（多副本只允许一个赢家）")
+    void markOpenOutageMustBeConditional() throws IOException {
+        String sql = methodSql("markOpenOutage");
+
+        assertThat(sql).as("抽取到的 SQL 不能为空，否则本门禁恒真（空跑）").isNotBlank();
+        assertThat(sql).as("少了这个谓词：两副本会各插一条进行中断档 ⇒ 可用率被双计、其中一条永久不闭合")
+            .contains("open_outage_id IS NULL");
+    }
+
+    @Test
+    @DisplayName("★ 上报路径不得回写 open_outage_id（写权分离：扫描开、上报闭）")
+    void observedStateUpdateMustNotWriteOpenOutage() throws IOException {
+        String sql = methodSql("reviveAndUpdate");
+
+        assertThat(sql).as("抽取到的 SQL 不能为空").isNotBlank();
+        assertThat(sql).as("无条件回写 open_outage_id 会把扫描刚开的断档覆盖成 NULL（孤儿）")
+            .doesNotContain("open_outage_id");
+    }
+
+    @Test
+    @DisplayName("★ 清空标记必须带 `AND open_outage_id = #{outageId}`（只清自己那一条）")
+    void clearOpenOutageMustBeConditional() throws IOException {
+        String sql = methodSql("clearOpenOutage");
+
+        assertThat(sql).as("抽取到的 SQL 不能为空").isNotBlank();
+        assertThat(sql).contains("open_outage_id = #{outageId}");
+    }
+
+    /** 抽取某个 Mapper 方法注解里的 SQL 文本（把 Java 字符串拼接还原成一行）。 */
+    private static String methodSql(String methodName) throws IOException {
+        String source = Files.readString(MAPPER, StandardCharsets.UTF_8);
+        int methodIndex = source.indexOf(" " + methodName + "(");
+        assertThat(methodIndex).as("Mapper 里找不到方法 %s（门禁失效）", methodName).isPositive();
+        int annotationIndex = source.lastIndexOf("@Update", methodIndex);
+        assertThat(annotationIndex).as("方法 %s 前找不到 @Update（门禁失效）", methodName).isPositive();
+        String block = source.substring(annotationIndex + "@Update(".length(), methodIndex);
+        int lastQuote = block.lastIndexOf('"');
+        assertThat(lastQuote).as("@Update 参数里找不到字符串字面量（门禁失效）").isPositive();
+        // 把「多行字符串拼接」还原成一行 SQL：去掉加号/引号/换行
+        return block.substring(0, lastQuote + 1)
+            .replace("+", " ")
+            .replace("\"", "")
+            .replaceAll("\\s+", " ")
+            .trim();
+    }
+}
