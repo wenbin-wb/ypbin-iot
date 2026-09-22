@@ -64,14 +64,72 @@ class AvailabilityMapperContractTest {
         assertThat(sql).contains("open_outage_id = #{outageId}");
     }
 
-    /** 抽取某个 Mapper 方法注解里的 SQL 文本（把 Java 字符串拼接还原成一行）。 */
+    @Test
+    @DisplayName("★ A14：观测状态的时间戳必须**在 SQL 里**只前进（跨副本写回旧值不得回退）")
+    void observedStateUpdateMustBeMonotonic() throws IOException {
+        String sql = methodSql("reviveAndUpdate");
+
+        // 断言到「THEN/ELSE 的极性」而不只是子串：反转变异（THEN 与 ELSE 对调）也必须被咬住
+        assertThat(sql).as("last_good_at 必须取较大值（否则两个副本各自读旧快照再写回，旧时间戳会覆盖新的 ⇒ 可用率被算高）")
+            .contains("WHEN last_good_at IS NULL OR #{lastGoodAt,jdbcType=TIMESTAMP} > last_good_at "
+                + "THEN #{lastGoodAt,jdbcType=TIMESTAMP} ELSE last_good_at END");
+        assertThat(sql).as("first_observed_at 必须取较小值（极性同样要在断言里体现）")
+            .contains("WHEN first_observed_at IS NULL OR #{firstObservedAt,jdbcType=TIMESTAMP} < first_observed_at "
+                + "THEN #{firstObservedAt,jdbcType=TIMESTAMP} ELSE first_observed_at END");
+        assertThat(sql).as("last_observed_at 必须取较大值")
+            .contains("WHEN last_observed_at IS NULL OR #{lastObservedAt,jdbcType=TIMESTAMP} > last_observed_at "
+                + "THEN #{lastObservedAt,jdbcType=TIMESTAMP} ELSE last_observed_at END");
+        assertThat(sql).as("null 参数必须有 jdbcType，否则 MyBatis 拼不出可执行语句")
+            .contains("jdbcType=TIMESTAMP");
+    }
+
+    @Test
+    @DisplayName("★ A11：窗口汇总必须是聚合 SQL，且显式带 tenant_id 与 is_deleted=0")
+    void windowSummaryMustBeExactAggregate() throws IOException {
+        String sql = outageMapperSql("summarizeInWindow");
+
+        assertThat(sql).as("抽取到的 SQL 不能为空").isNotBlank();
+        assertThat(sql).as("必须一次聚合出精确值（明细截断不影响汇总）").contains("SUM(").contains("MAX(")
+            .contains("COUNT(*)");
+        // 显式写的理由（按实测更正）：租户条件其实会被 MP 的租户拦截器**重写追加**，显式写属纵深防御
+        // （executeIgnore 等跨租户场景下它是唯一护栏）；而**逻辑删除不会被追加** ⇒ is_deleted 必须显式写
+        assertThat(sql).as("tenant_id 与 is_deleted 都必须显式写：前者是纵深防御，后者是必需（逻辑删除不会被自动追加）")
+            .contains("tenant_id = #{tenantId}").contains("is_deleted = 0");
+        // SUM 与 MAX **各自**都要有防负（只给 SUM 加会被漏掉一条路径）
+        assertThat(sql).as("SUM 侧的单条防负不得缺失（否则脏数据会把可用率抬高）")
+            .contains("SUM(GREATEST(0, TIMESTAMPDIFF");
+        assertThat(sql).as("MAX 侧的单条防负不得缺失").contains("MAX(GREATEST(0, TIMESTAMPDIFF");
+        // 窗口裁剪要**两端都在**，且整段窗口谓词不得被删掉（否则汇总会变成「该设备全历史断档」）
+        assertThat(sql).as("窗口裁剪：起点侧").contains("GREATEST(start_ts, #{from,jdbcType=TIMESTAMP})");
+        assertThat(sql).as("窗口裁剪：终点侧（进行中的断档结算到 now，now 缺失时退回数据库时钟）")
+            .contains("LEAST(COALESCE(end_ts, COALESCE(#{now,jdbcType=TIMESTAMP}, NOW())), "
+                + "#{to,jdbcType=TIMESTAMP})");
+        assertThat(sql).as("窗口谓词不得被删掉").contains("start_ts < #{to,jdbcType=TIMESTAMP}")
+            .contains("(end_ts IS NULL OR end_ts > #{from,jdbcType=TIMESTAMP})");
+        assertThat(sql).as("可空时间参数必须带 jdbcType（与观测状态更新同一条纪律）")
+            .contains("jdbcType=TIMESTAMP");
+    }
+
+    /** 抽取某个 Mapper 方法注解里的 SQL 文本（把 Java 字符串拼接还原成一行；支持 @Update 与 @Select）。 */
     private static String methodSql(String methodName) throws IOException {
-        String source = Files.readString(MAPPER, StandardCharsets.UTF_8);
+        return methodSql(MAPPER, methodName, "@Update");
+    }
+
+    /** 抽取 OutageEventMapper 的 SQL（@Select 聚合）。 */
+    private static String outageMapperSql(String methodName) throws IOException {
+        return methodSql(REPO_ROOT.resolve(
+            "ypbin-service/ypbin-iot/src/main/java/cn/ypbin/admin/iot/mapper/OutageEventMapper.java"),
+            methodName, "@Select");
+    }
+
+    private static String methodSql(Path mapperPath, String methodName, String annotation)
+            throws IOException {
+        String source = Files.readString(mapperPath, StandardCharsets.UTF_8);
         int methodIndex = source.indexOf(" " + methodName + "(");
         assertThat(methodIndex).as("Mapper 里找不到方法 %s（门禁失效）", methodName).isPositive();
-        int annotationIndex = source.lastIndexOf("@Update", methodIndex);
-        assertThat(annotationIndex).as("方法 %s 前找不到 @Update（门禁失效）", methodName).isPositive();
-        String block = source.substring(annotationIndex + "@Update(".length(), methodIndex);
+        int annotationIndex = source.lastIndexOf(annotation, methodIndex);
+        assertThat(annotationIndex).as("方法 %s 前找不到 %s（门禁失效）", methodName, annotation).isPositive();
+        String block = source.substring(annotationIndex + annotation.length() + 1, methodIndex);
         int lastQuote = block.lastIndexOf('"');
         assertThat(lastQuote).as("@Update 参数里找不到字符串字面量（门禁失效）").isPositive();
         // 把「多行字符串拼接」还原成一行 SQL：去掉加号/引号/换行

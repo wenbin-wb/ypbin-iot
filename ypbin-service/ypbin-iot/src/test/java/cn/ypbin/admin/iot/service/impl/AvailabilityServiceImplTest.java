@@ -33,12 +33,14 @@ import cn.ypbin.admin.iot.mapper.DeviceLivenessMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.OutageEventMapper;
 import cn.ypbin.starter.core.exception.BusinessException;
+import cn.ypbin.starter.tenant.core.TenantContext;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -287,15 +289,20 @@ class AvailabilityServiceImplTest {
     }
 
     @Test
-    @DisplayName("★ 查询：按窗口现算可用率（10h 窗口内 1h 断档 ⇒ 0.9，不达标），并回填断档明细")
+    @DisplayName("★ 查询：可用率来自**精确聚合**（10h 窗口内 1h 断档 ⇒ 0.9，不达标），并回填断档明细")
     void queryMustComputeAvailability() {
         when(deviceMapper.selectById(DEVICE)).thenReturn(device());
         when(livenessMapper.selectNow()).thenReturn(T0.plusHours(10));
         when(livenessMapper.selectOne(any())).thenReturn(liveness(T0, T0, null));
+        // 汇总来自聚合（SUM 在 MySQL 里可能是 BigDecimal ⇒ 顺便覆盖 toLong 的两种取值）
+        when(outageMapper.summarizeInWindow(eq(TENANT), eq(DEVICE), any(), any(), any()))
+            .thenReturn(Map.of("outageCount", 1L, "outageSeconds", new BigDecimal("3600"),
+                "longestOutageSeconds", 3_600L));
         when(outageMapper.selectList(any())).thenReturn(List.of(
             outage(1L, T0.plusHours(2), T0.plusHours(3), 3_600L)));
 
-        AvailabilityResp resp = service.query(DEVICE, T0, T0.plusHours(10));
+        AvailabilityResp resp = TenantContext.executeWithTenant(TENANT,
+            () -> service.query(DEVICE, T0, T0.plusHours(10)));
 
         assertThat(resp.getDeviceId()).isEqualTo(DEVICE);
         assertThat(resp.getWindowSeconds()).isEqualTo(10 * 3600L);
@@ -309,21 +316,39 @@ class AvailabilityServiceImplTest {
     }
 
     @Test
-    @DisplayName("★ 查询：断档明细超过上限时置 truncated（可用率会偏低断档 ⇒ 客户端必须能看出截断）")
-    void queryMustFlagTruncatedOutages() {
+    @DisplayName("★ A11：明细被截断（只返回上限条数）时，汇总仍取**精确聚合**值（次数不被截成 200）")
+    void queryMustKeepExactSummaryWhenDetailsTruncated() {
         when(deviceMapper.selectById(DEVICE)).thenReturn(device());
         when(livenessMapper.selectNow()).thenReturn(T0.plusHours(10));
         when(livenessMapper.selectOne(any())).thenReturn(liveness(T0, T0, null));
-        List<OutageEvent> many = new ArrayList<>();
-        for (int i = 0; i <= AvailabilityRules.MAX_OUTAGE_ROWS; i++) {
-            many.add(outage((long) i, T0.plusMinutes(i), T0.plusMinutes(i).plusSeconds(30), 30L));
+        // 精确聚合：201 条、合计 6030 秒（明细只可能返回 200 条）
+        when(outageMapper.summarizeInWindow(eq(TENANT), eq(DEVICE), any(), any(), any()))
+            .thenReturn(Map.of("outageCount", 201L, "outageSeconds", 6_030L,
+                "longestOutageSeconds", 30L));
+        List<OutageEvent> details = new ArrayList<>();
+        for (int i = 0; i < AvailabilityRules.MAX_OUTAGE_ROWS; i++) {
+            details.add(outage((long) i, T0.plusMinutes(i), T0.plusMinutes(i).plusSeconds(30), 30L));
         }
-        when(outageMapper.selectList(any())).thenReturn(many);
+        when(outageMapper.selectList(any())).thenReturn(details);
 
-        AvailabilityResp resp = service.query(DEVICE, T0, T0.plusHours(10));
+        AvailabilityResp resp = TenantContext.executeWithTenant(TENANT,
+            () -> service.query(DEVICE, T0, T0.plusHours(10)));
 
-        assertThat(resp.getTruncated()).isTrue();
         assertThat(resp.getOutages()).hasSize(AvailabilityRules.MAX_OUTAGE_ROWS);
+        assertThat(resp.getTruncated()).isTrue();
+        assertThat(resp.getOutageCount()).as("次数是精确值，不是明细条数").isEqualTo(201);
+        assertThat(resp.getOutageSeconds()).as("断档合计来自精确聚合，不因截断变小").isEqualTo(6_030L);
+        assertThat(resp.getAvailability()).isEqualByComparingTo(new BigDecimal("0.832500"));
+    }
+
+    @Test
+    @DisplayName("★ 查询：缺少租户上下文时直接报错（不猜租户、不查全表）")
+    void queryMustRejectMissingTenantContext() {
+        when(deviceMapper.selectById(DEVICE)).thenReturn(device());
+
+        assertThatThrownBy(() -> service.query(DEVICE, T0, T0.plusHours(1)))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("缺少租户上下文");
     }
 
     @Test
@@ -334,7 +359,9 @@ class AvailabilityServiceImplTest {
         when(livenessMapper.selectOne(any())).thenReturn(null);
         when(outageMapper.selectList(any())).thenReturn(List.of());
 
-        AvailabilityResp resp = service.query(DEVICE, null, null);
+        when(outageMapper.summarizeInWindow(eq(TENANT), eq(DEVICE), any(), any(), any()))
+            .thenReturn(Map.of("outageCount", 0L, "outageSeconds", 0L, "longestOutageSeconds", 0L));
+        AvailabilityResp resp = TenantContext.executeWithTenant(TENANT, () -> service.query(DEVICE, null, null));
 
         assertThat(resp.getTo()).isEqualTo(T0);
         assertThat(resp.getFrom()).isEqualTo(T0.minusHours(properties.getDefaultWindowHours()));
