@@ -10,6 +10,9 @@
 package cn.ypbin.admin.iot.availability;
 
 import java.math.BigDecimal;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
 
 /**
  * 可用率口径的**固定部分**（继承 spec §12.5 / 设计 §5.4）。
@@ -45,10 +48,30 @@ public final class AvailabilityRules {
     /** 可用率小数位。 */
     public static final int AVAILABILITY_SCALE = 6;
 
+    /**
+     * 平台时区（与 starter 的全局时间序列化一致）。
+     *
+     * <p>显式写死而不用 {@code systemDefault()}：上报来的是 epoch 毫秒，落库要变成 {@code LocalDateTime}，
+     * 若依赖 JVM 默认时区，同一份数据在不同时区的节点上会落成不同的「墙上时间」——这类差异在报表上
+     * 很难定位。</p>
+     */
+    public static final ZoneId PLATFORM_ZONE = ZoneId.of("GMT+8");
+
     /** 断档明细一次返回的最大条数（超出则截断并置 {@code truncated}，避免一个长窗口把响应撑爆）。 */
     public static final int MAX_OUTAGE_ROWS = 200;
 
     private AvailabilityRules() {
+    }
+
+    /**
+     * epoch 毫秒 → 平台墙上时间。
+     *
+     * @param epochMillis epoch 毫秒（可空）
+     * @return 平台时区的 {@code LocalDateTime}；入参为空返回 {@code null}
+     */
+    public static LocalDateTime toLocalDateTime(Long epochMillis) {
+        return epochMillis == null ? null : LocalDateTime.ofInstant(Instant.ofEpochMilli(epochMillis),
+            PLATFORM_ZONE);
     }
 
     /**

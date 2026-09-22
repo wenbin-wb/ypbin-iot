@@ -367,7 +367,7 @@ class AvailabilityServiceImplTest {
         observation.setDeviceId(deviceId);
         observation.setPollIntervalMs(pollIntervalMs);
         observation.setQuality(quality);
-        observation.setTs(ts);
+        observation.setTs(ts.atZone(AvailabilityRules.PLATFORM_ZONE).toInstant().toEpochMilli());
         return observation;
     }
 

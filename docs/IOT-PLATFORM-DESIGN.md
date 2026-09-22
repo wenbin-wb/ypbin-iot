@@ -471,11 +471,12 @@ business 变更台账（产品/设备/点位映射/凭据）
 
 ### 5.4 断档与可用率（继承 spec §12.5 定义，逐台达标）
 
-> **落地状态（2026-09-22，M-2）**：**口径、检出、落库、查询已落地**（`device_liveness` / `outage_event`
-> 两张表 + `AvailabilityRules`/`OutageDetector`/`AvailabilityCalculator` + `/internal/readings` 上报端点
-> + 周期扫描 + `GET /devices/{id}/availability`）。**尚未落地**：① access 侧把读数真正上报（当前端点无生产
-> 调用者，属下一增量）；② 读数**值**的存储（IoTDB/Redis，依赖 Q8）；③ 维护窗口排除、按设备覆盖阈值、
-> 链路级原因码；④ 租约转移导致的停采仍会被算成断档（活性行感知不到归属变化）。完整登记见
+> **落地状态（2026-09-22，M-2）**：**口径、检出、落库、查询、access 侧上报全部已落地**
+> （`device_liveness` / `outage_event` 两张表 + `AvailabilityRules`/`OutageDetector`/`AvailabilityCalculator`
+> + `/internal/readings` 上报端点 + 周期扫描 + `GET /devices/{id}/availability`；access 侧
+> `HttpAccessReadingSink`：有界队列 → 微批 → HTTP 上报）。**尚未落地**：① 读数**值**的存储（IoTDB/Redis，
+> 依赖 Q8）；② 维护窗口排除、按设备覆盖阈值、链路级原因码；③ 租约转移导致的停采仍会被算成断档
+> （活性行感知不到归属变化）；④ 上报失败不重试（丢弃并计数）；EMQX 传输待 Q4。完整登记见
 > docs/IOT-ROADMAP.md 四点十二。
 
 ```

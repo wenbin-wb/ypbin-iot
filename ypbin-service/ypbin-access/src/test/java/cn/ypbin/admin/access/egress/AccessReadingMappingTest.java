@@ -55,7 +55,7 @@ class AccessReadingMappingTest {
     @DisplayName("映射：地址命中 → 发到出口的属性号/值/质量/时刻均正确（含缩放与质量语义）")
     void mappedAddressShouldProduceReading() {
         List<AccessReading> readings = new ArrayList<>();
-        PointMappingDataListener listener = new PointMappingDataListener("100",
+        PointMappingDataListener listener = new PointMappingDataListener("100", 5_000,
             List.of(point("holding:1", "900", new BigDecimal("0.1"), new BigDecimal("0"))),
             readings::add);
         Instant now = Instant.parse("2026-09-21T08:00:00Z");
@@ -68,6 +68,8 @@ class AccessReadingMappingTest {
         assertThat(reading.propertyId()).isEqualTo("900");
         assertThat(reading.value()).isEqualTo(new BigDecimal("25.000000"));
         assertThat(reading.quality()).isEqualTo("GOOD");
+        assertThat(reading.pollIntervalMs()).as("设备级周期必须随读数带出（断档判定用真周期）")
+            .isEqualTo(5_000);
         assertThat(reading.isGood()).isTrue();
         assertThat(reading.timestamp()).isEqualTo(now);
         assertThat(listener.unmappedCount()).isZero();
@@ -77,7 +79,7 @@ class AccessReadingMappingTest {
     @DisplayName("未映射地址：不进出口且计数递增（不得静默丢弃、也不得误发到别的属性）")
     void unmappedAddressShouldBeCountedNotEmitted() {
         List<AccessReading> readings = new ArrayList<>();
-        PointMappingDataListener listener = new PointMappingDataListener("100",
+        PointMappingDataListener listener = new PointMappingDataListener("100", 5_000,
             List.of(point("holding:1", "900", null, null)), readings::add);
 
         listener.onData(new PointValue(PointAddress.of("holding:99"), 1, Quality.GOOD,
@@ -91,7 +93,7 @@ class AccessReadingMappingTest {
     @DisplayName("质量非 GOOD 也要如实上报（断档判定依赖它，不能在采集侧吞掉）")
     void nonGoodQualityShouldBeReported() {
         List<AccessReading> readings = new ArrayList<>();
-        PointMappingDataListener listener = new PointMappingDataListener("100",
+        PointMappingDataListener listener = new PointMappingDataListener("100", 5_000,
             List.of(point("holding:1", "900", null, null)), readings::add);
 
         listener.onData(new PointValue(PointAddress.of("holding:1"), null, Quality.BAD,
@@ -106,7 +108,7 @@ class AccessReadingMappingTest {
     @DisplayName("点位清单里的空/缺失地址被忽略：不会变成可用映射（其他地址仍按未映射计数）")
     void blankAddressInPointListShouldBeIgnored() {
         List<AccessReading> readings = new ArrayList<>();
-        PointMappingDataListener listener = new PointMappingDataListener("100",
+        PointMappingDataListener listener = new PointMappingDataListener("100", 5_000,
             List.of(point("", "900", null, null), point(null, "901", null, null)), readings::add);
 
         // 框架自身会拒绝空地址（PointAddress 构造期校验），故这里用一个真实但未映射的地址验证：

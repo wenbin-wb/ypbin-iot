@@ -33,7 +33,8 @@ public record AccessReading(
         String propertyId,
         Object value,
         String quality,
-        Instant timestamp) {
+        Instant timestamp,
+        Integer pollIntervalMs) {
 
     /** 质量码 GOOD。 */
     public static final String QUALITY_GOOD = "GOOD";

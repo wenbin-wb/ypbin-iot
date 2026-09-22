@@ -413,23 +413,29 @@ ERROR The build could not read 1 project
 | 静默设备检出 | 周期扫描 `OutageScanner`（`ypbin.availability.scan-interval-ms`）：SQL 里用 `TIMESTAMPADD(MICROSECOND, K × max(周期, 兜底) × 1000, COALESCE(last_good_at, first_observed_at)) < NOW()` 选候选 ⇒ **设备彻底不再上报也能发现**（这正是断档判定的核心场景，只靠上报事件永远发现不了） |
 | 多副本安全 | 打开断档 = 插入事件 + `UPDATE device_liveness SET open_outage_id=? WHERE id=? AND open_outage_id IS NULL`；受影响行数为 0 时**撤销刚插入的事件** ⇒ 同一段断档不会被两个副本记两次（否则可用率被双计） |
 | 假断档过滤 | 扫描候选必须「设备仍存在且启用」（一次批量查设备，非循环查）：设备删除/停用后活性行不会自己消失，不筛就会产生**永远消不掉的假断档** |
+| **接入侧上报（A1，已落地）** | access 的读数出口从「日志占位」换成 `HttpAccessReadingSink`：**有界队列 → 微批（默认 200 条 / 1s）→ `POST /internal/readings`**；入队 `offer`（队满**丢弃并计数**，绝不阻塞采集线程）、Feign 超时显式（connect 1s / read 5s / **不重试**）、失败与非法读数分别计数（`iot.access.egress.dropped/failed/invalid`）、停机前尽力刷出队尾；没有内部客户端或显式关闭时**退化为日志占位并打 WARN**（不静默降级）。设备级周期随读数带出（断档用真周期）；上报时刻用 **epoch 毫秒**（跨服务不用字符串时间，避免两端时区/格式配置不一致）。S6（日志占位）至此收口；EMQX 替换待 Q4 |
 | 参数自检 | `IotAvailabilityConfiguration` 启动期校验 K ≥ 1、兜底周期/扫描周期/批次/默认窗口为正：K=0 会让「任何时刻都算断档」，只会在运行期以「数据全错」暴露 |
 | 查询端点 | `GET /devices/{deviceId}/availability?from=&to=`（权限码 `iot:availability:get`，007 与迁移同步 + `IotPermissionCodeGateTest` 覆盖）：返回窗口/断档合计/最长断档/次数/可用率/是否达标/上限值/断档明细（超 200 条置 `truncated`）。窗口给反**报错**而不是静默交换；设备不存在按「查不到」处理（不泄露存在性） |
 
 **验收证据（本轮，本机实跑）**
 
-- `ypbin-iot` 单测 **118/0**（原 90 → 本轮 +28：`OutageDetectorTest` 5、`AvailabilityCalculatorTest` 8、
-  `AvailabilityServiceImplTest` 15）；
-- `ypbin-access` 61/0、`ypbin-architecture-tests` 41/0、`tools/check-iot-sql-equivalence.sh` OK；
-- 真库 IT `OutageAvailabilityIT`（4 例：完整闭环 / 新鲜设备不误判 / 从未有有效数据用首次观测当起点 /
-  逻辑删除活性行必须复活）**本机不跑容器**，由 CI 的 `-Pit` 反应堆执行（CI 断言不出现 Skipped）；
-- ⚠️ 因此本轮的「SQL 时间推进条件」验收依赖 CI（本机只验到编译与纯逻辑），合入前看 CI 结论。
+- `ypbin-iot` 单测 **118/0**（原 90 → +28：`OutageDetectorTest` 5、`AvailabilityCalculatorTest` 8、
+  `AvailabilityServiceImplTest` 15）；`ypbin-access` **67/0**（原 61 → +6：`HttpAccessReadingSinkTest`）；
+  `ypbin-architecture-tests` 41/0；`tools/check-iot-sql-equivalence.sh` OK；
+- **真库 IT 已由 CI 实测**（`-Pit`，commit `bf4191c` 的 IoT Integration Tests **SUCCESS**）：
+  `OutageAvailabilityIT` **5/0（0 跳过）**——完整闭环（上报→扫描开断档→闭合→可用率 0.5）、新鲜设备不误判、
+  从未有有效数据用首次观测当起点、软删活性行复活、**无租户上下文 fail-closed**；IT 合计 20/0；
+- 变异 **10 处**全部精确转红（iot 侧 7：阈值非严格 / 不做窗口裁剪 / 达标只看可用率 / 去掉多副本守卫 /
+  去掉设备存在性过滤 / 状态可回退 / 有效数据不闭合断档；access 侧 3：队满改为阻塞 / 失败后仍抛 /
+  上报时刻不用 epoch 毫秒——见提交信息）。
 
 **本轮仍未闭环（如实登记，勿当已完成）**
 
 | # | 事项 | 现状 |
 |---|---|---|
-| **A1** | **access 侧上报接线未做**（下一增量） | `POST /internal/readings` 目前**没有生产调用者** ⇒ 真实链路上还不会产生可用率数据。计划：access 侧 `AccessReadingSink` 换成「有界队列 → 微批 → HTTP 上报」的实现（区别于 S6 的日志占位），含丢弃计数与超时；EMQX 替换依赖 Q4 决策 |
+| **A1** | ~~access 侧上报接线~~ **已落地**（`HttpAccessReadingSink`）：有界队列 → 微批 → `/internal/readings`，含丢弃/失败/非法计数与超时；EMQX 传输**待 Q4** | 已收口；仍有限制见 A9/A10 |
+| **A9** | **上报失败不重试**（本批丢弃） | 刻意为之：重试会占住 flush 线程并放大远端压力；代价是读数丢失会让断档缺口被算长一些 ⇒ 以 `iot.access.egress.failed`/`dropped` 暴露。彻底解决要等 EMQX/MQ 的持久化通道（Q4）与「断档判定对丢失不敏感」的补偿口径 |
+| **A10** | **扫描无租约/归属联动**（= A6 的另一面） | 租户被接管到别的节点后，本节点的活性行停止更新 ⇒ 会被算成断档。需要判据（如「本节点仍持有该租户」）或上报里带「本节点是否在采」 |
 | **A2** | 读数**值**不落库、Redis 最新值未做 | 依赖 Q8（IoTDB 树/表模型）；本轮刻意只上报「质量+时刻」，不发明取值契约 |
 | **A3** | 维护窗口排除未做 | spec 口径里「统计总时长排除可配置维护窗口」尚未实现，当前窗口时长 = `to - from` |
 | **A4** | 阈值/目标全局常量 | 按设备覆盖目标可用率/最长断档属后续增量 |

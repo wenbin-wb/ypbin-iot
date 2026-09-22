@@ -24,7 +24,8 @@ import org.springframework.scheduling.annotation.EnableScheduling;
  * @since 2026-09-20
  */
 @EnableScheduling
-@EnableFeignClients(basePackages = {"cn.ypbin.admin.iot.lease", "cn.ypbin.admin.iot.device"})
+@EnableFeignClients(basePackages = {"cn.ypbin.admin.iot.lease", "cn.ypbin.admin.iot.device",
+    "cn.ypbin.admin.iot.availability"})
 @SpringBootApplication(scanBasePackages = {"cn.ypbin.admin.access", "cn.ypbin.admin.iot.lease"})
 public class AccessApplication {
 

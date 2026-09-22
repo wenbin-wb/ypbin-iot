@@ -255,7 +255,7 @@ class OutageAvailabilityIT {
         observation.setDeviceId(deviceId);
         observation.setPollIntervalMs(pollIntervalMs);
         observation.setQuality(quality);
-        observation.setTs(ts.withNano(0));
+        observation.setTs(ts.withNano(0).atZone(AvailabilityRules.PLATFORM_ZONE).toInstant().toEpochMilli());
         return observation;
     }
 

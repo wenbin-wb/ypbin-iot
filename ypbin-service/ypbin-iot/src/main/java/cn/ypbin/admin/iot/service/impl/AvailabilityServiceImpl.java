@@ -325,9 +325,13 @@ public class AvailabilityServiceImpl implements AvailabilityService {
             if (item == null || item.getDeviceId() == null || item.getTs() == null) {
                 continue;
             }
+            LocalDateTime observedAt = AvailabilityRules.toLocalDateTime(item.getTs());
+            if (observedAt == null) {
+                continue;
+            }
             boolean good = AvailabilityRules.QUALITY_GOOD.equals(item.getQuality());
             byDevice.merge(item.getDeviceId(), new DeviceReadingBatch(item.getDeviceId(),
-                    item.getPollIntervalMs(), item.getTs(), item.getTs(), good ? item.getTs() : null, 1),
+                    item.getPollIntervalMs(), observedAt, observedAt, good ? observedAt : null, 1),
                 (left, right) -> new DeviceReadingBatch(left.deviceId(),
                     right.pollIntervalMs() != null ? right.pollIntervalMs() : left.pollIntervalMs(),
                     earliest(left.firstObservedAt(), right.firstObservedAt()),

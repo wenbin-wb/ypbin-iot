@@ -11,7 +11,6 @@ package cn.ypbin.admin.iot.availability;
 
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
-import java.time.LocalDateTime;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -22,8 +21,10 @@ import lombok.Setter;
  * 读数**值的存储**属于数据面（IoTDB/Redis），依赖 Q8 选型，本轮不做——所以这里刻意不带值，
  * 避免发明一个马上要改的取值契约。</p>
  *
- * <p>时间用 {@link LocalDateTime}（全局序列化锁定 {@code yyyy-MM-dd HH:mm:ss}，时区 GMT+8），
- * 与平台其它接口一致；不使用 epoch 毫秒以免客户端与服务端时区歧义。</p>
+ * <p><b>时间用 epoch 毫秒</b>（而非 {@code LocalDateTime} 字符串）：这是**跨服务**的内部上报，
+ * 两端各自的 Jackson 时区/格式配置一旦不一致就会出现「同一时刻被解析成不同瞬间」或直接解析失败；
+ * epoch 毫秒没有这个耦合面（access 侧协议栈给的本就是 {@code Instant}），服务端再用平台固定时区
+ * 落成 {@code LocalDateTime}。</p>
  *
  * @author wenbin
  * @since 2026-09-22
@@ -43,7 +44,7 @@ public class ReadingObservationDto {
     @NotBlank(message = "质量码不能为空")
     private String quality;
 
-    /** 读数时刻（全局格式 yyyy-MM-dd HH:mm:ss）。 */
+    /** 读数时刻（epoch 毫秒）。 */
     @NotNull(message = "读数时刻不能为空")
-    private LocalDateTime ts;
+    private Long ts;
 }
