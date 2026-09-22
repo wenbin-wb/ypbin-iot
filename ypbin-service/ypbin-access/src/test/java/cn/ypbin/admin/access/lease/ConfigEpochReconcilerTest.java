@@ -192,6 +192,26 @@ class ConfigEpochReconcilerTest {
     }
 
     @Test
+    @DisplayName("★ 安全网按「距上次尝试的时长」触发：**信号正常、版本号长期不变**的租户同样会被周期强制对账")
+    void healthyTenantMustAlsoBeCoveredBySafetyNet() {
+        // 版本号恒为 5（健康、无变更），reconcile 恒成功
+        when(client.batchEpoch()).thenReturn(R.ok(batch(item(TENANT_A, 5L))));
+        reconciler.reconcile(Set.of(TENANT_A));
+        assertThat(linkManager.reconciled).hasSize(1);
+
+        clock.advance(Duration.ofMillis(REFRESH_INTERVAL_MS + 1_000));
+        reconciler.reconcile(Set.of(TENANT_A));
+
+        // 这条钉住 ROADMAP 里如实写下的代价：安全网不是「只在信号缺失时才触发」，
+        // 而是「距上次尝试超过间隔就拉一次」——健康租户同样付费
+        assertThat(linkManager.reconciled).as("信号正常也要按周期重拉").hasSize(2);
+        assertThat(meterRegistry.get("iot.access.config.reconcile.forced").counter().count())
+            .isEqualTo(1.0d);
+        assertThat(meterRegistry.get("iot.access.config.changed").counter().count())
+            .as("版本号没变，不得计入「变更」").isZero();
+    }
+
+    @Test
     @DisplayName("安全网可关闭（间隔 <= 0）：版本号恒不变时不再强制对账")
     void safetyNetMustBeSwitchable() {
         ConfigEpochReconciler disabled = new ConfigEpochReconciler(client, linkManager, meterRegistry,
