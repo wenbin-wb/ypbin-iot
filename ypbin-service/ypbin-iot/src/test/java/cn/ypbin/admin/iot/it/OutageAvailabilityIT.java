@@ -222,6 +222,62 @@ class OutageAvailabilityIT {
     }
 
     @Test
+    @DisplayName("★ 生效周期口径：上报周期小于兜底时按**上报周期**判定（不能抬到兜底，否则与 spec 的 K×周期不符）")
+    void pollIntervalBelowFallbackMustUseReportedInterval() {
+        LocalDateTime dbNow = livenessMapper.selectNow();
+        // 周期 1s、K=2 ⇒ 阈值 2s；最后有效数据在 3s 前 ⇒ 必须判为断档
+        service.ingest(req(observation(OTHER_DEVICE, 1_000, AvailabilityRules.QUALITY_GOOD,
+            dbNow.minusSeconds(3))));
+
+        assertThat(service.scanAndOpenOutages())
+            .as("用 GREATEST(周期, 兜底) 的口径时这里会是 0（阈值被抬到 10s）").isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("★ 多副本守卫（SQL 谓词）：同一设备只允许一个副本把 open_outage_id 从 NULL 改成新值")
+    void markOpenOutageMustBeConditionalOnNullInRealSql() {
+        LocalDateTime dbNow = livenessMapper.selectNow();
+        service.ingest(req(observation(DEVICE, 5_000, AvailabilityRules.QUALITY_GOOD, dbNow.minusMinutes(1))));
+        Long rowId = inTenant(() -> livenessMapper.selectOne(Wrappers.<DeviceLiveness>lambdaQuery()
+            .eq(DeviceLiveness::getDeviceId, DEVICE)).getId());
+
+        assertThat(inTenant(() -> livenessMapper.markOpenOutage(rowId, 111L)))
+            .as("第一次抢到").isEqualTo(1);
+        assertThat(inTenant(() -> livenessMapper.markOpenOutage(rowId, 222L)))
+            .as("已被占：必须返回 0（少了 `AND open_outage_id IS NULL` 这里会是 1）").isZero();
+        assertThat(inTenant(() -> livenessMapper.selectOne(Wrappers.<DeviceLiveness>lambdaQuery()
+            .eq(DeviceLiveness::getDeviceId, DEVICE)).getOpenOutageId()))
+            .as("标记必须仍是第一个副本写入的那条").isEqualTo(111L);
+    }
+
+    @Test
+    @DisplayName("★ 扫描饥饿：被清理的垃圾候选不得永久占住候选批次（批次=1 时第二轮必须能发现真断档）")
+    void garbageCandidatesMustNotStarveRealOutages() {
+        LocalDateTime dbNow = livenessMapper.selectNow();
+        AvailabilityProperties oneByOne = new AvailabilityProperties();
+        oneByOne.setScanBatchSize(1);
+        AvailabilityServiceImpl tightScan = new AvailabilityServiceImpl(livenessMapper, outageMapper,
+            deviceMapper, oneByOne);
+        // 两个「设备不存在」的垃圾活性行（id 更小 ⇒ 优先被候选查询选中）+ 一个真断档设备
+        insertOrphanLiveness(DEVICE, 1L, dbNow.minusHours(1));
+        insertOrphanLiveness(DEVICE, 2L, dbNow.minusHours(1));
+        service.ingest(req(observation(DEVICE, 5_000, AvailabilityRules.QUALITY_GOOD,
+            dbNow.minusHours(1))));
+
+        assertThat(tightScan.scanAndOpenOutages()).as("第一轮只处理到垃圾候选").isZero();
+        assertThat(tightScan.scanAndOpenOutages()).as("第二轮只剩垃圾").isZero();
+        assertThat(tightScan.scanAndOpenOutages()).as("垃圾被清理后必须能发现真断档").isEqualTo(1);
+    }
+
+    /** 插一条「设备不存在」的活性行（模拟设备已删除但活性行遗留）。 */
+    private static void insertOrphanLiveness(Long tenantId, Long rowId, LocalDateTime lastGoodAt) {
+        execute("INSERT INTO device_liveness (id, tenant_id, device_id, poll_interval_ms, last_good_at, "
+            + "first_observed_at, last_observed_at, create_time, update_time) VALUES (" + rowId + ", "
+            + tenantId + ", 999999, 5000, '" + lastGoodAt + "', '" + lastGoodAt + "', '" + lastGoodAt
+            + "', NOW(), NOW())");
+    }
+
+    @Test
     @DisplayName("★ 租户隔离：无租户上下文时新表被插件拒绝（fail-closed，证明它们确实是租户表）")
     void tenantTablesMustFailClosedWithoutContext() {
         assertThatThrownBy(() -> livenessMapper.selectOne(Wrappers.<DeviceLiveness>lambdaQuery()

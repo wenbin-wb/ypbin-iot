@@ -37,7 +37,13 @@ public class ReadingObservationDto {
     @NotNull(message = "设备 ID 不能为空")
     private Long deviceId;
 
-    /** 设备级采集周期（毫秒，取各点位最小周期；{@code null}/0=未知，按平台兜底周期判定）。 */
+    /**
+     * 设备级采集周期（毫秒；{@code null}/0=未知，按平台兜底周期判定）。
+     *
+     * <p>当前由 access 侧按设备（= 各点位最小周期）统一填同一个值；服务端聚合同一批时取
+     * **最后一个非空值**——一旦上游改成逐点周期上报，这里会静默变成「最后一条的周期」，
+     * 需要同步改成显式语义（例如取最小）。</p>
+     */
     private Integer pollIntervalMs;
 
     /** 质量码（与协议栈 Quality 的 name 对齐：GOOD | UNCERTAIN | BAD | STALE | NOT_CONNECTED | CONFIG_ERROR）。 */

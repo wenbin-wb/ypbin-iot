@@ -155,7 +155,8 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
         if (interval == null || interval.isZero() || interval.isNegative()) {
             return null;
         }
-        return (int) interval.toMillis();
+        // 上限钳到 Integer.MAX_VALUE：超过 ~24.8 天的周期在协议上无意义，静默溢出成负数才是坑
+        return (int) Math.min(interval.toMillis(), Integer.MAX_VALUE);
     }
 
     /** 已跟踪会话数的观测入口（测试/自检）。 */

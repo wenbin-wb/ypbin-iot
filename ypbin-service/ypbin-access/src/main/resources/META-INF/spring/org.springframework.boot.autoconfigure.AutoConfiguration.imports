@@ -1,4 +1,6 @@
-# ypbin-access 自动配置登记（SRC 门禁要求每个 @AutoConfiguration 都在此登记）
+# ypbin-access 自动配置登记（**新增 @AutoConfiguration 必须登记在这里**：只写注解不登记时，
+# 类只靠组件扫描生效，`before=`/`after=` 的顺序声明会失效——脱离本应用的装配入口就静默没有它）
 cn.ypbin.admin.access.config.AccessDeviceSpecConfiguration
 cn.ypbin.admin.access.config.AccessIotProtocolConfiguration
 cn.ypbin.admin.access.config.AccessLeaseConfiguration
+cn.ypbin.admin.access.config.AccessEgressConfiguration

@@ -161,6 +161,26 @@ class HttpAccessReadingSinkTest {
         assertThat(meterRegistry.get("iot.access.egress.sent").counter().count()).isEqualTo(1.0d);
     }
 
+    @Test
+    @DisplayName("★ 停机刷尾要**循环**刷空（队列远大于微批时，只刷一批会静默丢尾）")
+    void closeMustDrainAllBatches() {
+        properties.setQueueCapacity(5);
+        properties.setBatchSize(2);
+        when(client.ingest(any())).thenReturn(R.ok(2));
+        HttpAccessReadingSink sink = sink();
+        for (int i = 0; i < 5; i++) {
+            sink.accept(reading(DEVICE, "GOOD", 5_000));
+        }
+
+        sink.close();
+
+        assertThat(sink.pendingCount()).isZero();
+        assertThat(meterRegistry.get("iot.access.egress.sent").counter().count())
+            .as("5 条分 3 批（2+2+1）全部送出").isEqualTo(5.0d);
+        assertThat(meterRegistry.get("iot.access.egress.dropped").counter().count())
+            .as("没有静默丢弃").isZero();
+    }
+
     private HttpAccessReadingSink sink() {
         return new HttpAccessReadingSink(client, properties, meterRegistry);
     }

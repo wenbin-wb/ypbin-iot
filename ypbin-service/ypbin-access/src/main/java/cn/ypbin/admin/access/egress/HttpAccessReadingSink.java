@@ -122,13 +122,27 @@ public class HttpAccessReadingSink implements AccessReadingSink {
         }
     }
 
-    /** 停机前尽力把队尾刷出去（失败也只记录，不影响停机）。 */
+    /**
+     * 停机前把队列刷空（**循环**刷，直到空或达到次数上限）。
+     *
+     * <p>为什么不能只刷一批：队列容量（默认 10000）可以远大于微批（默认 200），只刷一批会把尾部
+     * **静默丢掉**——既不计 `dropped` 也没有日志，排查时「读数去哪了」无从回答。剩下的必须计数 + 告警。</p>
+     */
     @PreDestroy
     public void close() {
-        try {
-            flush();
-        } catch (RuntimeException ex) {
-            log.error("[access] 停机前刷出残留读数失败（已丢弃）：pending={}", pendingCount(), ex);
+        int maxRounds = Math.max(1, queue.size() / batchSize + 2);
+        for (int round = 0; round < maxRounds && !queue.isEmpty(); round++) {
+            try {
+                flush();
+            } catch (RuntimeException ex) {
+                log.error("[access] 停机前刷出残留读数失败：pending={}", pendingCount(), ex);
+                break;
+            }
+        }
+        int left = queue.size();
+        if (left > 0) {
+            droppedCounter.increment(left);
+            log.warn("[access] 停机时仍有 {} 条读数未送出（已计入 iot.access.egress.dropped）", left);
         }
     }
 

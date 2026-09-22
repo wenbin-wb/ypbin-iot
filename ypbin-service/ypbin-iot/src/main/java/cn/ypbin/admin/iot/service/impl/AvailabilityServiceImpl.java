@@ -110,20 +110,25 @@ public class AvailabilityServiceImpl implements AvailabilityService {
         if (!properties.isEnabled()) {
             return 0;
         }
+        // 数据库时钟：候选 SQL 与下面的纯逻辑复核必须用**同一个基准**，否则两处会得出不同结论
+        LocalDateTime now = livenessMapper.selectNow();
         // 跨租户读候选（扫描没有租户身份），逐条进入各自租户写 —— 见类注释
         List<DeviceLiveness> candidates = TenantContext.executeIgnore(() -> livenessMapper.selectList(
             Wrappers.<DeviceLiveness>lambdaQuery()
                 .isNull(DeviceLiveness::getOpenOutageId)
                 .apply("COALESCE(last_good_at, first_observed_at) IS NOT NULL")
-                .apply("TIMESTAMPADD(MICROSECOND, CAST(GREATEST(COALESCE(poll_interval_ms, 0), {0}) AS SIGNED)"
-                    + " * {1} * 1000, COALESCE(last_good_at, first_observed_at)) < NOW()",
+                // 生效周期口径必须与 OutageDetector.effectiveIntervalMs 完全一致：
+                // 「上报了正周期就用它，否则用兜底」——不用 GREATEST（那会把 1s 周期的设备抬到 5s，与 spec 的 K×周期不符）
+                .apply("TIMESTAMPADD(MICROSECOND, CAST((CASE WHEN COALESCE(poll_interval_ms, 0) > 0"
+                    + " THEN poll_interval_ms ELSE {0} END) AS SIGNED) * {1} * 1000,"
+                    + " COALESCE(last_good_at, first_observed_at)) < NOW()",
                     properties.getFallbackIntervalMs(), properties.getKFactor())
                 .orderByAsc(DeviceLiveness::getId)
                 .last("LIMIT " + properties.getScanBatchSize())));
         List<DeviceLiveness> collectible = filterCollectible(candidates);
         int opened = 0;
         for (DeviceLiveness candidate : collectible) {
-            opened += openOutage(candidate);
+            opened += openOutage(candidate, now);
         }
         if (opened > 0) {
             log.warn("[iot] 断档扫描：新开断档 {} 个（候选 {} 个，其中可采集 {} 个；K={} 兜底周期={}ms）",
@@ -164,13 +169,21 @@ public class AvailabilityServiceImpl implements AvailabilityService {
             .map(IotDevice::getId)
             .collect(Collectors.toSet());
         List<DeviceLiveness> collectible = new ArrayList<>(candidates.size());
+        // 设备已删除/停用的活性行不会自己消失，**必须清掉**而不是只跳过——候选查询按 id 升序 +
+        // LIMIT 批次上限，这类行永远满足条件、永远占住前段，累积 ≥ 批次上限后**其它设备的断档再也
+        // 不会被发现**（是饥饿，不是延迟）。清理走**一次批量删**（循环里逐条删是 N+1 写，被架构门禁拦）。
+        List<Long> orphanIds = new ArrayList<>();
         for (DeviceLiveness candidate : candidates) {
             if (candidate.getDeviceId() != null && enabled.contains(candidate.getDeviceId())) {
                 collectible.add(candidate);
             } else {
-                log.debug("[iot] 断档扫描跳过（设备已删除或停用，活性行遗留不算断档）：deviceId={}",
-                    LogSanitizer.sanitize(candidate.getDeviceId()));
+                orphanIds.add(candidate.getId());
             }
+        }
+        if (!orphanIds.isEmpty()) {
+            livenessMapper.deleteBatchIds(orphanIds);
+            log.info("[iot] 断档扫描清理了 {} 条设备已删除/停用的活性行（它们不再参与断档判定）",
+                orphanIds.size());
         }
         return collectible;
     }
@@ -257,8 +270,20 @@ public class AvailabilityServiceImpl implements AvailabilityService {
         // 闭合断档必须用**更新前**的 lastGoodAt/firstObservedAt 当起点（起点不能等于恢复时刻）
         if (batch.lastGoodAt() != null && row.getOpenOutageId() != null) {
             LocalDateTime start = OutageDetector.outageStart(row.getLastGoodAt(), row.getFirstObservedAt());
-            closeOutage(row.getOpenOutageId(), start, batch.lastGoodAt());
-            row.setOpenOutageId(null);
+            if (start == null || !batch.lastGoodAt().isAfter(start)) {
+                // 乱序/重放：这条有效数据**早于**断档起点，不可能是「恢复」⇒ 不闭合。
+                // 否则会写出一条 start > end、duration=0 的假恢复，并把进行中的断档标记清掉。
+                log.warn("[access→iot] 有效数据早于断档起点，忽略本次「恢复」（乱序/重放上报）：deviceId={} ts={} 起点={}",
+                    LogSanitizer.sanitize(deviceId), batch.lastGoodAt(), start);
+            } else {
+                closeOutage(row.getOpenOutageId(), start, batch.lastGoodAt());
+                int cleared = livenessMapper.clearOpenOutage(row.getId(), row.getOpenOutageId());
+                if (cleared == 0) {
+                    // 清空期间标记已被别的路径改掉（扫描开了新断档）：保留新标记，不覆盖
+                    log.warn("[access→iot] 断档标记在闭合期间已被改动，保留当前标记：deviceId={} 期望清空={}",
+                        LogSanitizer.sanitize(deviceId), row.getOpenOutageId());
+                }
+            }
         }
         if (batch.pollIntervalMs() != null && batch.pollIntervalMs() > 0) {
             row.setPollIntervalMs(batch.pollIntervalMs());
@@ -280,10 +305,18 @@ public class AvailabilityServiceImpl implements AvailabilityService {
      * @param candidate 候选活性行（来自跨租户扫描）
      * @return 实际打开返回 1，被其它副本抢先返回 0
      */
-    private int openOutage(DeviceLiveness candidate) {
+    private int openOutage(DeviceLiveness candidate, LocalDateTime now) {
         Long tenantId = candidate.getTenantId();
         LocalDateTime start = OutageDetector.outageStart(candidate.getLastGoodAt(),
             candidate.getFirstObservedAt());
+        long intervalMs = OutageDetector.effectiveIntervalMs(candidate.getPollIntervalMs(),
+            properties.getFallbackIntervalMs());
+        if (!OutageDetector.isOutage(start, now, intervalMs, properties.getKFactor())) {
+            // 用与 SQL 同一套纯逻辑复核一遍：两处口径（SQL 与 Java）必须一致，不一致时这里会先暴露
+            log.warn("[iot] 断档候选未通过纯逻辑复核（SQL 与 Java 口径可能漂移）：deviceId={} 起点={} 周期={}",
+                LogSanitizer.sanitize(candidate.getDeviceId()), start, intervalMs);
+            return 0;
+        }
         return TenantContext.executeWithTenant(tenantId, () -> {
             OutageEvent event = new OutageEvent();
             event.setId(IdWorker.getId());

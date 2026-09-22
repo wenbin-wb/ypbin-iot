@@ -129,7 +129,7 @@ class AvailabilityServiceImplTest {
     }
 
     @Test
-    @DisplayName("★ 有效数据到达必须闭合进行中的断档，并用**更新前**的起点算时长")
+    @DisplayName("★ 有效数据到达必须闭合进行中的断档：用**更新前**的起点算时长，并用条件语句清空标记")
     void goodReadingMustCloseOpenOutage() {
         DeviceLiveness existing = liveness(T0, T0, 999L);
         when(livenessMapper.selectByDeviceIncludingDeleted(TENANT, DEVICE)).thenReturn(existing);
@@ -138,9 +138,24 @@ class AvailabilityServiceImplTest {
         service.ingest(req(observation(DEVICE, 5_000, AvailabilityRules.QUALITY_GOOD, recovered)));
 
         verify(outageMapper).closeOutage(999L, recovered, 600L);
+        // 清空走条件语句（只清「仍是那一条」时）：无条件整行回写会把扫描刚开的新断档抹成孤儿
+        verify(livenessMapper).clearOpenOutage(1L, 999L);
         ArgumentCaptor<DeviceLiveness> captor = ArgumentCaptor.forClass(DeviceLiveness.class);
         verify(livenessMapper).reviveAndUpdate(captor.capture());
-        assertThat(captor.getValue().getOpenOutageId()).as("闭合后必须清空 open_outage_id").isNull();
+        assertThat(captor.getValue().getLastGoodAt()).isEqualTo(recovered);
+    }
+
+    @Test
+    @DisplayName("★ 乱序/重放：有效数据**早于**断档起点时不得闭合断档（否则写出 start>end 的假恢复并清掉标记）")
+    void staleGoodReadingMustNotCloseOutage() {
+        DeviceLiveness existing = liveness(T0, T0, 999L);
+        when(livenessMapper.selectByDeviceIncludingDeleted(TENANT, DEVICE)).thenReturn(existing);
+
+        // 上报时刻比断档起点早 5 分钟：不可能是「恢复」
+        service.ingest(req(observation(DEVICE, 5_000, AvailabilityRules.QUALITY_GOOD, T0.minusMinutes(5))));
+
+        verify(outageMapper, never()).closeOutage(anyLong(), any(), any());
+        verify(livenessMapper, never()).clearOpenOutage(anyLong(), anyLong());
     }
 
     @Test
@@ -224,8 +239,8 @@ class AvailabilityServiceImplTest {
     }
 
     @Test
-    @DisplayName("★ 设备已删除/停用：活性行遗留不得被当成断档（否则报表里会出现永远消不掉的假断档）")
-    void scanMustSkipDevicesThatAreGoneOrDisabled() {
+    @DisplayName("★ 设备已删除/停用：活性行既不得算断档，也**必须被清理**（否则永远占住候选集前段 ⇒ 饥饿）")
+    void scanMustCleanUpDevicesThatAreGoneOrDisabled() {
         when(livenessMapper.selectList(any())).thenReturn(List.of(candidate(5L, T0)));
 
         // 设备已被逻辑删除或停用 ⇒ 批量查设备时查不到（或查到的不是启用态）⇒ 不开断档
@@ -235,6 +250,9 @@ class AvailabilityServiceImplTest {
 
         verify(outageMapper, never()).insert(any(OutageEvent.class));
         verify(livenessMapper, never()).markOpenOutage(anyLong(), anyLong());
+        // 关键：清理掉（一次批量删，不是循环逐条），否则候选查询（id 升序 + LIMIT 批次上限）
+        // 会被这类行永久占满 ⇒ 其它设备的断档再也不会被发现
+        verify(livenessMapper).deleteBatchIds(List.of(5L));
     }
 
     @Test
