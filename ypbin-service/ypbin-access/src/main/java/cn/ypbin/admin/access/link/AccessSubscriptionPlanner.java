@@ -65,8 +65,10 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
         this.sessions = sessions;
         this.objectMapper = objectMapper;
         this.readingSink = readingSink;
-        this.subscribeSuccess = meterRegistry.counter("ypbin.access.subscribe.success");
-        this.subscribeFailure = meterRegistry.counter("ypbin.access.subscribe.failure");
+        // 指标前缀统一为 `iot.access.*`（与既有的 `iot.access.lease.*` 一致；
+        // S5 引入时用的 `ypbin.access.*` 是同一批 access 指标，混用会让大盘上出现两套前缀）
+        this.subscribeSuccess = meterRegistry.counter("iot.access.subscribe.success");
+        this.subscribeFailure = meterRegistry.counter("iot.access.subscribe.failure");
     }
 
     /**
@@ -127,6 +129,18 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
             subscribed++;
         }
         return subscribed;
+    }
+
+    /**
+     * 忘记某设备的订阅跟踪（设备被移除时由对账路径调用）。
+     *
+     * @param deviceId 设备标识
+     */
+    @Override
+    public void forget(String deviceId) {
+        if (subscribedSessions.remove(deviceId) != null) {
+            log.debug("[access] 设备已移除，清理订阅跟踪：deviceId={}", deviceId);
+        }
     }
 
     /** 已跟踪会话数的观测入口（测试/自检）。 */

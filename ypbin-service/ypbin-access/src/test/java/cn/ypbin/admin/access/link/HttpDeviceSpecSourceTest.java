@@ -10,6 +10,7 @@
 package cn.ypbin.admin.access.link;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
@@ -23,6 +24,7 @@ import cn.ypbin.admin.iot.device.IDeviceSpecClient;
 import cn.ypbin.iot.core.model.ConnectionSpec;
 import cn.ypbin.iot.core.model.DeviceSpec;
 import cn.ypbin.starter.core.model.R;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.ObjectMapper;
 import java.time.Duration;
@@ -34,8 +36,9 @@ import org.junit.jupiter.api.Test;
 /**
  * access 取数实现单测。
  *
- * <p>守四件事：① 点位随 {@code properties} 传到协议栈（订阅规划器的输入）；② 失败**不静默**——
- * 非成功信封/调用异常都记 ERROR 且本轮按「无设备」处理；③ {@code connectionId} 能解析出租户，
+ * <p>守四件事：① 点位随 {@code properties} 传到协议栈（订阅规划器的输入）；② 失败**不静默且与「空」可区分**
+ * ——非成功信封/调用异常一律抛 {@link DeviceSpecLoadException}（调用方据此区分「接口挂了」与「确实没有设备」），
+ * 且失败结果**不进缓存**；③ {@code connectionId} 能解析出租户，
  * 非法一律返回 {@code Optional.empty()}（框架据此跳过设备，而不是抛断整轮引导）；
  * ④ 一次租户拉取 + 建链回调**只打一次远端**（缓存生效）。</p>
  *
@@ -48,7 +51,9 @@ class HttpDeviceSpecSourceTest {
 
     private final IDeviceSpecClient client = mock(IDeviceSpecClient.class);
     private final ObjectMapper objectMapper = new ObjectMapper();
-    private final HttpDeviceSpecSource source = new HttpDeviceSpecSource(client, objectMapper);
+    private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+    private final HttpDeviceSpecSource source =
+        new HttpDeviceSpecSource(client, objectMapper, meterRegistry);
 
     @Test
     @DisplayName("loadByTenant：连同点位清单一起交给协议栈（properties.points 可反序列化回 DTO）")
@@ -73,22 +78,74 @@ class HttpDeviceSpecSourceTest {
     }
 
     @Test
-    @DisplayName("非成功信封：本轮按无设备处理（不抛），且不污染缓存")
-    void failedEnvelopeShouldYieldNoDevice() {
+    @DisplayName("非成功信封：抛 DeviceSpecLoadException（可重试语义），且不污染缓存、连接参数返回 empty")
+    void failedEnvelopeShouldThrowAndNotPoisonCache() {
         when(client.listByTenant(TENANT)).thenReturn(R.fail(500, "boom"));
 
-        assertThat(source.loadByTenant(TENANT)).isEmpty();
+        assertThatThrownBy(() -> source.loadByTenant(TENANT))
+            .isInstanceOf(DeviceSpecLoadException.class)
+            .hasMessageContaining("失败信封");
         assertThat(source.findConnection("t11-d100")).as("失败不得留下半份缓存").isEmpty();
         // 可证伪性：若失败结果被写进缓存，findConnection 就不会再拉一次 —— 只断言 isEmpty() 是咬不住的
         verify(client, times(2)).listByTenant(TENANT);
     }
 
     @Test
-    @DisplayName("调用异常：同样按无设备处理（记 ERROR），不把异常抛给租约调度线程")
-    void clientExceptionShouldYieldNoDevice() {
+    @DisplayName("调用异常：同样抛 DeviceSpecLoadException（保留根因），不把「失败」伪装成「没有设备」")
+    void clientExceptionShouldThrowDeviceSpecLoadException() {
         when(client.listByTenant(anyLong())).thenThrow(new IllegalStateException("network down"));
 
+        assertThatThrownBy(() -> source.loadByTenant(TENANT))
+            .isInstanceOf(DeviceSpecLoadException.class)
+            .hasMessageContaining("传输异常")
+            .hasRootCauseInstanceOf(IllegalStateException.class);
+        assertThat(source.findConnection("t11-d100")).as("建链路径不得抛异常，按连接不可用处理").isEmpty();
+    }
+
+    @Test
+    @DisplayName("成功但为空列表：这是「确实没有设备」的有效答案（不得抛异常）")
+    void emptyListIsAValidAnswer() {
+        when(client.listByTenant(TENANT)).thenReturn(R.ok(List.of()));
+
         assertThat(source.loadByTenant(TENANT)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("★ 端点漏了 scheme：findConnection **不得抛**（建链路径抛出去会中断整轮绑定），按连接不可用处理并计数")
+    void invalidEndpointMustNotThrowFromFindConnection() {
+        AccessDeviceSpecResp broken = spec();
+        broken.setEndpoint("127.0.0.1:15002");
+        when(client.listByTenant(TENANT)).thenReturn(R.ok(List.of(broken)));
+
+        assertThat(source.findConnection("t11-d100")).isEmpty();
+        assertThat(meterRegistry.get("iot.access.connection.invalid").counter().count()).isEqualTo(1.0d);
+    }
+
+    @Test
+    @DisplayName("★ 转换失败（协议码非法）必须归一到 DeviceSpecLoadException（否则会穿透引导/对账的 catch，把 tick 打断）")
+    void conversionFailureMustSurfaceAsLoadException() {
+        AccessDeviceSpecResp badProtocol = spec();
+        badProtocol.setProtocol("TCP");
+        when(client.listByTenant(TENANT)).thenReturn(R.ok(List.of(badProtocol)));
+
+        assertThatThrownBy(() -> source.loadByTenant(TENANT))
+            .isInstanceOf(DeviceSpecLoadException.class)
+            .hasMessageContaining("设备规格转换失败");
+        assertThat(meterRegistry.get("iot.access.connection.invalid").counter().count())
+            .as("loadByTenant 的转换失败由调用方按「取数失败」计数，不在这里重复计数").isZero();
+    }
+
+    @Test
+    @DisplayName("端点非法**不影响** loadByTenant（DeviceSpec 不解析端点），只影响建链：这条边界必须钉住")
+    void invalidEndpointMustNotBreakLoadByTenant() {
+        AccessDeviceSpecResp broken = spec();
+        broken.setEndpoint("127.0.0.1:15002");
+        when(client.listByTenant(TENANT)).thenReturn(R.ok(List.of(broken)));
+
+        // 取数可以成功（规格里的端点只是原样带着走）；真正的失败发生在协议栈建链问连接参数时，
+        // 由 findConnection 收敛为「连接不可用」。写入侧的 @Pattern 才是第一道防线。
+        assertThat(source.loadByTenant(TENANT)).hasSize(1);
+        assertThat(source.findConnection("t11-d100")).isEmpty();
     }
 
     @Test

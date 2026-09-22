@@ -12,6 +12,7 @@ package cn.ypbin.admin.access.config;
 import cn.ypbin.admin.access.link.DeviceSpecSource;
 import cn.ypbin.admin.access.link.HttpDeviceSpecSource;
 import cn.ypbin.admin.iot.device.IDeviceSpecClient;
+import io.micrometer.core.instrument.MeterRegistry;
 import tools.jackson.databind.ObjectMapper;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -33,13 +34,15 @@ public class AccessDeviceSpecConfiguration {
     /**
      * 经内部接口取设备与点位规格。
      *
-     * @param client       设备规格内部客户端
-     * @param objectMapper 点位清单序列化
+     * @param client        设备规格内部客户端
+     * @param objectMapper  点位清单序列化
+     * @param meterRegistry 指标注册表（连接参数非法计数）
      * @return 取数实现
      */
     @Bean
     @ConditionalOnMissingBean
-    public DeviceSpecSource httpDeviceSpecSource(IDeviceSpecClient client, ObjectMapper objectMapper) {
-        return new HttpDeviceSpecSource(client, objectMapper);
+    public DeviceSpecSource httpDeviceSpecSource(IDeviceSpecClient client, ObjectMapper objectMapper,
+                                                MeterRegistry meterRegistry) {
+        return new HttpDeviceSpecSource(client, objectMapper, meterRegistry);
     }
 }

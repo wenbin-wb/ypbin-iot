@@ -11,9 +11,11 @@ package cn.ypbin.admin.iot.lease;
 
 import cn.ypbin.admin.iot.entity.TenantLedger;
 import cn.ypbin.admin.iot.mapper.TenantLedgerMapper;
+import cn.ypbin.admin.iot.model.resp.TenantLedgerResp;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.core.exception.GlobalErrorCode;
 import cn.ypbin.starter.core.util.LogSanitizer;
+import cn.ypbin.starter.tenant.core.TenantContext;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import java.util.ArrayList;
 import java.util.List;
@@ -59,6 +61,41 @@ public class TenantLedgerService {
      */
     @Transactional(rollbackFor = Exception.class)
     public LedgerChange setAssignable(Long tenantId, boolean assignable) {
+        return doSetAssignable(tenantId, assignable);
+    }
+
+    /**
+     * 设置某租户是否可被分配，并**回读**落库后的真实状态（运维端点用它一次拿到结果与版本号）。
+     *
+     * <p>回读是刻意的：返回值必须来自数据库，而不是「我刚写进去的意图」——
+     * 「声称改了、产物没落地」在本仓有历史教训。</p>
+     *
+     * @param tenantId   租户 ID
+     * @param assignable 是否可分配
+     * @return 落库后的台账状态（含本次变更类型与最新版本号）
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public TenantLedgerResp setAssignableAndGet(Long tenantId, boolean assignable) {
+        LedgerChange change = doSetAssignable(tenantId, assignable);
+        TenantLedger row = ledgerMapper.selectIncludingDeleted(tenantId);
+        if (row == null) {
+            // 刚写完却读不到：属异常状态（并发物理删除等），暴露而不是返回 null/半份状态
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "台账写入后回读失败（并发冲突？）：" + tenantId);
+        }
+        TenantLedgerResp resp = toResp(row);
+        resp.setChange(change.getCode());
+        return resp;
+    }
+
+    /**
+     * 台账「可分配」写入实现（公开入口共用；直接调用它可避免类内自调用绕过事务代理）。
+     *
+     * @param tenantId   租户 ID
+     * @param assignable 是否可分配
+     * @return 本次是「新建/复活/更新」中的哪一种
+     */
+    private LedgerChange doSetAssignable(Long tenantId, boolean assignable) {
         if (tenantId == null) {
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "租户 ID 不能为空");
         }
@@ -93,6 +130,71 @@ public class TenantLedgerService {
             LogSanitizer.sanitize(tenantId), assignable,
             wasDeleted ? "（复活了此前被删除的台账行）" : "");
         return wasDeleted ? LedgerChange.REVIVED : LedgerChange.UPDATED;
+    }
+
+    /**
+     * 设备/点位映射等**采集配置**变更后推进配置版本号（M-2：让接入侧发现变更，修 G7）。
+     *
+     * <p>为什么需要：接入侧只在台账版本号变化时才重取设备清单；若上游增删设备、改点位映射不推进版本号，
+     * 变更就永远不会被接入侧发现（只能靠链路重建）。本方法把「改了配置」变成可对账的信号。</p>
+     *
+     * <p><b>台账没有该租户时是 no-op（返回 false）</b>：不 insert、不改 assignable——
+     * 否则会把「可分配来源」从配置兜底静默切成台账。此时接入侧收不到信号，属**已登记的已知限制**
+     * （见 docs/IOT-ROADMAP.md），调用方只需 DEBUG 记录，不得吞掉配置变更本身。</p>
+     *
+     * @param tenantId 租户 ID；为 {@code null} 时直接返回 false（无租户上下文，例如未开租户插件）
+     * @return 是否真的推进了版本号（台账无该租户/租户为 null 时返回 {@code false}）
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public boolean bumpConfigEpoch(Long tenantId) {
+        if (tenantId == null) {
+            return false;
+        }
+        int rows = ledgerMapper.bumpConfigEpoch(tenantId);
+        if (rows == 0) {
+            log.debug("[iot] 台账无该租户，配置版本号未推进（接入侧不会收到本次变更信号）：tenantId={}",
+                LogSanitizer.sanitize(tenantId));
+            return false;
+        }
+        log.info("[iot] 采集配置变更，台账版本号已推进：tenantId={}", LogSanitizer.sanitize(tenantId));
+        return true;
+    }
+
+    /**
+     * 采集配置变更后按**当前租户上下文**推进版本号（设备/点位映射写入口统一走这里）。
+     *
+     * <p>租户上下文缺失时是 no-op（返回 {@code false}）：例如未开租户插件的单租户部署。
+     * 该情形下接入侧收不到变更信号，属已登记的已知限制，调用方不得因此中断业务写入。</p>
+     *
+     * @return 是否真的推进了版本号
+     */
+    public boolean bumpConfigEpochOfCurrentTenant() {
+        return bumpConfigEpoch(TenantContext.getTenantId().orElse(null));
+    }
+
+    /**
+     * 台账全量（供运维端点查看「谁可被分配、版本号到哪了」）。
+     *
+     * @return 台账行（按租户排序；可能为空集合，绝不返回 null）
+     */
+    public List<TenantLedgerResp> listAll() {
+        List<TenantLedger> rows = ledgerMapper.selectList(Wrappers.<TenantLedger>lambdaQuery()
+            .orderByAsc(TenantLedger::getTenantId));
+        List<TenantLedgerResp> result = new ArrayList<>(rows.size());
+        for (TenantLedger row : rows) {
+            result.add(toResp(row));
+        }
+        return result;
+    }
+
+    /** 实体 → 契约模型。 */
+    private TenantLedgerResp toResp(TenantLedger row) {
+        TenantLedgerResp resp = new TenantLedgerResp();
+        resp.setTenantId(row.getTenantId());
+        resp.setAssignable(row.getAssignable());
+        resp.setConfigEpoch(row.getConfigEpoch());
+        resp.setUpdateTime(row.getUpdateTime());
+        return resp;
     }
 
     /**

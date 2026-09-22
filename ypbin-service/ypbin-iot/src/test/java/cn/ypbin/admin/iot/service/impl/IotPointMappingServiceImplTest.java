@@ -14,6 +14,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -23,6 +24,7 @@ import cn.ypbin.admin.iot.entity.IotProduct;
 import cn.ypbin.admin.iot.entity.IotProperty;
 import cn.ypbin.admin.iot.entity.IotService;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
+import cn.ypbin.admin.iot.lease.TenantLedgerService;
 import cn.ypbin.admin.iot.mapper.IotPointMappingMapper;
 import cn.ypbin.admin.iot.mapper.IotProductMapper;
 import cn.ypbin.admin.iot.mapper.IotPropertyMapper;
@@ -63,8 +65,9 @@ class IotPointMappingServiceImplTest {
     private final IotProductMapper productMapper = mock(IotProductMapper.class);
     private final IotServiceMapper serviceMapper = mock(IotServiceMapper.class);
     private final IotPointMappingMapper mappingMapper = mock(IotPointMappingMapper.class);
+    private final TenantLedgerService ledgerService = mock(TenantLedgerService.class);
     private final IotPointMappingServiceImpl service = new IotPointMappingServiceImpl(
-        deviceMapper, propertyMapper, productMapper, serviceMapper);
+        deviceMapper, propertyMapper, productMapper, serviceMapper, ledgerService);
 
     @BeforeAll
     static void initTableInfo() {
@@ -182,6 +185,23 @@ class IotPointMappingServiceImplTest {
         assertThat(resp.getPollIntervalMs()).isEqualTo(5000);
         assertThat(resp.getRw()).isEqualTo("RW");
         assertThat(resp.getEnabled()).isTrue();
+    }
+
+    @Test
+    @DisplayName("★ 点位映射增删改都必须推进台账配置版本号（否则接入侧永远不知道点位变了 ⇒ G7 静默零更新）")
+    void pointMappingMutationsMustBumpConfigEpoch() {
+        stubPublishedProduct();
+        when(propertyMapper.selectById(PROPERTY_ID)).thenReturn(rwProperty("RW"));
+        IotPointMapping existing = new IotPointMapping();
+        existing.setId(800L);
+        existing.setDeviceId(DEVICE_ID);
+        when(mappingMapper.selectById(800L)).thenReturn(existing);
+
+        service.create(request(DEVICE_ID, PROPERTY_ID, "RW"));
+        service.update(800L, request(DEVICE_ID, PROPERTY_ID, "RW"));
+        service.remove(DEVICE_ID, 800L);
+
+        verify(ledgerService, times(3)).bumpConfigEpochOfCurrentTenant();
     }
 
     private void stubPublishedProduct() {

@@ -89,6 +89,22 @@ class AccessDeviceRegistryTest {
     }
 
     @Test
+    @DisplayName("★ 单个租户取数失败不得中断引导：跳过该租户，其余租户照常返回")
+    void loadAllShouldTolerateOneTenantFailure() {
+        DeviceSpecSource source = mock(DeviceSpecSource.class);
+        when(source.loadByTenant(TENANT_HELD_A))
+            .thenThrow(new DeviceSpecLoadException("iot 内部接口不可达"));
+        when(source.loadByTenant(TENANT_HELD_B)).thenReturn(List.of(device("b1")));
+
+        AccessDeviceRegistry registry = new AccessDeviceRegistry(source,
+            () -> Set.of(TENANT_HELD_A, TENANT_HELD_B));
+
+        // 引导（ApplicationReadyEvent 的一次性调用）不得因为一个租户取数失败而整体抛断：
+        // 那会让整个协议栈起不来；正确行为是「本轮少采一个租户」，运行期由配置对账补齐
+        assertThat(registry.loadAll()).extracting(DeviceSpec::deviceId).containsExactly("b1");
+    }
+
+    @Test
     @DisplayName("未接线时 emit 不抛异常且被丢弃（监听器数量为 0）——框架接线由 addChangeListener 完成")
     void emitWithoutListenerShouldBeDroppedSafely() {
         AccessDeviceRegistry registry = new AccessDeviceRegistry(mock(DeviceSpecSource.class), Set::of);

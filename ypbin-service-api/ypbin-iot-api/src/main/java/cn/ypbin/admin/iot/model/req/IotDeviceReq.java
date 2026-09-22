@@ -40,9 +40,17 @@ public class IotDeviceReq {
     @Pattern(regexp = "[a-z][a-z0-9-]*", message = "协议码格式非法（应为小写字母开头，仅含小写字母、数字与连字符）")
     private String protocol;
 
-    /** 端点 URI（必须带 scheme，例如 tcp://host:port）。 */
+    /**
+     * 端点 URI（必须带 scheme，例如 tcp://host:port）。
+     *
+     * <p>{@code @Pattern} 不是装饰：协议栈侧 {@code Endpoint.of} 会把「没有 scheme」的取值判为非法
+     * （`127.0.0.1:15002` 这种），而它是**建链路径**——写入侧不挡住，就会变成「设备建链时被跳过」
+     * 或「整轮绑定被异常中断」的静默失效。这里把校验前移到写入侧，让脏数据进不来。</p>
+     */
     @NotBlank(message = "端点不能为空")
     @Size(max = 300, message = "端点长度不能超过 300")
+    @Pattern(regexp = "[a-zA-Z][a-zA-Z0-9+.-]*://\\S+",
+        message = "端点必须带 scheme 且不含空白，例如 tcp://host:port")
     private String endpoint;
 
     /** 绑定产品 ID（M-1，§4.1；可选，草稿设备可不绑）。 */

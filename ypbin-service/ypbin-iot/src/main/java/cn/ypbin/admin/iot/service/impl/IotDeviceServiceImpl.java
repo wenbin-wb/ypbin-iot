@@ -12,6 +12,7 @@ package cn.ypbin.admin.iot.service.impl;
 import cn.ypbin.admin.iot.entity.IotDevice;
 import cn.ypbin.admin.iot.entity.IotProduct;
 import cn.ypbin.admin.iot.enums.ModelStatus;
+import cn.ypbin.admin.iot.lease.TenantLedgerService;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.IotProductMapper;
 import cn.ypbin.admin.iot.model.query.IotDeviceQuery;
@@ -34,6 +35,9 @@ import org.springframework.util.StringUtils;
  * <p>租户隔离由 MyBatis-Plus 租户插件与 {@code TenantBaseEntity} 共同保证：本类<b>不手写</b>
  * {@code tenant_id} 过滤条件（手写反而会绕过统一策略）。</p>
  *
+ * <p><b>采集配置变更要发信号</b>：设备是「采什么」的输入，增删改都必须推进台账的
+ * {@code config_epoch}（与业务写入同一事务）——否则接入侧永远不知道设备变了（M-2 / G7）。</p>
+ *
  * @author wenbin
  * @since 2026-09-19
  */
@@ -42,9 +46,12 @@ public class IotDeviceServiceImpl extends BaseServiceImpl<IotDeviceMapper, IotDe
     implements IotDeviceService {
 
     private final IotProductMapper iotProductMapper;
+    private final TenantLedgerService tenantLedgerService;
 
-    public IotDeviceServiceImpl(IotProductMapper iotProductMapper) {
+    public IotDeviceServiceImpl(IotProductMapper iotProductMapper,
+                                TenantLedgerService tenantLedgerService) {
         this.iotProductMapper = iotProductMapper;
+        this.tenantLedgerService = tenantLedgerService;
     }
 
     @Override
@@ -60,6 +67,7 @@ public class IotDeviceServiceImpl extends BaseServiceImpl<IotDeviceMapper, IotDe
         IotDevice device = new IotDevice();
         applyDevice(device, req);
         save(device);
+        notifyConfigChanged();
         return device.getId();
     }
 
@@ -67,6 +75,7 @@ public class IotDeviceServiceImpl extends BaseServiceImpl<IotDeviceMapper, IotDe
     @Transactional(rollbackFor = Exception.class)
     public void removeDevice(Long id) {
         removeById(id);
+        notifyConfigChanged();
     }
 
     @Override
@@ -81,6 +90,14 @@ public class IotDeviceServiceImpl extends BaseServiceImpl<IotDeviceMapper, IotDe
         }
         applyDevice(device, req);
         updateById(device);
+        notifyConfigChanged();
+    }
+
+    /**
+     * 采集配置变更后推进台账版本号（同一事务；台账无该租户时为已登记的已知限制，不阻断业务写入）。
+     */
+    private void notifyConfigChanged() {
+        tenantLedgerService.bumpConfigEpochOfCurrentTenant();
     }
 
     /**

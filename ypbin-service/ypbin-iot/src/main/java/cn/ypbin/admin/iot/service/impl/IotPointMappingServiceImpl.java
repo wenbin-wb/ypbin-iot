@@ -17,6 +17,7 @@ import cn.ypbin.admin.iot.enums.PointRefType;
 import cn.ypbin.admin.iot.entity.IotProduct;
 import cn.ypbin.admin.iot.entity.IotProperty;
 import cn.ypbin.admin.iot.entity.IotService;
+import cn.ypbin.admin.iot.lease.TenantLedgerService;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.IotPointMappingMapper;
 import cn.ypbin.admin.iot.mapper.IotProductMapper;
@@ -39,6 +40,9 @@ import org.springframework.transaction.annotation.Transactional;
  * <p>约束：映射必须引用<b>已发布版本</b>的属性（设备绑定产品+版本，属性经产品/服务可达）；
  * 读写权限与属性 {@code access_mode} 联动校验；协议能力不支持时由 iot-starter 显式失败（I6）。</p>
  *
+ * <p><b>采集配置变更要发信号</b>：点位映射是「采什么点位」的输入，增删改都必须推进台账的
+ * {@code config_epoch}（与业务写入同一事务）——否则接入侧永远不知道点位变了（M-2 / G7）。</p>
+ *
  * @author wenbin
  * @since 2026-09-20
  */
@@ -50,15 +54,18 @@ public class IotPointMappingServiceImpl extends BaseServiceImpl<IotPointMappingM
     private final IotPropertyMapper iotPropertyMapper;
     private final IotProductMapper iotProductMapper;
     private final IotServiceMapper iotServiceMapper;
+    private final TenantLedgerService tenantLedgerService;
 
     public IotPointMappingServiceImpl(IotDeviceMapper iotDeviceMapper,
                                       IotPropertyMapper iotPropertyMapper,
                                       IotProductMapper iotProductMapper,
-                                      IotServiceMapper iotServiceMapper) {
+                                      IotServiceMapper iotServiceMapper,
+                                      TenantLedgerService tenantLedgerService) {
         this.iotDeviceMapper = iotDeviceMapper;
         this.iotPropertyMapper = iotPropertyMapper;
         this.iotProductMapper = iotProductMapper;
         this.iotServiceMapper = iotServiceMapper;
+        this.tenantLedgerService = tenantLedgerService;
     }
 
     @Override
@@ -78,6 +85,7 @@ public class IotPointMappingServiceImpl extends BaseServiceImpl<IotPointMappingM
         IotPointMapping mapping = new IotPointMapping();
         apply(mapping, req);
         save(mapping);
+        notifyConfigChanged();
         return mapping.getId();
     }
 
@@ -95,6 +103,7 @@ public class IotPointMappingServiceImpl extends BaseServiceImpl<IotPointMappingM
         validateReference(device, req);
         apply(mapping, req);
         updateById(mapping);
+        notifyConfigChanged();
     }
 
     @Override
@@ -106,6 +115,14 @@ public class IotPointMappingServiceImpl extends BaseServiceImpl<IotPointMappingM
                 "点位映射不属于该设备：" + id);
         }
         removeById(id);
+        notifyConfigChanged();
+    }
+
+    /**
+     * 采集配置变更后推进台账版本号（同一事务；台账无该租户时为已登记的已知限制，不阻断业务写入）。
+     */
+    private void notifyConfigChanged() {
+        tenantLedgerService.bumpConfigEpochOfCurrentTenant();
     }
 
     /**

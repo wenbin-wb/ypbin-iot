@@ -231,8 +231,8 @@ ERROR The build could not read 1 project
 | # | 限制 | 触发条件 | 后果 | M-2 前的处置要求 |
 |---|---|---|---|---|
 | **S4** | **点位地址语义未定死**：MQTT 回调用**具体主题**当 address（`MqttSession` 有意如此），而订阅用 mapping 的 `address` 当**过滤器**，`PointMappingDataListener` 做**字符串精确匹配** | 加装 `ypbin-iot-protocol-mqtt` 模块**当天**（当前只装 tcp，故未触发） | 映射里填了通配符（`a/#`、`a/+/c`）时**订阅成功但每条数据都判「未映射」被丢弃** ⇒ 看起来在采、实际零数据 | 定死「`raw_address` = 具体地址，非过滤器」，并在点位映射保存时**加校验拒绝通配符**；或改为按主题前缀匹配 |
-| **S5** | 订阅计数与会话跟踪的精度：`AccessSubscriptionPlanner` 在 `session.subscribe(...)` **之前**就写入 `subscribedSessions` 并自增计数 ⇒ **异步订阅失败不会被重试**（对账只对「无会话」或「会话实例变化」重试） | 会话存在但订阅被协议侧拒绝（如地址非法） | 日志「已订阅设备数」**高估**；订阅失败只记 ERROR，**不会**自愈，需靠链路重建（会话实例变化）才能恢复 | 把「成功」定义在 `CompletionStage` 完成之后（失败则**不**写 `subscribedSessions`，让对账自动重试）；并把失败计入指标 |
-| **S7** | **零设备租户的周期噪声**：修复 N-1 后，设备清单为空的租户**每个租约周期（15s）都会打一条 WARN 并重新拉一次内部接口** | 租户已分配但尚未配设备／点位（或设备全部停用） | 日志噪声 + 每 15s 一次内部调用（规模大时是无效压力） | M-2 引入「空清单退避」（指数或固定上限）并改为指标计数；当前判定为**可接受**（第三次外委复核观测 5 次/80s） |
+| **S5** | 订阅计数与会话跟踪的精度：`AccessSubscriptionPlanner` 在 `session.subscribe(...)` **之前**就写入 `subscribedSessions` 并自增计数 ⇒ **异步订阅失败不会被重试**（对账只对「无会话」或「会话实例变化」重试） | 会话存在但订阅被协议侧拒绝（如地址非法） | 日志「已订阅设备数」**高估**；订阅失败只记 ERROR，**不会**自愈，需靠链路重建（会话实例变化）才能恢复 | ✅ **已处置**（PR #15，2026-09-21）：`subscribedSessions` 改到 `whenComplete` 的**成功**分支写入，失败不记录跟踪 ⇒ 下个租约周期自动重试；新增 `iot.access.subscribe.success/failure` 指标；返回语义明确为「本次**发起**数」。外委复核 PASS（把 `put` 移回 `subscribe` 之前⇒回归用例精确转红） |
+| **S7** | **零设备租户的周期噪声**：修复 N-1 后，设备清单为空的租户**每个租约周期（15s）都会打一条 WARN 并重新拉一次内部接口** | 租户已分配但尚未配设备／点位（或设备全部停用） | 日志噪声 + 每 15s 一次内部调用（规模大时是无效压力） | ✅ **已处置**（PR #15，2026-09-21）：空清单改**指数退避**（30s 起、上限 2 分钟）+ 日志分级（首次 WARN、其后 DEBUG）+ `iot.access.spec.empty` / `iot.access.spec.backoff.skipped` 指标；`Clock` 可注入以便用假时钟测。外委复核 PASS（去退避判断 / 退避永不过期均精确转红） |
 | **N-2** | **bind 失败后永不重发 ADD**：ADD 只在首次采集时发，而框架仅在 `bind()` **成功后**才挂重连监听（`IotLifecycle`） | 启动瞬间设备离线（建链失败） | 该设备**永久零数据**且不自动恢复，只有日志一次 ERROR | 对「已采集但无会话」的设备在后续对账中**重发 ADD**（或登记为显式限制）；当前仅在 planner 打 DEBUG「暂无会话」 |
 | **S6** | **出口是日志占位**：`LoggingAccessReadingSink` / `LoggingDataSink` 是唯一实现且**无 profile 限制** | 生产部署 | 按 INFO **逐条打印**且**数据不落任何地方** ⇒ 「有日志＝像在工作」而实际零持久化 | M-2 数据面替换为「有界队列 → 微批 → EMQX → business 落 IoTDB/Redis」（§5.1），并加**丢弃计数**；替换前不得以占位实现宣称数据面可用 |
 
@@ -315,8 +315,8 @@ ERROR The build could not read 1 project
 
 | # | 事项 | 现状（勿写成已完成） |
 |---|---|---|
-| **P4** | `config_epoch` **目前无消费方** | 接入侧 `AccessLeaseManager` 只用 register/acquire/renew，**从不调** `batchEpoch`/`/internal/lease/epochs` ⇒ 「不一致才拉全量」的**对账尚未落地**；本分支只交付了列/契约/写入口（前置件） |
-| **P5** | `TenantLedgerService.setAssignable` **无生产调用者/端点** | 「运维可动态增删可分配租户」在运行态**尚不可达**（仅 IT 调用） |
+| **P4** | `config_epoch` **目前无消费方** | 接入侧 `AccessLeaseManager` 只用 register/acquire/renew，**从不调** `batchEpoch`/`/internal/lease/epochs` ⇒ 「不一致才拉全量」的**对账尚未落地**；本分支只交付了列/契约/写入口（前置件）。**→ 已于「四点十一」落地**（`ConfigEpochReconciler`） |
+| **P5** | `TenantLedgerService.setAssignable` **无生产调用者/端点** | 「运维可动态增删可分配租户」在运行态**尚不可达**（仅 IT 调用）。**→ 已于「四点十一」落地**（`IotTenantLedgerController`：`GET /tenant-ledger`、`PUT /tenant-ledger/{id}/assignable`） |
 | **P6** | 台账全置不可分配时会**静默回落配置** | 当前 nacos `assignable-tenant-ids: []` 故无害；一旦填了配置，撤销操作会被静默忽略 ⇒ 接线时须一并处理 |
 | **P7** | 容量只限「新分配」，**不回收存量** | 容量改小/改 0 后，既有 ACTIVE 行仍被续期，旧租户不会自动脱落（设计取舍，需显式说明） |
 | **P8** | `status` 列未参与过滤 | `assignableTenantIds`/`listAssignableTenantIds` 与 `selectByNode/selectForUpdate` 都不过滤 `status`（本仓他处是显式过滤的） |
@@ -327,6 +327,74 @@ ERROR The build could not read 1 project
 但接入侧「本地到期即自行停采」的比较仍受本机时钟影响（**钟快=提前停采、钟慢=服务端接管后仍多采一段**）。
 彻底闭环需要租约契约带上**服务端时间**（如 `LeaseAcquireResp`/`RenewAck` 增加 serverTime），
 接入侧以「服务端时间 + 本地单调流逝」判断。属 M-2 数据面/契约项，登记在此。
+
+### 四点十一、M-2：接入侧消费 `config_epoch`（P4）与**设备变更自动对账**（G7）
+
+**解决了什么**：`config_epoch` 此前**没有消费方**（P4：接入侧从不调 `batchEpoch`），而设备清单只在
+「首次开始采集」时取一次（G7：`collected` 非空后**永不重取**）——租约持续续约时连 fence 都不会发生，
+于是上游**新增设备 / 改点位映射 / 改端点周期 / 停用删除设备**永远不会被接入侧发现，只能靠链路重建。
+两件事是同一个缺口的两面，本轮一起落地（外委复核已用代码路径把 G7 做实）。
+**外委复核两轮**：第一轮判 `FAIL(条件)`（① `findConnection` 的「不得抛断整轮绑定」声明与代码不符——
+端点漏 scheme 时 `Endpoint.of` 会抛非 `DeviceSpecLoadException` 异常且写入侧无校验；② 文档把「单租户/台账
+无该租户」写成有 `startCollecting` 兜底，实际该场景**完全无兜底**；另有 `forget` 两条停采路径零覆盖等）。
+两轮复核的放行条件与全部非阻断建议已在本轮修完，见下表最后几行。
+
+**做了什么**
+
+| 面 | 实现 |
+|---|---|
+| 变更信号（业务侧） | 设备增删改、点位映射增删改 ⇒ **同一事务**推进 `tenant_ledger.config_epoch`（`TenantLedgerMapper.bumpConfigEpoch`，只更新未删除行）；台账无该租户时 **no-op**（不 insert、不改 assignable，否则会静默把「可分配来源」从配置兜底切成台账） |
+| 变更消费（接入侧） | 新增 `ConfigEpochReconciler`：每轮租约周期调 `/internal/lease/epochs`，**只对本节点持有的租户**、**只在版本号变化时**触发 `TenantLinkManager.reconcile`；停采/回收/nodeFenced 时 `forget`，重领后必然重新对账 |
+| 版本号推进条件 | **对账已完成才推进**（`reconcile` 返回 false = 取数失败/退避中/不在采集 ⇒ 下轮重试）。先推进再对账会让一次失败**永久吞掉**一次变更 |
+| 差异应用 | 新增→ADD；消失→REMOVE + 清理订阅跟踪；**规格变化→重新 ADD**（点位/端点/周期变了必须让框架重建会话，新会话再重订阅）；上游确认「确实没有设备」（成功信封 + 空列表）→ 全部下架，且**不缓存空清单**（交还 `startCollecting` 的空清单退避重取路径） |
+| 首次观测 | 本进程第一次看到某租户时**也做一次全量对账**：否则「清单拉取时刻早于版本号读取」的竞态会永久吞掉一次变更（多拉一次有界，漏一次变更永久） |
+| 运维入口（P5） | `GET /tenant-ledger` + `PUT /tenant-ledger/{tenantId}/assignable`（平台级权限 `iot:ledger:list/update`，`platform_only=1`、只授角色 1、**不进**租户模板）：把「哪些租户可被采集」从「改配置重启」变成可运维数据 |
+| 失败与空分离（G2/G3） | `DeviceSpecSource.loadByTenant` 失败一律抛 `DeviceSpecLoadException` ⇒ 引导路径（`loadAll`）捕获后跳过该租户（不整体抛断），对账路径**不下架既有设备**并单独计数 `iot.access.spec.failure`；`findConnection` 是框架建链路径，单独捕获返回 `Optional.empty()`（不得抛断整轮绑定） |
+| 指标前缀统一（G5） | 3b-2 引入的 `ypbin.access.*` 与既有 `iot.access.lease.*` 统一为 `iot.access.*` |
+| 用例补强（G4） | 补「fence 必须清退避状态」可咬用例（复核实测：删掉 `fence` 里的 `emptyBackoff.remove` 时原 8 条用例全绿；新用例在该变异下转红）；补「本地过期」「nodeFenced」两条停采路径的 `forget` 断言（复核变异⑦⑧ 证明此前**零覆盖**） |
+| **端点/建链路径加固**（复核放行条件①） | `IotDeviceReq.endpoint` 加 scheme `@Pattern`（写入侧第一道防线，且有 `IotDeviceReqValidationTest` 钉住）；`loadByTenant` 把**转换失败**（协议码非法、点位清单写不出去）归一到 `DeviceSpecLoadException`；`findConnection` 把「取数失败」与「端点/协议值非法」都收敛为 `Optional.empty()` 并计数 `iot.access.connection.invalid`（建链路径不得抛断整轮绑定）。注意：`DeviceSpec` 不解析端点，所以端点非法**不会**让 `loadByTenant` 失败——这条边界有用例钉住 |
+| **周期安全网**（复核放行条件②） | 新增 `ypbin.access.config-refresh-interval-ms`（默认 **5 分钟**）：超过该间隔未被「版本号驱动」覆盖到的持有租户会被强制对账一次，**每 tick 最多 1 个租户**（把额外远端调用限流为每 tick 至多一次）。覆盖「单租户部署/台账无该租户 ⇒ 根本没有变更信号」的场景，把它从「永不重取」兜成「最坏等一个周期即收敛」 |
+| **指标噪声收敛** | `iot.access.config.reconcile.not_applied` 改为**同一版本号只计一次**（零设备/持续失败租户每轮都会重试，原实现会让它无界单调增长）；对账请求本身失败时**不跑安全网**（请求每 tick 就会重试，跑安全网只会翻倍压力） |
+
+**验收证据（本轮，均本机 `clean` + `-am` 实跑）**
+
+- `ypbin-access` 单测 **61/0**（原有 37 → 本轮 +24：`ConfigEpochReconcilerTest` 11、`IotProtocolTenantLinkManagerTest` +6、
+  `HttpDeviceSpecSourceTest` +4、`AccessDeviceRegistryTest` +1、`AccessLeaseManagerTest` +2 与既有用例的断言补强）；
+- `ypbin-iot` 单测 **90/0**（原有 79 → 本轮 +11：`TenantLedgerServiceTest` 5、设备/点位写路径接线 2、
+  `IotDeviceReqValidationTest` 4）；
+- `ypbin-architecture-tests` **41/0**；`tools/check-iot-sql-equivalence.sh` **OK**（007 与迁移文件同步）；
+- **CI 四绿**（CI / CodeQL / IoT 集成测试 / Sync Whitelist）；CI 的 `-Pit` 日志实测：`TenantLedgerIT` 5/0（**0 跳过**）、
+  `LeaseConcurrencyIT` 3/0、`LeaseDbClockIT` 1/0、`IotTenantIsolationIT` 6/0，IT 合计 15/0；
+- **变异验证 10 处**（每处先确认变异落地、后还原，除本轮一次失误见下）：版本号无条件推进→红 `notAppliedMustNotAdvanceEpochSoNextRoundRetries:104`（行号按当前树）；
+  消失设备分支失效→红 `reconcileShouldApplyAddRemoveAndReplace:184`；删 `fence` 的 `emptyBackoff.remove`→红 `fenceMustClearBackoffSoReacquireRefetchesImmediately:244`；
+  删点位 `create` 的版本号推进→红 `pointMappingMutationsMustBumpConfigEpoch:204`；摘掉安全网→红 `missingSignalMustConvergeThroughBoundedSafetyNet`（+1）；
+  安全网改成「强制所有到期租户」→红同用例「每轮只允许强制一个」；删 `loadByTenant` 的转换归一→红 `conversionFailureMustSurfaceAsLoadException`；
+  删 `findConnection` 的 try/catch→红 `invalidEndpointMustNotThrowFromFindConnection`；删 `IotDeviceReq` 的 `@Pattern`→红 `endpointWithoutSchemeMustBeRejected`；
+  删本地过期/nodeFenced 的 `forget`→红 `AccessLeaseManagerTest:160/:182`（此前后者无覆盖）。
+- ⚠️ **真 socket 端到端**（设备变更→接入侧真的重建会话并出数）本轮未复验：需能稳定跑容器的机器，
+  且本轮不改协议栈装配（风险面是「变更是否被应用」，已由单测 + 真库 IT 覆盖其两侧）。
+- ⚠️ **一次操作失误（如实记录）**：复核后的修复尚未提交时，我用 `git checkout -- <file>` 还原变异，
+  把 `ConfigEpochReconciler.java` 的**未提交修复一起还原**（教训三十三的同一坑）。已按上下文重写该文件并重跑门禁确认；
+  此后所有变异一律改在**已提交的 detached worktree** 上做。
+
+**本轮仍未闭环（如实登记，勿当已完成）**
+
+| # | 事项 | 现状 |
+|---|---|---|
+| **G1** | 订阅失败**无退避、无在途去重** | 失败设备每 15s 重发一次（可能打到远端），慢订阅 >15s 会重复发起 —— 未做 |
+| **G6'** | 属性标识改名 / 新版本物模型发布**不**推进 `config_epoch` | 点位地址、类型、周期、字节序等变更已覆盖；`identifier` 仅影响读数标签，改名要等下一次变更才对账 |
+| **G7'** | 设备「全部停用」路径 | 设备 `status` 没有写入口（`IotDeviceReq` 无该字段），故只能靠设备删除/映射删除触发；`status=1` 过滤仍在 `DeviceSpecServiceImpl` |
+| **G8** | 单租户部署（未开 tenant 插件）与「台账无该租户」时**没有变更信号** | `bumpConfigEpochOfCurrentTenant` 无租户上下文即 no-op（设计取舍：不得顺手 insert 一行台账）。**已由周期安全网兜底**：超过 `config-refresh-interval-ms`（默认 5 分钟）未尝试过对账的持有租户会被强制对账、**每 tick 至多 1 个** ⇒ 全量轮转时间 ≈ `max(租户数 × tick 周期, config-refresh-interval-ms)`（仓库内用例 `safetyNetMustRotateAcrossAllStaleTenants` 钉住「3 租户 3 个 tick 全覆盖」）；因此收敛上界是**一个轮转周期**，不是「一个间隔」。⚠️ **代价如实说明**：安全网按「距上次尝试的时长」触发 ⇒ **信号正常、版本号长期不变的租户同样会被周期强制全量对账**（**不是**「只在信号缺失时才触发」），换来的是「任何漏信号/信号缺失场景最坏一个轮转周期即收敛」；确定信号链路可靠时可调大间隔或设 0 关闭 |
+| **R8-2** | **对账可能拖长调度 tick**：对账是串行远端调用（首次观测对全部持有租户各拉一次），单 tick 超过续约 TTL（30s）会让下一轮 `selfFenceExpiredLocally` **批量自我 fence** 并重领，形成抖动；`AccessStartupValidator` 只按「一次租约调用」建模。**安全网既限流又加剧**：它把新增调用限到每 tick 至多 1 次（缓解），但又恒定 +1 次全量 `loadByTenant`（最坏 +6s：Feign connect1+read5）。越界的**最坏 tick 次数本身不变**（两种设计都是每租户至多一次 `loadByTenant`）；安全网降低的是**引发越界所需的「本轮变更租户数」**：`3 个变更 × 6s + 18s 稳态 + 1 个被强制 × 6s = 36s > 30s` ⇒ 3 个变更 + 1 个未变更租户即越界（节点需持有 ≥4 个租户；恰持 3 个时上限为 12+3×6=30s，不越界）。⚠️ 上一版此处写「阈值从约 4 个租户下压到约 3 个」把「变更租户数」写成了「租户数」，已更正 | 未做（需要 tick 级时间预算/并发上限；或把安全网收敛为「仅对无台账/epoch 恒 0 的租户强制」/调大默认间隔） |
+| **R8-3** | `iot.access.config.reconcile.not_applied` 对零设备/持续失败租户**永久递增** | **已修**：同一版本号只计一次；零设备租户仍每 tick 走一次**廉价**重试（`reconcile` 在 `collected == null` 时直接返回 false，不打远端） |
+| **R8-4** | `/internal/lease/epochs` **不按节点过滤**：每节点每 10s 拉全平台 assignment × ledger（O(节点数 × 全平台租户)） | 未做（可加 `?accessNode=` 只返回本节点持有租户，或分页） |
+| **R8-5** | `fence()` **不清理订阅跟踪**（与 `removeAllDevices` 不对称），`SubscriptionPlanner.forget` 默认空实现无门禁 | 未做；重领后是否漏订阅取决于框架 REMOVE→ADD 是否复用同一 `DeviceSession` 实例（**需真 socket e2e 核实**） |
+| **R8-6** | **规格变化路径只重发 ADD**，依赖「框架先解绑再绑定 ⇒ 新会话实例 ⇒ 重新订阅」 | 未做（同上：若框架复用会话实例，新点位永不订阅 ⇒ 静默零数据；需 e2e 核实并登记依赖） |
+| **R8-7** | P5 的**平台级不变量无门禁**：`platform_only=1` 与「不进 `sys_template_menu`」只靠人眼（`IotPermissionCodeGateTest` 只校验权限码存在性） | 未做（建议加一条 SQL/源码级门禁，防后续补授把跨租户越权面授给租户管理员） |
+| **R8-8** | 「设备/点位变更与版本号**同一事务**」**无自动守卫**：单测用 mock 只能证明「被调用 3 次」；且台账表故障会**阻断设备/点位写入**（可用性耦合） | 未做（可加「bump 失败 ⇒ 业务写入回滚」的真库用例与事务边界门禁） |
+| **R8-9** | **安全网的成本与可观测性**：健康系统也每租户每周期多一次全量 `loadByTenant`（见 G8 行的如实说明）；新指标 `iot.access.config.reconcile.forced`/`...not_applied`/`...changed` 已注册但**未作为指标登记进任何指标文档/大盘**（本文档仅文字提及），且 `deploy/nacos/ypbin-iot.yaml` **没有指标暴露配置**（`/actuator/**` 白名单只在 `ypbin-system.yaml`）⇒ 「可观测」目前只是潜在 | 未做（登记指标 + 补 iot 服务指标暴露配置；如需降低安全网成本，可收敛触发条件或调大间隔） |
+| **P6/P7/P8/P10** | 台账全置 false 静默回落配置／容量不回收存量／`status` 未参与过滤／`renew/release/markExpired` 取节点行锁的残余死锁面 | 与「四点十」登记一致，本轮未动 |
+| **M0b-4 残留** | 接入侧 `AccessLeaseManager` 仍用**本机时钟**做本地过期自停采 | 需租约契约带「服务端时间」，未做 |
 
 ### 五、替换缝（3a 已备好，3b-2 只需新增自动配置）
 3a 的 `LoggingTenantLinkManager` 已去掉 `@Component`，由 `AccessLeaseConfiguration`（`@AutoConfiguration`

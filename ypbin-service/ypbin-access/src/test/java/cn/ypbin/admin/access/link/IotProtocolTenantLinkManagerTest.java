@@ -25,6 +25,7 @@ import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -34,11 +35,15 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
- * 真实链路管理器的单测（增量 3b-2）。
+ * 真实链路管理器的单测（增量 3b-2 + M-2 配置变更对账）。
  *
  * <p>核心守卫是<b>revision 单调递增</b>：框架按设备记录「已应用的 revision」，收到 ≤ 它的变更
  * <b>直接丢弃、无异常无日志</b>。所以这里不仅断言「变更发出去了」，还用一个实现了同款去重规则的
  * 假框架验证「真的被应用了」——否则测试会在 revision 复用时依然全绿（假成功）。</p>
+ *
+ * <p>M-2 追加的守卫：<b>配置变更对账</b>（新增/消失/规格变化三类差异都必须被应用）、
+ * <b>取数失败与「确实没有设备」必须分开</b>（失败不得下架既有设备、不得被当成已对账）、
+ * 以及 <b>fence 后重取必须立即生效</b>（退避状态不得跨越 fence 泄漏）。</p>
  *
  * @author wenbin
  * @since 2026-09-21
@@ -54,17 +59,17 @@ class IotProtocolTenantLinkManagerTest {
 
     /** 可推进的假时钟：退避是时间相关行为，必须能「把时间推过去」而不是靠 sleep。 */
     private final MutableClock clock = new MutableClock();
-    private final List<Integer> subscribedBatchSizes = new ArrayList<>();
+    private RecordingPlanner planner;
     private FakeFramework framework;
+    private SimpleMeterRegistry meterRegistry;
 
     @BeforeEach
     void setUp() {
         source = new FakeSource();
         registry = new AccessDeviceRegistry(source, () -> Set.of(TENANT_A, TENANT_B));
-        linkManager = new IotProtocolTenantLinkManager(source, registry, devices -> {
-            subscribedBatchSizes.add(devices.size());
-            return devices.size();
-        }, new SimpleMeterRegistry(), clock);
+        planner = new RecordingPlanner();
+        meterRegistry = new SimpleMeterRegistry();
+        linkManager = new IotProtocolTenantLinkManager(source, registry, planner, meterRegistry, clock);
         framework = new FakeFramework();
         registry.addChangeListener(framework::onChange);
     }
@@ -80,7 +85,7 @@ class IotProtocolTenantLinkManagerTest {
             "ADD:d1", "ADD:d2");
         assertThat(linkManager.isCollecting(TENANT_A)).isTrue();
         assertThat(linkManager.collectingTenants()).containsExactly(TENANT_A);
-        assertThat(subscribedBatchSizes).as("ADD 之后必须发起订阅（框架不主动订阅）")
+        assertThat(planner.subscribedBatchSizes).as("ADD 之后必须发起订阅（框架不主动订阅）")
             .containsExactly(2);
     }
 
@@ -105,17 +110,18 @@ class IotProtocolTenantLinkManagerTest {
 
         // 这条钉住 B1 的修复机制：启动期（ApplicationRunner 早于 ApplicationReadyEvent）没有会话，
         // 订阅必须靠「下一个租约周期再对账」补上——否则采集恒为 0 且不自愈
-        assertThat(subscribedBatchSizes).as("每轮都要对账").containsExactly(1, 1);
+        assertThat(planner.subscribedBatchSizes).as("每轮都要对账").containsExactly(1, 1);
         assertThat(framework.actions).as("ADD 只在首次采集时发，不得重复建链").containsExactly("ADD:d1");
     }
 
     @Test
     @DisplayName("★ N-1+S7：空清单不缓存（退避后必须重取），且**退避窗口内不得再打远端**")
     void emptyDeviceListMustNotBePinnedAndMustBackOff() {
-        // 第一轮：取数失败（返回空）⇒ 不缓存、进入退避
+        // 第一轮：上游成功信封但列表为空 ⇒ 不缓存、进入退避
         linkManager.startCollecting(TENANT_A);
         assertThat(framework.actions).isEmpty();
         assertThat(source.loadCallCount(TENANT_A)).as("第一轮应取数一次").isEqualTo(1);
+        assertThat(meterRegistry.get("iot.access.spec.empty").counter().count()).isEqualTo(1.0d);
 
         // 退避窗口内再被调用（每个租约周期都会调用 startCollecting）：不得再打远端
         linkManager.startCollecting(TENANT_A);
@@ -129,8 +135,114 @@ class IotProtocolTenantLinkManagerTest {
         linkManager.startCollecting(TENANT_A);
 
         assertThat(framework.actions).as("恢复后必须重新取数并建链").containsExactly("ADD:d1");
-        assertThat(subscribedBatchSizes).as("恢复后必须对账订阅").containsExactly(1);
+        assertThat(planner.subscribedBatchSizes).as("恢复后必须对账订阅").containsExactly(1);
         assertThat(source.loadCallCount(TENANT_A)).as("退避到期后应重取一次").isEqualTo(2);
+    }
+
+    @Test
+    @DisplayName("★ 取数**失败**（抛异常）不得被当成「没有设备」：不下架、计入失败指标、退避后重试")
+    void loadFailureMustNotBeTreatedAsEmpty() {
+        source.devices.put(TENANT_A, List.of(device("d1")));
+        linkManager.startCollecting(TENANT_A);
+        assertThat(framework.actions).containsExactly("ADD:d1");
+
+        // 上游接口开始失败：对账必须返回 false（调用方据此不推进版本号）
+        source.failing.add(TENANT_A);
+        assertThat(linkManager.reconcile(TENANT_A)).isFalse();
+        assertThat(framework.actions).as("取数失败绝不能把既有设备下架").containsExactly("ADD:d1");
+        assertThat(meterRegistry.get("iot.access.spec.failure").counter().count()).isEqualTo(1.0d);
+        assertThat(meterRegistry.get("iot.access.spec.empty").counter().count())
+            .as("失败不得计入「空清单」").isZero();
+
+        // 失败也要退避（否则持续失败会每周期打一次远端）
+        int loads = source.loadCallCount(TENANT_A);
+        assertThat(linkManager.reconcile(TENANT_A)).isFalse();
+        assertThat(source.loadCallCount(TENANT_A)).as("失败退避窗口内不得再打远端").isEqualTo(loads);
+
+        // 退避到期且上游恢复 ⇒ 对账成功，并应用最新清单
+        clock.advance(IotProtocolTenantLinkManager.BACKOFF_BASE.plusSeconds(1));
+        source.failing.clear();
+        source.devices.put(TENANT_A, List.of(device("d1"), device("d3")));
+        assertThat(linkManager.reconcile(TENANT_A)).isTrue();
+        assertThat(framework.actions).contains("ADD:d3");
+    }
+
+    @Test
+    @DisplayName("★ 配置变更对账：新增→ADD、消失→REMOVE+清理订阅跟踪、规格变化→重新 ADD")
+    void reconcileShouldApplyAddRemoveAndReplace() {
+        source.devices.put(TENANT_A, List.of(device("d1"), device("d2")));
+        linkManager.startCollecting(TENANT_A);
+        assertThat(framework.actions).containsExactly("ADD:d1", "ADD:d2");
+
+        // 上游改配置：d1 的点位变了、d2 没了、d3 是新增的
+        source.devices.put(TENANT_A,
+            List.of(deviceWithPoints("d1", "[{\"address\":\"holding:9\"}]"), device("d3")));
+
+        assertThat(linkManager.reconcile(TENANT_A)).isTrue();
+
+        assertThat(framework.actions).as("消失的设备必须 REMOVE、新增的设备必须 ADD")
+            .contains("REMOVE:d2", "ADD:d3");
+        // 假框架会丢弃 revision ≤ 已应用值的变更 ⇒ 第二次 ADD:d1 出现即证明「规格变化被重新应用」
+        assertThat(framework.actions.stream().filter("ADD:d1"::equals).count())
+            .as("规格变化的设备必须重新 ADD（框架按「先解绑再绑定」应用，新会话会触发重订阅）")
+            .isEqualTo(2);
+        assertThat(planner.forgotten).as("消失的设备必须清理订阅跟踪").containsExactly("d2");
+        assertThat(planner.subscribedBatchSizes).as("对账后必须再发起一轮订阅").hasSize(2);
+    }
+
+    @Test
+    @DisplayName("★ 对账：上游答「确实没有设备」（成功信封 + 空列表）⇒ 必须全部下架（G7 的删除面）")
+    void reconcileShouldRemoveAllWhenUpstreamReallyHasNoDevice() {
+        source.devices.put(TENANT_A, List.of(device("d1"), device("d2")));
+        linkManager.startCollecting(TENANT_A);
+
+        source.devices.put(TENANT_A, List.of());
+        assertThat(linkManager.reconcile(TENANT_A)).as("「确实没有设备」是有效对账结果").isTrue();
+
+        assertThat(framework.actions).filteredOn(action -> action.startsWith("REMOVE:"))
+            .containsExactlyInAnyOrder("REMOVE:d1", "REMOVE:d2");
+        assertThat(planner.forgotten).containsExactlyInAnyOrder("d1", "d2");
+        assertThat(planner.subscribedBatchSizes).as("没有设备可订阅：不得再发起订阅").containsExactly(2);
+    }
+
+    @Test
+    @DisplayName("对账：不在采集的租户不得取数、不得推设备（fence 后不能复活）")
+    void reconcileMustBeNoopWhenNotCollecting() {
+        source.devices.put(TENANT_B, List.of(device("d9")));
+
+        assertThat(linkManager.reconcile(TENANT_B)).isFalse();
+
+        assertThat(source.loadCallCount(TENANT_B)).isZero();
+        assertThat(framework.actions).isEmpty();
+    }
+
+    @Test
+    @DisplayName("对账：尚未成功取过清单（启动期为空的租户）交还给 startCollecting 的重取路径")
+    void reconcileBeforeFirstSuccessMustDelegateToStartCollecting() {
+        linkManager.startCollecting(TENANT_A);
+        int loads = source.loadCallCount(TENANT_A);
+
+        assertThat(linkManager.reconcile(TENANT_A)).isFalse();
+
+        assertThat(source.loadCallCount(TENANT_A)).as("不得与 startCollecting 的退避重取重复打远端")
+            .isEqualTo(loads);
+    }
+
+    @Test
+    @DisplayName("★ fence 必须清掉退避状态：重新领取后立刻重取（不能等满退避窗口）")
+    void fenceMustClearBackoffSoReacquireRefetchesImmediately() {
+        // 先制造退避：空清单 ⇒ 下一次重取要等 30s
+        linkManager.startCollecting(TENANT_A);
+        assertThat(source.loadCallCount(TENANT_A)).isEqualTo(1);
+
+        linkManager.fence(TENANT_A, "租约丢失");
+        source.devices.put(TENANT_A, List.of(device("d1")));
+
+        // 时间**没有**推进：若 fence 没清退避，这里会因仍在退避窗口内而跳过取数 ⇒ 采不到
+        linkManager.startCollecting(TENANT_A);
+
+        assertThat(source.loadCallCount(TENANT_A)).as("fence 后重取必须立即生效").isEqualTo(2);
+        assertThat(framework.actions).containsExactly("ADD:d1");
     }
 
     @Test
@@ -195,11 +307,62 @@ class IotProtocolTenantLinkManagerTest {
     }
 
     private static DeviceSpec device(String deviceId) {
-        return new DeviceSpec(deviceId, deviceId, ProtocolCode.of("tcp"), "link-" + deviceId,
-            "tcp://127.0.0.1:15002", Duration.ofSeconds(5), Map.of("points", "[]"));
+        return deviceWithPoints(deviceId, "[]");
     }
 
-    /** 假取数源。 */
+    private static DeviceSpec deviceWithPoints(String deviceId, String pointsJson) {
+        return new DeviceSpec(deviceId, deviceId, ProtocolCode.of("tcp"), "link-" + deviceId,
+            "tcp://127.0.0.1:15002", Duration.ofSeconds(5), Map.of("points", pointsJson));
+    }
+
+    /** 假取数源：{@code devices} 是「成功信封的答案」，{@code failing} 里的租户模拟**取数失败**（抛异常）。 */
+    private static final class FakeSource implements DeviceSpecSource {
+
+        private final Map<Long, List<DeviceSpec>> devices = new HashMap<>();
+
+        /** 取数调用次数（S7 用它证明「退避窗口内不再打远端」）。 */
+        private final Map<Long, Integer> loadCalls = new HashMap<>();
+
+        private final Set<Long> failing = new HashSet<>();
+
+        @Override
+        public List<DeviceSpec> loadByTenant(Long tenantId) {
+            loadCalls.merge(tenantId, 1, Integer::sum);
+            if (failing.contains(tenantId)) {
+                throw new DeviceSpecLoadException("模拟取数失败：tenantId=" + tenantId);
+            }
+            return devices.getOrDefault(tenantId, List.of());
+        }
+
+        int loadCallCount(Long tenantId) {
+            return loadCalls.getOrDefault(tenantId, 0);
+        }
+
+        @Override
+        public Optional<ConnectionSpec> findConnection(String connectionId) {
+            return Optional.of(ConnectionSpec.of(connectionId, ProtocolCode.of("tcp"),
+                Endpoint.of("tcp://127.0.0.1:15002")));
+        }
+    }
+
+    /** 记录订阅批次的替身（同时记录 forget，用于断言「消失的设备被清理跟踪」）。 */
+    private static final class RecordingPlanner implements SubscriptionPlanner {
+
+        private final List<Integer> subscribedBatchSizes = new ArrayList<>();
+        private final List<String> forgotten = new ArrayList<>();
+
+        @Override
+        public int subscribe(List<DeviceSpec> devices) {
+            subscribedBatchSizes.add(devices.size());
+            return devices.size();
+        }
+
+        @Override
+        public void forget(String deviceId) {
+            forgotten.add(deviceId);
+        }
+    }
+
     /** 可推进时钟（仅用于测试退避窗口）。 */
     private static final class MutableClock extends Clock {
 
@@ -222,30 +385,6 @@ class IotProtocolTenantLinkManagerTest {
         @Override
         public Instant instant() {
             return now;
-        }
-    }
-
-    private static final class FakeSource implements DeviceSpecSource {
-
-        private final Map<Long, List<DeviceSpec>> devices = new HashMap<>();
-
-        /** 取数调用次数（S7 用它证明「退避窗口内不再打远端」）。 */
-        private final Map<Long, Integer> loadCalls = new HashMap<>();
-
-        @Override
-        public List<DeviceSpec> loadByTenant(Long tenantId) {
-            loadCalls.merge(tenantId, 1, Integer::sum);
-            return devices.getOrDefault(tenantId, List.of());
-        }
-
-        int loadCallCount(Long tenantId) {
-            return loadCalls.getOrDefault(tenantId, 0);
-        }
-
-        @Override
-        public Optional<ConnectionSpec> findConnection(String connectionId) {
-            return Optional.of(ConnectionSpec.of(connectionId, ProtocolCode.of("tcp"),
-                Endpoint.of("tcp://127.0.0.1:15002")));
         }
     }
 

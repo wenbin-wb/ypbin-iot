@@ -11,9 +11,15 @@ package cn.ypbin.admin.iot.service.impl;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import cn.ypbin.admin.iot.entity.IotDevice;
+import cn.ypbin.admin.iot.lease.TenantLedgerService;
+import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.IotProductMapper;
+import cn.ypbin.admin.iot.model.req.IotDeviceReq;
 import cn.ypbin.admin.iot.model.query.IotDeviceQuery;
 import cn.ypbin.admin.iot.model.resp.IotDeviceResp;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
@@ -24,6 +30,7 @@ import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
 
 /**
  * 设备台账的纯逻辑单测（不起 Spring 上下文、不连库）。
@@ -40,7 +47,9 @@ import org.junit.jupiter.api.Test;
  */
 class IotDeviceServiceImplTest {
 
-    private final IotDeviceServiceImpl service = new IotDeviceServiceImpl(mock(IotProductMapper.class));
+    private final IotProductMapper productMapper = mock(IotProductMapper.class);
+    private final TenantLedgerService ledgerService = mock(TenantLedgerService.class);
+    private final IotDeviceServiceImpl service = new IotDeviceServiceImpl(productMapper, ledgerService);
 
     /**
      * 初始化 MyBatis-Plus 的实体元信息。
@@ -104,5 +113,38 @@ class IotDeviceServiceImplTest {
         assertThat(resp.getLastSeenAt()).isEqualTo(LocalDateTime.of(2026, 9, 20, 9, 30));
         assertThat(resp.getRemark()).isEqualTo("测试");
         assertThat(resp.getCreateTime()).isEqualTo(LocalDateTime.of(2026, 9, 19, 10, 0));
+    }
+
+    @Test
+    @DisplayName("★ 设备增删改都必须推进台账配置版本号（否则接入侧永远不知道设备变了 ⇒ G7 静默零更新）")
+    void deviceMutationsMustBumpConfigEpoch() {
+        IotDeviceMapper mapper = mock(IotDeviceMapper.class);
+        ReflectionTestUtils.setField(service, "baseMapper", mapper);
+        when(mapper.selectById(1L)).thenReturn(existingDevice());
+
+        service.createDevice(deviceReq());
+        service.updateDevice(1L, deviceReq());
+        service.removeDevice(1L);
+
+        verify(ledgerService, times(3)).bumpConfigEpochOfCurrentTenant();
+    }
+
+    private static IotDevice existingDevice() {
+        IotDevice device = new IotDevice();
+        device.setId(1L);
+        device.setDeviceCode("DEV-1");
+        device.setDeviceName("水表-1");
+        device.setProtocol("tcp");
+        device.setEndpoint("tcp://127.0.0.1:15002");
+        return device;
+    }
+
+    private static IotDeviceReq deviceReq() {
+        IotDeviceReq req = new IotDeviceReq();
+        req.setDeviceCode("DEV-1");
+        req.setDeviceName("水表-1");
+        req.setProtocol("tcp");
+        req.setEndpoint("tcp://127.0.0.1:15002");
+        return req;
     }
 }
