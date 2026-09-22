@@ -396,6 +396,48 @@ ERROR The build could not read 1 project
 | **P6/P7/P8/P10** | 台账全置 false 静默回落配置／容量不回收存量／`status` 未参与过滤／`renew/release/markExpired` 取节点行锁的残余死锁面 | 与「四点十」登记一致，本轮未动 |
 | **M0b-4 残留** | 接入侧 `AccessLeaseManager` 仍用**本机时钟**做本地过期自停采 | 需租约契约带「服务端时间」，未做 |
 
+### 四点十二、M-2 断档与可用率（口径 + 检出 + 落库 + 查询；**access 上报接线在下一增量**）
+
+**口径（落成代码常量，不再只是文档）**：有效数据 = `quality=GOOD`；断档 = 连续 **> K × 采集周期**
+无有效数据（K 默认 2，可配）；可用率（逐台）= `1 - Σ(断档时长 ∩ 窗口) / 窗口时长`（进行中的断档按
+**数据库时钟**结算到查询时刻）；达标是**双条件**：可用率 ≥ 0.995 **且** 最长单次断档 ≤ `max(10 分钟, 10 × 采集周期)`。
+口径常量集中在 `AvailabilityRules`，并随查询响应返回（客户端不必重复实现一遍口径，避免两处漂移）。
+
+**做了什么**
+
+| 面 | 实现 |
+|---|---|
+| 两张表 | `device_liveness`（每设备一行：最近有效数据/首次观测/最近观测/进行中断档 id，唯一键 `(tenant_id, device_id)`）、`outage_event`（start/end/duration/reason；`end_ts IS NULL` = 进行中）。**租户表**，不进 `ignore-tables`；006 与迁移 `2026-09-19-iot-m2-availability-schema.sql` 语句等价 |
+| 判定与计算 | `OutageDetector`（纯逻辑：阈值**严格大于**、起点=lastGoodAt 否则 firstObserved、生效周期兜底）与 `AvailabilityCalculator`（纯逻辑：窗口裁剪、进行中结算、双条件、脏数据封顶不为负）——时间相关行为全部可用可推进时间断言，不靠 sleep |
+| 上报端点 | `POST /internal/readings`（`X-Internal-Token` 保护；单批 ≤ 500）。**只收「读数观察」**（deviceId/周期/质量/时刻），不收值——值的存储属数据面（依赖 Q8），本轮不发明马上要改的契约 |
+| 静默设备检出 | 周期扫描 `OutageScanner`（`ypbin.availability.scan-interval-ms`）：SQL 里用 `TIMESTAMPADD(MICROSECOND, K × max(周期, 兜底) × 1000, COALESCE(last_good_at, first_observed_at)) < NOW()` 选候选 ⇒ **设备彻底不再上报也能发现**（这正是断档判定的核心场景，只靠上报事件永远发现不了） |
+| 多副本安全 | 打开断档 = 插入事件 + `UPDATE device_liveness SET open_outage_id=? WHERE id=? AND open_outage_id IS NULL`；受影响行数为 0 时**撤销刚插入的事件** ⇒ 同一段断档不会被两个副本记两次（否则可用率被双计） |
+| 假断档过滤 | 扫描候选必须「设备仍存在且启用」（一次批量查设备，非循环查）：设备删除/停用后活性行不会自己消失，不筛就会产生**永远消不掉的假断档** |
+| 参数自检 | `IotAvailabilityConfiguration` 启动期校验 K ≥ 1、兜底周期/扫描周期/批次/默认窗口为正：K=0 会让「任何时刻都算断档」，只会在运行期以「数据全错」暴露 |
+| 查询端点 | `GET /devices/{deviceId}/availability?from=&to=`（权限码 `iot:availability:get`，007 与迁移同步 + `IotPermissionCodeGateTest` 覆盖）：返回窗口/断档合计/最长断档/次数/可用率/是否达标/上限值/断档明细（超 200 条置 `truncated`）。窗口给反**报错**而不是静默交换；设备不存在按「查不到」处理（不泄露存在性） |
+
+**验收证据（本轮，本机实跑）**
+
+- `ypbin-iot` 单测 **118/0**（原 90 → 本轮 +28：`OutageDetectorTest` 5、`AvailabilityCalculatorTest` 8、
+  `AvailabilityServiceImplTest` 15）；
+- `ypbin-access` 61/0、`ypbin-architecture-tests` 41/0、`tools/check-iot-sql-equivalence.sh` OK；
+- 真库 IT `OutageAvailabilityIT`（4 例：完整闭环 / 新鲜设备不误判 / 从未有有效数据用首次观测当起点 /
+  逻辑删除活性行必须复活）**本机不跑容器**，由 CI 的 `-Pit` 反应堆执行（CI 断言不出现 Skipped）；
+- ⚠️ 因此本轮的「SQL 时间推进条件」验收依赖 CI（本机只验到编译与纯逻辑），合入前看 CI 结论。
+
+**本轮仍未闭环（如实登记，勿当已完成）**
+
+| # | 事项 | 现状 |
+|---|---|---|
+| **A1** | **access 侧上报接线未做**（下一增量） | `POST /internal/readings` 目前**没有生产调用者** ⇒ 真实链路上还不会产生可用率数据。计划：access 侧 `AccessReadingSink` 换成「有界队列 → 微批 → HTTP 上报」的实现（区别于 S6 的日志占位），含丢弃计数与超时；EMQX 替换依赖 Q4 决策 |
+| **A2** | 读数**值**不落库、Redis 最新值未做 | 依赖 Q8（IoTDB 树/表模型）；本轮刻意只上报「质量+时刻」，不发明取值契约 |
+| **A3** | 维护窗口排除未做 | spec 口径里「统计总时长排除可配置维护窗口」尚未实现，当前窗口时长 = `to - from` |
+| **A4** | 阈值/目标全局常量 | 按设备覆盖目标可用率/最长断档属后续增量 |
+| **A5** | 只有 `NO_GOOD_DATA` 一个原因码 | 链路级原因（断链/设备离线/未接管）与租约联动未做 |
+| **A6** | 租约转移导致的停采仍算断档 | 活性行感知不到归属变化：租户被接管到别的节点后，本节点的最后一次有效数据之后就会被算成断档。需要与归属/租约联动（或在上报里带「本次采集是否仍在进行」） |
+| **A7** | 平台自身停机期间的断档不可分辨原因 | 停机期间没有扫描；恢复后按 `lastGoodAt` 补开一条，跨越停机——时长方向正确，但无法区分「设备断档」与「平台停机」 |
+| **A8** | 采集周期当前靠兜底值 | `device_liveness.poll_interval_ms` 依赖 access 上报的真值；接线（A1）完成前一律走 `fallback-interval-ms`（默认 5s） |
+
 ### 五、替换缝（3a 已备好，3b-2 只需新增自动配置）
 3a 的 `LoggingTenantLinkManager` 已去掉 `@Component`，由 `AccessLeaseConfiguration`（`@AutoConfiguration`
 + `@Bean @ConditionalOnMissingBean`）装配，并有源码门禁守着（四处变异全咬）。⇒ 3b-2 提供真实现时

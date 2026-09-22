@@ -40,3 +40,17 @@ ypbin:
     expected-renew-interval: 10s
     # 允许分配的租户：为空 = **不分配任何**租户（不是「分配全部」）；M0b 起改为读台账表
     assignable-tenant-ids: []
+
+  # 断档与可用率（M-2）：口径见 docs/IOT-PLATFORM-DESIGN.md §5.4，常量见 AvailabilityRules。
+  # 参数不合法会在启动期被拒（K=0 会让任何时刻都算断档，是运行期最难查的一类错）。
+  availability:
+    enabled: true
+    # 断档 = 连续 > k-factor × 采集周期 无有效数据（quality=GOOD）
+    k-factor: 2
+    # 采集周期未知（access 尚未上报真值）时的兜底周期
+    fallback-interval-ms: 5000
+    scan-interval-ms: 15000
+    # 单次扫描最多处理的候选设备数（防一次扫描把库与线程拖住，下轮继续）
+    scan-batch-size: 200
+    # 查询未给 from 时的默认窗口时长
+    default-window-hours: 24

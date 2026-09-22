@@ -1,0 +1,410 @@
+/*
+ * Copyright (c) 2026-present ypbin-admin authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ */
+package cn.ypbin.admin.iot.service.impl;
+
+import cn.ypbin.admin.iot.availability.AvailabilityCalculator;
+import cn.ypbin.admin.iot.availability.AvailabilityProperties;
+import cn.ypbin.admin.iot.availability.AvailabilityResp;
+import cn.ypbin.admin.iot.availability.AvailabilityRules;
+import cn.ypbin.admin.iot.availability.OutageDetector;
+import cn.ypbin.admin.iot.availability.OutageEventResp;
+import cn.ypbin.admin.iot.availability.OutageReason;
+import cn.ypbin.admin.iot.availability.ReadingIngestReq;
+import cn.ypbin.admin.iot.availability.ReadingObservationDto;
+import cn.ypbin.admin.iot.entity.DeviceLiveness;
+import cn.ypbin.admin.iot.entity.IotDevice;
+import cn.ypbin.admin.iot.entity.OutageEvent;
+import cn.ypbin.admin.iot.mapper.DeviceLivenessMapper;
+import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
+import cn.ypbin.admin.iot.mapper.OutageEventMapper;
+import cn.ypbin.admin.iot.service.AvailabilityService;
+import cn.ypbin.starter.core.exception.BusinessException;
+import cn.ypbin.starter.core.exception.GlobalErrorCode;
+import cn.ypbin.starter.core.util.LogSanitizer;
+import cn.ypbin.starter.data.core.EntityStatus;
+import cn.ypbin.starter.tenant.core.TenantContext;
+import com.baomidou.mybatisplus.core.toolkit.IdWorker;
+import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import java.time.Duration;
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.stream.Collectors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+/**
+ * 断档与可用率服务实现（M-2，口径见 {@link AvailabilityRules}）。
+ *
+ * <p><b>静默设备是这条链路存在的理由</b>：设备彻底不再上报时没有任何请求进来，所以断档不能只在
+ * 「收到读数」时判定——必须由周期扫描按「最近有效数据 + K × 采集周期」打开断档。
+ * 上报只负责两件事：刷新活性、以及有效数据到达时闭合断档。</p>
+ *
+ * <p><b>租户上下文</b>：内部上报端点只有 {@code X-Internal-Token}、没有租户身份，而
+ * {@code iot_device} / {@code device_liveness} 都是租户表（插件 fail-closed）⇒ 先用
+ * {@link TenantContext#executeIgnore} 按设备解析出租户，再进入该租户执行写入。扫描同理：
+ * 跨租户读候选，逐条进入各自租户写事件——**绝不**手写 tenant_id 过滤（见租户隔离门禁）。</p>
+ *
+ * @author wenbin
+ * @since 2026-09-22
+ */
+@Service
+public class AvailabilityServiceImpl implements AvailabilityService {
+
+    private static final Logger log = LoggerFactory.getLogger(AvailabilityServiceImpl.class);
+
+    private final DeviceLivenessMapper livenessMapper;
+    private final OutageEventMapper outageMapper;
+    private final IotDeviceMapper deviceMapper;
+    private final AvailabilityProperties properties;
+
+    public AvailabilityServiceImpl(DeviceLivenessMapper livenessMapper, OutageEventMapper outageMapper,
+                                   IotDeviceMapper deviceMapper, AvailabilityProperties properties) {
+        this.livenessMapper = livenessMapper;
+        this.outageMapper = outageMapper;
+        this.deviceMapper = deviceMapper;
+        this.properties = properties;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public int ingest(ReadingIngestReq req) {
+        List<ReadingObservationDto> items = req.getItems();
+        if (items.isEmpty()) {
+            return 0;
+        }
+        Map<Long, DeviceReadingBatch> batches = aggregate(items);
+        Map<Long, Long> tenantByDevice = resolveTenants(batches.keySet());
+        int processed = 0;
+        for (Map.Entry<Long, DeviceReadingBatch> entry : batches.entrySet()) {
+            Long tenantId = tenantByDevice.get(entry.getKey());
+            if (tenantId == null) {
+                // 设备不存在（或不在任何租户）：丢弃并暴露，不静默当成有效上报
+                log.warn("[iot] 读数上报的设备不存在，已丢弃：deviceId={} 条数={}",
+                    LogSanitizer.sanitize(entry.getKey()), entry.getValue().count());
+                continue;
+            }
+            Long deviceId = entry.getKey();
+            DeviceReadingBatch batch = entry.getValue();
+            processed += TenantContext.executeWithTenant(tenantId, () -> applyBatch(tenantId, deviceId, batch));
+        }
+        return processed;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public int scanAndOpenOutages() {
+        if (!properties.isEnabled()) {
+            return 0;
+        }
+        // 跨租户读候选（扫描没有租户身份），逐条进入各自租户写 —— 见类注释
+        List<DeviceLiveness> candidates = TenantContext.executeIgnore(() -> livenessMapper.selectList(
+            Wrappers.<DeviceLiveness>lambdaQuery()
+                .isNull(DeviceLiveness::getOpenOutageId)
+                .apply("COALESCE(last_good_at, first_observed_at) IS NOT NULL")
+                .apply("TIMESTAMPADD(MICROSECOND, CAST(GREATEST(COALESCE(poll_interval_ms, 0), {0}) AS SIGNED)"
+                    + " * {1} * 1000, COALESCE(last_good_at, first_observed_at)) < NOW()",
+                    properties.getFallbackIntervalMs(), properties.getKFactor())
+                .orderByAsc(DeviceLiveness::getId)
+                .last("LIMIT " + properties.getScanBatchSize())));
+        List<DeviceLiveness> collectible = filterCollectible(candidates);
+        int opened = 0;
+        for (DeviceLiveness candidate : collectible) {
+            opened += openOutage(candidate);
+        }
+        if (opened > 0) {
+            log.warn("[iot] 断档扫描：新开断档 {} 个（候选 {} 个，其中可采集 {} 个；K={} 兜底周期={}ms）",
+                opened, candidates.size(), collectible.size(), properties.getKFactor(),
+                properties.getFallbackIntervalMs());
+        }
+        return opened;
+    }
+
+    /**
+     * 只保留「设备仍存在且启用」的候选。
+     *
+     * <p><b>为什么必须筛</b>：设备被删除或停用后，活性行不会自己消失——若不过滤，它们会**永远**被判成断档，
+     * 报表上出现一堆假断档（可用率看起来像坏了一样）。这里一次批量查设备（不是循环查，避免 N+1），
+     * 只保留 {@code status=启用} 且未被逻辑删除的设备。</p>
+     *
+     * @param candidates 扫描候选
+     * @return 可采集的候选
+     */
+    private List<DeviceLiveness> filterCollectible(List<DeviceLiveness> candidates) {
+        if (candidates.isEmpty()) {
+            return List.of();
+        }
+        List<Long> deviceIds = candidates.stream()
+            .map(DeviceLiveness::getDeviceId)
+            .filter(Objects::nonNull)
+            .distinct()
+            .toList();
+        if (deviceIds.isEmpty()) {
+            return List.of();
+        }
+        Set<Long> enabled = TenantContext.executeIgnore(() -> deviceMapper.selectList(
+            Wrappers.<IotDevice>lambdaQuery()
+                .select(IotDevice::getId)
+                .in(IotDevice::getId, deviceIds)
+                .eq(IotDevice::getStatus, EntityStatus.ENABLED.getCode())))
+            .stream()
+            .map(IotDevice::getId)
+            .collect(Collectors.toSet());
+        List<DeviceLiveness> collectible = new ArrayList<>(candidates.size());
+        for (DeviceLiveness candidate : candidates) {
+            if (candidate.getDeviceId() != null && enabled.contains(candidate.getDeviceId())) {
+                collectible.add(candidate);
+            } else {
+                log.debug("[iot] 断档扫描跳过（设备已删除或停用，活性行遗留不算断档）：deviceId={}",
+                    LogSanitizer.sanitize(candidate.getDeviceId()));
+            }
+        }
+        return collectible;
+    }
+
+    @Override
+    public AvailabilityResp query(Long deviceId, LocalDateTime from, LocalDateTime to) {
+        if (deviceId == null) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "设备 ID 不能为空");
+        }
+        IotDevice device = deviceMapper.selectById(deviceId);
+        if (device == null) {
+            // 不存在（含跨租户访问）按「查不到」处理，不泄露存在性
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "设备不存在：" + deviceId);
+        }
+        LocalDateTime now = livenessMapper.selectNow();
+        LocalDateTime windowTo = to != null ? to : now;
+        LocalDateTime windowFrom = from != null
+            ? from : windowTo.minusHours(properties.getDefaultWindowHours());
+        if (windowFrom.isAfter(windowTo)) {
+            // 参数给反了就报错，不静默交换：否则「用错参数」会得到一份看起来正常的报表
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "统计窗口起点必须早于终点：" + windowFrom + " > " + windowTo);
+        }
+        DeviceLiveness liveness = livenessMapper.selectOne(Wrappers.<DeviceLiveness>lambdaQuery()
+            .eq(DeviceLiveness::getDeviceId, deviceId));
+        long intervalMs = OutageDetector.effectiveIntervalMs(
+            liveness == null ? null : liveness.getPollIntervalMs(), properties.getFallbackIntervalMs());
+        List<OutageEvent> rows = outageMapper.selectList(Wrappers.<OutageEvent>lambdaQuery()
+            .eq(OutageEvent::getDeviceId, deviceId)
+            .lt(OutageEvent::getStartTs, windowTo)
+            .and(wrapper -> wrapper.isNull(OutageEvent::getEndTs)
+                .or().gt(OutageEvent::getEndTs, windowFrom))
+            .orderByAsc(OutageEvent::getStartTs)
+            .last("LIMIT " + (AvailabilityRules.MAX_OUTAGE_ROWS + 1)));
+        boolean truncated = rows.size() > AvailabilityRules.MAX_OUTAGE_ROWS;
+        List<OutageEvent> limited = truncated
+            ? new ArrayList<>(rows.subList(0, AvailabilityRules.MAX_OUTAGE_ROWS)) : rows;
+        if (truncated) {
+            log.warn("[iot] 断档明细超过 {} 条已截断（可用率会被低估断档 ⇒ 偏高）：deviceId={} from={} to={}",
+                AvailabilityRules.MAX_OUTAGE_ROWS, LogSanitizer.sanitize(deviceId), windowFrom, windowTo);
+        }
+        List<AvailabilityCalculator.OutageWindow> windows = new ArrayList<>(limited.size());
+        for (OutageEvent row : limited) {
+            windows.add(new AvailabilityCalculator.OutageWindow(row.getStartTs(), row.getEndTs()));
+        }
+        AvailabilityCalculator.Summary summary = AvailabilityCalculator.summarize(windowFrom, windowTo, now,
+            windows, intervalMs, truncated);
+        AvailabilityResp resp = new AvailabilityResp();
+        resp.setDeviceId(deviceId);
+        resp.setFrom(windowFrom);
+        resp.setTo(windowTo);
+        resp.setWindowSeconds(summary.windowSeconds());
+        resp.setOutageSeconds(summary.outageSeconds());
+        resp.setLongestOutageSeconds(summary.longestOutageSeconds());
+        resp.setOutageCount(summary.outageCount());
+        resp.setAvailability(summary.availability());
+        resp.setMeetsTarget(summary.meetsTarget());
+        resp.setTargetAvailability(AvailabilityRules.TARGET_AVAILABILITY);
+        resp.setMaxAllowedOutageSeconds(summary.maxAllowedOutageSeconds());
+        resp.setTruncated(summary.truncated());
+        for (OutageEvent row : limited) {
+            resp.getOutages().add(toResp(row, now));
+        }
+        return resp;
+    }
+
+    /**
+     * 落地一批（同一设备）观察：刷新活性；有效数据到达则闭合进行中的断档。
+     *
+     * @param tenantId 设备所属租户（已进入该租户上下文）
+     * @param deviceId 设备 ID
+     * @param batch    聚合后的批次
+     * @return 处理的观察条数
+     */
+    private int applyBatch(Long tenantId, Long deviceId, DeviceReadingBatch batch) {
+        DeviceLiveness row = livenessMapper.selectByDeviceIncludingDeleted(tenantId, deviceId);
+        boolean created = row == null;
+        if (created) {
+            row = new DeviceLiveness();
+            row.setId(IdWorker.getId());
+            row.setDeviceId(deviceId);
+            row.setPollIntervalMs(0);
+        }
+        // 闭合断档必须用**更新前**的 lastGoodAt/firstObservedAt 当起点（起点不能等于恢复时刻）
+        if (batch.lastGoodAt() != null && row.getOpenOutageId() != null) {
+            LocalDateTime start = OutageDetector.outageStart(row.getLastGoodAt(), row.getFirstObservedAt());
+            closeOutage(row.getOpenOutageId(), start, batch.lastGoodAt());
+            row.setOpenOutageId(null);
+        }
+        if (batch.pollIntervalMs() != null && batch.pollIntervalMs() > 0) {
+            row.setPollIntervalMs(batch.pollIntervalMs());
+        }
+        row.setFirstObservedAt(earliest(row.getFirstObservedAt(), batch.firstObservedAt()));
+        row.setLastObservedAt(latest(row.getLastObservedAt(), batch.lastObservedAt()));
+        row.setLastGoodAt(latest(row.getLastGoodAt(), batch.lastGoodAt()));
+        if (created) {
+            livenessMapper.insert(row);
+        } else {
+            livenessMapper.reviveAndUpdate(row);
+        }
+        return batch.count();
+    }
+
+    /**
+     * 打开一条断档（多副本安全：只有把 {@code open_outage_id} 从 NULL 改成新值的那一方算开成功）。
+     *
+     * @param candidate 候选活性行（来自跨租户扫描）
+     * @return 实际打开返回 1，被其它副本抢先返回 0
+     */
+    private int openOutage(DeviceLiveness candidate) {
+        Long tenantId = candidate.getTenantId();
+        LocalDateTime start = OutageDetector.outageStart(candidate.getLastGoodAt(),
+            candidate.getFirstObservedAt());
+        return TenantContext.executeWithTenant(tenantId, () -> {
+            OutageEvent event = new OutageEvent();
+            event.setId(IdWorker.getId());
+            event.setDeviceId(candidate.getDeviceId());
+            event.setStartTs(start);
+            event.setReason(OutageReason.NO_GOOD_DATA.getCode());
+            outageMapper.insert(event);
+            int marked = livenessMapper.markOpenOutage(candidate.getId(), event.getId());
+            if (marked == 0) {
+                // 另一个副本已开断档：撤销本次插入，避免同一段断档被记两次（可用率会被双计）
+                outageMapper.deleteById(event.getId());
+                log.debug("[iot] 断档已被其它副本打开，撤销本次插入：deviceId={}",
+                    LogSanitizer.sanitize(candidate.getDeviceId()));
+                return 0;
+            }
+            log.warn("[iot] 发现断档：deviceId={} start={}（连续超过 {}×采集周期无有效数据）",
+                LogSanitizer.sanitize(candidate.getDeviceId()), start, properties.getKFactor());
+            return 1;
+        });
+    }
+
+    /**
+     * 闭合断档并计算时长。
+     *
+     * @param outageId 断档事件 ID
+     * @param start    断档起点（可空：起点缺失时只闭合、不算时长）
+     * @param end      恢复时刻
+     */
+    private void closeOutage(Long outageId, LocalDateTime start, LocalDateTime end) {
+        Long durationSeconds = start == null ? null : Math.max(0L, Duration.between(start, end).getSeconds());
+        outageMapper.closeOutage(outageId, end, durationSeconds);
+        log.info("[iot] 断档恢复：outageId={} 时长={}秒", LogSanitizer.sanitize(outageId), durationSeconds);
+    }
+
+    /** 按设备聚合一批观察（同一批里同一设备可能多条）。 */
+    private static Map<Long, DeviceReadingBatch> aggregate(List<ReadingObservationDto> items) {
+        Map<Long, DeviceReadingBatch> byDevice = new LinkedHashMap<>();
+        for (ReadingObservationDto item : items) {
+            if (item == null || item.getDeviceId() == null || item.getTs() == null) {
+                continue;
+            }
+            boolean good = AvailabilityRules.QUALITY_GOOD.equals(item.getQuality());
+            byDevice.merge(item.getDeviceId(), new DeviceReadingBatch(item.getDeviceId(),
+                    item.getPollIntervalMs(), item.getTs(), item.getTs(), good ? item.getTs() : null, 1),
+                (left, right) -> new DeviceReadingBatch(left.deviceId(),
+                    right.pollIntervalMs() != null ? right.pollIntervalMs() : left.pollIntervalMs(),
+                    earliest(left.firstObservedAt(), right.firstObservedAt()),
+                    latest(left.lastObservedAt(), right.lastObservedAt()),
+                    latest(left.lastGoodAt(), right.lastGoodAt()),
+                    left.count() + right.count()));
+        }
+        return byDevice;
+    }
+
+    /** 解析设备 → 租户（内部端点没有租户身份，必须显式忽略租户条件再回到各租户）。 */
+    private Map<Long, Long> resolveTenants(Set<Long> deviceIds) {
+        if (deviceIds.isEmpty()) {
+            return Map.of();
+        }
+        List<IotDevice> devices = TenantContext.executeIgnore(
+            () -> deviceMapper.selectBatchIds(deviceIds));
+        Map<Long, Long> tenantByDevice = new LinkedHashMap<>(devices.size());
+        for (IotDevice device : devices) {
+            if (device.getTenantId() != null) {
+                tenantByDevice.put(device.getId(), device.getTenantId());
+            }
+        }
+        return tenantByDevice;
+    }
+
+    /** 实体 → 视图。 */
+    private static OutageEventResp toResp(OutageEvent row, LocalDateTime now) {
+        OutageEventResp resp = new OutageEventResp();
+        resp.setId(row.getId());
+        resp.setDeviceId(row.getDeviceId());
+        resp.setStartTs(row.getStartTs());
+        resp.setEndTs(row.getEndTs());
+        resp.setReason(row.getReason());
+        boolean ongoing = row.getEndTs() == null;
+        resp.setOngoing(ongoing);
+        if (row.getDurationSec() != null) {
+            resp.setDurationSec(row.getDurationSec());
+        } else if (ongoing && row.getStartTs() != null) {
+            resp.setDurationSec(Math.max(0L, Duration.between(row.getStartTs(), now).getSeconds()));
+        }
+        return resp;
+    }
+
+    /** 取两个时刻里较早的非空值。 */
+    private static LocalDateTime earliest(LocalDateTime left, LocalDateTime right) {
+        if (left == null) {
+            return right;
+        }
+        if (right == null) {
+            return left;
+        }
+        return left.isBefore(right) ? left : right;
+    }
+
+    /** 取两个时刻里较晚的非空值。 */
+    private static LocalDateTime latest(LocalDateTime left, LocalDateTime right) {
+        if (left == null) {
+            return right;
+        }
+        if (right == null) {
+            return left;
+        }
+        return left.isAfter(right) ? left : right;
+    }
+
+    /**
+     * 同一设备在一批观察里的聚合结果。
+     *
+     * @param deviceId         设备 ID
+     * @param pollIntervalMs   采集周期（取批次里最后一个非空值）
+     * @param firstObservedAt  最早观测时刻
+     * @param lastObservedAt   最晚观测时刻
+     * @param lastGoodAt       最晚有效数据时刻（无有效数据为 {@code null}）
+     * @param count            观察条数
+     */
+    private record DeviceReadingBatch(Long deviceId, Integer pollIntervalMs, LocalDateTime firstObservedAt,
+                                      LocalDateTime lastObservedAt, LocalDateTime lastGoodAt, int count) {
+    }
+}

@@ -95,3 +95,20 @@ VALUES (320014, 3200, 'IotLedgerList', 'button', 1, 'iot:ledger:list', 'page.iot
 -- 且在本文件之前执行 ⇒ 新追加的菜单必须自己再授一次
 INSERT INTO sys_role_menu (role_id, menu_id)
 SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (320014, 320015);
+
+-- =============================================================
+-- M-2 断档与可用率菜单与权限（2026-09-22 追加）
+-- 权限码：iot:availability:get（逐台设备可用率查询，租户可见 —— 与影子/标签同为设备页内的能力）
+-- 等价性：本文件追加部分与 migration/2026-09-22-iot-m2-availability-menu.sql 语句等价。
+-- =============================================================
+
+INSERT INTO sys_menu (id, pid, name, type, platform_only, auth_code, title, sort, create_time, status, is_deleted)
+VALUES (320016, 3200, 'IotAvailabilityGet', 'button', 0, 'iot:availability:get', 'page.iot.availability.title', 16, NOW(), 1, 0);
+
+-- 显式授权给平台管理员角色（role 1）：002-data.sql 的批量授权只覆盖 platform_only=1，且在本文件之前执行
+INSERT INTO sys_role_menu (role_id, menu_id)
+SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (320016);
+
+-- 租户可授菜单来自 sys_template_menu（SysAuthTemplateServiceImpl 从它推导），必须一并补授
+INSERT INTO sys_template_menu (template_id, menu_id)
+SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (320016);

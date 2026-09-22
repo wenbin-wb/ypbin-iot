@@ -471,6 +471,13 @@ business 变更台账（产品/设备/点位映射/凭据）
 
 ### 5.4 断档与可用率（继承 spec §12.5 定义，逐台达标）
 
+> **落地状态（2026-09-22，M-2）**：**口径、检出、落库、查询已落地**（`device_liveness` / `outage_event`
+> 两张表 + `AvailabilityRules`/`OutageDetector`/`AvailabilityCalculator` + `/internal/readings` 上报端点
+> + 周期扫描 + `GET /devices/{id}/availability`）。**尚未落地**：① access 侧把读数真正上报（当前端点无生产
+> 调用者，属下一增量）；② 读数**值**的存储（IoTDB/Redis，依赖 Q8）；③ 维护窗口排除、按设备覆盖阈值、
+> 链路级原因码；④ 租约转移导致的停采仍会被算成断档（活性行感知不到归属变化）。完整登记见
+> docs/IOT-ROADMAP.md 四点十二。
+
 ```
 可用率（逐台设备）= 1 - Σ(断档时长) / 统计总时长（时间口径，排除可配置维护窗口）
 断档定义          = 连续 > K×采集周期 无「有效数据」（K 默认 2，可配；有效=quality=GOOD）
