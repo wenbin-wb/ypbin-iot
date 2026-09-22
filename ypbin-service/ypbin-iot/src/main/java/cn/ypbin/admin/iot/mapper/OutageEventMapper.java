@@ -57,6 +57,8 @@ public interface OutageEventMapper extends BaseMapper<OutageEvent> {
      *       不改变结果；但在 {@code executeIgnore} 这类显式跨租户场景下，它是唯一还能收敛租户的护栏）；</li>
      *   <li><b>逻辑删除</b>：{@code is_deleted = 0} **必须**显式写——逻辑删除由 BaseMapper 的注入器实现，
      *       原生 SQL 不会被追加该条件（漏写会把已删断档算进可用率）。</li>
+     *   <li><b>时间参数一律显式 {@code jdbcType=TIMESTAMP}</b>：不写不报错，但会按 {@code jdbcTypeForNull}
+     *       的默认 {@code OTHER} 绑定（实测 {@code setNull(idx, 1111)}）；显式写才绑成 TIMESTAMP。</li>
      * </ul>
      *
      * <p>口径细节：{@code COUNT(*)} 统计的是**满足窗口重叠条件的行数**，包含极少数「裁剪后重叠为 0 秒」

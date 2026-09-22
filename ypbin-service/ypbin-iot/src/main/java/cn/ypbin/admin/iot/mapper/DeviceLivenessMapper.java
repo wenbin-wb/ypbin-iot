@@ -54,8 +54,10 @@ public interface DeviceLivenessMapper extends BaseMapper<DeviceLiveness> {
      *       放到 SQL 的 {@code CASE} 里比较，才是数据库级不变量。</li>
      * </ol>
      *
-     * <p>{@code jdbcType=TIMESTAMP} 是必需的：参数可能为 {@code null}，MyBatis 在 null 且无 jdbcType 时
-     * 对部分驱动会拼不出可执行语句。</p>
+     * <p>{@code jdbcType=TIMESTAMP} 是**纪律要求**（本轮实测校正了因果）：不写时 MyBatis 并不报错，
+     * 而是回落到 {@code configuration.getJdbcTypeForNull()}（默认 {@code OTHER} ⇒ {@code setNull(idx, 1111)}），
+     * 把这些时间列按 OTHER 绑定——类型不对；显式写才能绑成 {@code TIMESTAMP}（{@code setNull(idx, 93)}）。
+     * 对更严格的驱动/配置，缺 jdbcType 也可能直接报「JDBC requires a jdbcType」。</p>
      *
      * <p><b>{@code poll_interval_ms} 为什么**不**做成单调</b>：它是**配置**（采集周期），不是时间戳——
      * 配置合法地会变大或变小，取单调值会让「把周期从 1s 调成 10s」这类正常变更被静默忽略。

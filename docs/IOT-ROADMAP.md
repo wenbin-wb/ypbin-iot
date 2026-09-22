@@ -416,7 +416,7 @@ ERROR The build could not read 1 project
 | 乱序/重放防护 | 有效数据**早于断档起点**时**不闭合**（否则写出 `start > end`、`duration=0` 的假恢复并清掉标记）（状态字段的「只前进」已由 A14 提升为**数据库级**保证，见「观测状态数据库级单调」行） |
 | 候选清理（防饥饿） | 设备已删除/停用的活性行**清理掉**而不是只跳过：候选查询按 `id` 升序 + `LIMIT 扫描批次`，这类行永远满足条件、永远占住前段 ⇒ 累积 ≥ 批次上限后**其它设备的断档再也不会被发现**（是饥饿，不是延迟） |
 | 生效周期口径统一 | SQL 与 `OutageDetector.effectiveIntervalMs` 统一为「上报了正周期就用它，否则用兜底」；并把纯逻辑 `isOutage` **接进生产路径**（开断档前用同一套规则复核，两处口径不一致会先暴露）——此前它是死代码 |
-| **观测状态数据库级单调**（A14 闭环） | `reviveAndUpdate` 的时间戳比较**移到 SQL 的 `CASE` 里**：`last_good_at`/`last_observed_at` 取较大值、`first_observed_at` 取较小值、`poll_interval_ms` 只在正数时更新。Java 侧 `latest()/earliest()` 只保证**单次调用内**正确；两个副本各自拿旧快照写回时旧时间戳会覆盖新的（可用率被算高），只有数据库级比较才是不变量。可空参数一律带 `jdbcType=TIMESTAMP`（否则 MyBatis 拼不出可执行语句） |
+| **观测状态数据库级单调**（A14 闭环） | `reviveAndUpdate` 的时间戳比较**移到 SQL 的 `CASE` 里**：`last_good_at`/`last_observed_at` 取较大值、`first_observed_at` 取较小值、`poll_interval_ms` 只在正数时更新。Java 侧 `latest()/earliest()` 只保证**单次调用内**正确；两个副本各自拿旧快照写回时旧时间戳会覆盖新的（可用率被算高），只有数据库级比较才是不变量。可空参数一律**显式**带 jdbcType（时间列 `TIMESTAMP`、周期列 `INTEGER`）——不写不报错但会按默认 `OTHER` 绑定，类型不对 |
 | **可用率汇总精确化**（A11 闭环） | 汇总改由 `OutageEventMapper.summarizeInWindow` 的**一次聚合**给出（`COUNT`/`SUM`/`MAX` + SQL 侧窗口裁剪 `GREATEST(start_ts, from)` / `LEAST(COALESCE(end_ts, now), to)`、单条 `GREATEST(0, …)` 防负）；`AvailabilityCalculator` 退化为「拿到精确输入后的三件防御（窗口 0、下限 0、封顶到窗口）+ 双条件」。明细改为**最新优先**并仍按上限截断，但**截断不再影响可用率**（此前「明细求和」会在超过上限时低估断档 ⇒ 可用率偏高） |
 | 假断档过滤 | 扫描候选必须「设备仍存在且启用」（一次批量查设备，非循环查）：设备删除/停用后活性行不会自己消失，不筛就会产生**永远消不掉的假断档** |
 | **接入侧上报（A1，已落地）** | access 的读数出口从「日志占位」换成 `HttpAccessReadingSink`：**有界队列 → 微批（默认 200 条 / 1s）→ `POST /internal/readings`**；入队 `offer`（队满**丢弃并计数**，绝不阻塞采集线程）、Feign 超时显式（connect 1s / read 5s / **不重试**）、失败与非法读数分别计数（`iot.access.egress.dropped/failed/invalid`）、停机前尽力刷出队尾；没有内部客户端或显式关闭时**退化为日志占位并打 WARN**（不静默降级）。设备级周期随读数带出（断档用真周期）；上报时刻用 **epoch 毫秒**（跨服务不用字符串时间，避免两端时区/格式配置不一致）。S6（日志占位）至此收口；EMQX 替换待 Q4 |
@@ -435,9 +435,14 @@ ERROR The build could not read 1 project
   **过程如实记录**：该 IT 在 CI 上红过两次，都暴露了真问题或真错误——① `a79b5a2`：
   `filterCollectible` 的批量清理没包 `executeIgnore` ⇒ 租户插件 fail-closed 把整轮扫描打断（**产品缺陷**，已修）；
   ② `eca67a8`：新用例的两条垃圾活性行共用 `device_id` ⇒ 撞 `uk_device_liveness(tenant_id, device_id)`
-  （**用例自身数据错误**，已改为不同 device_id）。以 PR #17 最新一次 `IoT Integration Tests` 的结论为准；
-- 变异累计 **22 处**全部精确转红（本轮 +6，行号逐一经复核实测复现：`observedStateUpdateMustBeMonotonic:73`、
-  `windowSummaryMustBeExactAggregate:91/:92/:93`、`AvailabilityServiceImplTest…:338`、`:349`）；
+  （**用例自身数据错误**，已改为不同 device_id）；
+  ③ `6959e2d`（A14/A11 片）：新用例的原生 SQL 里把 Java 数字分隔符 `20_001` 写进了字符串 ⇒ MySQL
+  `Unknown column '20_001'`（**用例自身数据错误**，已改为 `20001`，`35604b9` 起绿）。
+  ⇒ 三次红**全部是测试代码问题**（两次原生 SQL 字面量、一次用例数据撞唯一键），产品代码在 CI 上一次没红；
+  以**本分支最新一次** `IoT Integration Tests` 的结论为准；
+- 变异累计 **22 处**全部精确转红（本轮 +6，行号按**当前 tip** 经复核实测复现：`observedStateUpdateMustBeMonotonic:74`、
+  `windowSummaryMustBeExactAggregate:95/:98/:101`、`AvailabilityServiceImplTest.queryMustKeepExactSummaryWhenDetailsTruncated:338`、
+  `queryMustRejectMissingTenantContext:349`）；
   此前 16 处为（iot 侧 7：阈值非严格 / 不做窗口裁剪 / 达标只看可用率 / 去掉多副本守卫 /
   去掉设备存在性过滤 / 状态可回退 / 有效数据不闭合断档；access 侧 3：队满改为阻塞 / 失败后仍抛 /
   上报时刻不用 epoch 毫秒）。复核后新增的门禁也做了变异（去掉 SQL 谓词 / 上报路径回写 open_outage_id /

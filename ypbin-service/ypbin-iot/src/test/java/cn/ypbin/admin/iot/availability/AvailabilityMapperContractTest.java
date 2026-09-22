@@ -84,14 +84,16 @@ class AvailabilityMapperContractTest {
     }
 
     @Test
-    @DisplayName("★ A11：窗口汇总必须是聚合 SQL，且显式带 tenant_id 与 is_deleted=0（原生 SQL 绕过自动追加）")
+    @DisplayName("★ A11：窗口汇总必须是聚合 SQL，且显式带 tenant_id 与 is_deleted=0")
     void windowSummaryMustBeExactAggregate() throws IOException {
         String sql = outageMapperSql("summarizeInWindow");
 
         assertThat(sql).as("抽取到的 SQL 不能为空").isNotBlank();
         assertThat(sql).as("必须一次聚合出精确值（明细截断不影响汇总）").contains("SUM(").contains("MAX(")
             .contains("COUNT(*)");
-        assertThat(sql).as("原生聚合 SQL 绕过了逻辑删除与租户条件 ⇒ 必须显式写")
+        // 显式写的理由（按实测更正）：租户条件其实会被 MP 的租户拦截器**重写追加**，显式写属纵深防御
+        // （executeIgnore 等跨租户场景下它是唯一护栏）；而**逻辑删除不会被追加** ⇒ is_deleted 必须显式写
+        assertThat(sql).as("tenant_id 与 is_deleted 都必须显式写：前者是纵深防御，后者是必需（逻辑删除不会被自动追加）")
             .contains("tenant_id = #{tenantId}").contains("is_deleted = 0");
         // SUM 与 MAX **各自**都要有防负（只给 SUM 加会被漏掉一条路径）
         assertThat(sql).as("SUM 侧的单条防负不得缺失（否则脏数据会把可用率抬高）")
