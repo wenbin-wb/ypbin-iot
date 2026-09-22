@@ -16,7 +16,11 @@ import cn.ypbin.admin.iot.entity.TenantLedger;
 import cn.ypbin.admin.iot.entity.TenantNodeAssignment;
 import cn.ypbin.admin.iot.lease.AccessNodeRegistry;
 import cn.ypbin.admin.iot.lease.LeaseAcquireReq;
+import cn.ypbin.admin.iot.lease.LeaseAcquireResp;
 import cn.ypbin.admin.iot.lease.LeaseProperties;
+import cn.ypbin.admin.iot.lease.LeaseRenewItem;
+import cn.ypbin.admin.iot.lease.LeaseRenewReq;
+import cn.ypbin.admin.iot.lease.LeaseRenewResp;
 import cn.ypbin.admin.iot.lease.LeaseState;
 import cn.ypbin.admin.iot.mapper.AccessNodeMapper;
 import cn.ypbin.admin.iot.mapper.TenantLedgerMapper;
@@ -172,6 +176,43 @@ class LeaseDbClockIT {
                     jvmOffset, SESSION_TZ)
                 .isGreaterThan(3600);
         }
+    }
+
+    @Test
+    @DisplayName("★ M0b-4：领取/续约响应必须回传**数据库时钟**（接入侧据此校准到期判据）")
+    void responsesMustExposeDatabaseClockForAccessSide() {
+        purge();
+        registerNode();
+        insertAssignableTenant();
+
+        LeaseProperties properties = new LeaseProperties();
+        properties.setTtl(TTL);
+        properties.setAssignableTenantIds(List.of());
+        LeaseServiceImpl service = new LeaseServiceImpl(assignmentMapper,
+            new AccessNodeRegistry(accessNodeMapper), ledgerMapper, properties,
+            new SimpleMeterRegistry(), transactionTemplate);
+
+        LocalDateTime before = assignmentMapper.selectNow();
+        LeaseAcquireResp acquired = service.acquire(acquireReq());
+        LocalDateTime after = assignmentMapper.selectNow();
+
+        assertThat(acquired.getServerTime()).as("领取响应必须带服务端时间").isNotNull();
+        assertThat(ChronoUnit.SECONDS.between(before, acquired.getServerTime()))
+            .as("服务端时间应落在本次调用窗口内").isGreaterThanOrEqualTo(-1L);
+        assertThat(ChronoUnit.SECONDS.between(acquired.getServerTime(), after))
+            .as("服务端时间应落在本次调用窗口内").isGreaterThanOrEqualTo(-1L);
+
+        LeaseRenewReq renew = new LeaseRenewReq();
+        renew.setAccessNode(NODE);
+        LeaseRenewItem item = new LeaseRenewItem();
+        item.setTenantId(TENANT);
+        item.setEpoch(0L);
+        renew.setLeases(List.of(item));
+        LeaseRenewResp renewed = service.renew(renew);
+
+        assertThat(renewed.getServerTime()).as("续约响应必须带服务端时间").isNotNull();
+        assertThat(ChronoUnit.SECONDS.between(acquired.getServerTime(), renewed.getServerTime()))
+            .as("续约的服务端时间不应早于领取（同一数据库时钟）").isGreaterThanOrEqualTo(-1L);
     }
 
     private static void registerNode() {

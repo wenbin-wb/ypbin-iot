@@ -140,6 +140,72 @@ class AccessLeaseManagerTest {
     }
 
     @Test
+    @DisplayName("★ M0b-4：本机钟**快**时不得提前自停采（判据必须校准到服务端时钟）")
+    void fastLocalClockMustNotSelfFenceEarly() {
+        LocalDateTime localNow = LocalDateTime.now();
+        // 服务端比本机慢 10 分钟（本机钟快）；租约按**服务端时间**还有 2 分钟
+        //（即：不校准就会在「本机时刻」上看起来早过期了 9 分钟 ⇒ 误停采）
+        LocalDateTime serverNow = localNow.minusMinutes(10);
+        when(client.register(any())).thenReturn(R.ok());
+        when(client.acquire(any())).thenReturn(R.ok(acquireRespAt(serverNow,
+            assignmentAt(TENANT_A, serverNow.plusSeconds(120)))));
+        manager.start();
+
+        assertThat(manager.clockSkewSeconds())
+            .as("偏移 = 服务端 - 本机 ⇒ 本机快时为负（允许 1s 往返误差）").isBetween(-601L, -599L);
+        assertThat(meterRegistry.get("iot.access.lease.clock_skew_seconds").gauge().value())
+            .as("偏移要上大盘").isBetween(-601.0d, -599.0d);
+
+        // 本机时刻已比「租约到期时刻」晚了 8 分钟：若不校准就会误判过期而停采（数据凭空变少）
+        manager.renewAndSelfCheck(localNow.plusMinutes(1));
+
+        assertThat(manager.heldTenants()).as("按服务端时钟仍未到期，不得停采").containsExactly(TENANT_A);
+        assertThat(linkManager.isCollecting(TENANT_A)).isTrue();
+        assertThat(meterRegistry.get("iot.access.lease.self_fenced").counter().count()).isZero();
+    }
+
+    @Test
+    @DisplayName("★ M0b-4：本机钟**慢**时必须按服务端时钟判定过期（否则服务端已接管仍在多采）")
+    void slowLocalClockMustSelfFenceOnTime() {
+        LocalDateTime localNow = LocalDateTime.now();
+        // 服务端比本机快 10 分钟（本机钟慢）；租约按服务端时间**已过期 1 秒**
+        LocalDateTime serverNow = localNow.plusMinutes(10);
+        when(client.register(any())).thenReturn(R.ok());
+        when(client.acquire(any())).thenReturn(R.ok(acquireRespAt(serverNow,
+            assignmentAt(TENANT_A, serverNow.minusSeconds(1)))));
+        when(client.renew(any())).thenReturn(R.ok(new LeaseRenewResp()));
+        manager.start();
+
+        assertThat(manager.clockSkewSeconds())
+            .as("本机慢时偏移为正（允许 1s 往返误差）").isBetween(599L, 601L);
+
+        manager.renewAndSelfCheck(localNow.plusSeconds(1));
+
+        assertThat(manager.heldTenants()).as("按服务端时钟已过期，必须自停采").isEmpty();
+        assertThat(linkManager.isCollecting(TENANT_A)).isFalse();
+        assertThat(meterRegistry.get("iot.access.lease.self_fenced").counter().count()).isEqualTo(1.0d);
+    }
+
+    @Test
+    @DisplayName("服务端未回传时间时保留上一次校准（不得退回 0 把校准丢掉）")
+    void missingServerTimeMustKeepPreviousSkew() {
+        LocalDateTime serverNow = LocalDateTime.now().plusMinutes(7);
+        when(client.register(any())).thenReturn(R.ok());
+        when(client.acquire(any())).thenReturn(R.ok(acquireRespAt(serverNow, assignment(TENANT_A))));
+        manager.start();
+        long calibrated = manager.clockSkewSeconds();
+        assertThat(calibrated).isBetween(419L, 421L);
+
+        // 续约回执不带 serverTime（如节点级否决）⇒ 沿用上次偏移
+        LeaseRenewResp noServerTime = new LeaseRenewResp();
+        noServerTime.setServerTime(null);
+        when(client.renew(any())).thenReturn(R.ok(noServerTime));
+        manager.renewAndSelfCheck(LocalDateTime.now());
+
+        assertThat(manager.clockSkewSeconds()).as("校准不得被清掉").isEqualTo(calibrated);
+    }
+
+    @Test
     @DisplayName("节点级失效：整体停采后重新注册并重新领取")
     void nodeFencedShouldRecover() {
         startWith(TENANT_A);
@@ -269,7 +335,26 @@ class AccessLeaseManagerTest {
         LeaseAcquireResp resp = new LeaseAcquireResp();
         resp.setAccessNode(NODE);
         resp.setAssignments(List.of(assignments));
+        // 默认不带服务端时间：既有用例都走「未校准」路径（偏移 0），行为与修复前一致
         return resp;
+    }
+
+    /** 带**服务端时间**的领取响应（M0b-4 校时用例用）。 */
+    private LeaseAcquireResp acquireRespAt(LocalDateTime serverTime, LeaseAssignmentDto... assignments) {
+        LeaseAcquireResp resp = acquireResp(assignments);
+        resp.setServerTime(serverTime);
+        return resp;
+    }
+
+    /** 按**服务端时间**给出到期时刻的归属（本机时钟偏移用例用）。 */
+    private LeaseAssignmentDto assignmentAt(Long tenantId, LocalDateTime leaseExpireAt) {
+        LeaseAssignmentDto dto = new LeaseAssignmentDto();
+        dto.setTenantId(tenantId);
+        dto.setAccessNode(NODE);
+        dto.setLeaseExpireAt(leaseExpireAt);
+        dto.setEpoch(1L);
+        dto.setState(LeaseState.ACTIVE);
+        return dto;
     }
 
     private LeaseAssignmentDto assignment(Long tenantId) {

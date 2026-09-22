@@ -23,6 +23,7 @@ import cn.ypbin.admin.iot.lease.LeaseRenewResp;
 import cn.ypbin.starter.core.model.R;
 import cn.ypbin.starter.core.util.LogSanitizer;
 import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Duration;
 import java.time.LocalDateTime;
@@ -62,6 +63,13 @@ public class AccessLeaseManager {
     /** 指标前缀。 */
     static final String METRIC_PREFIX = "iot.access.lease.";
 
+    /**
+     * 时钟偏移告警阈值（秒）：超过它说明节点时钟与服务端明显不一致，值得一条 WARN。
+     *
+     * <p>偏移本身**不影响租约语义**（判据已用服务端时间校准），它是**运维信号**：NTP 坏了、容器时区配错等。</p>
+     */
+    static final long SKEW_WARN_SECONDS = 5L;
+
     private final ILeaseClient leaseClient;
     private final TenantLinkManager linkManager;
     private final AccessProperties properties;
@@ -75,6 +83,18 @@ public class AccessLeaseManager {
     private final Counter selfFencedCounter;
     private final Counter nodeFencedCounter;
     private final Counter acquiredCounter;
+
+    /**
+     * 本地时钟相对**服务端（数据库）时钟**的偏移：{@code serverTime - localTime}。
+     *
+     * <p>正值 = 服务端比本机快（本机钟慢）；负值 = 本机钟快。它是「单次采样的 NTP 式估计」：
+     * 每次 acquire/renew 回执都带服务端时间，取「调用前后本地时刻的中点」与服务端时间之差，
+     * 抵消掉大部分往返延迟。请求失败时保留上一次的值（不得退回 0——那等于把校准丢掉）。</p>
+     */
+    private final AtomicReference<Duration> clockSkew = new AtomicReference<>(Duration.ZERO);
+
+    /** 上次因时钟偏移告警时的偏移值（用于抑制日志噪声：只在跨过阈值或明显变化时再告警）。 */
+    private final AtomicReference<Duration> lastWarnedSkew = new AtomicReference<>(null);
 
     /**
      * 构造状态机。
@@ -98,6 +118,10 @@ public class AccessLeaseManager {
         this.selfFencedCounter = Counter.builder(METRIC_PREFIX + "self_fenced").register(meterRegistry);
         this.nodeFencedCounter = Counter.builder(METRIC_PREFIX + "node_fenced").register(meterRegistry);
         this.acquiredCounter = Counter.builder(METRIC_PREFIX + "acquired").register(meterRegistry);
+        // 偏移量上大盘：节点钟漂移是「数据看起来莫名变少/变多」的常见根因
+        Gauge.builder(METRIC_PREFIX + "clock_skew_seconds", clockSkew,
+                ref -> ref.get().toMillis() / 1000.0d)
+            .description("本机时钟相对服务端时钟的偏移（正=本机慢）").register(meterRegistry);
     }
 
     /** 启动握手（fail-fast）：注册 + 领取。 */
@@ -137,8 +161,12 @@ public class AccessLeaseManager {
      * @param now 当前时刻
      */
     private void selfFenceExpiredLocally(LocalDateTime now) {
+        // ⚠️ M0b-4 收口：判据必须用**校准到服务端时钟**的时刻——本机钟快会提前停采（数据凭空变少）、
+        //    钟慢会在服务端已判定接管后仍多采一段（双采）。本地时刻只用于本地调度（lastAcquireAt）。
+        Duration skew = clockSkew.get();
+        LocalDateTime serverNow = now.plus(skew);
         List<Long> expired = holdings.entrySet().stream()
-            .filter(entry -> entry.getValue().mustSelfFence(now))
+            .filter(entry -> entry.getValue().mustSelfFence(serverNow))
             .map(Map.Entry::getKey)
             .toList();
         for (Long tenantId : expired) {
@@ -147,8 +175,52 @@ public class AccessLeaseManager {
             reconciler.forget(tenantId);
             linkManager.fence(tenantId, "本地租约已过期（未成功续约）");
             selfFencedCounter.increment();
-            log.warn("本地租约过期，自行停采：tenantId={}", LogSanitizer.sanitize(tenantId));
+            log.warn("本地租约过期，自行停采：tenantId={} 本地时刻={} 校准后={} 时钟偏移={}秒",
+                LogSanitizer.sanitize(tenantId), now, serverNow, skew.toSeconds());
         }
+    }
+
+    /**
+     * 用服务端时间校准本地时钟偏移（每次 acquire/renew 回执都调用）。
+     *
+     * @param localSample 本次调用的本地时刻中点（抵消往返延迟）
+     * @param serverTime  服务端时间；{@code null}（如续约被节点级否决）时保留上一次的校准结果
+     */
+    private void updateClockSkew(LocalDateTime localSample, LocalDateTime serverTime) {
+        if (serverTime == null) {
+            log.debug("服务端未回传时间，沿用上一次时钟校准：偏移={}秒", clockSkew.get().toSeconds());
+            return;
+        }
+        Duration skew = Duration.between(localSample, serverTime);
+        clockSkew.set(skew);
+        Duration warned = lastWarnedSkew.get();
+        boolean crossed = Math.abs(skew.toSeconds()) > SKEW_WARN_SECONDS
+            && (warned == null || Math.abs(warned.toSeconds()) <= SKEW_WARN_SECONDS
+                || Math.abs(skew.minus(warned).toSeconds()) > SKEW_WARN_SECONDS);
+        if (crossed) {
+            lastWarnedSkew.set(skew);
+            log.warn("节点时钟与服务端相差 {} 秒（正=本机慢；租约判据已按服务端时间校准，"
+                + "但请检查 NTP/容器时区）：node={}", skew.toSeconds(),
+                LogSanitizer.sanitize(properties.getNodeId()));
+        } else {
+            log.debug("时钟校准：偏移={}秒", skew.toSeconds());
+        }
+    }
+
+    /**
+     * 本地时刻中点：调用前采样到「现在」的中点，作为服务端时间的本地对应点，抵消大部分往返延迟。
+     *
+     * @param localBefore 调用前的本地时刻
+     * @return 调用前到现在的近似中点
+     */
+    private static LocalDateTime midpoint(LocalDateTime localBefore) {
+        LocalDateTime localAfter = LocalDateTime.now();
+        return localBefore.plus(Duration.between(localBefore, localAfter).dividedBy(2));
+    }
+
+    /** 当前观测到的时钟偏移（秒，正=本机慢）；观测/测试用。 */
+    public long clockSkewSeconds() {
+        return clockSkew.get().toSeconds();
     }
 
     /**
@@ -183,6 +255,7 @@ public class AccessLeaseManager {
             return;
         }
         renewSuccess.increment();
+        updateClockSkew(midpoint(now), resp.getData().getServerTime());
         applyRenewResponse(resp.getData(), now);
     }
 
@@ -316,6 +389,7 @@ public class AccessLeaseManager {
     /** 领取（失败即启动失败）。 */
     private void acquireOrFail() {
         R<LeaseAcquireResp> resp;
+        LocalDateTime localBefore = LocalDateTime.now();
         try {
             resp = leaseClient.acquire(acquireRequest());
         } catch (RuntimeException ex) {
@@ -327,6 +401,7 @@ public class AccessLeaseManager {
                 + LogSanitizer.sanitize(properties.getNodeId()) + ", code="
                 + (resp == null ? "null" : resp.getCode()) + "）");
         }
+        updateClockSkew(midpoint(localBefore), resp.getData().getServerTime());
         applyAcquireResponse(resp.getData());
         log.info("租户领取完成：node={} 持有租户={}", LogSanitizer.sanitize(properties.getNodeId()),
             LogSanitizer.sanitize(holdings.keySet()));

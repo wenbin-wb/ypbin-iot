@@ -211,6 +211,9 @@ public class LeaseServiceImpl implements LeaseService {
 
         LeaseAcquireResp resp = new LeaseAcquireResp();
         resp.setAccessNode(node);
+        // M0b-4 收口：把**服务端（数据库）时间**带给接入侧——它据此校准本地到期判据，
+        // 节点钟快/慢不再影响「是否仍在租约期内」的语义
+        resp.setServerTime(now);
         resp.setAssignments(listAssignmentsOf(node));
         log.info("[iot] 节点领取完成：node={} 持有租户={}", LogSanitizer.sanitize(node),
             LogSanitizer.sanitize(resp.getAssignments().stream().map(LeaseAssignmentDto::getTenantId).toList()));
@@ -225,12 +228,15 @@ public class LeaseServiceImpl implements LeaseService {
         if (!nodeRegistry.isRegistered(node)) {
             // 节点级失效：节点必须整体停采并重新注册（契约里的 nodeFenced）
             resp.setNodeFenced(true);
+            resp.setServerTime(mapper.selectNow());
             log.warn("[iot] 续约来自未注册节点，判定节点失效：node={}", LogSanitizer.sanitize(node));
             return resp;
         }
         // M0b-4：时间基准取**数据库时钟**（多节点时钟漂移会让快的节点提前抢走仍在续约的租户）
         LocalDateTime now = mapper.selectNow();
         LocalDateTime expireAt = now.plus(properties.getTtl());
+        // 同 acquire：回执带服务端时间供接入侧校时
+        resp.setServerTime(now);
         List<Long> requested = new ArrayList<>();
         for (LeaseRenewItem item : req.getLeases()) {
             requested.add(item.getTenantId());

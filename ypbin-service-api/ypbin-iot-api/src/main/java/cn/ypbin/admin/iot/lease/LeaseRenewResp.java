@@ -9,6 +9,7 @@
  */
 package cn.ypbin.admin.iot.lease;
 
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import lombok.Getter;
@@ -32,6 +33,15 @@ public class LeaseRenewResp {
 
     /** 节点级失效（未注册/已被移除）：节点应整体停采并重新注册。 */
     private boolean nodeFenced;
+
+    /**
+     * 服务端时间（**数据库时钟**，非接入节点时钟）。
+     *
+     * <p>见 {@link LeaseAcquireResp#getServerTime()}：接入侧据它校准「本地租约到期」判据，
+     * 避免节点时钟漂移导致提前停采或超期多采。续约失败/未注册时该字段可能为 {@code null}，
+     * 接入侧应沿用上一次的校准结果（不得因此停止判定）。</p>
+     */
+    private LocalDateTime serverTime;
 
     /**
      * 成功回执（防御 null）。

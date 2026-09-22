@@ -394,7 +394,7 @@ ERROR The build could not read 1 project
 | **R8-8** | 「设备/点位变更与版本号**同一事务**」**无自动守卫**：单测用 mock 只能证明「被调用 3 次」；且台账表故障会**阻断设备/点位写入**（可用性耦合） | 未做（可加「bump 失败 ⇒ 业务写入回滚」的真库用例与事务边界门禁） |
 | **R8-9** | **安全网的成本与可观测性**：健康系统也每租户每周期多一次全量 `loadByTenant`（见 G8 行的如实说明）；新指标 `iot.access.config.reconcile.forced`/`...not_applied`/`...changed` 已注册但**未作为指标登记进任何指标文档/大盘**（本文档仅文字提及），且 `deploy/nacos/ypbin-iot.yaml` **没有指标暴露配置**（`/actuator/**` 白名单只在 `ypbin-system.yaml`）⇒ 「可观测」目前只是潜在 | 未做（登记指标 + 补 iot 服务指标暴露配置；如需降低安全网成本，可收敛触发条件或调大间隔） |
 | **P6/P7/P8/P10** | 台账全置 false 静默回落配置／容量不回收存量／`status` 未参与过滤／`renew/release/markExpired` 取节点行锁的残余死锁面 | 与「四点十」登记一致，本轮未动 |
-| **M0b-4 残留** | 接入侧 `AccessLeaseManager` 仍用**本机时钟**做本地过期自停采 | 需租约契约带「服务端时间」，未做 |
+| **M0b-4 残留** | ✅ **已落地**（2026-09-22，见「四点十四」）：租约契约（`LeaseAcquireResp`/`LeaseRenewResp`）带上**服务端（数据库）时间** `serverTime`，接入侧用「服务端时间 + 本地单调流逝」判定到期（本机钟快不再提前停采、钟慢不再超期多采），并把偏移量上大盘 `iot.access.lease.clock_skew_seconds` |
 
 ### 四点十二、M-2 断档与可用率（口径 + 检出 + 落库 + 查询 + access 上报接线）
 
@@ -466,6 +466,35 @@ ERROR The build could not read 1 project
 | **A6** | 租约转移导致的停采仍算断档 | 活性行感知不到归属变化：租户被接管到别的节点后，本节点的最后一次有效数据之后就会被算成断档。需要与归属/租约联动（或在上报里带「本次采集是否仍在进行」） |
 | **A7** | 平台自身停机期间的断档不可分辨原因 | 停机期间没有扫描；恢复后按 `lastGoodAt` 补开一条，跨越停机——时长方向正确，但无法区分「设备断档」与「平台停机」 |
 | **A8** | ~~采集周期当前靠兜底值~~ **已闭环** | access 已随读数上报 `pollIntervalMs`（来自 `DeviceSpec.pollInterval`）；只有上游未给周期（0/null）时才走 `fallback-interval-ms` |
+
+### 四点十四、M-2 时钟收口：租约契约带服务端时间（M0b-4 残留）
+
+**解决什么问题**：续约/接管的时间基准早已统一到**数据库时钟**（M0b-4 服务端一半），但**接入侧**判断
+「本地租约是否已过期（该自停采）」用的仍是**本机时钟**：节点钟快 ⇒ 提前自行停采（数据凭空变少）、
+钟慢 ⇒ 服务端已判定接管后仍多采一段（**双采**）。这是「时钟漂移把正确性变成概率」的典型形态。
+
+**做了什么**
+
+| 面 | 实现 |
+|---|---|
+| 契约 | `LeaseAcquireResp.serverTime` / `LeaseRenewResp.serverTime`（**数据库时钟**；续约被节点级否决时也带上，便于接入侧继续校准） |
+| 服务端 | `LeaseServiceImpl` 在 acquire / renew（含 `nodeFenced` 早退分支）里把 `mapper.selectNow()` 的结果放进响应——与 `leaseExpireAt` **同一次读取**，两者必然自洽 |
+| 接入侧 | `AccessLeaseManager` 维护 `clockSkew = serverTime - 本地采样`（单次采样的 NTP 式估计：取**调用前后本地时刻的中点**抵消往返延迟）；到期判据用 `本地 now + skew`；**回执不带 serverTime 时保留上次校准**（不得退回 0）；|skew| > 5s 时打 WARN（抑制噪声：只在跨阈值或明显变化时告警）；偏移上 gauge `iot.access.lease.clock_skew_seconds`（正 = 本机慢） |
+
+**验收证据（本机实跑）**
+
+- `ypbin-access` 单测 **71/0**（+3：本机钟快不得提前停采 / 钟慢必须按服务端时钟停采 / 缺 serverTime 保留上次校准）；
+- `ypbin-iot` 单测 **126/0**（+1：领取与续约响应必须带服务端时间）；
+- 真库 IT `LeaseDbClockIT` 增 1 例（响应中的服务端时间必须落在调用窗口内、且续约不早于领取），由 CI 的 `-Pit` 执行；
+- 变异 **3 处**（判据退回本机时刻 / 缺 serverTime 时把校准清零 / 服务端不填 serverTime）各自精确转红。
+
+**仍未闭环（本片相关）**
+
+| # | 事项 | 现状 |
+|---|---|---|
+| **C1** | 偏移是**单次采样估计** | 正常 NTP 环境下误差在百毫秒级；若网络抖动极大（RTT 秒级），估计会有同量级偏差。判据本身留有 `ttl` 量级的余量，影响有限；未做多采样中位数/卡尔曼滤波 |
+| **C2** | 偏移只在 acquire/renew 时更新 | 两次调用之间若发生 NTP 阶跃（时钟被大幅纠正），到期判据会短暂用旧偏移（最长一个周期，默认 10s） |
+| **C3** | 未做「偏移过大即拒绝启动」 | 目前只告警 + 上大盘。若要求更严，可在 |skew| > 阈值时直接拒绝领取（需与运维约定阈值，避免误杀） |
 
 ### 五、替换缝（3a 已备好，3b-2 只需新增自动配置）
 3a 的 `LoggingTenantLinkManager` 已去掉 `@Component`，由 `AccessLeaseConfiguration`（`@AutoConfiguration`
