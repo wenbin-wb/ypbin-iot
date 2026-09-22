@@ -13,6 +13,11 @@ import cn.ypbin.iot.core.model.DeviceSpec;
 import cn.ypbin.iot.core.spi.ChangeType;
 import cn.ypbin.iot.core.spi.DeviceChange;
 import cn.ypbin.starter.core.util.LogSanitizer;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -50,11 +55,32 @@ import org.slf4j.LoggerFactory;
  */
 public class IotProtocolTenantLinkManager implements TenantLinkManager {
 
+    /** 空清单退避的起始间隔。 */
+    static final Duration BACKOFF_BASE = Duration.ofSeconds(30);
+
+    /**
+     * 空清单退避的上限。
+     *
+     * <p>取值是权衡：太大 ⇒ 设备刚配好却要等很久才开始采集；太小 ⇒ 退避没意义。
+     * 2 分钟意味着「设备清单刚变非空」最坏等 2 分钟即自动开始采集（无需重启、无需人工干预）。</p>
+     */
+    static final Duration BACKOFF_MAX = Duration.ofMinutes(2);
+
     private static final Logger log = LoggerFactory.getLogger(IotProtocolTenantLinkManager.class);
 
     private final DeviceSpecSource source;
     private final AccessDeviceRegistry registry;
     private final SubscriptionPlanner planner;
+
+    private final Clock clock;
+
+    private final Counter emptySpecCounter;
+
+    /** 因退避跳过的取数次数（观测「省了多少次远端调用」）。 */
+    private final Counter backoffSkippedCounter;
+
+    /** 每个租户的空清单退避状态（有设备即移除）。 */
+    private final Map<Long, EmptyBackoff> emptyBackoff = new ConcurrentHashMap<>();
 
     /** 本节点正在采集的租户 → 已推给框架的设备（deviceId → 当时那份规格，断链时原样用于 REMOVE）。 */
     private final Map<Long, Map<String, DeviceSpec>> collected = new ConcurrentHashMap<>();
@@ -68,10 +94,14 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
     private final Set<Long> collecting = ConcurrentHashMap.newKeySet();
 
     public IotProtocolTenantLinkManager(DeviceSpecSource source, AccessDeviceRegistry registry,
-                                        SubscriptionPlanner planner) {
+                                        SubscriptionPlanner planner, MeterRegistry meterRegistry,
+                                        Clock clock) {
         this.source = source;
         this.registry = registry;
         this.planner = planner;
+        this.clock = clock;
+        this.emptySpecCounter = meterRegistry.counter("ypbin.access.spec.empty");
+        this.backoffSkippedCounter = meterRegistry.counter("ypbin.access.spec.backoff.skipped");
     }
 
     /**
@@ -88,6 +118,11 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
         collecting.add(tenantId);
         Map<String, DeviceSpec> devices = collected.get(tenantId);
         if (devices == null) {
+            if (inEmptyBackoff(tenantId)) {
+                // S7：空清单退避窗口内**不再打远端**（否则零设备租户每 15s 一次调用 + 一条 WARN）
+                backoffSkippedCounter.increment();
+                return;
+            }
             devices = new LinkedHashMap<>();
             for (DeviceSpec device : source.loadByTenant(tenantId)) {
                 devices.put(device.deviceId(), device);
@@ -95,11 +130,11 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
             if (devices.isEmpty()) {
                 // **空清单不得被缓存**：取数失败（内部接口尚未就绪/瞬时抖动）返回的就是空集合，
                 // 若在此缓存，该租户会被永久钉死为「零设备」且不再重取——与 B1 同类、更早一步的静默零数据。
-                // 这里只是「本轮跳过」，下一个租约周期会重新取数。
-                log.warn("[access] 租户设备清单为空，本轮不缓存并等待下轮重取：tenantId={}"
-                    + "（若持续为空，请检查点位映射与内部接口）", LogSanitizer.sanitize(tenantId));
+                // 这里只是「本轮跳过」，并按 S7 退避后重取。
+                onEmptySpec(tenantId);
                 return;
             }
+            clearEmptyBackoff(tenantId);
             collected.put(tenantId, devices);
             for (DeviceSpec device : devices.values()) {
                 registry.emit(new DeviceChange(ChangeType.ADD, device,
@@ -110,14 +145,52 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
         }
         int subscribed = planner.subscribe(List.copyOf(devices.values()));
         if (subscribed > 0) {
-            log.info("[access] 已建立/补建订阅：tenantId={} 本次订阅设备数={}",
+            log.info("[access] 已发起订阅（异步完成；成败看 subscribe.success/failure 与日志）：tenantId={} 本次发起设备数={}",
                 LogSanitizer.sanitize(tenantId), subscribed);
+        }
+    }
+
+    /** 是否处于空清单退避窗口内。 */
+    private boolean inEmptyBackoff(Long tenantId) {
+        EmptyBackoff state = emptyBackoff.get(tenantId);
+        return state != null && clock.instant().isBefore(state.nextRetryAt());
+    }
+
+    /** 记一次空清单：计数、推进退避、分级日志（首次 WARN，之后 DEBUG，避免日志噪声）。 */
+    private void onEmptySpec(Long tenantId) {
+        emptySpecCounter.increment();
+        EmptyBackoff previous = emptyBackoff.get(tenantId);
+        int attempts = previous == null ? 1 : previous.attempts() + 1;
+        Duration delay = backoffDelay(attempts);
+        emptyBackoff.put(tenantId, new EmptyBackoff(attempts, clock.instant().plus(delay)));
+        if (attempts == 1) {
+            log.warn("[access] 租户设备清单为空，本轮不缓存并退避重取：tenantId={} 下次重取={} 秒后"
+                + "（若持续为空，请检查点位映射与内部接口）", LogSanitizer.sanitize(tenantId),
+                delay.toSeconds());
+        } else {
+            log.debug("[access] 租户设备清单仍为空，退避中：tenantId={} 已连续={} 次 下次重取={} 秒后",
+                LogSanitizer.sanitize(tenantId), attempts, delay.toSeconds());
+        }
+    }
+
+    /** 指数退避（起始 {@link #BACKOFF_BASE}，上限 {@link #BACKOFF_MAX}）。 */
+    private static Duration backoffDelay(int attempts) {
+        long millis = BACKOFF_BASE.toMillis() * (1L << Math.min(attempts - 1, 20));
+        return Duration.ofMillis(Math.min(millis, BACKOFF_MAX.toMillis()));
+    }
+
+    /** 取到设备后清除退避状态。 */
+    private void clearEmptyBackoff(Long tenantId) {
+        if (emptyBackoff.remove(tenantId) != null) {
+            log.info("[access] 租户设备清单已非空，退出退避：tenantId={}",
+                LogSanitizer.sanitize(tenantId));
         }
     }
 
     @Override
     public synchronized void fence(Long tenantId, String reason) {
         collecting.remove(tenantId);
+        emptyBackoff.remove(tenantId);
         Map<String, DeviceSpec> devices = collected.remove(tenantId);
         if (devices == null) {
             return;
@@ -150,5 +223,16 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
     @Override
     public Set<Long> collectingTenants() {
         return Set.copyOf(collecting);
+    }
+
+    /**
+     * 空清单退避状态。
+     *
+     * @param attempts    连续为空的次数
+     * @param nextRetryAt 下一次允许重取的时刻
+     * @author wenbin
+     * @since 2026-09-21
+     */
+    private record EmptyBackoff(int attempts, Instant nextRetryAt) {
     }
 }

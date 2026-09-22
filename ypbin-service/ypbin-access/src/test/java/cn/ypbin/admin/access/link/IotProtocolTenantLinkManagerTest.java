@@ -17,7 +17,12 @@ import cn.ypbin.iot.core.model.Endpoint;
 import cn.ypbin.iot.core.protocol.ProtocolCode;
 import cn.ypbin.iot.core.spi.ChangeType;
 import cn.ypbin.iot.core.spi.DeviceChange;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -46,6 +51,9 @@ class IotProtocolTenantLinkManagerTest {
     private FakeSource source;
     private AccessDeviceRegistry registry;
     private IotProtocolTenantLinkManager linkManager;
+
+    /** 可推进的假时钟：退避是时间相关行为，必须能「把时间推过去」而不是靠 sleep。 */
+    private final MutableClock clock = new MutableClock();
     private final List<Integer> subscribedBatchSizes = new ArrayList<>();
     private FakeFramework framework;
 
@@ -56,7 +64,7 @@ class IotProtocolTenantLinkManagerTest {
         linkManager = new IotProtocolTenantLinkManager(source, registry, devices -> {
             subscribedBatchSizes.add(devices.size());
             return devices.size();
-        });
+        }, new SimpleMeterRegistry(), clock);
         framework = new FakeFramework();
         registry.addChangeListener(framework::onChange);
     }
@@ -102,18 +110,27 @@ class IotProtocolTenantLinkManagerTest {
     }
 
     @Test
-    @DisplayName("★ 空清单不得被缓存：取数失败（返回空）后必须在下一轮重新取数并对账订阅")
-    void emptyDeviceListMustNotBePinned() {
-        // 第一轮：取数失败（source 返回空）——不得把「零设备」钉死
+    @DisplayName("★ N-1+S7：空清单不缓存（退避后必须重取），且**退避窗口内不得再打远端**")
+    void emptyDeviceListMustNotBePinnedAndMustBackOff() {
+        // 第一轮：取数失败（返回空）⇒ 不缓存、进入退避
         linkManager.startCollecting(TENANT_A);
         assertThat(framework.actions).isEmpty();
+        assertThat(source.loadCallCount(TENANT_A)).as("第一轮应取数一次").isEqualTo(1);
 
-        // 第二轮：内部接口恢复，设备出现 ⇒ 必须能取到并建链 + 订阅
+        // 退避窗口内再被调用（每个租约周期都会调用 startCollecting）：不得再打远端
+        linkManager.startCollecting(TENANT_A);
+        assertThat(source.loadCallCount(TENANT_A))
+            .as("S7：退避窗口内不得重取（否则零设备租户每 15s 一次调用 + 一条 WARN）")
+            .isEqualTo(1);
+
+        // 推过退避窗口后设备出现 ⇒ 必须重新取数、建链并订阅（N-1 的自愈不能被退避破坏）
+        clock.advance(IotProtocolTenantLinkManager.BACKOFF_BASE.plusSeconds(1));
         source.devices.put(TENANT_A, List.of(device("d1")));
         linkManager.startCollecting(TENANT_A);
 
         assertThat(framework.actions).as("恢复后必须重新取数并建链").containsExactly("ADD:d1");
         assertThat(subscribedBatchSizes).as("恢复后必须对账订阅").containsExactly(1);
+        assertThat(source.loadCallCount(TENANT_A)).as("退避到期后应重取一次").isEqualTo(2);
     }
 
     @Test
@@ -183,13 +200,46 @@ class IotProtocolTenantLinkManagerTest {
     }
 
     /** 假取数源。 */
+    /** 可推进时钟（仅用于测试退避窗口）。 */
+    private static final class MutableClock extends Clock {
+
+        private Instant now = Instant.parse("2026-09-21T12:00:00Z");
+
+        void advance(Duration duration) {
+            now = now.plus(duration);
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            return this;
+        }
+
+        @Override
+        public Instant instant() {
+            return now;
+        }
+    }
+
     private static final class FakeSource implements DeviceSpecSource {
 
         private final Map<Long, List<DeviceSpec>> devices = new HashMap<>();
 
+        /** 取数调用次数（S7 用它证明「退避窗口内不再打远端」）。 */
+        private final Map<Long, Integer> loadCalls = new HashMap<>();
+
         @Override
         public List<DeviceSpec> loadByTenant(Long tenantId) {
+            loadCalls.merge(tenantId, 1, Integer::sum);
             return devices.getOrDefault(tenantId, List.of());
+        }
+
+        int loadCallCount(Long tenantId) {
+            return loadCalls.getOrDefault(tenantId, 0);
         }
 
         @Override
