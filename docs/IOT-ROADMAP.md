@@ -328,6 +328,9 @@ ERROR The build could not read 1 project
 彻底闭环需要租约契约带上**服务端时间**（如 `LeaseAcquireResp`/`RenewAck` 增加 serverTime），
 接入侧以「服务端时间 + 本地单调流逝」判断。属 M-2 数据面/契约项，登记在此。
 
+> ✅ **已由「四点十四」闭环（2026-09-22）**：契约已带 `serverTime`，接入侧按「服务端时间 + 本地单调流逝」判定；
+> 上面这段保留为历史背景，不要再当作未闭环项。
+
 ### 四点十一、M-2：接入侧消费 `config_epoch`（P4）与**设备变更自动对账**（G7）
 
 **解决了什么**：`config_epoch` 此前**没有消费方**（P4：接入侧从不调 `batchEpoch`），而设备清单只在
@@ -394,7 +397,7 @@ ERROR The build could not read 1 project
 | **R8-8** | 「设备/点位变更与版本号**同一事务**」**无自动守卫**：单测用 mock 只能证明「被调用 3 次」；且台账表故障会**阻断设备/点位写入**（可用性耦合） | 未做（可加「bump 失败 ⇒ 业务写入回滚」的真库用例与事务边界门禁） |
 | **R8-9** | **安全网的成本与可观测性**：健康系统也每租户每周期多一次全量 `loadByTenant`（见 G8 行的如实说明）；新指标 `iot.access.config.reconcile.forced`/`...not_applied`/`...changed` 已注册但**未作为指标登记进任何指标文档/大盘**（本文档仅文字提及），且 `deploy/nacos/ypbin-iot.yaml` **没有指标暴露配置**（`/actuator/**` 白名单只在 `ypbin-system.yaml`）⇒ 「可观测」目前只是潜在 | 未做（登记指标 + 补 iot 服务指标暴露配置；如需降低安全网成本，可收敛触发条件或调大间隔） |
 | **P6/P7/P8/P10** | 台账全置 false 静默回落配置／容量不回收存量／`status` 未参与过滤／`renew/release/markExpired` 取节点行锁的残余死锁面 | 与「四点十」登记一致，本轮未动 |
-| **M0b-4 残留** | ✅ **已落地**（2026-09-22，见「四点十四」）：租约契约（`LeaseAcquireResp`/`LeaseRenewResp`）带上**服务端（数据库）时间** `serverTime`，接入侧用「服务端时间 + 本地单调流逝」判定到期（本机钟快不再提前停采、钟慢不再超期多采），并把偏移量上大盘 `iot.access.lease.clock_skew_seconds` |
+| **M0b-4 残留** | ✅ **已落地**（2026-09-22，见「四点十四」）：租约契约（`LeaseAcquireResp`/`LeaseRenewResp`）带上**服务端（数据库）时间** `serverTime`，接入侧用「服务端时间 + 本地单调流逝」判定到期（本机钟快不再提前停采、钟慢不再超期多采），并**注册**偏移 gauge `iot.access.lease.clock_skew_seconds`（⚠️ 接入侧的指标**暴露/采集链路未接**：本仓无 actuator exposure 配置、pom 里也无 micrometer registry，见 C4） |
 
 ### 四点十二、M-2 断档与可用率（口径 + 检出 + 落库 + 查询 + access 上报接线）
 
@@ -483,18 +486,22 @@ ERROR The build could not read 1 project
 
 **验收证据（本机实跑）**
 
-- `ypbin-access` 单测 **71/0**（+3：本机钟快不得提前停采 / 钟慢必须按服务端时钟停采 / 缺 serverTime 保留上次校准）；
+- `ypbin-access` 单测 **74/0**（+6：本机钟快不得提前停采 / 钟慢必须按服务端时钟停采 / 缺 serverTime 保留上次校准 / **中点采样抵消 RTT** / **拒绝过大偏移** / 告警阈值对称）；
 - `ypbin-iot` 单测 **126/0**（+1：领取与续约响应必须带服务端时间）；
 - 真库 IT `LeaseDbClockIT` 增 1 例（响应中的服务端时间必须落在调用窗口内、且续约不早于领取），由 CI 的 `-Pit` 执行；
-- 变异 **3 处**（判据退回本机时刻 / 缺 serverTime 时把校准清零 / 服务端不填 serverTime）各自精确转红。
+- 变异 **6 处**（判据退回本机时刻 / 缺 serverTime 时把校准清零 / 服务端不填 serverTime / 去掉中点采样 / 去掉过大偏移保护 / 去掉阈值对称判据）各自精确转红；其中「去掉中点采样」初稿时**逃逸**（71 条全绿、实测引入 +1.2s 偏差），补用例后才被咬住。
 
 **仍未闭环（本片相关）**
 
 | # | 事项 | 现状 |
 |---|---|---|
-| **C1** | 偏移是**单次采样估计** | 正常 NTP 环境下误差在百毫秒级；若网络抖动极大（RTT 秒级），估计会有同量级偏差。判据本身留有 `ttl` 量级的余量，影响有限；未做多采样中位数/卡尔曼滤波 |
+| **C1** | 偏移估计的**精度上限≈1 秒**（初稿「百毫秒级」**已被复核实测证伪**） | 两处**独立的秒级截断**：① 线上格式 `yyyy-MM-dd HH:mm:ss`（starter 的 `JacksonProperties` 默认，纳秒被丢弃，探针实测）；② `SELECT NOW()`（MySQL 无 fsp 参数即整秒）。⇒ 偏移**单向偏小**（最多晚停采 ~1s，属「超期多采」侧）；网络**非对称**误差 ≤ RTT/2（本仓最坏 RTT 4s ⇒ ≤2s）。未做多采样中位数/滤波 |
+| **C2** | 校准点覆盖 | 已在 acquire、**周期重领（`refreshAssignmentsIfDue`）**、renew 三处校准；renew 的本地采样改为**紧贴调用前**（原先用本轮起点，把 selfFence/组装耗时算进去程、偏移偏正）。两次校准之间若发生 NTP 阶跃，仍会短暂用旧偏移（最长一个周期）——但见 C3 的上限保护 |
+| **C3** | ~~未做「偏移过大即拒绝启动」~~ **已加保护** | `MAX_ACCEPTED_SKEW = 10min`：超过它的读数**拒绝采用**并保留上次校准（WARN）——避免 DB 故障切换/时区误配/向前 NTP 阶跃时把**全部租户**判过期、整批拆链。代价是「真有大偏移时不会立刻纠正」（会持续告警）。**未**在启动期直接拒绝（需与运维约定阈值，避免误杀） |
+| **C4** | 接入侧指标**暴露链路未接** | gauge 已注册，但本仓没有 `management.endpoints.web.exposure` 配置、pom 里也没有任何 micrometer registry ⇒ **实际抓不到**（Spring Boot 默认只暴露 health）。与 iot 侧的 A12 同类，需统一决策 |
+| **C5** | 偏移越过告警阈值的判据必须**对称** | 已改用 `Duration#abs().compareTo(5s) > 0`：`Duration.toSeconds()` 对负值**向下取整**（-5.5s→-6），原先的 `Math.abs(toSeconds())` 会让 +5.5s 判成「未超阈值」而 -5.5s 判成「超阈值」（复核实测 +6.0s/-5.0s 不对称）；已有单测覆盖四种符号/边界 |
 | **C2** | 偏移只在 acquire/renew 时更新 | 两次调用之间若发生 NTP 阶跃（时钟被大幅纠正），到期判据会短暂用旧偏移（最长一个周期，默认 10s） |
-| **C3** | 未做「偏移过大即拒绝启动」 | 目前只告警 + 上大盘。若要求更严，可在 |skew| > 阈值时直接拒绝领取（需与运维约定阈值，避免误杀） |
+
 
 ### 五、替换缝（3a 已备好，3b-2 只需新增自动配置）
 3a 的 `LoggingTenantLinkManager` 已去掉 `@Component`，由 `AccessLeaseConfiguration`（`@AutoConfiguration`

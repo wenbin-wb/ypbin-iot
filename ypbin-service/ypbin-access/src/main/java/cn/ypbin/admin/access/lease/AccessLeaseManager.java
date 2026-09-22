@@ -25,6 +25,7 @@ import cn.ypbin.starter.core.util.LogSanitizer;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -97,6 +98,17 @@ public class AccessLeaseManager {
     private final AtomicReference<Duration> lastWarnedSkew = new AtomicReference<>(null);
 
     /**
+     * 可以接受的**最大**时钟偏移：超过它说明「其中一个时钟坏了」（DB 故障切换、容器时区误配、NTP 未同步）。
+     *
+     * <p>此时**拒绝采用**本次读数并保留上一次校准，同时告警——比「照着一个离谱的偏移把全部租户判过期、
+     * 整批拆链」安全得多（NTP 向前阶跃时 {@code serverNow} 会突然前跳 2Δ，那种批量自停采没有意义）。</p>
+     */
+    static final Duration MAX_ACCEPTED_SKEW = Duration.ofMinutes(10);
+
+    /** 本地时间源（生产=系统时钟；单测注入可推进/可偏移的假时钟）。 */
+    private final Clock clock;
+
+    /**
      * 构造状态机。
      *
      * @param leaseClient  租约客户端
@@ -107,11 +119,12 @@ public class AccessLeaseManager {
      */
     public AccessLeaseManager(ILeaseClient leaseClient, TenantLinkManager linkManager,
             AccessProperties properties, MeterRegistry meterRegistry,
-            ConfigEpochReconciler reconciler) {
+            ConfigEpochReconciler reconciler, Clock clock) {
         this.leaseClient = leaseClient;
         this.linkManager = linkManager;
         this.properties = properties;
         this.reconciler = reconciler;
+        this.clock = clock;
         this.renewSuccess = Counter.builder(METRIC_PREFIX + "renew.success").register(meterRegistry);
         this.renewFailure = Counter.builder(METRIC_PREFIX + "renew.failure").register(meterRegistry);
         this.revokedCounter = Counter.builder(METRIC_PREFIX + "revoked").register(meterRegistry);
@@ -121,6 +134,7 @@ public class AccessLeaseManager {
         // 偏移量上大盘：节点钟漂移是「数据看起来莫名变少/变多」的常见根因
         Gauge.builder(METRIC_PREFIX + "clock_skew_seconds", clockSkew,
                 ref -> ref.get().toMillis() / 1000.0d)
+            .baseUnit("seconds")
             .description("本机时钟相对服务端时钟的偏移（正=本机慢）").register(meterRegistry);
     }
 
@@ -128,14 +142,14 @@ public class AccessLeaseManager {
     public void start() {
         registerOrFail();
         // 必须在领取之前记录：否则调度器若在这一瞬抢跑，会把「还没握手」误判为「到点重领」
-        lastAcquireAt.set(LocalDateTime.now());
+        lastAcquireAt.set(LocalDateTime.now(clock));
         acquireOrFail();
-        lastAcquireAt.set(LocalDateTime.now());
+        lastAcquireAt.set(LocalDateTime.now(clock));
     }
 
     /** 对外入口（调度器用）。 */
     public void renewAndSelfCheck() {
-        renewAndSelfCheck(LocalDateTime.now());
+        renewAndSelfCheck(LocalDateTime.now(clock));
     }
 
     /**
@@ -192,11 +206,19 @@ public class AccessLeaseManager {
             return;
         }
         Duration skew = Duration.between(localSample, serverTime);
+        if (skew.abs().compareTo(MAX_ACCEPTED_SKEW) > 0) {
+            // 拒绝离谱读数：宁可继续用上一次校准 + 告警，也不要照着它把全部租户判过期（批量拆链）
+            log.warn("时钟偏移 {} 秒超过可接受上限 {} 秒，**拒绝采用**本次读数（保留上次校准 {} 秒；"
+                + "请检查 DB/容器/NTP 时钟，可能是故障切换或时区误配）：node={}", skew.toSeconds(),
+                MAX_ACCEPTED_SKEW.toSeconds(), clockSkew.get().toSeconds(),
+                LogSanitizer.sanitize(properties.getNodeId()));
+            return;
+        }
         clockSkew.set(skew);
         Duration warned = lastWarnedSkew.get();
-        boolean crossed = Math.abs(skew.toSeconds()) > SKEW_WARN_SECONDS
-            && (warned == null || Math.abs(warned.toSeconds()) <= SKEW_WARN_SECONDS
-                || Math.abs(skew.minus(warned).toSeconds()) > SKEW_WARN_SECONDS);
+        boolean crossed = exceedsWarnThreshold(skew)
+            && (warned == null || !exceedsWarnThreshold(warned)
+                || skew.minus(warned).abs().compareTo(Duration.ofSeconds(SKEW_WARN_SECONDS)) > 0);
         if (crossed) {
             lastWarnedSkew.set(skew);
             log.warn("节点时钟与服务端相差 {} 秒（正=本机慢；租约判据已按服务端时间校准，"
@@ -213,9 +235,23 @@ public class AccessLeaseManager {
      * @param localBefore 调用前的本地时刻
      * @return 调用前到现在的近似中点
      */
-    private static LocalDateTime midpoint(LocalDateTime localBefore) {
-        LocalDateTime localAfter = LocalDateTime.now();
+    private LocalDateTime midpoint(LocalDateTime localBefore) {
+        LocalDateTime localAfter = LocalDateTime.now(clock);
         return localBefore.plus(Duration.between(localBefore, localAfter).dividedBy(2));
+    }
+
+    /**
+     * 是否超过告警阈值。
+     *
+     * <p>必须用 {@link Duration#abs()} **比较 Duration 本身**：{@code Duration.toSeconds()} 对负值**向下取整**
+     * （-5.5s → -6），用 {@code Math.abs(toSeconds())} 会让 +5.5s 判成「未超阈值」而 -5.5s 判成「超阈值」——
+     * 同量级偏移、方向不同结论不同（外委复核实测 +6.0s/-5.0s 不对称）。</p>
+     *
+     * @param skew 偏移
+     * @return 超过阈值返回 {@code true}
+     */
+    static boolean exceedsWarnThreshold(Duration skew) {
+        return skew.abs().compareTo(Duration.ofSeconds(SKEW_WARN_SECONDS)) > 0;
     }
 
     /** 当前观测到的时钟偏移（秒，正=本机慢）；观测/测试用。 */
@@ -240,6 +276,8 @@ public class AccessLeaseManager {
         }
         req.setLeases(items);
         R<LeaseRenewResp> resp;
+        // 紧贴调用前采样：用本轮起点（now）会把 selfFence/组装耗时算进去程，让偏移偏正（复核 R8-5）
+        LocalDateTime renewBefore = LocalDateTime.now(clock);
         try {
             resp = leaseClient.renew(req);
         } catch (RuntimeException ex) {
@@ -255,7 +293,7 @@ public class AccessLeaseManager {
             return;
         }
         renewSuccess.increment();
-        updateClockSkew(midpoint(now), resp.getData().getServerTime());
+        updateClockSkew(midpoint(renewBefore), resp.getData().getServerTime());
         applyRenewResponse(resp.getData(), now);
     }
 
@@ -340,6 +378,7 @@ public class AccessLeaseManager {
             return;
         }
         lastAcquireAt.set(now);
+        LocalDateTime localBefore = LocalDateTime.now(clock);
         R<LeaseAcquireResp> resp;
         try {
             resp = leaseClient.acquire(acquireRequest());
@@ -356,6 +395,7 @@ public class AccessLeaseManager {
                 LogSanitizer.sanitize(properties.getNodeId()), resp == null ? "null" : resp.getCode());
             return;
         }
+        updateClockSkew(midpoint(localBefore), resp.getData().getServerTime());
         int gained = applyAcquireResponse(resp.getData());
         if (gained > 0) {
             acquiredCounter.increment(gained);
@@ -389,7 +429,7 @@ public class AccessLeaseManager {
     /** 领取（失败即启动失败）。 */
     private void acquireOrFail() {
         R<LeaseAcquireResp> resp;
-        LocalDateTime localBefore = LocalDateTime.now();
+        LocalDateTime localBefore = LocalDateTime.now(clock);
         try {
             resp = leaseClient.acquire(acquireRequest());
         } catch (RuntimeException ex) {

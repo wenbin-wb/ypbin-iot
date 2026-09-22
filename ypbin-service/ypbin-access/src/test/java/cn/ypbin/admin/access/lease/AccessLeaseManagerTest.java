@@ -35,6 +35,10 @@ import cn.ypbin.admin.iot.lease.TenantEpochItem;
 import cn.ypbin.starter.core.model.R;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.time.LocalDateTime;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
@@ -50,6 +54,10 @@ import org.mockito.ArgumentCaptor;
  * @since 2026-09-20
  */
 class AccessLeaseManagerTest {
+
+    /** 可推进/可偏移的假时钟：时钟校准是时间相关行为，必须能控制而不是 sleep。 */
+    private final MutableClock clock = new MutableClock();
+
 
     private static final String NODE = "access-1";
     private static final long TENANT_A = 11L;
@@ -74,7 +82,7 @@ class AccessLeaseManagerTest {
         // spy：既要它真实工作（按版本号触发对账），又要能断言停采路径确实调了 forget
         reconciler = spy(new ConfigEpochReconciler(client, linkManager, meterRegistry,
             Clock.systemUTC(), 300_000L));
-        manager = new AccessLeaseManager(client, linkManager, properties, meterRegistry, reconciler);
+        manager = new AccessLeaseManager(client, linkManager, properties, meterRegistry, reconciler, clock);
         // 每个租约周期都会打一次 epoch 对账：默认给「没有任何条目」的成功信封，
         // 避免用例里出现 null 信封的错误日志（影响可读性，也会掩盖真问题）
         when(client.batchEpoch()).thenReturn(R.ok(epochBatch()));
@@ -120,7 +128,7 @@ class AccessLeaseManagerTest {
     @DisplayName("续约：回执刷新到期时间与 epoch；被回收的租户立即停采")
     void renewShouldRefreshAndFenceRevoked() {
         startWith(TENANT_A, TENANT_B);
-        LocalDateTime newExpiry = LocalDateTime.now().plusSeconds(60);
+        LocalDateTime newExpiry = LocalDateTime.now(clock).plusSeconds(60);
         LeaseRenewResp resp = new LeaseRenewResp();
         resp.setRenewedLeases(List.of(ack(TENANT_A, newExpiry, 3L)));
         resp.setRevokedTenantIds(List.of(TENANT_B));
@@ -142,7 +150,7 @@ class AccessLeaseManagerTest {
     @Test
     @DisplayName("★ M0b-4：本机钟**快**时不得提前自停采（判据必须校准到服务端时钟）")
     void fastLocalClockMustNotSelfFenceEarly() {
-        LocalDateTime localNow = LocalDateTime.now();
+        LocalDateTime localNow = LocalDateTime.now(clock);
         // 服务端比本机慢 10 分钟（本机钟快）；租约按**服务端时间**还有 2 分钟
         //（即：不校准就会在「本机时刻」上看起来早过期了 9 分钟 ⇒ 误停采）
         LocalDateTime serverNow = localNow.minusMinutes(10);
@@ -167,7 +175,7 @@ class AccessLeaseManagerTest {
     @Test
     @DisplayName("★ M0b-4：本机钟**慢**时必须按服务端时钟判定过期（否则服务端已接管仍在多采）")
     void slowLocalClockMustSelfFenceOnTime() {
-        LocalDateTime localNow = LocalDateTime.now();
+        LocalDateTime localNow = LocalDateTime.now(clock);
         // 服务端比本机快 10 分钟（本机钟慢）；租约按服务端时间**已过期 1 秒**
         LocalDateTime serverNow = localNow.plusMinutes(10);
         when(client.register(any())).thenReturn(R.ok());
@@ -189,7 +197,7 @@ class AccessLeaseManagerTest {
     @Test
     @DisplayName("服务端未回传时间时保留上一次校准（不得退回 0 把校准丢掉）")
     void missingServerTimeMustKeepPreviousSkew() {
-        LocalDateTime serverNow = LocalDateTime.now().plusMinutes(7);
+        LocalDateTime serverNow = LocalDateTime.now(clock).plusMinutes(7);
         when(client.register(any())).thenReturn(R.ok());
         when(client.acquire(any())).thenReturn(R.ok(acquireRespAt(serverNow, assignment(TENANT_A))));
         manager.start();
@@ -200,7 +208,7 @@ class AccessLeaseManagerTest {
         LeaseRenewResp noServerTime = new LeaseRenewResp();
         noServerTime.setServerTime(null);
         when(client.renew(any())).thenReturn(R.ok(noServerTime));
-        manager.renewAndSelfCheck(LocalDateTime.now());
+        manager.renewAndSelfCheck(LocalDateTime.now(clock));
 
         assertThat(manager.clockSkewSeconds()).as("校准不得被清掉").isEqualTo(calibrated);
     }
@@ -239,7 +247,7 @@ class AccessLeaseManagerTest {
         assertThat(manager.heldTenants()).containsExactly(TENANT_A);
         assertThat(meterRegistry.get("iot.access.lease.renew.failure").counter().count()).isEqualTo(1.0d);
 
-        manager.renewAndSelfCheck(LocalDateTime.now().plusSeconds(120));
+        manager.renewAndSelfCheck(LocalDateTime.now(clock).plusSeconds(120));
 
         assertThat(manager.heldTenants()).isEmpty();
         assertThat(linkManager.isCollecting(TENANT_A)).isFalse();
@@ -257,10 +265,10 @@ class AccessLeaseManagerTest {
         manager.start();
         when(client.acquire(any())).thenReturn(R.ok(acquireResp(assignment(TENANT_A), assignment(TENANT_B))));
 
-        manager.renewAndSelfCheck(LocalDateTime.now().plusSeconds(10));
+        manager.renewAndSelfCheck(LocalDateTime.now(clock).plusSeconds(10));
         verify(client, times(1)).acquire(any());
 
-        manager.renewAndSelfCheck(LocalDateTime.now().plusSeconds(70));
+        manager.renewAndSelfCheck(LocalDateTime.now(clock).plusSeconds(70));
         verify(client, times(2)).acquire(any());
         assertThat(manager.heldTenants()).containsExactlyInAnyOrder(TENANT_A, TENANT_B);
         assertThat(meterRegistry.get("iot.access.lease.acquired").counter().count()).isEqualTo(1.0d);
@@ -313,7 +321,7 @@ class AccessLeaseManagerTest {
         // 通过的理由就不是「闸门存在」（复核用等价断言实证过：去掉闸门后会变成 register=1/acquire=1）
         when(client.register(any())).thenReturn(R.ok());
 
-        manager.renewAndSelfCheck(LocalDateTime.now().plusSeconds(600));
+        manager.renewAndSelfCheck(LocalDateTime.now(clock).plusSeconds(600));
 
         verify(client, times(0)).register(any());
         verify(client, times(0)).acquire(any());
@@ -366,7 +374,7 @@ class AccessLeaseManagerTest {
         LeaseAssignmentDto dto = new LeaseAssignmentDto();
         dto.setTenantId(tenantId);
         dto.setAccessNode(NODE);
-        dto.setLeaseExpireAt(LocalDateTime.now().plusSeconds(ttlSeconds));
+        dto.setLeaseExpireAt(LocalDateTime.now(clock).plusSeconds(ttlSeconds));
         dto.setEpoch(1L);
         dto.setState(LeaseState.ACTIVE);
         return dto;
@@ -375,7 +383,7 @@ class AccessLeaseManagerTest {
     private TenantEpochBatchResp epochBatch(TenantEpochItem... items) {
         TenantEpochBatchResp resp = new TenantEpochBatchResp();
         resp.setItems(List.of(items));
-        resp.setReadAt(LocalDateTime.now());
+        resp.setReadAt(LocalDateTime.now(clock));
         return resp;
     }
 
@@ -393,5 +401,82 @@ class AccessLeaseManagerTest {
         ack.setLeaseExpireAt(expireAt);
         ack.setEpoch(epoch);
         return ack;
+    }
+
+    @Test
+    @DisplayName("★ 中点采样必须抵消往返延迟（桩注入固定 RTT 时偏移应≈0，不得等于 RTT/2）")
+    void midpointSamplingMustCancelRoundTripDelay() {
+        // 服务端时间固定取「往返中点」；客户端在调用期间把本地时钟推进 RTT（模拟 1200ms 往返）
+        Duration rtt = Duration.ofMillis(1_200);
+        LocalDateTime serverNow = LocalDateTime.now(clock).plus(rtt.dividedBy(2));
+        when(client.register(any())).thenReturn(R.ok());
+        when(client.acquire(any())).thenAnswer(invocation -> {
+            clock.advance(rtt);
+            return R.ok(acquireRespAt(serverNow, assignment(TENANT_A)));
+        });
+
+        manager.start();
+
+        assertThat(Math.abs(manager.clockSkewSeconds()))
+            .as("取调用前后中点 ⇒ 偏移应≈0；若退回「调用前时刻」，这里会是 RTT/2≈0.6s")
+            .isLessThanOrEqualTo(0L);
+        assertThat(Math.abs(meterRegistry.get("iot.access.lease.clock_skew_seconds").gauge().value()))
+            .as("gauge 同样是中点口径（允许毫秒级误差）").isLessThan(200.0d);
+    }
+
+    @Test
+    @DisplayName("★ 离谱偏移必须被拒绝采用（保留上次校准），避免照着坏时钟把全部租户判过期")
+    void absurdSkewMustBeRejectedInsteadOfAdopted() {
+        LocalDateTime localNow = LocalDateTime.now(clock);
+        when(client.register(any())).thenReturn(R.ok());
+        // 第一次：正常偏移 1 分钟（会被采用）
+        when(client.acquire(any())).thenReturn(R.ok(acquireRespAt(localNow.plusMinutes(1),
+            assignment(TENANT_A, 600))));
+        manager.start();
+        assertThat(manager.clockSkewSeconds()).isEqualTo(60L);
+
+        // 第二次：DB 故障切换/时区误配导致偏移 30 分钟 ⇒ 必须拒绝采用（保留 60s）
+        when(client.acquire(any())).thenReturn(R.ok(acquireRespAt(LocalDateTime.now(clock).plusMinutes(30),
+            assignment(TENANT_A, 600))));
+        manager.renewAndSelfCheck(LocalDateTime.now(clock).plusSeconds(1));
+
+        assertThat(manager.clockSkewSeconds())
+            .as("超过可接受上限（%s）的读数不得被采用", AccessLeaseManager.MAX_ACCEPTED_SKEW)
+            .isEqualTo(60L);
+    }
+
+    @Test
+    @DisplayName("★ 告警阈值判据必须对称（+5.5s 与 -5.5s 都要超阈值；Duration.toSeconds 对负值向下取整会不对称）")
+    void warnThresholdMustBeSymmetric() {
+        assertThat(AccessLeaseManager.exceedsWarnThreshold(Duration.ofMillis(5_500))).isTrue();
+        assertThat(AccessLeaseManager.exceedsWarnThreshold(Duration.ofMillis(-5_500))).isTrue();
+        assertThat(AccessLeaseManager.exceedsWarnThreshold(Duration.ofSeconds(5))).isFalse();
+        assertThat(AccessLeaseManager.exceedsWarnThreshold(Duration.ofSeconds(-5))).isFalse();
+        assertThat(AccessLeaseManager.exceedsWarnThreshold(Duration.ofNanos(-1))).isFalse();
+    }
+
+    /** 可推进/可偏移时钟。 */
+    private static final class MutableClock extends Clock {
+
+        private Instant now = Instant.parse("2026-09-22T06:00:00Z");
+
+        void advance(Duration duration) {
+            now = now.plus(duration);
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            return this;
+        }
+
+        @Override
+        public Instant instant() {
+            return now;
+        }
     }
 }

@@ -18,8 +18,8 @@
 | 方法 | 路径 | 语义 |
 |---|---|---|
 | POST | `/register` | 注册节点（`accessNode` + 可选 `maxTenants`，**不填 = 不限**）。幂等覆盖 |
-| POST | `/acquire` | 领取/续期：返回本节点当前应采集的租户清单（含到期时间与 epoch） |
-| POST | `/renew` | 周期续约：`renewedLeases`（成功）+ `revokedTenantIds`（不再属于本节点）+ `nodeFenced`（节点级失效） |
+| POST | `/acquire` | 领取/续期：返回本节点当前应采集的租户清单（含到期时间与 epoch）+ **`serverTime`（数据库时钟）** |
+| POST | `/renew` | 周期续约：`renewedLeases`（成功）+ `revokedTenantIds`（不再属于本节点）+ `nodeFenced`（节点级失效）+ **`serverTime`（数据库时钟）** |
 | POST | `/release` | 节点主动下线时释放租户（状态置为 `released`，可被重新分配） |
 | POST | `/assignment` | 查询单个租户的归属（从未分配返回 `data=null`） |
 | GET | `/epochs` | 批量对账：一次拉取所有租户的 epoch（**判据只用 epoch**，不用设备数） |
@@ -63,7 +63,7 @@
    但「容量与节点存活跨重启」应落库，属 **M0b**。
 1b. **容量的临界区只在同一 JVM 内**：领取用「每节点锁 + 事务模板（提交先于解锁）」保证同进程并发不超额；
    多个副本用同一个 nodeId 属误配置（nodeId 是归属键，必须唯一）。数据库级原子容量（节点行 + `SELECT ... FOR UPDATE`）属 **M0b**。
-1c. **跨副本时钟偏移未防护**：到期时间用**应用时钟**写、也用应用时钟比较（`markExpired`/接管条件）。
+1c. **时钟偏移**：服务端一律用**数据库时钟**（`SELECT NOW()`）写/比较（`markExpired`/接管条件）；**接入侧**用契约回传的 `serverTime` 校准本地判据（见 §一 的 `LeaseAcquireResp/LeaseRenewResp.serverTime`）。见 ROADMAP 四点十四（C1 精度上限≈1s、C3 过大偏移保护）。
    若某副本时钟快于其它副本，可能出现「续约成功的同时被判定过期」的窗口（≤ 一个续约周期）。
    要求多副本 NTP 对齐；彻底解法是把比较改成数据库时间。属 **M0b**。
 2. **可分配租户来自配置**（`ypbin.lease.assignable-tenant-ids`，空 = 不分配任何）：
@@ -81,7 +81,7 @@
    靠「active 且已过期」的兜底分支缩短；这条关系未做成启动自检。
 3g. **`batchEpoch` 是全表读**（无分页/上限）：自用规模无碍，租户数上来要加上限或分页。
 4. **access 侧的 Feign 客户端**（`ILeaseClient`）随**增量 3** 一起落地——先有服务端契约，再有调用方。
-5. 失效扫描与续约的**指标**已埋（`iot.lease.takeover|expired|revoked`），但**告警阈值**未定（M1 观测面）。
+5. 失效扫描与续约的**指标**已埋（`iot.lease.takeover|expired|revoked`）；接入侧时钟偏移告警阈值已定为 **5 秒**（`AccessLeaseManager.SKEW_WARN_SECONDS`，判据对称）。
 
 ## 六、配置参考
 
