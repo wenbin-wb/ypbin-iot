@@ -52,6 +52,7 @@ class ConfigEpochReconcilerTest {
 
     private static final Long TENANT_A = 11L;
     private static final Long TENANT_B = 22L;
+    private static final Long TENANT_C = 33L;
 
     /** 安全网间隔（测试里用 5 分钟，与生产默认一致）。 */
     private static final long REFRESH_INTERVAL_MS = 300_000L;
@@ -189,6 +190,26 @@ class ConfigEpochReconcilerTest {
         reconciler.reconcile(Set.of(TENANT_A, TENANT_B));
         assertThat(linkManager.reconciled).as("轮转覆盖：另一个租户也会被强制到")
             .hasSize(afterFirstSight + 2);
+    }
+
+    @Test
+    @DisplayName("★ 安全网轮转覆盖：3 个租户在 3 个 tick 内全部被强制过（每 tick 只强制 1 个）")
+    void safetyNetMustRotateAcrossAllStaleTenants() {
+        when(client.batchEpoch()).thenReturn(R.ok(
+            batch(item(TENANT_A, 0L), item(TENANT_B, 0L), item(TENANT_C, 0L))));
+
+        reconciler.reconcile(Set.of(TENANT_A, TENANT_B, TENANT_C));
+        assertThat(linkManager.reconciled).as("首次观测：3 个租户各对账一次").hasSize(3);
+
+        // 每轮都把时间推过安全网间隔：每轮最多强制 1 个 ⇒ 3 轮覆盖 3 个租户
+        for (int round = 1; round <= 3; round++) {
+            clock.advance(Duration.ofMillis(REFRESH_INTERVAL_MS + 1_000));
+            reconciler.reconcile(Set.of(TENANT_A, TENANT_B, TENANT_C));
+            assertThat(linkManager.reconciled)
+                .as("第 %s 轮：每轮只允许强制一个租户", round).hasSize(3 + round);
+        }
+        assertThat(meterRegistry.get("iot.access.config.reconcile.forced").counter().count())
+            .as("3 轮共强制 3 个租户 ⇒ 全量轮转 = 租户数 × tick（与间隔取较大者）").isEqualTo(3.0d);
     }
 
     @Test
