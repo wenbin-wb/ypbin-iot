@@ -512,7 +512,7 @@ UI/OpenAPI → business(core.device)
 | 归属 | `tenant_node_assignment`（tenant_id/access_node/lease_expire_at/epoch/state），DB CAS 单赢家 |
 | 内部端点 | `/internal/lease/**` 六端点（register/acquire/renew/release/assignment/epochs），`InternalTokenGuardInterceptor` 保护 |
 | 失效检测 | 过期→`PENDING_TAKEOVER`；self-fencing 三路径（revoked/nodeFenced/本地过期） |
-| epoch | 归属每次转移递增（**已落地**）；`tenant_config_epoch`（台账变更同事务递增）为**设计项**，继承 spec §3.1③，M-2 前落地 |
+| epoch | 归属每次转移递增（**已落地**）；`tenant_config_epoch`（台账变更同事务递增）**已落地**（M-2：落在 `tenant_ledger.config_epoch`；设备/点位映射写入口**同一事务** +1，接入侧 `ConfigEpochReconciler` 消费 —— 见 ROADMAP 四点十一） |
 | 变更推送 | 事件 `$iot/svc/config/{t}/device-changed` + 周期对账（批量拉 epoch，不一致才拉全量） |
 
 **M0b 补项（纳入本设计，不缩水）**：节点注册表落库（容量数据库级原子）、可分配租户改读台账表、
@@ -607,7 +607,7 @@ UI/OpenAPI → business(core.device)
 | `iot_device_group` / `iot_device_tag` | 分组标签 | §3.11 |
 | `iot_point_mapping` | 点位映射 | §3.9 |
 | `iot_shadow`（Redis 为主，可选落库） | 影子 | §3.10 |
-| `tenant_node_assignment`（已落地）／ `tenant_config_epoch`（设计项，M-2 前落地） | 租约 | §7 |
+| `tenant_node_assignment`（已落地）／ `tenant_config_epoch`（**已落地**，落在 `tenant_ledger.config_epoch`） | 租约 | §7 |
 | `iot_rule` / `iot_alarm` | 规则告警 | §8 |
 | `outage_event` | 断档 | §5.4 |
 | `data_point`（IoTDB） | 时序 | §5.2 |

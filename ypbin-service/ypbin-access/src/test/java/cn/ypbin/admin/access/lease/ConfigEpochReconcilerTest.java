@@ -10,6 +10,8 @@
 package cn.ypbin.admin.access.lease;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -125,17 +127,19 @@ class ConfigEpochReconcilerTest {
     @Test
     @DisplayName("对账请求失败（异常/非成功信封）：计数、不推进任何版本号、下一轮重试")
     void checkFailureMustNotAdvanceAnyEpoch() {
-        when(client.batchEpoch()).thenThrow(new IllegalStateException("iot 不可达"));
+        // 必须用 doThrow：`when(mock.method())` 会在**打桩时**就执行该方法并立刻抛出，测试自己就炸了
+        doThrow(new IllegalStateException("iot 不可达")).when(client).batchEpoch();
         reconciler.reconcile(Set.of(TENANT_A));
         assertThat(reconciler.trackedTenantCount()).isZero();
         assertThat(meterRegistry.get("iot.access.config.check.failure").counter().count()).isEqualTo(1.0d);
 
-        when(client.batchEpoch()).thenReturn(R.fail(500, "boom"));
+        // 该 mock 此时已被打成「抛异常」：`when(...)` 会立刻触发它 ⇒ 后续打桩也必须用 doReturn
+        doReturn(R.fail(500, "boom")).when(client).batchEpoch();
         reconciler.reconcile(Set.of(TENANT_A));
         assertThat(meterRegistry.get("iot.access.config.check.failure").counter().count()).isEqualTo(2.0d);
         assertThat(linkManager.reconciled).isEmpty();
 
-        when(client.batchEpoch()).thenReturn(R.ok(batch(item(TENANT_A, 3L))));
+        doReturn(R.ok(batch(item(TENANT_A, 3L)))).when(client).batchEpoch();
         reconciler.reconcile(Set.of(TENANT_A));
         assertThat(linkManager.reconciled).containsExactly(TENANT_A);
         assertThat(reconciler.trackedTenantCount()).isEqualTo(1);

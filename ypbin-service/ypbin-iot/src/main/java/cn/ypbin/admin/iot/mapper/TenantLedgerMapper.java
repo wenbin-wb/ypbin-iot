@@ -48,4 +48,22 @@ public interface TenantLedgerMapper extends BaseMapper<TenantLedger> {
     @Update("UPDATE tenant_ledger SET assignable = #{assignable}, config_epoch = config_epoch + 1, "
         + "is_deleted = 0, update_time = NOW() WHERE tenant_id = #{tenantId}")
     int reviveAndBump(@Param("tenantId") Long tenantId, @Param("assignable") boolean assignable);
+
+    /**
+     * 把某租户的配置版本号 +1（不改动 {@code assignable}）。
+     *
+     * <p>用途：设备/点位映射等**采集配置**变更时发信号给接入侧（设计 §3.1③「business 变更台账
+     * ─ 同一事务递增 tenant_config_epoch」）。与 {@link #reviveAndBump} 一样放在一条 UPDATE 里，
+     * 保证「改了配置」与「版本号变了」原子成立。</p>
+     *
+     * <p>只更新**未删除**的行：台账行不存在（该租户还没进台账）或已被逻辑删除时返回 0，
+     * 由调用方决定如何登记——**绝不**在这里顺手 insert 一行，那会把「可分配来源」从配置兜底
+     * 悄悄切成台账（P6 的静默回落），是行为突变。</p>
+     *
+     * @param tenantId 租户 ID
+     * @return 受影响行数（0 = 台账无该租户，未发信号）
+     */
+    @Update("UPDATE tenant_ledger SET config_epoch = config_epoch + 1, update_time = NOW() "
+        + "WHERE tenant_id = #{tenantId} AND is_deleted = 0")
+    int bumpConfigEpoch(@Param("tenantId") Long tenantId);
 }

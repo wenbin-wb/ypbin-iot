@@ -140,6 +140,53 @@ class TenantLedgerIT {
         assertThat(ledgerService.listAssignableTenantIds()).doesNotContain(TENANT);
     }
 
+    @Test
+    @DisplayName("★ 采集配置变更推进版本号：有台账行才 +1（真库验证）；无台账行是 no-op 且**不得**插入")
+    void bumpConfigEpochMustSkipWhenNoLedgerRow() {
+        physicalDelete();
+        assertThat(ledgerService.bumpConfigEpoch(TENANT))
+            .as("台账无该租户 ⇒ 未发信号（不得顺手 insert，那会静默改变可分配来源）").isFalse();
+        assertThat(rawRowCount()).as("no-op 不得留下任何行").isZero();
+
+        ledgerService.setAssignable(TENANT, true);
+        assertThat(configEpoch()).isEqualTo(1L);
+        assertThat(ledgerService.bumpConfigEpoch(TENANT)).isTrue();
+        assertThat(configEpoch()).as("每次采集配置变更必须 +1").isEqualTo(2L);
+        assertThat(ledgerService.bumpConfigEpoch(TENANT)).isTrue();
+        assertThat(configEpoch()).isEqualTo(3L);
+    }
+
+    @Test
+    @DisplayName("★ 逻辑删除的台账行不得被 bump 复活（否则软删失效 + 版本号漂移）")
+    void bumpConfigEpochMustNotReviveSoftDeletedRow() {
+        physicalDelete();
+        ledgerService.setAssignable(TENANT, true);
+        softDelete();
+
+        assertThat(ledgerService.bumpConfigEpoch(TENANT))
+            .as("软删行不算「有台账」，不得复活").isFalse();
+        assertThat(rawRowCount()).isEqualTo(1);
+        assertThat(ledgerMapper.selectIncludingDeleted(TENANT).getIsDeleted())
+            .as("bump 不得把 is_deleted 改回 0").isNotZero();
+    }
+
+    @Test
+    @DisplayName("运维写入口：返回的是**回读**的落库状态（含变更类型与最新版本号）")
+    void setAssignableAndGetMustReturnPersistedRow() {
+        physicalDelete();
+        var created = ledgerService.setAssignableAndGet(TENANT, true);
+        assertThat(created.getChange()).isEqualTo("created");
+        assertThat(created.getConfigEpoch()).isEqualTo(1L);
+        assertThat(created.getAssignable()).isTrue();
+
+        var updated = ledgerService.setAssignableAndGet(TENANT, false);
+        assertThat(updated.getChange()).isEqualTo("updated");
+        assertThat(updated.getConfigEpoch()).isEqualTo(2L);
+        assertThat(updated.getAssignable()).isFalse();
+
+        assertThat(ledgerService.listAll()).extracting("tenantId").contains(TENANT);
+    }
+
     private static Long rowId() {
         return ledgerMapper.selectOne(Wrappers.<TenantLedger>lambdaQuery()
             .eq(TenantLedger::getTenantId, TENANT)).getId();

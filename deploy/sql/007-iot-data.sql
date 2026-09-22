@@ -76,3 +76,22 @@ SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (3201, 320101, 320102,
 -- 租户可授菜单补授
 INSERT INTO sys_template_menu (template_id, menu_id)
 SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (3201, 320101, 320102, 320103, 320104, 320105, 320106, 3202, 320201, 320202, 320203, 320003, 320004, 320005, 320006, 320007, 320008, 320009, 320010, 320011, 320012, 320013);
+
+-- =============================================================
+-- M-2 租户台账运维权限（2026-09-21 追加）
+-- 权限码：iot:ledger:list | iot:ledger:update
+-- ⚠️ 这是**平台级**动作（决定哪些租户可被 access 节点采集，跨租户生效）⇒ platform_only=1，
+--    且**只授平台管理员角色 1**，绝不进 sys_template_menu：否则任一租户管理员都能改
+--    「别的租户是否被采集」。本端点没有独立前端页面，故按影子/标签的既有做法挂为设备菜单
+--    3200 下的按钮权限（挂一个点不开的页面菜单才是更差的体验）。
+-- 等价性：本文件追加部分与 migration/2026-09-21-iot-m2-ledger-menu.sql 语句等价。
+-- =============================================================
+
+INSERT INTO sys_menu (id, pid, name, type, platform_only, auth_code, title, sort, create_time, status, is_deleted)
+VALUES (320014, 3200, 'IotLedgerList', 'button', 1, 'iot:ledger:list', 'page.iot.ledger.title', 14, NOW(), 1, 0),
+       (320015, 3200, 'IotLedgerUpdate', 'button', 1, 'iot:ledger:update', 'common.edit', 15, NOW(), 1, 0);
+
+-- 显式授权给平台管理员角色（role 1）：002-data.sql 的批量授权只覆盖 platform_only=1 的**存量**菜单，
+-- 且在本文件之前执行 ⇒ 新追加的菜单必须自己再授一次
+INSERT INTO sys_role_menu (role_id, menu_id)
+SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (320014, 320015);
