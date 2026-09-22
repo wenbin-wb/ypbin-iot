@@ -236,15 +236,16 @@ class AccessSubscriptionPlannerTest {
         clock.advance(Duration.ofSeconds(31));
         planner.subscribe(List.of(device("d1")));                    // 失败 2 ⇒ 60s
         clock.advance(Duration.ofSeconds(61));
-        planner.subscribe(List.of(device("d1")));                    // 失败 3 ⇒ 封顶 120s
+        planner.subscribe(List.of(device("d1")));                    // 失败 3 ⇒ 120s（=封顶值）
+        clock.advance(Duration.ofSeconds(121));
+        planner.subscribe(List.of(device("d1")));                    // 失败 4 ⇒ 封顶 120s（不封顶会是 240s）
 
         clock.advance(AccessSubscriptionPlanner.SUBSCRIBE_BACKOFF_MAX.minusSeconds(1));
         assertThat(planner.subscribe(List.of(device("d1"))))
-            .as("封顶后只差 1 秒不得重试（若封顶被去掉会退化成 240s，这里同样为 0——故下一条才是关键）")
-            .isZero();
+            .as("封顶窗口内（差 1 秒）不得重试").isZero();
         clock.advance(Duration.ofSeconds(2));
         assertThat(planner.subscribe(List.of(device("d1"))))
-            .as("封顶恰为 120s：超过即必须重试").isEqualTo(1);
+            .as("封顶恰为 120s：超过即必须重试（不封顶时为 240s，此断言会失败）").isEqualTo(1);
     }
 
     @Test
