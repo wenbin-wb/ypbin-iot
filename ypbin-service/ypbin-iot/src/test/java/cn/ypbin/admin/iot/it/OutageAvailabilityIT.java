@@ -10,6 +10,7 @@
 package cn.ypbin.admin.iot.it;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import cn.ypbin.admin.iot.availability.AvailabilityProperties;
 import cn.ypbin.admin.iot.availability.AvailabilityResp;
@@ -23,12 +24,16 @@ import cn.ypbin.admin.iot.mapper.DeviceLivenessMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.OutageEventMapper;
 import cn.ypbin.admin.iot.service.impl.AvailabilityServiceImpl;
+import cn.ypbin.starter.tenant.core.TenantContext;
+import cn.ypbin.starter.tenant.handler.DefaultTenantLineHandler;
+import cn.ypbin.starter.tenant.autoconfigure.TenantProperties;
 import cn.ypbin.starter.test.condition.EnabledIfMySqlAvailable;
 import cn.ypbin.starter.test.container.MySqlIntegrationTestSupport;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.plugins.MybatisPlusInterceptor;
+import com.baomidou.mybatisplus.extension.plugins.inner.TenantLineInnerInterceptor;
 import com.baomidou.mybatisplus.spring.MybatisSqlSessionFactoryBean;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
@@ -41,6 +46,8 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.function.Supplier;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.apache.ibatis.session.SqlSessionFactory;
 import org.junit.jupiter.api.AfterAll;
@@ -86,7 +93,14 @@ class OutageAvailabilityIT {
         ItSchema.ensure(dataSource, REPO_ROOT);
         MybatisConfiguration configuration = new MybatisConfiguration();
         configuration.setMapUnderscoreToCamelCase(true);
-        configuration.addInterceptor(new MybatisPlusInterceptor());
+        // 装上**生产同款**的租户拦截器：tenant_id 由插件注入（服务代码不写 tenant_id），
+        // 这样本 IT 同时钉住「新表是租户表、插件会为其注入 tenant_id」与「无上下文时 fail-closed」
+        TenantProperties tenantProperties = new TenantProperties();
+        tenantProperties.setFailOnMissingTenant(true);
+        MybatisPlusInterceptor plugins = new MybatisPlusInterceptor();
+        plugins.addInnerInterceptor(new TenantLineInnerInterceptor(
+            new DefaultTenantLineHandler(Optional::empty, tenantProperties)));
+        configuration.addInterceptor(plugins);
         configuration.addMapper(DeviceLivenessMapper.class);
         configuration.addMapper(OutageEventMapper.class);
         configuration.addMapper(IotDeviceMapper.class);
@@ -133,8 +147,8 @@ class OutageAvailabilityIT {
         // 1) 一次有效数据（10 分钟前）⇒ 活性行落库
         service.ingest(req(observation(DEVICE, 5_000, AvailabilityRules.QUALITY_GOOD,
             dbNow.minusMinutes(10))));
-        DeviceLiveness liveness = livenessMapper.selectOne(Wrappers.<DeviceLiveness>lambdaQuery()
-            .eq(DeviceLiveness::getDeviceId, DEVICE));
+        DeviceLiveness liveness = inTenant(() -> livenessMapper.selectOne(
+            Wrappers.<DeviceLiveness>lambdaQuery().eq(DeviceLiveness::getDeviceId, DEVICE)));
         assertThat(liveness).as("上报后必须有活性行").isNotNull();
         assertThat(liveness.getLastGoodAt()).isNotNull();
 
@@ -154,12 +168,12 @@ class OutageAvailabilityIT {
         assertThat(closed).hasSize(1);
         assertThat(closed.getFirst().getEndTs()).isNotNull();
         assertThat(closed.getFirst().getDurationSec()).as("10 分钟断档").isEqualTo(600L);
-        assertThat(livenessMapper.selectOne(Wrappers.<DeviceLiveness>lambdaQuery()
-            .eq(DeviceLiveness::getDeviceId, DEVICE)).getOpenOutageId())
+        assertThat(inTenant(() -> livenessMapper.selectOne(Wrappers.<DeviceLiveness>lambdaQuery()
+            .eq(DeviceLiveness::getDeviceId, DEVICE)).getOpenOutageId()))
             .as("闭合后 open_outage_id 必须清空").isNull();
 
         // 5) 可用率：20 分钟窗口内 10 分钟断档 ⇒ 0.5，不达标
-        AvailabilityResp resp = service.query(DEVICE, dbNow.minusMinutes(20), dbNow);
+        AvailabilityResp resp = inTenant(() -> service.query(DEVICE, dbNow.minusMinutes(20), dbNow));
         assertThat(resp.getWindowSeconds()).isEqualTo(1_200L);
         assertThat(resp.getOutageSeconds()).isEqualTo(600L);
         assertThat(resp.getAvailability()).isEqualByComparingTo(new BigDecimal("0.500000"));
@@ -184,8 +198,8 @@ class OutageAvailabilityIT {
         service.ingest(req(observation(OTHER_DEVICE, 5_000, "BAD", dbNow.minusMinutes(30))));
 
         assertThat(service.scanAndOpenOutages()).isEqualTo(1);
-        List<OutageEvent> events = outageMapper.selectList(Wrappers.<OutageEvent>lambdaQuery()
-            .eq(OutageEvent::getDeviceId, OTHER_DEVICE));
+        List<OutageEvent> events = inTenant(() -> outageMapper.selectList(
+            Wrappers.<OutageEvent>lambdaQuery().eq(OutageEvent::getDeviceId, OTHER_DEVICE)));
         assertThat(events).hasSize(1);
         assertThat(events.getFirst().getStartTs()).as("无有效数据 ⇒ 起点=首次观测")
             .isEqualTo(dbNow.minusMinutes(30));
@@ -201,22 +215,38 @@ class OutageAvailabilityIT {
 
         service.ingest(req(observation(DEVICE, 5_000, AvailabilityRules.QUALITY_GOOD, dbNow)));
 
-        DeviceLiveness row = livenessMapper.selectByDeviceIncludingDeleted(TENANT, DEVICE);
+        DeviceLiveness row = inTenant(() -> livenessMapper.selectByDeviceIncludingDeleted(TENANT, DEVICE));
         assertThat(row.getIsDeleted()).as("复活后不得仍是删除态").isZero();
         assertThat(row.getLastGoodAt()).isEqualTo(dbNow);
         assertThat(rawRowCount(DEVICE)).as("只允许一行").isEqualTo(1L);
     }
 
+    @Test
+    @DisplayName("★ 租户隔离：无租户上下文时新表被插件拒绝（fail-closed，证明它们确实是租户表）")
+    void tenantTablesMustFailClosedWithoutContext() {
+        assertThatThrownBy(() -> livenessMapper.selectOne(Wrappers.<DeviceLiveness>lambdaQuery()
+            .eq(DeviceLiveness::getDeviceId, DEVICE)))
+            .hasMessageContaining("缺少租户上下文");
+        assertThatThrownBy(() -> outageMapper.selectList(Wrappers.<OutageEvent>lambdaQuery()
+            .eq(OutageEvent::getDeviceId, DEVICE)))
+            .hasMessageContaining("缺少租户上下文");
+    }
+
     private static List<OutageEvent> openOutages(Long deviceId) {
-        return outageMapper.selectList(Wrappers.<OutageEvent>lambdaQuery()
+        return inTenant(() -> outageMapper.selectList(Wrappers.<OutageEvent>lambdaQuery()
             .eq(OutageEvent::getDeviceId, deviceId)
-            .isNull(OutageEvent::getEndTs));
+            .isNull(OutageEvent::getEndTs)));
     }
 
     private static List<OutageEvent> closedOutages(Long deviceId) {
-        return outageMapper.selectList(Wrappers.<OutageEvent>lambdaQuery()
+        return inTenant(() -> outageMapper.selectList(Wrappers.<OutageEvent>lambdaQuery()
             .eq(OutageEvent::getDeviceId, deviceId)
-            .isNotNull(OutageEvent::getEndTs));
+            .isNotNull(OutageEvent::getEndTs)));
+    }
+
+    /** 在租户上下文里执行（生产里由登录态提供；IT 里显式指定，同时验证 fail-closed 确实生效）。 */
+    private static <T> T inTenant(Supplier<T> supplier) {
+        return TenantContext.executeWithTenant(TENANT, supplier);
     }
 
     private static ReadingObservationDto observation(Long deviceId, Integer pollIntervalMs, String quality,
