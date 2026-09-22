@@ -259,8 +259,8 @@ class OutageAvailabilityIT {
         AvailabilityServiceImpl tightScan = new AvailabilityServiceImpl(livenessMapper, outageMapper,
             deviceMapper, oneByOne);
         // 两个「设备不存在」的垃圾活性行（id 更小 ⇒ 优先被候选查询选中）+ 一个真断档设备
-        insertOrphanLiveness(1L, dbNow.minusHours(1));
-        insertOrphanLiveness(2L, dbNow.minusHours(1));
+        insertOrphanLiveness(1L, 999_998L, dbNow.minusHours(1));
+        insertOrphanLiveness(2L, 999_999L, dbNow.minusHours(1));
         service.ingest(req(observation(DEVICE, 5_000, AvailabilityRules.QUALITY_GOOD,
             dbNow.minusHours(1))));
 
@@ -275,10 +275,12 @@ class OutageAvailabilityIT {
      * <p>用 Mapper 而不是原生 SQL：{@code LocalDateTime.toString()} 是 {@code 2026-09-22T01:59:59}
      * （带 T），MySQL 的 DATETIME 字面量不认——CI 上一轮就是这么失败的（测试代码问题，不是产品问题）。</p>
      */
-    private static void insertOrphanLiveness(Long rowId, LocalDateTime lastGoodAt) {
+    private static void insertOrphanLiveness(Long rowId, Long orphanDeviceId, LocalDateTime lastGoodAt) {
         DeviceLiveness orphan = new DeviceLiveness();
         orphan.setId(rowId);
-        orphan.setDeviceId(999_999L);
+        // device_id 必须**每条不同**：uk_device_liveness 是 (tenant_id, device_id)，
+        // 两条同 device_id 会撞唯一键（CI 实测 `Duplicate entry '920001-999999'`）
+        orphan.setDeviceId(orphanDeviceId);
         orphan.setPollIntervalMs(5_000);
         orphan.setLastGoodAt(lastGoodAt);
         orphan.setFirstObservedAt(lastGoodAt);
