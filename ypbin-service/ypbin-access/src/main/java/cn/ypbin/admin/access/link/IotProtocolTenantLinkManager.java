@@ -70,6 +70,15 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
      */
     static final Duration BACKOFF_MAX = Duration.ofMinutes(2);
 
+    /** 无会话设备重发 ADD 的退避起点（N-2：建链失败/设备离线时不每个周期猛重试）。 */
+    static final Duration REBIND_BACKOFF_BASE = Duration.ofSeconds(30);
+
+    /** 无会话设备重发 ADD 的退避上限。 */
+    static final Duration REBIND_BACKOFF_MAX = Duration.ofMinutes(2);
+
+    /** 每轮对账最多重发多少个 ADD（防「整批设备离线」时把框架与远端打爆）。 */
+    static final int REBIND_MAX_PER_CYCLE = 20;
+
     private static final Logger log = LoggerFactory.getLogger(IotProtocolTenantLinkManager.class);
 
     private final DeviceSpecSource source;
@@ -90,7 +99,21 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
     private final Counter reconcileAppliedCounter;
 
     /** 每个租户的空清单退避状态（有设备即移除）。 */
-    private final Map<Long, EmptyBackoff> emptyBackoff = new ConcurrentHashMap<>();
+    private final Map<Long, Backoff> emptyBackoff = new ConcurrentHashMap<>();
+
+    /**
+     * 逐设备的「重发 ADD」退避状态（N-2）：设备还没有会话时，隔一段时间重发一次 ADD 让框架重建链。
+     *
+     * <p>为什么必须由宿主重发：框架只在 {@code bind()} **成功**后才挂重连监听——启动瞬间设备离线时 ADD
+     * 发出去但建链失败，框架**不会**自己重试 ⇒ 该设备永久零数据（日志里只有一行 DEBUG「暂无会话」）。</p>
+     */
+    private final Map<String, Backoff> rebindBackoff = new ConcurrentHashMap<>();
+
+    /** 重发 ADD 的累计次数。 */
+    private final Counter rebindCounter;
+
+    /** 因「每轮上限」被推迟的重发次数（观测「本来想重发多少」）。 */
+    private final Counter rebindDeferredCounter;
 
     /** 本节点正在采集的租户 → 已推给框架的设备（deviceId → 当时那份规格，断链时原样用于 REMOVE）。 */
     private final Map<Long, Map<String, DeviceSpec>> collected = new ConcurrentHashMap<>();
@@ -115,6 +138,8 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
         this.specFailureCounter = meterRegistry.counter("iot.access.spec.failure");
         this.backoffSkippedCounter = meterRegistry.counter("iot.access.spec.backoff.skipped");
         this.reconcileAppliedCounter = meterRegistry.counter("iot.access.spec.reconcile.applied");
+        this.rebindCounter = meterRegistry.counter("iot.access.device.rebind");
+        this.rebindDeferredCounter = meterRegistry.counter("iot.access.device.rebind.deferred");
     }
 
     /**
@@ -161,14 +186,59 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
             for (DeviceSpec device : devices.values()) {
                 registry.emit(new DeviceChange(ChangeType.ADD, device,
                     registry.nextRevision(device.deviceId())));
+                // 刚发过 ADD：先预置一次退避，避免同一轮立刻再发一次（建链结果下一轮才看得出来）
+                rebindBackoff.put(device.deviceId(),
+                    new Backoff(1, clock.instant().plus(REBIND_BACKOFF_BASE)));
             }
             log.info("[access] 协议栈开始采集租户：tenantId={} 设备数={}",
                 LogSanitizer.sanitize(tenantId), devices.size());
         }
-        int subscribed = planner.subscribe(List.copyOf(devices.values()));
+        List<DeviceSpec> current = List.copyOf(devices.values());
+        int subscribed = planner.subscribe(current);
         if (subscribed > 0) {
             log.info("[access] 已发起订阅（异步完成；成败看 subscribe.success/failure 与日志）：tenantId={} 本次发起设备数={}",
                 LogSanitizer.sanitize(tenantId), subscribed);
+        }
+        retryDevicesWithoutSession(tenantId, current);
+    }
+
+    /**
+     * 对「仍没有会话」的设备重发 ADD（N-2）：让框架重新走一次 {@code bind}，使「首次绑定失败/设备离线」
+     * 能自愈（框架只在 bind **成功**后才挂重连监听，失败后不会自己重试 ⇒ 设备会永久零数据）。
+     *
+     * <p>三重节制：逐设备指数退避（{@link #REBIND_BACKOFF_BASE} 起、{@link #REBIND_BACKOFF_MAX} 封顶）、
+     * 每轮上限 {@link #REBIND_MAX_PER_CYCLE}、以及**首次 ADD 当轮先预置一次退避**（建链结果下一轮才看得出来，
+     * 同一轮再发一次纯属浪费）。会话一旦建立即清除该设备的退避。</p>
+     *
+     * @param tenantId 租户 ID
+     * @param devices  本轮清单
+     */
+    private void retryDevicesWithoutSession(Long tenantId, List<DeviceSpec> devices) {
+        Set<String> missing = planner.devicesWithoutSession(devices);
+        int emitted = 0;
+        for (DeviceSpec device : devices) {
+            String deviceId = device.deviceId();
+            if (!missing.contains(deviceId)) {
+                rebindBackoff.remove(deviceId);
+                continue;
+            }
+            if (emitted >= REBIND_MAX_PER_CYCLE) {
+                rebindDeferredCounter.increment();
+                continue;
+            }
+            Backoff backoff = rebindBackoff.get(deviceId);
+            if (backoff != null && clock.instant().isBefore(backoff.nextRetryAt())) {
+                continue;
+            }
+            int attempts = backoff == null ? 1 : backoff.attempts() + 1;
+            Duration delay = backoffDelay(attempts, REBIND_BACKOFF_BASE, REBIND_BACKOFF_MAX);
+            rebindBackoff.put(deviceId, new Backoff(attempts, clock.instant().plus(delay)));
+            registry.emit(new DeviceChange(ChangeType.ADD, device, registry.nextRevision(deviceId)));
+            rebindCounter.increment();
+            emitted++;
+            log.warn("[access] 设备仍无会话（建链失败/设备离线），重发 ADD 重建链：tenantId={} deviceId={} "
+                + "第 {} 次 下次重试={} 秒后（若持续无会话请查设备端点与网络）",
+                LogSanitizer.sanitize(tenantId), deviceId, attempts, delay.toSeconds());
         }
     }
 
@@ -268,6 +338,7 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
             registry.emit(new DeviceChange(ChangeType.REMOVE, entry.getValue(),
                 registry.nextRevision(entry.getKey())));
             planner.forget(entry.getKey());
+            rebindBackoff.remove(entry.getKey());
         }
         // 不缓存空清单：交给 startCollecting 的「空清单不缓存 + 退避重取」路径，
         // 设备重新出现时无需依赖台账版本号变化即可恢复（与 N-1 的取向一致）
@@ -278,17 +349,17 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
 
     /** 是否处于空清单退避窗口内。 */
     private boolean inEmptyBackoff(Long tenantId) {
-        EmptyBackoff state = emptyBackoff.get(tenantId);
+        Backoff state = emptyBackoff.get(tenantId);
         return state != null && clock.instant().isBefore(state.nextRetryAt());
     }
 
     /** 记一次空清单：计数、推进退避、分级日志（首次 WARN，之后 DEBUG，避免日志噪声）。 */
     private void onEmptySpec(Long tenantId) {
         emptySpecCounter.increment();
-        EmptyBackoff previous = emptyBackoff.get(tenantId);
+        Backoff previous = emptyBackoff.get(tenantId);
         int attempts = previous == null ? 1 : previous.attempts() + 1;
         Duration delay = backoffDelay(attempts);
-        emptyBackoff.put(tenantId, new EmptyBackoff(attempts, clock.instant().plus(delay)));
+        emptyBackoff.put(tenantId, new Backoff(attempts, clock.instant().plus(delay)));
         if (attempts == 1) {
             log.warn("[access] 租户设备清单为空，本轮不缓存并退避重取：tenantId={} 下次重取={} 秒后"
                 + "（若持续为空，请检查点位映射与内部接口）", LogSanitizer.sanitize(tenantId),
@@ -310,10 +381,10 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
      */
     private void onLoadFailure(Long tenantId, DeviceSpecLoadException ex) {
         specFailureCounter.increment();
-        EmptyBackoff previous = emptyBackoff.get(tenantId);
+        Backoff previous = emptyBackoff.get(tenantId);
         int attempts = previous == null ? 1 : previous.attempts() + 1;
         Duration delay = backoffDelay(attempts);
-        emptyBackoff.put(tenantId, new EmptyBackoff(attempts, clock.instant().plus(delay)));
+        emptyBackoff.put(tenantId, new Backoff(attempts, clock.instant().plus(delay)));
         if (attempts == 1) {
             log.warn("[access] 拉取设备清单失败（本轮不缓存、不下架既有设备；{} 秒后重试）：tenantId={}",
                 delay.toSeconds(), LogSanitizer.sanitize(tenantId), ex);
@@ -323,10 +394,22 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
         }
     }
 
-    /** 指数退避（起始 {@link #BACKOFF_BASE}，上限 {@link #BACKOFF_MAX}）。 */
+    /** 指数退避（空清单：起始 {@link #BACKOFF_BASE}、上限 {@link #BACKOFF_MAX}）。 */
     private static Duration backoffDelay(int attempts) {
-        long millis = BACKOFF_BASE.toMillis() * (1L << Math.min(attempts - 1, 20));
-        return Duration.ofMillis(Math.min(millis, BACKOFF_MAX.toMillis()));
+        return backoffDelay(attempts, BACKOFF_BASE, BACKOFF_MAX);
+    }
+
+    /**
+     * 通用指数退避：{@code base × 2^(attempts-1)}，封顶 {@code max}。
+     *
+     * @param attempts 连续次数（≥1）
+     * @param base     起始间隔
+     * @param max      上限
+     * @return 本次退避时长
+     */
+    private static Duration backoffDelay(int attempts, Duration base, Duration max) {
+        long millis = base.toMillis() * (1L << Math.min(Math.max(attempts, 1) - 1, 20));
+        return Duration.ofMillis(Math.min(millis, max.toMillis()));
     }
 
     /** 取到设备后清除退避状态。 */
@@ -346,6 +429,7 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
             return;
         }
         for (DeviceSpec device : devices.values()) {
+            rebindBackoff.remove(device.deviceId());
             registry.emit(new DeviceChange(ChangeType.REMOVE, device,
                 registry.nextRevision(device.deviceId())));
         }
@@ -383,6 +467,14 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
      * @author wenbin
      * @since 2026-09-21
      */
-    private record EmptyBackoff(int attempts, Instant nextRetryAt) {
+    /**
+     * 退避状态（空清单与「重发 ADD」共用）。
+     *
+     * @param attempts    连续次数
+     * @param nextRetryAt 下一次允许动作的时刻
+     * @author wenbin
+     * @since 2026-09-22
+     */
+    private record Backoff(int attempts, Instant nextRetryAt) {
     }
 }

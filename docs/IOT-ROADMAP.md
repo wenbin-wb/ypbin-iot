@@ -233,7 +233,7 @@ ERROR The build could not read 1 project
 | **S4** | **点位地址语义未定死**：MQTT 回调用**具体主题**当 address（`MqttSession` 有意如此），而订阅用 mapping 的 `address` 当**过滤器**，`PointMappingDataListener` 做**字符串精确匹配** | 加装 `ypbin-iot-protocol-mqtt` 模块**当天**（当前只装 tcp，故未触发） | 映射里填了通配符（`a/#`、`a/+/c`）时**订阅成功但每条数据都判「未映射」被丢弃** ⇒ 看起来在采、实际零数据 | 定死「`raw_address` = 具体地址，非过滤器」，并在点位映射保存时**加校验拒绝通配符**；或改为按主题前缀匹配 |
 | **S5** | 订阅计数与会话跟踪的精度：`AccessSubscriptionPlanner` 在 `session.subscribe(...)` **之前**就写入 `subscribedSessions` 并自增计数 ⇒ **异步订阅失败不会被重试**（对账只对「无会话」或「会话实例变化」重试） | 会话存在但订阅被协议侧拒绝（如地址非法） | 日志「已订阅设备数」**高估**；订阅失败只记 ERROR，**不会**自愈，需靠链路重建（会话实例变化）才能恢复 | ✅ **已处置**（PR #15，2026-09-21）：`subscribedSessions` 改到 `whenComplete` 的**成功**分支写入，失败不记录跟踪 ⇒ 下个租约周期自动重试；新增 `iot.access.subscribe.success/failure` 指标；返回语义明确为「本次**发起**数」。外委复核 PASS（把 `put` 移回 `subscribe` 之前⇒回归用例精确转红） |
 | **S7** | **零设备租户的周期噪声**：修复 N-1 后，设备清单为空的租户**每个租约周期（15s）都会打一条 WARN 并重新拉一次内部接口** | 租户已分配但尚未配设备／点位（或设备全部停用） | 日志噪声 + 每 15s 一次内部调用（规模大时是无效压力） | ✅ **已处置**（PR #15，2026-09-21）：空清单改**指数退避**（30s 起、上限 2 分钟）+ 日志分级（首次 WARN、其后 DEBUG）+ `iot.access.spec.empty` / `iot.access.spec.backoff.skipped` 指标；`Clock` 可注入以便用假时钟测。外委复核 PASS（去退避判断 / 退避永不过期均精确转红） |
-| **N-2** | **bind 失败后永不重发 ADD**：ADD 只在首次采集时发，而框架仅在 `bind()` **成功后**才挂重连监听（`IotLifecycle`） | 启动瞬间设备离线（建链失败） | 该设备**永久零数据**且不自动恢复，只有日志一次 ERROR | 对「已采集但无会话」的设备在后续对账中**重发 ADD**（或登记为显式限制）；当前仅在 planner 打 DEBUG「暂无会话」 |
+| **N-2** | **bind 失败后永不重发 ADD**：ADD 只在首次采集时发，而框架仅在 `bind()` **成功后**才挂重连监听（`IotLifecycle`） | 启动瞬间设备离线（建链失败） | 该设备**永久零数据**且不自动恢复，只有日志一次 ERROR | ✅ **已处置**（2026-09-22，M-2 链路自愈）：`IotProtocolTenantLinkManager.retryDevicesWithoutSession` 对「仍无会话」的设备**重发 ADD**（逐设备指数退避 30s→2min、每轮上限 20、首次 ADD 当轮先预置一次退避以免同轮重复），会话建立即清退避；指标 `iot.access.device.rebind` / `...rebind.deferred`；门禁用例 4 条（含「有会话设备不得被重发」「会话出现后退避立刻作废」「每轮上限 + deferred」） |
 | **S6** | **出口是日志占位**：`LoggingAccessReadingSink` / `LoggingDataSink` 是唯一实现且**无 profile 限制** | 生产部署 | 按 INFO **逐条打印**且**数据不落任何地方** ⇒ 「有日志＝像在工作」而实际零持久化 | M-2 数据面替换为「有界队列 → 微批 → EMQX → business 落 IoTDB/Redis」（§5.1），并加**丢弃计数**；替换前不得以占位实现宣称数据面可用 |
 
 **已修（第二轮复核发现，与 B1 同类且更早一步）**：`startCollecting` 原会把 `loadByTenant()` 的空结果也缓存进 `collected`，而取数瞬时失败返回的就是空集合 ⇒ **启动期一次取数失败即把该租户永久钉死为零设备**。现改为「空清单不缓存、下轮重取」，并把「本节点负责该租户」的状态（`collecting`）与设备清单缓存**分开**，保证 fencing 与观测语义不变；已补可咬回归用例 `emptyDeviceListMustNotBePinned`。
@@ -381,7 +381,7 @@ ERROR The build could not read 1 project
 
 | # | 事项 | 现状 |
 |---|---|---|
-| **G1** | 订阅失败**无退避、无在途去重** | 失败设备每 15s 重发一次（可能打到远端），慢订阅 >15s 会重复发起 —— 未做 |
+| **G1** | 订阅失败**无退避、无在途去重** | ✅ **已处置**（2026-09-22，M-2 链路自愈）：订阅失败改**指数退避**（30s→2min；退避状态记住失败所在的**会话实例**，实例变化即作废——否则框架重连后的立刻重试会被退避挡住）+ **在途去重**（异步未完成的订阅不得被下一轮重复发起）；新增 `iot.access.subscribe.inflight.skipped` / `...backoff.skipped` 指标；门禁 7 条用例（含「退避窗口内不得重发」「翻倍」「成功清除」「forget 清退避」） |
 | **G6'** | 属性标识改名 / 新版本物模型发布**不**推进 `config_epoch` | 点位地址、类型、周期、字节序等变更已覆盖；`identifier` 仅影响读数标签，改名要等下一次变更才对账 |
 | **G7'** | 设备「全部停用」路径 | 设备 `status` 没有写入口（`IotDeviceReq` 无该字段），故只能靠设备删除/映射删除触发；`status=1` 过滤仍在 `DeviceSpecServiceImpl` |
 | **G8** | 单租户部署（未开 tenant 插件）与「台账无该租户」时**没有变更信号** | `bumpConfigEpochOfCurrentTenant` 无租户上下文即 no-op（设计取舍：不得顺手 insert 一行台账）。**已由周期安全网兜底**：超过 `config-refresh-interval-ms`（默认 5 分钟）未尝试过对账的持有租户会被强制对账、**每 tick 至多 1 个** ⇒ 全量轮转时间 ≈ `max(租户数 × tick 周期, config-refresh-interval-ms)`（仓库内用例 `safetyNetMustRotateAcrossAllStaleTenants` 钉住「3 租户 3 个 tick 全覆盖」）；因此收敛上界是**一个轮转周期**，不是「一个间隔」。⚠️ **代价如实说明**：安全网按「距上次尝试的时长」触发 ⇒ **信号正常、版本号长期不变的租户同样会被周期强制全量对账**（**不是**「只在信号缺失时才触发」），换来的是「任何漏信号/信号缺失场景最坏一个轮转周期即收敛」；确定信号链路可靠时可调大间隔或设 0 关闭 |
@@ -466,6 +466,38 @@ ERROR The build could not read 1 project
 | **A6** | 租约转移导致的停采仍算断档 | 活性行感知不到归属变化：租户被接管到别的节点后，本节点的最后一次有效数据之后就会被算成断档。需要与归属/租约联动（或在上报里带「本次采集是否仍在进行」） |
 | **A7** | 平台自身停机期间的断档不可分辨原因 | 停机期间没有扫描；恢复后按 `lastGoodAt` 补开一条，跨越停机——时长方向正确，但无法区分「设备断档」与「平台停机」 |
 | **A8** | ~~采集周期当前靠兜底值~~ **已闭环** | access 已随读数上报 `pollIntervalMs`（来自 `DeviceSpec.pollInterval`）；只有上游未给周期（0/null）时才走 `fallback-interval-ms` |
+
+### 四点十三、M-2 链路自愈：重发 ADD（N-2）与订阅退避/在途去重（G1）
+
+**解决什么问题**：这两条都是「出了问题不会报错、只是永远没数据」的静默失效——
+① **N-2**：框架只在 `bind()` **成功后**才挂重连监听，启动瞬间设备离线时 ADD 发出去但建链失败，
+框架**不会**自己重试 ⇒ 该设备永久零数据，日志里只有一行 DEBUG「暂无会话」；
+② **G1**：`session.subscribe(...)` 是**异步**的，慢订阅（> 一个租约周期）会被下一轮对账再发起一次（重复订阅、
+监听器重复挂、远端压力翻倍），而失败订阅又**每个周期**重发一次。
+
+**做了什么**
+
+| 面 | 实现 |
+|---|---|
+| 重发 ADD（N-2） | `TenantLinkManager#reconcile` 之外新增链路：每轮对账后查「仍无会话」的设备（`SubscriptionPlanner#devicesWithoutSession`，默认空实现给日志桩/测试替身）并**重发 ADD**（新 revision）让框架重新 bind。三重节制：逐设备指数退避 **30s→2min**、每轮上限 **20**（超出计 `iot.access.device.rebind.deferred`）、**首次 ADD 当轮先预置一次退避**（建链结果下一轮才看得出来，同轮再发纯属浪费）。会话建立即清退避；fence/设备下架同步清理 |
+| 订阅失败退避（G1） | `AccessSubscriptionPlanner` 记 `{会话实例, 连续失败次数, 下次可重试时刻}`，指数退避 30s→2min；**会话实例变化即作废退避**（框架重连说明换了链路，立刻重试才对——否则一次失败会把「设备恢复」也挡在窗口外）；成功即清除；新增跳过计数 `iot.access.subscribe.backoff.skipped` |
+| 在途去重（G1） | `Set<String> inFlight`：`subscribe` 发起后加入、`whenComplete` **无论成败**都移除（不移除会让该设备再也不能被订阅，比重复订阅更糟）；在途期间下一轮直接跳过并计 `iot.access.subscribe.inflight.skipped` |
+
+**验收证据（本机实跑）**
+
+- `ypbin-access` 单测 **76/0**（原 68 → +8：`AccessSubscriptionPlannerTest` 3→7、`IotProtocolTenantLinkManagerTest` 14→18）；
+- `ypbin-iot` 125/0、`ypbin-architecture-tests` 41/0、`tools/check-iot-sql-equivalence.sh` OK；
+- 变异 **5 处**全部精确转红（见本节提交信息与验收证据段）：去掉在途去重、去掉失败退避、去掉「会话实例变化作废退避」、
+  去掉重发 ADD、去掉重发退避判断——各自只让目标用例失败；
+- 无需真库（本片全是 access 侧内存态逻辑，不涉及 SQL/租户）。
+
+**仍未闭环（本片相关）**
+
+| # | 事项 | 现状 |
+|---|---|---|
+| **L1** | 重发 ADD 是「重建链」而非「重试订阅」 | 设备离线时框架 bind 会失败并每 30s 重试一次；若未来出现「bind 成功但 subscribe 永远失败」的协议侧问题，靠 G1 的退避重试覆盖（不会自愈到「换协议参数」的程度） |
+| **L2** | 每轮上限 20 只保证「不会一次打爆」 | 大规模离线（>20 台同时无会话）时其余设备**按轮次顺延**（每轮 10s ⇒ 200 台最坏 ~100s 才轮完一轮重发）；已用 `rebind.deferred` 暴露 |
+| **L3** | 会话实例判等依赖框架「重连必换实例」 | 与本仓既有的 B2 防线同一前提；若框架某天复用实例，G1 的退避会挡住恢复（需真 socket e2e 长期观测） |
 
 ### 五、替换缝（3a 已备好，3b-2 只需新增自动配置）
 3a 的 `LoggingTenantLinkManager` 已去掉 `@Component`，由 `AccessLeaseConfiguration`（`@AutoConfiguration`
