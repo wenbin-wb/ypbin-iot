@@ -36,6 +36,7 @@ import cn.ypbin.admin.iot.service.LeaseService;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.core.exception.GlobalErrorCode;
 import cn.ypbin.starter.core.util.LogSanitizer;
+import cn.ypbin.starter.tenant.core.TenantContext;
 import com.baomidou.mybatisplus.core.toolkit.IdWorker;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import io.micrometer.core.instrument.Counter;
@@ -343,8 +344,12 @@ public class LeaseServiceImpl implements LeaseService {
         }
         List<Long> tenantIds = List.copyOf(startsByTenant.keySet());
         // 一次查询拿到「已有进行中交接窗口」的租户：避免「先查后插」的循环内 DB 调用（N+1 门禁）
-        Set<Long> alreadyOpen = Set.copyOf(maintenanceWindowMapper.findTenantsWithOpenHandover(tenantIds,
-            MaintenanceSource.LEASE_HANDOVER.getCode()));
+        // ⚠️ 租约侧**没有租户上下文**（/internal/lease/** 只有内部凭证）：maintenance_window 是**租户表**，
+        //    租户插件在无上下文时 fail-closed ⇒ 跨租户读写必须显式 executeIgnore（与可用率扫描同一取向）。
+        //    安全性来自显式 tenant_id：查询/更新按入参租户集合收敛，插入的 tenant_id 逐行给出。
+        Set<Long> alreadyOpen = Set.copyOf(TenantContext.executeIgnore(
+            () -> maintenanceWindowMapper.findTenantsWithOpenHandover(tenantIds,
+                MaintenanceSource.LEASE_HANDOVER.getCode())));
         List<MaintenanceWindow> toInsert = new ArrayList<>();
         for (Map.Entry<Long, LocalDateTime> entry : startsByTenant.entrySet()) {
             if (alreadyOpen.contains(entry.getKey())) {
@@ -360,7 +365,7 @@ public class LeaseServiceImpl implements LeaseService {
             toInsert.add(window);
         }
         if (!toInsert.isEmpty()) {
-            maintenanceWindowMapper.insertBatch(toInsert);
+            TenantContext.executeIgnore(() -> maintenanceWindowMapper.insertBatch(toInsert));
             // 日志用入参租户集合：**不在服务层引用租户实体的 getTenantId**（租户隔离门禁：隔离条件统一由插件追加）
             log.info("[iot] 打开租约交接维护窗口 {} 个（交接空档不计为断档）：{}", toInsert.size(),
                 LogSanitizer.sanitize(List.copyOf(startsByTenant.keySet())));
@@ -377,8 +382,8 @@ public class LeaseServiceImpl implements LeaseService {
         if (tenantIds == null || tenantIds.isEmpty()) {
             return;
         }
-        int closed = maintenanceWindowMapper.closeOpenWindows(tenantIds,
-            MaintenanceSource.LEASE_HANDOVER.getCode(), now);
+        int closed = TenantContext.executeIgnore(() -> maintenanceWindowMapper.closeOpenWindows(tenantIds,
+            MaintenanceSource.LEASE_HANDOVER.getCode(), now));
         if (closed > 0) {
             log.info("[iot] 交接完成，关闭交接维护窗口 {} 个", closed);
         }

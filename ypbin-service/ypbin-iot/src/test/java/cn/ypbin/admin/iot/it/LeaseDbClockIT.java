@@ -28,11 +28,14 @@ import cn.ypbin.admin.iot.mapper.TenantLedgerMapper;
 import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
 import cn.ypbin.admin.iot.mapper.TenantNodeAssignmentMapper;
 import cn.ypbin.admin.iot.service.impl.LeaseServiceImpl;
+import cn.ypbin.starter.tenant.autoconfigure.TenantProperties;
+import cn.ypbin.starter.tenant.handler.DefaultTenantLineHandler;
 import cn.ypbin.starter.test.condition.EnabledIfMySqlAvailable;
 import cn.ypbin.starter.test.container.MySqlIntegrationTestSupport;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.baomidou.mybatisplus.extension.plugins.inner.TenantLineInnerInterceptor;
 import com.baomidou.mybatisplus.extension.plugins.MybatisPlusInterceptor;
 import com.baomidou.mybatisplus.spring.MybatisSqlSessionFactoryBean;
 import com.zaxxer.hikari.HikariConfig;
@@ -115,6 +118,15 @@ class LeaseDbClockIT {
         configuration.setMapUnderscoreToCamelCase(true);
         configuration.addInterceptor(new MybatisPlusInterceptor());
         configuration.addMapper(TenantNodeAssignmentMapper.class);
+        // 装上**生产同款**租户拦截器（含平台表 ignore 列表）：交接窗口落在**租户表** maintenance_window 上，
+        // 而租约侧没有租户上下文 ⇒ 服务层必须 executeIgnore 才能跨租户读写（本 IT 就是来钉这件事的）
+        TenantProperties tenantProperties = new TenantProperties();
+        tenantProperties.setFailOnMissingTenant(true);
+        tenantProperties.setIgnoreTables(List.of("tenant_node_assignment", "access_node", "tenant_ledger"));
+        MybatisPlusInterceptor plugins = new MybatisPlusInterceptor();
+        plugins.addInnerInterceptor(new TenantLineInnerInterceptor(
+            new DefaultTenantLineHandler(java.util.Optional::empty, tenantProperties)));
+        configuration.addInterceptor(plugins);
         configuration.addMapper(MaintenanceWindowMapper.class);
         configuration.addMapper(AccessNodeMapper.class);
         configuration.addMapper(TenantLedgerMapper.class);
