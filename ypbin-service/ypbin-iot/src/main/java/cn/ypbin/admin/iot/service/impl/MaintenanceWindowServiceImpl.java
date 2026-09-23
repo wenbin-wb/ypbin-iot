@@ -19,6 +19,7 @@ import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.core.exception.GlobalErrorCode;
 import cn.ypbin.starter.core.util.LogSanitizer;
 import cn.ypbin.starter.tenant.core.TenantContext;
+import cn.ypbin.starter.tenant.core.TenantProvider;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import java.time.LocalDateTime;
 import java.util.List;
@@ -43,14 +44,23 @@ public class MaintenanceWindowServiceImpl implements MaintenanceWindowService {
 
     private final MaintenanceWindowMapper mapper;
 
-    public MaintenanceWindowServiceImpl(MaintenanceWindowMapper mapper) {
+    /** 租户来源：与 MP 租户插件**完全一致**（ThreadLocal 优先，其次 TenantProvider/IdentityContext）。 */
+    private final TenantProvider tenantProvider;
+
+    public MaintenanceWindowServiceImpl(MaintenanceWindowMapper mapper, TenantProvider tenantProvider) {
         this.mapper = mapper;
+        this.tenantProvider = tenantProvider;
+    }
+
+    /** 当前请求的租户（与插件同源；只读 TenantContext 会在真实请求上误报「缺少租户上下文」）。 */
+    private Long currentTenantId() {
+        return TenantContext.getTenantId().or(tenantProvider::getCurrentTenantId).orElse(null);
     }
 
     @Override
     @Transactional(rollbackFor = Exception.class)
     public Long open(MaintenanceWindowReq req) {
-        Long tenantId = TenantContext.getTenantId().orElse(null);
+        Long tenantId = currentTenantId();
         if (tenantId == null) {
             // 维护窗口是租户数据：没有租户上下文绝不猜、不写「无租户」的行
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "缺少租户上下文，无法声明维护窗口");
@@ -63,6 +73,21 @@ public class MaintenanceWindowServiceImpl implements MaintenanceWindowService {
             // 给反/相等一律报错，不静默交换（否则会得到「零长度」的窗口，运维以为配上了其实没有）
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
                 "维护窗口结束必须晚于开始：" + startTs + " >= " + endTs);
+        }
+        // 重叠校验：同设备范围（本设备 + 租户级）内的窗口**不得重叠**——聚合按「逐窗口求交后求和」统计，
+        // 重叠会重复计数（分子被断档封顶 ⇒ 可用率偏高；分母重复扣 ⇒ 统计总时长偏小、极端下 fail-open）。
+        LocalDateTime probeTo = endTs == null ? LocalDateTime.of(9999, 12, 31, 23, 59, 59) : endTs;
+        List<MaintenanceWindow> overlapped = mapper.selectList(Wrappers.<MaintenanceWindow>lambdaQuery()
+            .and(wrapper -> wrapper.isNull(MaintenanceWindow::getDeviceId)
+                .or().eq(req.getDeviceId() != null, MaintenanceWindow::getDeviceId, req.getDeviceId()))
+            .lt(MaintenanceWindow::getStartTs, probeTo)
+            .and(wrapper -> wrapper.isNull(MaintenanceWindow::getEndTs)
+                .or().gt(MaintenanceWindow::getEndTs, startTs)));
+        if (!overlapped.isEmpty()) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "维护窗口与已有窗口重叠（重叠会重复计数导致可用率偏高）：已有窗口 ID="
+                    + overlapped.get(0).getId() + " " + overlapped.get(0).getStartTs() + " ~ "
+                    + overlapped.get(0).getEndTs());
         }
         MaintenanceWindow row = new MaintenanceWindow();
         row.setTenantId(tenantId);

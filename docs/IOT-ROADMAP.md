@@ -555,17 +555,19 @@ ERROR The build could not read 1 project
 | 面 | 实现 |
 |---|---|
 | 表 | `maintenance_window`（租户表，006 与迁移逐字等价）：`device_id` 为空=该租户全部设备；`end_ts` 为空=进行中；`source` = `MANUAL` / `LEASE_HANDOVER`（后者为租约交接预留） |
-| 精确聚合 | `OutageEventMapper.summarizeInWindow` 改为「派生表 + 与维护窗口求交」：每行断档先算自身时长 `sec`，再算它落在维护内的 `msec`（**上限封顶到 `sec`**），返回计入断档 `Σ(sec−msec)`、计入最长断档 `MAX(sec−msec)`、被剔除 `Σmsec` 与精确次数；`MaintenanceWindowMapper.sumMaintenanceSecondsInWindow` 给分母的维护时长。两者都是单条 SQL（明细截断不影响精度） |
+| 精确聚合（**两段简单 SQL + Java 侧相减**） | `OutageEventMapper.summarizeInWindow` 给**原始**断档合计/最长（保持简单可解析）；`MaintenanceWindowMapper.sumMaintenanceSecondsInWindow` 给分母维护时长；`sumOutageInMaintenanceSeconds` 用一次 `JOIN` 求「断档∩维护」。计入断档 = 原始 − min(断档∩维护, 原始)，在 Java 侧算。⚠️ **曾经写成「派生表 + 相关子查询」一行搞定，CI 真库连续两轮打回**：① MP 的 JSqlParser 解析失败（拦截器改写不了就**拒绝执行**）② 关掉拦截器后 MySQL 自身报语法错误 ⇒ 改为两段简单 SQL（源码门禁新增「不得出现派生表/相关子查询」的回归防线） |
+| 重叠不变量 | 聚合按「逐个维护窗口求交后求和」统计 ⇒ 同设备范围内**窗口重叠会重复计数**（分子封顶后偏小 ⇒ 可用率偏高；分母重复扣 ⇒ 统计总时长偏小，极端下 `effectiveWindow=0` 直接判 100% 达标 = fail-open）。`open` 因此**拒绝重叠声明**（含租户级窗口），并在文档写明「直接改库绕过校验会破坏该前提」 |
+| 最长断档的近似 | 「计入的最长单次断档」取 `min(原始最长, 计入断档合计)`：要精确得到「排除维护后的单次最长」需要逐行求交（就是被 CI 拒绝的复杂 SQL）⇒ 该近似**方向偏严**（可能把一半落在维护里的最长断档算得更长 ⇒ 达标更难），已如实登记 |
 | 计算与响应 | `AvailabilityCalculator` 增加维护输入（维护时长封顶到窗口、被剔除断档取下限）；`AvailabilityResp` 回显 `maintenanceSeconds`/`effectiveWindowSeconds`/`outageInMaintenanceSeconds` 与窗口列表（最多 50 条），让「这段时间为什么不算断档」在响应里自解释 |
 | 可配置 | 内部端点 `POST /internal/maintenance/windows`（声明，租户取自上下文、时间基准取数据库时钟、结束必须晚于开始）、`POST /{id}/close`（**只关进行中**）、`GET`（按设备/区间查询）；服务层 `MaintenanceWindowService` |
 
 **验收证据（本机实跑）**
 
-- `ypbin-iot` 单测 **137/0**（+11：`AvailabilityCalculatorTest` +4 维护口径、`AvailabilityServiceImplTest` +1 维护排除与回显、
-  `MaintenanceWindowServiceImplTest` +5（租户守卫/区间校验/只关进行中/查询映射）、源码门禁 +1 维护聚合）；
+- `ypbin-iot` 单测 **140/0**（+14：`AvailabilityCalculatorTest` +4 维护口径、`AvailabilityServiceImplTest` +2（维护排除与回显 + **真实请求链路租户来自 TenantProvider**）、
+  `MaintenanceWindowServiceImplTest` +7（租户守卫/区间校验/只关进行中/查询映射/**租户来自 provider**/**重叠拒绝**）、源码门禁 +1 维护聚合）；
 - 真库 IT `OutageAvailabilityIT` +2（`-Pit` 由 CI 执行）：维护窗口同时从分母与分子排除（可用率 100%、
   另一台设备的窗口不影响本设备）、租户级窗口对所有设备生效；
-- 源码级门禁把「与维护求交」「上限封顶」「显式租户/逻辑删除/jdbcType」钉在构建期。
+- 源码级门禁把「不得出现派生表/相关子查询」「与维护求交（JOIN）」「显式租户/逻辑删除/jdbcType」钉在构建期；维护剔除的**算术**在 Java 侧，因此「不减维护内断档」这类变异由 `AvailabilityServiceImplTest` 单测咬住（复核实测过：早期把剔除写在 SQL 里时，「把子查询结果乘 0」能逃逸子串门禁——那正是把剔除搬到 Java 侧的动机之一）。
 
 **仍未闭环（本片相关）**
 
@@ -573,6 +575,7 @@ ERROR The build could not read 1 project
 |---|---|---|
 | **M1** | 租约交接**自动**开/关窗 | 表与 `source=LEASE_HANDOVER` 已备好，租约侧接线未做（释放/过期→开窗、接管成功→关窗）⇒ 交接空档仍按断档计（A6/A10 保持登记） |
 | **M2** | 管理台与权限码 | 当前只有内部端点（平台侧调用）；面向运维的页面/权限码属后续增量 |
+| **M4** | 租户来源（**本片修掉了一个既有缺陷**） | A11 的可用率查询与新端点原先只读 `TenantContext`（ThreadLocal），而真实请求链路上绑定的是 `IdentityContext`（网关身份头 → 过滤器），`TenantContext` 只有显式 `executeWithTenant` 才非空 ⇒ 两个端点在真实请求下都会误报「缺少租户上下文」。现改为**与 MP 租户插件同源**：`TenantContext` 优先、其次 `TenantProvider`（`MicroserviceTenantProvider` 读 `IdentityContext`）；并补了「TenantContext 为空、provider 有租户」的用例 |
 | **M3** | 维护窗口与断档的**边界**语义 | 窗口起止与断档起止都按秒结算；若窗口正好在断档中间结束，只剔除重叠部分（本实现如此），未做「整段断档都不计」的宽松口径 |
 
 ### 五、替换缝（3a 已备好，3b-2 只需新增自动配置）

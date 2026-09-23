@@ -50,6 +50,8 @@ class MaintenanceWindowServiceImplTest {
     private MaintenanceWindowMapper mapper;
     private MaintenanceWindowServiceImpl service;
 
+    private cn.ypbin.starter.tenant.core.TenantProvider tenantProvider;
+
     /**
      * 注册实体元数据：{@code LambdaUpdateWrapper} 需要 MP 的 TableInfo 缓存，而它通常由 Mapper 扫描时注册
      * ——纯单测（不起 Spring、不扫 Mapper）里没有这一步，会抛 {@code can not find lambda cache}。
@@ -64,7 +66,11 @@ class MaintenanceWindowServiceImplTest {
     void setUp() {
         mapper = mock(MaintenanceWindowMapper.class);
         when(mapper.selectNow()).thenReturn(T0);
-        service = new MaintenanceWindowServiceImpl(mapper);
+        tenantProvider = mock(cn.ypbin.starter.tenant.core.TenantProvider.class);
+        when(tenantProvider.getCurrentTenantId()).thenReturn(java.util.Optional.empty());
+        // 默认无重叠窗口
+        when(mapper.selectList(any())).thenReturn(List.of());
+        service = new MaintenanceWindowServiceImpl(mapper, tenantProvider);
     }
 
     @Test
@@ -90,6 +96,36 @@ class MaintenanceWindowServiceImplTest {
         assertThat(captor.getValue().getStartTs()).as("start 缺省用 DB 时钟").isEqualTo(T0);
         assertThat(captor.getValue().getSource()).isEqualTo("MANUAL");
         assertThat(captor.getValue().getDeviceId()).isEqualTo(77L);
+    }
+
+    @Test
+    @DisplayName("★ 声明：租户来自 TenantProvider（真实请求链路：TenantContext 为空也能声明）")
+    void openMustResolveTenantFromProviderOnRealRequestPath() {
+        when(tenantProvider.getCurrentTenantId()).thenReturn(java.util.Optional.of(TENANT));
+        when(mapper.insert(any(MaintenanceWindow.class))).thenReturn(1);
+        MaintenanceWindowReq req = new MaintenanceWindowReq();
+        req.setEndTs(T0.plusHours(1));
+
+        // 刻意不用 executeWithTenant：网关注入身份后的真实形状
+        assertThat(service.open(req)).isNull(); // mock 未回填 id；关键是不抛「缺少租户上下文」
+        verify(mapper).insert(any(MaintenanceWindow.class));
+    }
+
+    @Test
+    @DisplayName("★ 声明：与已有窗口重叠必须拒绝（重叠会重复计数 ⇒ 可用率偏高/统计总时长偏小）")
+    void openOverlappingMustBeRejected() {
+        MaintenanceWindow existing = new MaintenanceWindow();
+        existing.setId(5L);
+        existing.setStartTs(T0.minusHours(1));
+        existing.setEndTs(T0.plusHours(1));
+        when(mapper.selectList(any())).thenReturn(List.of(existing));
+        MaintenanceWindowReq req = new MaintenanceWindowReq();
+        req.setStartTs(T0);
+        req.setEndTs(T0.plusHours(2));
+
+        assertThatThrownBy(() -> TenantContext.executeWithTenant(TENANT, () -> service.open(req)))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("重叠");
     }
 
     @Test

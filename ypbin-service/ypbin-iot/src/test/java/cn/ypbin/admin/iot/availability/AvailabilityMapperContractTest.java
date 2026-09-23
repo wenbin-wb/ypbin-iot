@@ -84,90 +84,51 @@ class AvailabilityMapperContractTest {
     }
 
     @Test
-    @DisplayName("★ A11：窗口汇总必须是聚合 SQL，且显式带 tenant_id 与 is_deleted=0")
-    void windowSummaryMustBeExactAggregate() throws IOException {
+    @DisplayName("★ A11/A3：断档聚合必须**保持简单可解析**（无派生表/相关子查询），并显式带租户与逻辑删除")
+    void windowSummaryMustBeExactSimpleAggregate() throws IOException {
         String sql = outageMapperSql("summarizeInWindow");
 
         assertThat(sql).as("抽取到的 SQL 不能为空，否则本门禁恒真（空跑）").isNotBlank();
         assertThat(sql).as("必须一次聚合出精确值（明细截断不影响汇总）").contains("COUNT(*)")
-            .contains("SUM(per_row.sec - per_row.msec)").contains("MAX(GREATEST(0, per_row.sec - per_row.msec))")
-            .contains("SUM(per_row.msec)");
-        // 显式写的理由（按实测更正）：租户条件其实会被 MP 的租户拦截器**重写追加**，显式写属纵深防御
-        // （executeIgnore 等跨租户场景下它是唯一护栏）；而**逻辑删除不会被追加** ⇒ is_deleted 必须显式写
-        assertThat(sql).as("tenant_id 与 is_deleted 都必须显式写：前者是纵深防御，后者是必需（逻辑删除不会被自动追加）")
-            .contains("tenant_id = #{tenantId}").contains("o.is_deleted = 0");
-        assertThat(sql).as("单条断档不得为负（否则脏数据会把可用率抬高）")
-            .contains("GREATEST(0, TIMESTAMPDIFF");
-        assertThat(sql).as("窗口裁剪：起点侧").contains("GREATEST(o.start_ts, #{from,jdbcType=TIMESTAMP})");
-        assertThat(sql).as("窗口裁剪：终点侧（进行中的断档结算到 now，now 缺失时退回数据库时钟）")
-            .contains("LEAST(COALESCE(o.end_ts, COALESCE(#{now,jdbcType=TIMESTAMP}, NOW())), "
+            .contains("SUM(GREATEST(0, TIMESTAMPDIFF").contains("MAX(GREATEST(0, TIMESTAMPDIFF");
+        // ⚠️ 这条是**回归防线**：本 PR 曾用「派生表 + 相关子查询」把维护剔除写进这条 SQL，CI 真库实测
+        // ① MP 的 JSqlParser 解析失败（拦截器改写不了就拒绝执行）② 即便关掉拦截器 MySQL 也报语法错误。
+        // 复杂剔除因此改到 Java 侧（两段 SQL 都保持简单可解析）。
+        assertThat(sql).as("不得引入派生表/相关子查询（CI 真库实测被 JSqlParser 与 MySQL 双重拒绝）")
+            .doesNotContain("(SELECT").doesNotContain("per_row");
+        assertThat(sql).as("tenant_id 与 is_deleted 都必须显式写：前者是纵深防御（插件会追加），后者是必需（逻辑删除不会被追加）")
+            .contains("tenant_id = #{tenantId}").contains("is_deleted = 0");
+        assertThat(sql).as("窗口裁剪两端 + 单条不得为负").contains("GREATEST(start_ts, #{from,jdbcType=TIMESTAMP})")
+            .contains("LEAST(COALESCE(end_ts, COALESCE(#{now,jdbcType=TIMESTAMP}, NOW())), "
                 + "#{to,jdbcType=TIMESTAMP})");
-        assertThat(sql).as("窗口谓词不得被删掉").contains("o.start_ts < #{to,jdbcType=TIMESTAMP}")
-            .contains("(o.end_ts IS NULL OR o.end_ts > #{from,jdbcType=TIMESTAMP})");
-        assertThat(sql).as("可空时间参数必须带 jdbcType（与观测状态更新同一条纪律）")
-            .contains("jdbcType=TIMESTAMP");
-        // 维护窗口（spec §12.5）：每行断档要与维护窗口求交、并从该行里剔除；子查询自己也要收敛租户与逻辑删除
-        assertThat(sql).as("必须把维护窗口内的断档从分子里剔除（否则计划停机仍拉低可用率）")
-            .contains("FROM maintenance_window w").contains("(w.device_id IS NULL OR w.device_id = o.device_id)")
-            .contains("w.is_deleted = 0").contains("w.tenant_id = o.tenant_id");
-        assertThat(sql).as("维护重叠不得超过该行自身断档时长（上限封顶，保证计入断档不为负）")
-            .contains("LEAST(GREATEST(0, TIMESTAMPDIFF(SECOND, GREATEST(o.start_ts, "
-                + "#{from,jdbcType=TIMESTAMP}),");
-        // 断言到**形状**而不是「子查询存在」：把子查询结果乘 0（等于不剔除维护）也必须被咬住——
-        // 「存在维护子查询」与「真的把它的结果从断档里减掉」是两回事（前者是装饰，后者才是口径）
-        assertThat(sql).as("必须真的用维护子查询的结果（不是只查出来放着）")
-            .contains("COALESCE((SELECT SUM(GREATEST(0, TIMESTAMPDIFF(SECOND, ");
-        assertThat(sql).as("计入断档必须是 sec 与 msec 的差").contains("SUM(per_row.sec - per_row.msec)");
-    }
-
-    @Test
-    @DisplayName("★ A3：维护时长聚合必须收敛设备范围（租户级窗口对所有设备生效）且显式带租户/逻辑删除")
-    void maintenanceAggregateMustScopeDeviceAndTenant() throws IOException {
-        String sql = methodSql(REPO_ROOT.resolve(
-            "ypbin-service/ypbin-iot/src/main/java/cn/ypbin/admin/iot/mapper/MaintenanceWindowMapper.java"),
-            "sumMaintenanceSecondsInWindow", "@Select");
-
-        assertThat(sql).as("抽取到的 SQL 不能为空").isNotBlank();
-        assertThat(sql).as("设备范围：显式 NULL 表示该租户全部设备").contains("(device_id IS NULL OR device_id = #{deviceId})");
-        assertThat(sql).as("原生聚合 SQL 必须显式收敛租户与逻辑删除，且时间参数带 jdbcType")
-            .contains("tenant_id = #{tenantId}").contains("is_deleted = 0").contains("jdbcType=TIMESTAMP");
-        assertThat(sql).as("窗口裁剪与「不得为负」都要在 SQL 里").contains("GREATEST(start_ts, #{from,jdbcType=TIMESTAMP})")
-            .contains("LEAST(COALESCE(end_ts, #{now,jdbcType=TIMESTAMP}), #{to,jdbcType=TIMESTAMP})")
-            .contains("GREATEST(0, TIMESTAMPDIFF");
         assertThat(sql).as("窗口谓词不得被删掉").contains("start_ts < #{to,jdbcType=TIMESTAMP}")
             .contains("(end_ts IS NULL OR end_ts > #{from,jdbcType=TIMESTAMP})");
+        assertThat(sql).as("可空时间参数必须带 jdbcType").contains("jdbcType=TIMESTAMP");
     }
 
     @Test
-    @DisplayName("★ 复杂聚合必须显式关闭租户拦截器（CI 真库实测：这两条 SQL 会被 JSqlParser 拒绝执行）")
-    void complexAggregateMustExplicitlyIgnoreTenantInterceptor() throws IOException {
-        // 事实依据（不是猜测）：CI 真库跑出 `MybatisPlusException: Failed to process ... ParseException:
-        // Encountered unexpected token: "("`——派生表 + 相关子查询让租户拦截器改写不了，改写不了就**拒绝执行**。
-        // 我曾想用「本地能 parse 就放行」的软门禁，但那会假绿（普通 CCJSqlParserUtil 用 MP 的解析特性不同、
-        // 本地能过、真库仍红）⇒ 这里改成**硬规则**：这两条聚合必须带 @InterceptorIgnore(tenantLine = "true")，
-        // 且必须显式写租户与逻辑删除（关掉拦截器后它们是唯一护栏）。
-        assertExplicitlyIgnored(REPO_ROOT.resolve(
-            "ypbin-service/ypbin-iot/src/main/java/cn/ypbin/admin/iot/mapper/OutageEventMapper.java"),
-            "summarizeInWindow");
-        assertExplicitlyIgnored(REPO_ROOT.resolve(
-            "ypbin-service/ypbin-iot/src/main/java/cn/ypbin/admin/iot/mapper/MaintenanceWindowMapper.java"),
-            "sumMaintenanceSecondsInWindow");
-    }
+    @DisplayName("★ A3：维护聚合必须简单可解析、显式收敛租户与设备范围，并覆盖「断档∩维护」")
+    void maintenanceAggregatesMustScopeTenantAndDevice() throws IOException {
+        Path mapper = REPO_ROOT.resolve(
+            "ypbin-service/ypbin-iot/src/main/java/cn/ypbin/admin/iot/mapper/MaintenanceWindowMapper.java");
+        String maintenance = methodSql(mapper, "sumMaintenanceSecondsInWindow", "@Select");
+        String overlap = methodSql(mapper, "sumOutageInMaintenanceSeconds", "@Select");
 
-    /** 断言该聚合方法显式关闭租户拦截器，且 SQL 里显式带租户条件与逻辑删除。 */
-    private static void assertExplicitlyIgnored(Path mapperPath, String methodName) throws IOException {
-        // ⚠️ 必须**剥离注释**再匹配：方法 Javadoc 里就写着 {@code @InterceptorIgnore(tenantLine = "true")}
-        // 作解释，直接在原文本里搜会在「注解已删」时仍然命中（本仓教训二十三：文本门禁要作用在剥离注释后的代码上；
-        // 我第一版没剥注释，去掉注解的变异照样全绿）
-        String source = stripComments(Files.readString(mapperPath, StandardCharsets.UTF_8));
-        int methodIndex = source.indexOf(" " + methodName + "(");
-        assertThat(methodIndex).as("找不到方法 %s", methodName).isPositive();
-        assertThat(source.lastIndexOf("@InterceptorIgnore(tenantLine = \"true\")", methodIndex) > 0)
-            .as("方法 %s 必须显式关闭租户拦截器（否则真库会因 JSqlParser 拒绝执行而无结果）", methodName)
-            .isTrue();
-        String sql = methodSql(mapperPath, methodName, "@Select");
-        assertThat(sql).as("关闭拦截器后，显式租户条件是唯一护栏：%s", methodName).contains("tenant_id");
-        assertThat(sql).as("逻辑删除不会被自动追加，必须显式写：%s", methodName).contains("is_deleted");
+        assertThat(maintenance).as("分母的维护时长：设备范围含 NULL（租户级窗口）")
+            .contains("(device_id IS NULL OR device_id = #{deviceId})");
+        assertThat(maintenance).as("显式租户/逻辑删除 + 窗口裁剪 + 不得为负")
+            .contains("tenant_id = #{tenantId}").contains("is_deleted = 0")
+            .contains("GREATEST(start_ts, #{from,jdbcType=TIMESTAMP})")
+            .contains("GREATEST(0, TIMESTAMPDIFF").contains("jdbcType=TIMESTAMP");
+        assertThat(overlap).as("分子的「断档∩维护」：必须真的与维护窗口求交（JOIN + 双端窗口裁剪）")
+            .contains("JOIN maintenance_window w").contains("(w.device_id IS NULL OR w.device_id = o.device_id)")
+            .contains("GREATEST(o.start_ts, w.start_ts, #{from,jdbcType=TIMESTAMP})")
+            .contains("LEAST(COALESCE(o.end_ts, COALESCE(#{now,jdbcType=TIMESTAMP}, NOW())), "
+                + "COALESCE(w.end_ts, #{to,jdbcType=TIMESTAMP}), #{to,jdbcType=TIMESTAMP})");
+        assertThat(overlap).as("显式租户/逻辑删除 + 简单可解析")
+            .contains("w.tenant_id = o.tenant_id").contains("o.tenant_id = #{tenantId}")
+            .contains("o.is_deleted = 0").contains("w.is_deleted = 0")
+            .doesNotContain("(SELECT");
     }
 
     /** 剥离行注释与块注释（文本门禁必须作用在代码上，否则注释里的示例会制造假绿）。 */

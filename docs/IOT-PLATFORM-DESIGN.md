@@ -471,13 +471,15 @@ business 变更台账（产品/设备/点位映射/凭据）
 
 ### 5.4 断档与可用率（继承 spec §12.5 定义，逐台达标）
 
-> **落地状态（2026-09-22，M-2）**：**口径、检出、落库、查询、access 侧上报全部已落地**
-> （`device_liveness` / `outage_event` 两张表 + `AvailabilityRules`/`OutageDetector`/`AvailabilityCalculator`
-> + `/internal/readings` 上报端点 + 周期扫描 + `GET /devices/{id}/availability`；access 侧
-> `HttpAccessReadingSink`：有界队列 → 微批 → HTTP 上报）。**尚未落地**：① 读数**值**的存储（IoTDB/Redis，
-> 依赖 Q8）；② 维护窗口排除、按设备覆盖阈值、链路级原因码；③ 租约转移导致的停采仍会被算成断档
-> （活性行感知不到归属变化）；④ 上报失败不重试（丢弃并计数）；EMQX 传输待 Q4。完整登记见
-> docs/IOT-ROADMAP.md 四点十二。
+> **落地状态（2026-09-23，M-2）**：**口径、检出、落库、查询、维护窗口排除、access 侧上报全部已落地**
+> （`device_liveness` / `outage_event` / `maintenance_window` 三张表 + `AvailabilityRules`/`OutageDetector`/
+> `AvailabilityCalculator` + `/internal/readings` 上报端点 + `/internal/maintenance/windows` 维护窗口端点
+> + 周期扫描 + `GET /devices/{id}/availability`；access 侧 `HttpAccessReadingSink`：有界队列 → 微批 → HTTP 上报）。
+> 可用率口径：`可用率 = 1 − 计入断档 / 统计总时长`，其中 **统计总时长 = 窗口 − 维护窗口**、
+> **计入断档 = 断档 − 断档∩维护**（比 spec §12.5 字面更严，理由与登记见 ROADMAP 四点十五）。
+> **尚未落地**：① 读数**值**的存储（IoTDB/Redis，依赖 Q8）；② 按设备覆盖阈值、链路级原因码；
+> ③ 租约转移导致的停采仍会被算成断档（自动交接窗口未接线，人工窗口可临时覆盖）；④ 上报失败不重试
+> （丢弃并计数）；EMQX 传输待 Q4。完整登记见 docs/IOT-ROADMAP.md 四点十二/四点十五。
 
 ```
 可用率（逐台设备）= 1 - Σ(断档时长) / 统计总时长（时间口径，排除可配置维护窗口）

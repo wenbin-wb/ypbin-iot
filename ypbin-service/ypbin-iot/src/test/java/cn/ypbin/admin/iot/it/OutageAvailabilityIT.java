@@ -128,8 +128,9 @@ class OutageAvailabilityIT {
         outageMapper = sessionTemplate.getMapper(OutageEventMapper.class);
         deviceMapper = sessionTemplate.getMapper(IotDeviceMapper.class);
         maintenanceWindowMapper = sessionTemplate.getMapper(MaintenanceWindowMapper.class);
+        // IT 里显式给「固定租户」的 provider：等价于真实请求经 IdentityContext 解析出的租户
         service = new AvailabilityServiceImpl(livenessMapper, outageMapper, maintenanceWindowMapper,
-            deviceMapper, new AvailabilityProperties());
+            deviceMapper, new AvailabilityProperties(), () -> java.util.Optional.of(TENANT));
         cleanup();
         seedDevices();
     }
@@ -270,7 +271,7 @@ class OutageAvailabilityIT {
         AvailabilityProperties oneByOne = new AvailabilityProperties();
         oneByOne.setScanBatchSize(1);
         AvailabilityServiceImpl tightScan = new AvailabilityServiceImpl(livenessMapper, outageMapper,
-            maintenanceWindowMapper, deviceMapper, oneByOne);
+            maintenanceWindowMapper, deviceMapper, oneByOne, () -> java.util.Optional.of(TENANT));
         // 两个「设备不存在」的垃圾活性行（id 更小 ⇒ 优先被候选查询选中）+ 一个真断档设备
         insertOrphanLiveness(1L, 999_998L, dbNow.minusHours(1));
         insertOrphanLiveness(2L, 999_999L, dbNow.minusHours(1));

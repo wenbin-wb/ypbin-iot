@@ -33,6 +33,7 @@ import cn.ypbin.starter.core.exception.GlobalErrorCode;
 import cn.ypbin.starter.core.util.LogSanitizer;
 import cn.ypbin.starter.data.core.EntityStatus;
 import cn.ypbin.starter.tenant.core.TenantContext;
+import cn.ypbin.starter.tenant.core.TenantProvider;
 import com.baomidou.mybatisplus.core.toolkit.IdWorker;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import java.time.Duration;
@@ -73,17 +74,22 @@ public class AvailabilityServiceImpl implements AvailabilityService {
     private final OutageEventMapper outageMapper;
 
     private final MaintenanceWindowMapper maintenanceWindowMapper;
+
+    /** 租户来源：与 MP 租户插件**完全一致**（ThreadLocal 优先，其次 TenantProvider/IdentityContext）。 */
+    private final TenantProvider tenantProvider;
     private final IotDeviceMapper deviceMapper;
     private final AvailabilityProperties properties;
 
     public AvailabilityServiceImpl(DeviceLivenessMapper livenessMapper, OutageEventMapper outageMapper,
                                    MaintenanceWindowMapper maintenanceWindowMapper,
-                                   IotDeviceMapper deviceMapper, AvailabilityProperties properties) {
+                                   IotDeviceMapper deviceMapper, AvailabilityProperties properties,
+                                   TenantProvider tenantProvider) {
         this.livenessMapper = livenessMapper;
         this.outageMapper = outageMapper;
         this.maintenanceWindowMapper = maintenanceWindowMapper;
         this.deviceMapper = deviceMapper;
         this.properties = properties;
+        this.tenantProvider = tenantProvider;
     }
 
     @Override
@@ -223,23 +229,31 @@ public class AvailabilityServiceImpl implements AvailabilityService {
         long intervalMs = OutageDetector.effectiveIntervalMs(
             liveness == null ? null : liveness.getPollIntervalMs(), properties.getFallbackIntervalMs());
         // 汇总走**精确聚合**（与明细条数无关）：明细有返回上限，够不到时求和会低估断档 ⇒ 可用率偏高
-        Long tenantId = TenantContext.getTenantId().orElse(null);
+        Long tenantId = currentTenantId();
         if (tenantId == null) {
             // 查询路径必然有租户身份（网关注入）；缺失时不猜、不查全表，直接暴露
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "缺少租户上下文，无法统计可用率");
         }
         Map<String, Object> aggregate = outageMapper.summarizeInWindow(tenantId, deviceId, windowFrom, windowTo,
             now);
-        long outageSeconds = toLong(aggregate == null ? null : aggregate.get("outageSeconds"));
-        long longestOutageSeconds = toLong(aggregate == null ? null : aggregate.get("longestOutageSeconds"));
-        long outageInMaintenanceSeconds = toLong(
-            aggregate == null ? null : aggregate.get("outageInMaintenanceSeconds"));
+        long rawOutageSeconds = toLong(aggregate == null ? null : aggregate.get("outageSeconds"));
+        long rawLongestOutageSeconds = toLong(aggregate == null ? null : aggregate.get("longestOutageSeconds"));
         int outageCount = (int) toLong(aggregate == null ? null : aggregate.get("outageCount"));
         long windowSeconds = Math.max(0L, Duration.between(windowFrom, windowTo).getSeconds());
-        // 维护窗口（spec §12.5）：统计总时长要排除计划停机；断档落在窗口内的部分也一并剔除（否则计划停机仍拉低可用率）
+        // 维护窗口（spec §12.5）：统计总时长要排除计划停机；断档落在窗口内的部分也一并剔除（否则计划停机仍拉低可用率）。
+        // 剔除在 Java 侧做：两段 SQL 保持简单可解析（复杂形状会被 MP 的 JSqlParser 与 MySQL 拒绝，CI 真实测过）。
         Long maintenanceRaw = maintenanceWindowMapper.sumMaintenanceSecondsInWindow(tenantId, deviceId,
             windowFrom, windowTo, now);
         long maintenanceSeconds = Math.max(0L, maintenanceRaw == null ? 0L : maintenanceRaw);
+        Long outageInMaintenanceRaw = maintenanceWindowMapper.sumOutageInMaintenanceSeconds(tenantId, deviceId,
+            windowFrom, windowTo, now);
+        long outageInMaintenanceSeconds = Math.max(0L,
+            Math.min(outageInMaintenanceRaw == null ? 0L : outageInMaintenanceRaw, rawOutageSeconds));
+        long outageSeconds = Math.max(0L, rawOutageSeconds - outageInMaintenanceSeconds);
+        // 计入的「最长单次断档」：原始最长断档减去「维护内部分」只能按下限近似（要精确得到
+        // 「排除维护后的单次最长」需要逐行求交，那正是被 CI 拒绝的复杂 SQL）⇒ 取 min(原始最长, 计入断档合计)。
+        // 方向是**偏严**（可能把「一半落在维护里的最长断档」算得更长 ⇒ 达标更困难），已在 ROADMAP 登记。
+        long longestOutageSeconds = Math.max(0L, Math.min(rawLongestOutageSeconds, outageSeconds));
         boolean truncated = outageCount > AvailabilityRules.MAX_OUTAGE_ROWS;
         if (truncated) {
             log.warn("[iot] 窗口内断档 {} 条超过明细上限 {}：明细按**最新优先**截断展示，"
@@ -459,7 +473,19 @@ public class AvailabilityServiceImpl implements AvailabilityService {
     }
 
     /**
-     * 聚合结果取值（驱动差异：MySQL 的 COUNT 是 Long、SUM 可能是 BigDecimal/Integer）。
+     * 当前请求的租户：**与 MP 租户插件同源**（{@code TenantContext} 优先，其次 {@code TenantProvider}）。
+     *
+     * <p>只读 {@code TenantContext} 是错的：真实请求链路上绑定的是 {@code IdentityContext}（网关身份头 →
+     * {@code IdentityHeaderFilter}），`TenantContext` 只有显式 executeWithTenant 才非空 ⇒ 会导致
+     * 「网关注入的租户明明存在，端点却报缺少租户上下文」（外委复核探针实测）。</p>
+     *
+     * @return 租户 ID；无则 {@code null}
+     */
+    private Long currentTenantId() {
+        return TenantContext.getTenantId().or(tenantProvider::getCurrentTenantId).orElse(null);
+    }
+
+    /**\n     * 聚合结果取值（驱动差异：MySQL 的 COUNT 是 Long、SUM 可能是 BigDecimal/Integer）。
      *
      * @param value 聚合值（可空）
      * @return 长整型；空返回 0
