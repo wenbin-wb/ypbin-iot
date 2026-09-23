@@ -138,7 +138,9 @@ public class AccessIotProtocolConfiguration {
             IotLifecycle lifecycle = lifecycleProvider.getIfAvailable();
             return lifecycle == null ? Map.of() : lifecycle.sessions();
         };
-        return new AccessSubscriptionPlanner(sessions, objectMapper, readingSink, meterRegistry);
+        // Clock 给系统时钟：订阅失败退避的时间基准，单测里注入可推进的假时钟
+        return new AccessSubscriptionPlanner(sessions, objectMapper, readingSink, meterRegistry,
+            Clock.systemUTC());
     }
 
     /**

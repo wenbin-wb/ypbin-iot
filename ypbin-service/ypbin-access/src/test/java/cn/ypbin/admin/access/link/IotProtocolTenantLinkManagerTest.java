@@ -30,6 +30,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -229,6 +230,152 @@ class IotProtocolTenantLinkManagerTest {
     }
 
     @Test
+    @DisplayName("★ N-2：设备仍无会话时必须**重发 ADD**（建链失败/设备离线可自愈），且不得每轮猛重试")
+    void rebindMustRetryWhenDeviceHasNoSession() {
+        source.devices.put(TENANT_A, List.of(device("d1")));
+        planner.missingSessions.add("d1");
+
+        linkManager.startCollecting(TENANT_A);
+        assertThat(framework.actions).as("首次采集只发一次 ADD（同一轮不得立刻再发）")
+            .containsExactly("ADD:d1");
+
+        // 退避窗口内（30s）不得重发
+        clock.advance(IotProtocolTenantLinkManager.REBIND_BACKOFF_BASE.minusSeconds(1));
+        linkManager.startCollecting(TENANT_A);
+        assertThat(framework.actions).as("退避窗口内不得重发 ADD").containsExactly("ADD:d1");
+
+        // 退避到期 ⇒ 重发 ADD（框架会重新 bind；revision 必须继续递增，否则被框架静默丢弃）
+        clock.advance(Duration.ofSeconds(2));
+        linkManager.startCollecting(TENANT_A);
+        assertThat(framework.actions).as("退避到期必须重发 ADD（N-2 的自愈）")
+            .containsExactly("ADD:d1", "ADD:d1");
+        assertThat(meterRegistry.get("iot.access.device.rebind").counter().count()).isEqualTo(1.0d);
+    }
+
+    @Test
+    @DisplayName("★ N-2：有会话的设备不得被重发 ADD（否则每轮都在重建链）")
+    void rebindMustNotTouchDevicesWithSession() {
+        source.devices.put(TENANT_A, List.of(device("d1")));
+
+        linkManager.startCollecting(TENANT_A);
+        clock.advance(Duration.ofMinutes(5));
+        linkManager.startCollecting(TENANT_A);
+        clock.advance(Duration.ofMinutes(5));
+        linkManager.startCollecting(TENANT_A);
+
+        assertThat(framework.actions).containsExactly("ADD:d1");
+        assertThat(meterRegistry.get("iot.access.device.rebind").counter().count()).isZero();
+    }
+
+    @Test
+    @DisplayName("★ N-2：会话一旦建立就清掉重发退避（会话消失后必须能立刻重试）")
+    void rebindBackoffMustBeClearedWhenSessionAppears() {
+        source.devices.put(TENANT_A, List.of(device("d1")));
+        planner.missingSessions.add("d1");
+        linkManager.startCollecting(TENANT_A);
+
+        // 会话建立（规划器不再报缺会话）⇒ 下一轮清掉退避
+        planner.missingSessions.clear();
+        linkManager.startCollecting(TENANT_A);
+
+        // 会话又没了：因为退避已被清掉，本轮就该重发（不用再等 30s）
+        planner.missingSessions.add("d1");
+        linkManager.startCollecting(TENANT_A);
+
+        assertThat(framework.actions).as("清掉退避后应立刻重发").containsExactly("ADD:d1", "ADD:d1");
+    }
+
+    @Test
+    @DisplayName("★ 公平性：采集间隔大于退避上限时，被每轮上限挡住的设备**下一轮必须轮到**（不得永久饿死）")
+    void rebindMustRotateAcrossCyclesToAvoidStarvation() {
+        int total = IotProtocolTenantLinkManager.REBIND_MAX_PER_CYCLE + 5;
+        List<DeviceSpec> many = new ArrayList<>();
+        for (int i = 1; i <= total; i++) {
+            many.add(device("d" + i));
+            planner.missingSessions.add("d" + i);
+        }
+        source.devices.put(TENANT_A, many);
+
+        // 采集间隔 5 分钟 > 退避上限 2 分钟：用户把 acquire-interval-ms 调大后的合法配置
+        linkManager.startCollecting(TENANT_A);
+        clock.advance(Duration.ofMinutes(5));
+        linkManager.startCollecting(TENANT_A);
+        clock.advance(Duration.ofMinutes(5));
+        linkManager.startCollecting(TENANT_A);
+
+        // 每台设备至少出现两次 ADD（首次采集 1 次 + 至少 1 次重发）
+        Map<String, Long> addCount = framework.actions.stream()
+            .filter(action -> action.startsWith("ADD:"))
+            .collect(Collectors.groupingBy(action -> action.substring(4), Collectors.counting()));
+        assertThat(addCount).hasSize(total);
+        assertThat(addCount.values()).as("每台都必须被重发过（轮转而非按列表顺序吃配额）")
+            .allMatch(count -> count >= 2L, "count>=2");
+    }
+
+    @Test
+    @DisplayName("★ N-2：重发退避必须封顶（连续无会话时重试间隔不得无限翻倍）")
+    void rebindBackoffMustCapAtConfiguredMax() {
+        source.devices.put(TENANT_A, List.of(device("d1")));
+        planner.missingSessions.add("d1");
+
+        linkManager.startCollecting(TENANT_A);                                   // 预置 30s
+        clock.advance(IotProtocolTenantLinkManager.REBIND_BACKOFF_BASE.plusSeconds(1));
+        linkManager.startCollecting(TENANT_A);                                   // 第 1 次重发 ⇒ 60s
+        clock.advance(Duration.ofSeconds(61));
+        linkManager.startCollecting(TENANT_A);                                   // 第 2 次 ⇒ 120s
+        clock.advance(Duration.ofSeconds(121));
+        linkManager.startCollecting(TENANT_A);                                   // 第 3 次 ⇒ 仍 120s
+        int before = framework.actions.size();
+
+        clock.advance(IotProtocolTenantLinkManager.REBIND_BACKOFF_MAX.minusSeconds(1));
+        linkManager.startCollecting(TENANT_A);
+        assertThat(framework.actions.size()).as("封顶内不得重发").isEqualTo(before);
+        clock.advance(Duration.ofSeconds(2));
+        linkManager.startCollecting(TENANT_A);
+        assertThat(framework.actions.size()).as("封顶恰为 2 分钟：超过即重发").isEqualTo(before + 1);
+    }
+
+    @Test
+    @DisplayName("★ C2：设备下架（reconcile 单设备删除）必须清掉重发退避，避免 Map 无界增长与陈旧退避")
+    void removedDeviceMustDropRebindBackoff() {
+        source.devices.put(TENANT_A, List.of(device("d1"), device("d2")));
+        planner.missingSessions.add("d1");
+        planner.missingSessions.add("d2");
+        linkManager.startCollecting(TENANT_A);
+        assertThat(linkManager.rebindBackoffCount()).as("两台都登记了退避").isEqualTo(2);
+
+        // 台账去掉 d1 ⇒ reconcile 走「单设备下架」分支
+        source.devices.put(TENANT_A, List.of(device("d2")));
+        assertThat(linkManager.reconcile(TENANT_A)).isTrue();
+
+        assertThat(linkManager.rebindBackoffCount())
+            .as("d1 下架后必须只剩 d2 的退避（否则设备长期更替会让 Map 无界增长）").isEqualTo(1);
+        assertThat(planner.forgotten).contains("d1");
+    }
+
+    @Test
+    @DisplayName("★ N-2：每轮重发有上限（整批设备离线时不得把框架与远端打爆），多余的计入 deferred")
+    void rebindMustRespectPerCycleCap() {
+        List<DeviceSpec> many = new ArrayList<>();
+        for (int i = 1; i <= IotProtocolTenantLinkManager.REBIND_MAX_PER_CYCLE + 1; i++) {
+            many.add(device("d" + i));
+            planner.missingSessions.add("d" + i);
+        }
+        source.devices.put(TENANT_A, many);
+
+        linkManager.startCollecting(TENANT_A);
+        int addsAfterFirstLoad = framework.actions.size();
+        clock.advance(IotProtocolTenantLinkManager.REBIND_BACKOFF_BASE.plusSeconds(1));
+        linkManager.startCollecting(TENANT_A);
+
+        assertThat(framework.actions.size() - addsAfterFirstLoad)
+            .as("每轮最多重发 %s 个", IotProtocolTenantLinkManager.REBIND_MAX_PER_CYCLE)
+            .isEqualTo(IotProtocolTenantLinkManager.REBIND_MAX_PER_CYCLE);
+        assertThat(meterRegistry.get("iot.access.device.rebind.deferred").counter().count())
+            .as("超出的 1 个计入 deferred").isEqualTo(1.0d);
+    }
+
+    @Test
     @DisplayName("★ fence 必须清掉退避状态：重新领取后立刻重取（不能等满退避窗口）")
     void fenceMustClearBackoffSoReacquireRefetchesImmediately() {
         // 先制造退避：空清单 ⇒ 下一次重取要等 30s
@@ -345,11 +492,14 @@ class IotProtocolTenantLinkManagerTest {
         }
     }
 
-    /** 记录订阅批次的替身（同时记录 forget，用于断言「消失的设备被清理跟踪」）。 */
+    /** 记录订阅批次的替身（同时记录 forget 与「无会话设备」，后者供 N-2 用例驱动）。 */
     private static final class RecordingPlanner implements SubscriptionPlanner {
 
         private final List<Integer> subscribedBatchSizes = new ArrayList<>();
         private final List<String> forgotten = new ArrayList<>();
+
+        /** 当前「没有会话」的设备（默认空＝都有会话）。 */
+        private final Set<String> missingSessions = new HashSet<>();
 
         @Override
         public int subscribe(List<DeviceSpec> devices) {
@@ -360,6 +510,17 @@ class IotProtocolTenantLinkManagerTest {
         @Override
         public void forget(String deviceId) {
             forgotten.add(deviceId);
+        }
+
+        @Override
+        public Set<String> devicesWithoutSession(List<DeviceSpec> devices) {
+            Set<String> missing = new HashSet<>();
+            for (DeviceSpec device : devices) {
+                if (missingSessions.contains(device.deviceId())) {
+                    missing.add(device.deviceId());
+                }
+            }
+            return missing;
         }
     }
 
