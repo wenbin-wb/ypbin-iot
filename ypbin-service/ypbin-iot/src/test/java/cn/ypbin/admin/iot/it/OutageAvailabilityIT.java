@@ -112,10 +112,12 @@ class OutageAvailabilityIT {
         configuration.addInterceptor(plugins);
         configuration.addMapper(DeviceLivenessMapper.class);
         configuration.addMapper(OutageEventMapper.class);
+        configuration.addMapper(MaintenanceWindowMapper.class);
         configuration.addMapper(IotDeviceMapper.class);
         MapperBuilderAssistant assistant = new MapperBuilderAssistant(configuration, "");
         TableInfoHelper.initTableInfo(assistant, DeviceLiveness.class);
         TableInfoHelper.initTableInfo(assistant, OutageEvent.class);
+        TableInfoHelper.initTableInfo(assistant, MaintenanceWindow.class);
         TableInfoHelper.initTableInfo(assistant, IotDevice.class);
         MybatisSqlSessionFactoryBean factoryBean = new MybatisSqlSessionFactoryBean();
         factoryBean.setDataSource(dataSource);
