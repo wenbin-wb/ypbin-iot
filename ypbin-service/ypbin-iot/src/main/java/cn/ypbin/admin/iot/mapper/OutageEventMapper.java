@@ -10,6 +10,7 @@
 package cn.ypbin.admin.iot.mapper;
 
 import cn.ypbin.admin.iot.entity.OutageEvent;
+import com.baomidou.mybatisplus.annotation.InterceptorIgnore;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import java.time.LocalDateTime;
 import java.util.Map;
@@ -57,9 +58,10 @@ public interface OutageEventMapper extends BaseMapper<OutageEvent> {
      *
      * <p><b>为什么显式写 {@code tenant_id} 与 {@code is_deleted = 0}</b>（措辞已按实测更正）：</p>
      * <ul>
-     *   <li><b>租户条件</b>：MyBatis-Plus 的 {@code TenantLineInnerInterceptor} 会解析并重写原生 SQL，
-     *       实测**确实会**追加 {@code tenant_id = ?}（所以显式写是**纵深防御 + 可读性**：多了个同值谓词，
-     *       不改变结果；但在 {@code executeIgnore} 这类显式跨租户场景下，它是唯一还能收敛租户的护栏）；</li>
+     *   <li><b>租户条件</b>：本方法用 {@code @InterceptorIgnore(tenantLine = "true")} **关闭**了租户拦截器
+     *       ——因为派生表 + 相关子查询的 SQL 让 MyBatis-Plus 的 JSqlParser 直接解析失败
+     *       （CI 真库实测 {@code ParseException}，拦截器改写不了就拒绝执行）。因此显式 {@code tenant_id}
+     *       是**唯一护栏**（不是纵深防御）：必须写，且调用方只能传上下文里的租户。</li>
      *   <li><b>逻辑删除</b>：{@code is_deleted = 0} **必须**显式写——逻辑删除由 BaseMapper 的注入器实现，
      *       原生 SQL 不会被追加该条件（漏写会把已删断档算进可用率）。</li>
      *   <li><b>时间参数一律显式 {@code jdbcType=TIMESTAMP}</b>：不写不报错，但会按 {@code jdbcTypeForNull}
@@ -77,6 +79,11 @@ public interface OutageEventMapper extends BaseMapper<OutageEvent> {
      * @param now      当前时刻（进行中的断档结算到它）
      * @return 含 outageCount / outageSeconds / longestOutageSeconds 的映射（永不为 null）
      */
+    // 关闭租户/动态表名拦截器：本条 SQL 含派生表 + 相关子查询，MyBatis-Plus 的 JSqlParser 解析不了
+    // （CI 真库实测：ParseException: Encountered unexpected token: "("）⇒ 拦截器无法改写就会直接拒绝执行。
+    // 代价：租户条件不再被自动追加，**显式 tenant_id 从「纵深防御」升级为「唯一护栏」**
+    //（源码门禁断言它必须存在；调用方的 tenantId 只来自上下文，绝不来自请求体）。
+    @InterceptorIgnore(tenantLine = "true")
     @Select("SELECT COUNT(*) AS outageCount, "
         + "COALESCE(SUM(per_row.sec - per_row.msec), 0) AS outageSeconds, "
         + "COALESCE(MAX(GREATEST(0, per_row.sec - per_row.msec)), 0) AS longestOutageSeconds, "

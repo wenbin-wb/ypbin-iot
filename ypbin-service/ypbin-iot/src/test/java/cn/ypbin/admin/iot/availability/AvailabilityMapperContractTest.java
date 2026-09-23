@@ -138,6 +138,44 @@ class AvailabilityMapperContractTest {
             .contains("(end_ts IS NULL OR end_ts > #{from,jdbcType=TIMESTAMP})");
     }
 
+    @Test
+    @DisplayName("★ 复杂聚合 SQL：要么能被 JSqlParser 解析，要么必须显式关闭租户拦截器（否则真库会被拒绝执行）")
+    void complexAggregateMustBeParseableOrExplicitlyIgnored() throws IOException {
+        // CI 真库实测过：派生表 + 相关子查询让 MP 的 JSqlParser 抛 ParseException，
+        // 而租户拦截器**改写不了就拒绝执行** ⇒ 这里把「可解析性」钉在本地（不必等 CI 才发现）。
+        assertParseableOrIgnored(REPO_ROOT.resolve(
+            "ypbin-service/ypbin-iot/src/main/java/cn/ypbin/admin/iot/mapper/OutageEventMapper.java"),
+            "summarizeInWindow");
+        assertParseableOrIgnored(REPO_ROOT.resolve(
+            "ypbin-service/ypbin-iot/src/main/java/cn/ypbin/admin/iot/mapper/MaintenanceWindowMapper.java"),
+            "sumMaintenanceSecondsInWindow");
+    }
+
+    /** 断言：SQL 可被 JSqlParser 解析，或该方法显式关闭了租户拦截器（关了就要求显式租户条件）。 */
+    private static void assertParseableOrIgnored(Path mapperPath, String methodName) throws IOException {
+        String source = Files.readString(mapperPath, StandardCharsets.UTF_8);
+        int methodIndex = source.indexOf(" " + methodName + "(");
+        assertThat(methodIndex).as("找不到方法 %s", methodName).isPositive();
+        boolean ignored = source.lastIndexOf("@InterceptorIgnore(tenantLine = \"true\")", methodIndex) > 0;
+        String sql = methodSql(mapperPath, methodName, "@Select")
+            .replaceAll("#\\{[^}]*}", "?");
+        boolean parseable;
+        try {
+            net.sf.jsqlparser.parser.CCJSqlParserUtil.parse(sql);
+            parseable = true;
+        } catch (Exception ex) {
+            parseable = false;
+        }
+        if (parseable) {
+            return;
+        }
+        assertThat(ignored)
+            .as("SQL 无法被 JSqlParser 解析（%s），而租户拦截器改写不了就会拒绝执行 ⇒ "
+                + "必须加 @InterceptorIgnore(tenantLine = \"true\") 并用显式 tenant_id 兜住隔离", methodName)
+            .isTrue();
+        assertThat(sql).as("关闭拦截器后，显式租户条件就是唯一护栏").contains("tenant_id");
+    }
+
     /** 抽取某个 Mapper 方法注解里的 SQL 文本（把 Java 字符串拼接还原成一行；支持 @Update 与 @Select）。 */
     private static String methodSql(String methodName) throws IOException {
         return methodSql(MAPPER, methodName, "@Update");

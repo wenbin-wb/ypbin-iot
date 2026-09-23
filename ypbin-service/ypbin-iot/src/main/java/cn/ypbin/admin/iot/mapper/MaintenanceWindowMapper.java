@@ -10,6 +10,7 @@
 package cn.ypbin.admin.iot.mapper;
 
 import cn.ypbin.admin.iot.entity.MaintenanceWindow;
+import com.baomidou.mybatisplus.annotation.InterceptorIgnore;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import java.time.LocalDateTime;
 import java.util.List;
@@ -47,6 +48,8 @@ public interface MaintenanceWindowMapper extends BaseMapper<MaintenanceWindow> {
      * @param now      结算时刻（进行中的维护窗口结算到它）
      * @return 维护时长（秒，永不为负）
      */
+    // 与断档聚合同一取向：显式写租户与逻辑删除，并关闭租户拦截器（避免复杂 SQL 被 JSqlParser 拒绝执行）
+    @InterceptorIgnore(tenantLine = "true")
     @Select("SELECT COALESCE(SUM(GREATEST(0, TIMESTAMPDIFF(SECOND, GREATEST(start_ts, #{from,jdbcType=TIMESTAMP}), "
         + "LEAST(COALESCE(end_ts, #{now,jdbcType=TIMESTAMP}), #{to,jdbcType=TIMESTAMP})))), 0) "
         + "FROM maintenance_window WHERE tenant_id = #{tenantId} AND is_deleted = 0 "
