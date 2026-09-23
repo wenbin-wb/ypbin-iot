@@ -262,8 +262,10 @@ public class AccessLeaseManager {
             Duration pending = pendingJump.get();
             boolean consistent = pending != null
                 && skew.minus(pending).abs().compareTo(SKEW_CONFIRM_TOLERANCE) <= 0;
-            int deferrals = deferredJumps.incrementAndGet();
-            if (!consistent && deferrals <= SKEW_CONFIRM_MAX_DEFERRALS) {
+            int deferrals = deferredJumps.get();
+            if (!consistent && deferrals < SKEW_CONFIRM_MAX_DEFERRALS) {
+                // 真正「暂缓」时才累加：一致即采纳/达上限强制采纳这两条路径都不该把计数算进去
+                deferrals = deferredJumps.incrementAndGet();
                 pendingJump.set(skew);
                 skewDeferredCounter.increment();
                 warnSkewRateLimited("时钟偏移相对已校准值跳变 {} 秒（阈值 {} 秒）⇒ **暂缓采纳**（第 {} 次），"
