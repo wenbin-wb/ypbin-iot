@@ -34,7 +34,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
@@ -114,12 +114,30 @@ public class AccessLeaseManager {
     /** 跳变被暂缓（待确认）的累计次数。 */
     private final Counter skewDeferredCounter;
 
+    /** 当前**连续**暂缓次数（采纳即清零；到 {@link #SKEW_CONFIRM_MAX_DEFERRALS} 强制采纳）。 */
+    private final AtomicInteger deferredJumps = new AtomicInteger();
+
     private final AtomicLong lastSkewWarnAt = new AtomicLong(Long.MIN_VALUE);
 
     /**
-     * 「连续两次一致」的确认容差：跳变读数只有与上一次待确认读数差在此范围内才算收敛。
+     * 「连续两次一致」的确认容差。
+     *
+     * <p>=30s（不是 5s）：本估计的**最坏噪声约 6s**（秒级截断 ±1s + 网络非对称 ≤ RTT/2，本仓最坏 RTT 4s ⇒ ≤2s，
+     * 叠加两次采样），取 5s 恰好会被噪声反复越过 ⇒ 读数每轮漂移 > 容差时**永不收敛**（判据停在旧值、
+     * 大偏移方向不利时继续每轮拆链——外委复核实测过该构造性缺陷）。30s ≈ 5× 最坏噪声。</p>
      */
-    static final Duration SKEW_CONFIRM_TOLERANCE = Duration.ofSeconds(5);
+    static final Duration SKEW_CONFIRM_TOLERANCE = Duration.ofSeconds(30);
+
+    /**
+     * 跳变**暂缓的上限**：连续暂缓超过这个次数就强制采纳。
+     *
+     * <p>与容差共同保证「收敛」不是必要条件：即使读数每轮漂移都超过容差（坏抖动/持续阶跃），
+     * 最长 3 个周期（默认 renew 10s ⇒ ~30s）后也会跟上真值，不会无限期停在旧判据上。</p>
+     */
+    static final int SKEW_CONFIRM_MAX_DEFERRALS = 3;
+
+    /** 跳变阈值默认值（配置缺省/被显式置空时使用）。 */
+    static final Duration DEFAULT_SKEW_JUMP_THRESHOLD = Duration.ofSeconds(60);
 
     /** 拒绝/待确认告警的最小间隔（避免每轮 10s 一条把日志打爆）。 */
     static final long SKEW_WARN_INTERVAL_MS = 60_000L;
@@ -228,7 +246,9 @@ public class AccessLeaseManager {
         }
         Duration skew = Duration.between(localSample, serverTime);
         Duration current = clockSkew.get();
-        Duration jumpThreshold = properties.getClockSkewJumpThreshold();
+        Duration configured = properties.getClockSkewJumpThreshold();
+        // 配置被显式置空时兜底（不能拿 null 去 compareTo：renew 路径没有 try 包裹 ⇒ 会变成 NPE 停机）
+        Duration jumpThreshold = configured == null ? DEFAULT_SKEW_JUMP_THRESHOLD : configured;
         if (!calibrated.get()) {
             if (skew.abs().compareTo(jumpThreshold) > 0) {
                 // 首次校准就很大：**照采**——未校准的判据（本机原始时钟）比大偏移更危险
@@ -237,23 +257,29 @@ public class AccessLeaseManager {
                     jumpThreshold.toSeconds(), LogSanitizer.sanitize(properties.getNodeId()));
             }
         } else if (skew.minus(current).abs().compareTo(jumpThreshold) > 0) {
-            // 相对**已校准值**的跳变：只暂缓本次，等下一次读数确认（NTP 阶跃/DB 故障切换的过渡态）
+            // 相对**已校准值**的跳变：先暂缓（等下一次读数确认），但**有次数上限**——
+            // 没有上限时，读数每轮漂移都超过容差就永不收敛（判据停在旧值、大偏移方向不利时每轮拆链）。
             Duration pending = pendingJump.get();
-            if (pending == null || skew.minus(pending).abs().compareTo(SKEW_CONFIRM_TOLERANCE) > 0) {
+            boolean consistent = pending != null
+                && skew.minus(pending).abs().compareTo(SKEW_CONFIRM_TOLERANCE) <= 0;
+            int deferrals = deferredJumps.incrementAndGet();
+            if (!consistent && deferrals <= SKEW_CONFIRM_MAX_DEFERRALS) {
                 pendingJump.set(skew);
                 skewDeferredCounter.increment();
-                warnSkewRateLimited("时钟偏移相对已校准值跳变 {} 秒（阈值 {} 秒）⇒ **暂缓采纳**，"
-                    + "保留原校准 {} 秒；连续两次读数一致才采纳（请查 NTP/DB/容器时区）：node={}",
-                    skew.minus(current).toSeconds(), jumpThreshold.toSeconds(), current.toSeconds(),
-                    LogSanitizer.sanitize(properties.getNodeId()));
+                warnSkewRateLimited("时钟偏移相对已校准值跳变 {} 秒（阈值 {} 秒）⇒ **暂缓采纳**（第 {} 次），"
+                    + "保留原校准 {} 秒；读数一致或暂缓达上限才采纳（请查 NTP/DB/容器时区）：node={}",
+                    skew.minus(current).toSeconds(), jumpThreshold.toSeconds(), deferrals,
+                    current.toSeconds(), LogSanitizer.sanitize(properties.getNodeId()));
                 return;
             }
-            log.warn("时钟偏移跳变 {} 秒经连续两次确认一致 ⇒ 采纳新偏移（原 {} 秒）：node={}",
-                skew.minus(current).toSeconds(), current.toSeconds(),
-                LogSanitizer.sanitize(properties.getNodeId()));
+            log.warn("时钟偏移跳变 {} 秒{} ⇒ 采纳新偏移（原 {} 秒，连续暂缓 {} 次）：node={}",
+                skew.minus(current).toSeconds(),
+                consistent ? "经连续两次确认一致" : "已达暂缓上限 " + SKEW_CONFIRM_MAX_DEFERRALS,
+                current.toSeconds(), deferrals, LogSanitizer.sanitize(properties.getNodeId()));
         }
         calibrated.set(true);
         pendingJump.set(null);
+        deferredJumps.set(0);
         clockSkew.set(skew);
         Duration warned = lastWarnedSkew.get();
         boolean crossed = exceedsWarnThreshold(skew)
@@ -271,7 +297,8 @@ public class AccessLeaseManager {
 
     /** 跳变/大偏移告警按最小间隔打（默认 60s），避免每轮一条。 */
     private void warnSkewRateLimited(String format, Object... args) {
-        long now = System.currentTimeMillis();
+        // 用注入时钟：既避免「时钟旁路」（外委复核点出），也让限流可被假时钟测试
+        long now = clock.millis();
         long last = lastSkewWarnAt.get();
         if (now - last < SKEW_WARN_INTERVAL_MS || !lastSkewWarnAt.compareAndSet(last, now)) {
             return;

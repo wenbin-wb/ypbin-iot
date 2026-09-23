@@ -477,6 +477,46 @@ class AccessLeaseManagerTest {
     }
 
     @Test
+    @DisplayName("★ 永不收敛的跳变必须在暂缓上限后强制采纳（不得无限期停在旧判据）")
+    void neverConvergingJumpMustBeForceAdoptedAtBudget() {
+        LocalDateTime localNow = LocalDateTime.now(clock);
+        when(client.register(any())).thenReturn(R.ok());
+        when(client.acquire(any())).thenReturn(R.ok(acquireRespAt(localNow.plusMinutes(1),
+            assignment(TENANT_A, 600))));
+        manager.start();
+        assertThat(manager.clockSkewSeconds()).isEqualTo(60L);
+
+        // 每轮读数都比上一轮再漂 60s（> 容差 30s）⇒ 永远「不一致」
+        for (int round = 1; round <= AccessLeaseManager.SKEW_CONFIRM_MAX_DEFERRALS + 1; round++) {
+            LeaseRenewResp resp = new LeaseRenewResp();
+            resp.setServerTime(LocalDateTime.now(clock).plusMinutes(30 + round));
+            when(client.renew(any())).thenReturn(R.ok(resp));
+            manager.renewAndSelfCheck(LocalDateTime.now(clock).plusSeconds(1));
+        }
+
+        assertThat(meterRegistry.get("iot.access.lease.clock_skew.deferred").counter().count())
+            .as("前面几次暂缓").isEqualTo((double) AccessLeaseManager.SKEW_CONFIRM_MAX_DEFERRALS);
+        assertThat(manager.clockSkewSeconds())
+            .as("达到暂缓上限后必须强制采纳（约 30+4 分钟），否则判据会永远停在 60s")
+            .isBetween(2_035L, 2_045L);
+    }
+
+    @Test
+    @DisplayName("★ 跳变阈值被显式置空必须兜底默认值（不得 NPE 把续约线程打死）")
+    void nullThresholdMustFallBackToDefault() {
+        properties.setClockSkewJumpThreshold(null);
+        when(client.register(any())).thenReturn(R.ok());
+        when(client.acquire(any())).thenReturn(R.ok(acquireRespAt(LocalDateTime.now(clock).plusSeconds(30),
+            assignment(TENANT_A, 600))));
+        when(client.renew(any())).thenReturn(R.ok(new LeaseRenewResp()));
+
+        manager.start();
+        manager.renewAndSelfCheck(LocalDateTime.now(clock).plusSeconds(1));
+
+        assertThat(manager.clockSkewSeconds()).as("照采 30s 且全程不抛").isEqualTo(30L);
+    }
+
+    @Test
     @DisplayName("★ 告警阈值判据必须对称（+5.5s 与 -5.5s 都要超阈值；Duration.toSeconds 对负值向下取整会不对称）")
     void warnThresholdMustBeSymmetric() {
         assertThat(AccessLeaseManager.exceedsWarnThreshold(Duration.ofMillis(5_500))).isTrue();
