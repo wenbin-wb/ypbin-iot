@@ -113,6 +113,11 @@ class AvailabilityMapperContractTest {
         assertThat(sql).as("维护重叠不得超过该行自身断档时长（上限封顶，保证计入断档不为负）")
             .contains("LEAST(GREATEST(0, TIMESTAMPDIFF(SECOND, GREATEST(o.start_ts, "
                 + "#{from,jdbcType=TIMESTAMP}),");
+        // 断言到**形状**而不是「子查询存在」：把子查询结果乘 0（等于不剔除维护）也必须被咬住——
+        // 「存在维护子查询」与「真的把它的结果从断档里减掉」是两回事（前者是装饰，后者才是口径）
+        assertThat(sql).as("必须真的用维护子查询的结果（不是只查出来放着）")
+            .contains("COALESCE((SELECT SUM(GREATEST(0, TIMESTAMPDIFF(SECOND, ");
+        assertThat(sql).as("计入断档必须是 sec 与 msec 的差").contains("SUM(per_row.sec - per_row.msec)");
     }
 
     @Test
