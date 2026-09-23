@@ -12,14 +12,17 @@ package cn.ypbin.admin.iot.service.impl;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import cn.ypbin.admin.iot.entity.AccessNode;
 import cn.ypbin.admin.iot.entity.TenantLedger;
+import cn.ypbin.admin.iot.entity.MaintenanceWindow;
 import cn.ypbin.admin.iot.entity.TenantNodeAssignment;
 import cn.ypbin.admin.iot.mapper.AccessNodeMapper;
 import cn.ypbin.admin.iot.mapper.TenantLedgerMapper;
@@ -36,6 +39,7 @@ import cn.ypbin.admin.iot.lease.LeaseRenewReq;
 import cn.ypbin.admin.iot.lease.LeaseRenewResp;
 import cn.ypbin.admin.iot.lease.LeaseState;
 import cn.ypbin.admin.iot.lease.TenantEpochBatchResp;
+import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
 import cn.ypbin.admin.iot.mapper.TenantNodeAssignmentMapper;
 import cn.ypbin.starter.core.exception.BusinessException;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
@@ -85,13 +89,15 @@ class LeaseServiceImplTest {
     @BeforeAll
     static void initTableInfo() {
         for (Class<?> entity : List.of(TenantNodeAssignment.class, AccessNode.class,
-                TenantLedger.class)) {
+                TenantLedger.class, MaintenanceWindow.class)) {
             TableInfoHelper.initTableInfo(new MapperBuilderAssistant(new MybatisConfiguration(), ""),
                 entity);
         }
     }
 
     private TenantNodeAssignmentMapper mapper;
+
+    private MaintenanceWindowMapper maintenanceWindowMapper;
     private AccessNodeMapper accessNodeMapper;
     private TenantLedgerMapper ledgerMapper;
     private AccessNodeRegistry registry;
@@ -105,6 +111,9 @@ class LeaseServiceImplTest {
     void setUp() {
         nodeTable.clear();
         mapper = Mockito.mock(TenantNodeAssignmentMapper.class);
+        maintenanceWindowMapper = Mockito.mock(MaintenanceWindowMapper.class);
+        // 默认无进行中的交接窗口（既有用例语义不变）
+        lenient().when(maintenanceWindowMapper.selectList(any())).thenReturn(List.of());
         accessNodeMapper = Mockito.mock(AccessNodeMapper.class);
         ledgerMapper = Mockito.mock(TenantLedgerMapper.class);
         // 节点表桩：按**查询里的节点名**返回（否则「未注册节点」会被误判为已注册，负向用例恒真）
@@ -131,7 +140,7 @@ class LeaseServiceImplTest {
         lenient().when(mapper.selectCount(any())).thenReturn(0L);
         // M0b-4：服务改用数据库时钟 ⇒ 桩一个固定值（否则 selectNow() 返回 null 会 NPE）
         lenient().when(mapper.selectNow()).thenReturn(LocalDateTime.of(2026, 9, 21, 12, 0));
-        service = new LeaseServiceImpl(mapper, registry, ledgerMapper, properties,
+        service = new LeaseServiceImpl(mapper, maintenanceWindowMapper, registry, ledgerMapper, properties,
             new SimpleMeterRegistry(), noTx());
     }
 
@@ -151,6 +160,49 @@ class LeaseServiceImplTest {
         assertThatThrownBy(() -> service.acquire(acquire))
             .isInstanceOf(BusinessException.class)
             .hasMessageContaining("节点未注册");
+    }
+
+    @Test
+    @DisplayName("★ A6/A10：过期扫描必须开「交接窗口」（起点=该行 lease_expire_at），接管成功后必须关闭")
+    void handoverWindowMustOpenOnExpiryAndCloseOnTakeover() {
+        LocalDateTime expireAt = LocalDateTime.of(2026, 9, 21, 11, 59);
+        when(mapper.selectNow()).thenReturn(LocalDateTime.of(2026, 9, 21, 12, 0));
+        // 第一次 selectList：过期扫描的候选行；第二次：接管后的持有清单（acquire 里查）
+        TenantNodeAssignment lapsed = assignment(11L, "access-old", 1L, LeaseState.PENDING_TAKEOVER);
+        lapsed.setLeaseExpireAt(expireAt);
+        when(mapper.selectList(any())).thenReturn(List.of(lapsed));
+        when(mapper.update(isNull(), any())).thenReturn(1);
+
+        assertThat(service.markExpired()).isEqualTo(1);
+
+        ArgumentCaptor<List<MaintenanceWindow>> inserted = ArgumentCaptor.forClass(List.class);
+        verify(maintenanceWindowMapper).insertBatch(inserted.capture());
+        assertThat(inserted.getValue()).singleElement().satisfies(window -> {
+            assertThat(window.getTenantId()).isEqualTo(11L);
+            assertThat(window.getStartTs()).as("起点必须是租约真正失效时刻，不是扫描时刻").isEqualTo(expireAt);
+            assertThat(window.getSource()).isEqualTo("LEASE_HANDOVER");
+        });
+
+        // 接管：acquire 结束时应关闭这些租户的进行中交接窗口（节点必须先注册，否则会被 fail-closed 拒绝）
+        registry.register(NODE, null);
+        service.acquire(acquireReq(NODE));
+        verify(maintenanceWindowMapper).closeOpenWindows(eq(List.of(11L)), eq("LEASE_HANDOVER"), any());
+    }
+
+    @Test
+    @DisplayName("★ A6/A10：已存在进行中的交接窗口时不得重复插入（幂等）")
+    void handoverWindowMustBeIdempotentWhenAlreadyOpen() {
+        when(mapper.selectNow()).thenReturn(LocalDateTime.of(2026, 9, 21, 12, 0));
+        when(mapper.update(isNull(), any())).thenReturn(1);
+        TenantNodeAssignment lapsed = assignment(11L, "access-old", 1L, LeaseState.PENDING_TAKEOVER);
+        lapsed.setLeaseExpireAt(LocalDateTime.of(2026, 9, 21, 11, 59));
+        when(mapper.selectList(any())).thenReturn(List.of(lapsed));
+        when(maintenanceWindowMapper.findTenantsWithOpenHandover(any(), any()))
+            .thenReturn(List.of(11L));
+
+        service.markExpired();
+
+        verify(maintenanceWindowMapper, never()).insertBatch(any());
     }
 
     @Test

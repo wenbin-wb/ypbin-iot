@@ -13,6 +13,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import cn.ypbin.admin.iot.entity.AccessNode;
 import cn.ypbin.admin.iot.entity.TenantLedger;
+import cn.ypbin.admin.iot.entity.MaintenanceWindow;
 import cn.ypbin.admin.iot.entity.TenantNodeAssignment;
 import cn.ypbin.admin.iot.lease.AccessNodeRegistry;
 import cn.ypbin.admin.iot.lease.LeaseAcquireReq;
@@ -24,6 +25,7 @@ import cn.ypbin.admin.iot.lease.LeaseRenewResp;
 import cn.ypbin.admin.iot.lease.LeaseState;
 import cn.ypbin.admin.iot.mapper.AccessNodeMapper;
 import cn.ypbin.admin.iot.mapper.TenantLedgerMapper;
+import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
 import cn.ypbin.admin.iot.mapper.TenantNodeAssignmentMapper;
 import cn.ypbin.admin.iot.service.impl.LeaseServiceImpl;
 import cn.ypbin.starter.test.condition.EnabledIfMySqlAvailable;
@@ -90,6 +92,8 @@ class LeaseDbClockIT {
     private static HikariDataSource dataSource;
     private static SqlSessionTemplate sqlSessionTemplate;
     private static TenantNodeAssignmentMapper assignmentMapper;
+
+    private static MaintenanceWindowMapper maintenanceWindowMapper;
     private static AccessNodeMapper accessNodeMapper;
     private static TenantLedgerMapper ledgerMapper;
     private static TransactionTemplate transactionTemplate;
@@ -111,6 +115,7 @@ class LeaseDbClockIT {
         configuration.setMapUnderscoreToCamelCase(true);
         configuration.addInterceptor(new MybatisPlusInterceptor());
         configuration.addMapper(TenantNodeAssignmentMapper.class);
+        configuration.addMapper(MaintenanceWindowMapper.class);
         configuration.addMapper(AccessNodeMapper.class);
         configuration.addMapper(TenantLedgerMapper.class);
         for (Class<?> entity : List.of(TenantNodeAssignment.class, AccessNode.class,
@@ -123,6 +128,7 @@ class LeaseDbClockIT {
         SqlSessionFactory factory = factoryBean.getObject();
         sqlSessionTemplate = new SqlSessionTemplate(factory);
         assignmentMapper = sqlSessionTemplate.getMapper(TenantNodeAssignmentMapper.class);
+        maintenanceWindowMapper = sqlSessionTemplate.getMapper(MaintenanceWindowMapper.class);
         accessNodeMapper = sqlSessionTemplate.getMapper(AccessNodeMapper.class);
         ledgerMapper = sqlSessionTemplate.getMapper(TenantLedgerMapper.class);
         transactionTemplate = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
@@ -147,7 +153,7 @@ class LeaseDbClockIT {
         LeaseProperties properties = new LeaseProperties();
         properties.setTtl(TTL);
         properties.setAssignableTenantIds(List.of());
-        LeaseServiceImpl service = new LeaseServiceImpl(assignmentMapper,
+        LeaseServiceImpl service = new LeaseServiceImpl(assignmentMapper, maintenanceWindowMapper,
             new AccessNodeRegistry(accessNodeMapper), ledgerMapper, properties,
             new SimpleMeterRegistry(), transactionTemplate);
 
@@ -179,6 +185,44 @@ class LeaseDbClockIT {
     }
 
     @Test
+    @DisplayName("★ A6/A10：过期→开「租约交接」维护窗口（起点=租约失效时刻），接管成功→关窗")
+    void handoverWindowMustOpenOnExpiryAndCloseOnTakeover() {
+        purge();
+        registerNode();
+        insertAssignableTenant();
+        LeaseProperties properties = new LeaseProperties();
+        properties.setTtl(TTL);
+        properties.setAssignableTenantIds(List.of());
+        LeaseServiceImpl service = new LeaseServiceImpl(assignmentMapper, maintenanceWindowMapper,
+            new AccessNodeRegistry(accessNodeMapper), ledgerMapper, properties,
+            new SimpleMeterRegistry(), transactionTemplate);
+        service.acquire(acquireReq());
+
+        // 人为把租约挪到过去（等价于「续约停了」），再跑失效扫描
+        execute("UPDATE tenant_node_assignment SET lease_expire_at = DATE_SUB(NOW(), INTERVAL 1 HOUR) "
+            + "WHERE tenant_id = " + TENANT);
+        LocalDateTime expiredAt = assignmentMapper.selectOne(Wrappers.<TenantNodeAssignment>lambdaQuery()
+            .eq(TenantNodeAssignment::getTenantId, TENANT)).getLeaseExpireAt();
+
+        assertThat(service.markExpired()).as("必须完成一次失效标记").isGreaterThan(0);
+
+        MaintenanceWindow opened = maintenanceWindowMapper.selectOne(Wrappers.<MaintenanceWindow>lambdaQuery()
+            .eq(MaintenanceWindow::getTenantId, TENANT)
+            .eq(MaintenanceWindow::getSource, "LEASE_HANDOVER"));
+        assertThat(opened).as("过期即开交接窗口（交接空档不是设备断档）").isNotNull();
+        assertThat(opened.getEndTs()).as("刚开的窗口是进行中").isNull();
+        assertThat(opened.getStartTs()).as("起点必须是租约真正失效的时刻，不是扫描时刻")
+            .isEqualTo(expiredAt);
+
+        // 接管（同一节点把待接管租户重新领回）⇒ 交接完成 ⇒ 关窗
+        service.acquire(acquireReq());
+        MaintenanceWindow closed = maintenanceWindowMapper.selectOne(Wrappers.<MaintenanceWindow>lambdaQuery()
+            .eq(MaintenanceWindow::getTenantId, TENANT)
+            .eq(MaintenanceWindow::getSource, "LEASE_HANDOVER"));
+        assertThat(closed.getEndTs()).as("接管成功后必须关窗（否则后半段空档会被继续排除）").isNotNull();
+    }
+
+    @Test
     @DisplayName("★ M0b-4：领取/续约响应必须回传**数据库时钟**（接入侧据此校准到期判据）")
     void responsesMustExposeDatabaseClockForAccessSide() {
         purge();
@@ -188,7 +232,7 @@ class LeaseDbClockIT {
         LeaseProperties properties = new LeaseProperties();
         properties.setTtl(TTL);
         properties.setAssignableTenantIds(List.of());
-        LeaseServiceImpl service = new LeaseServiceImpl(assignmentMapper,
+        LeaseServiceImpl service = new LeaseServiceImpl(assignmentMapper, maintenanceWindowMapper,
             new AccessNodeRegistry(accessNodeMapper), ledgerMapper, properties,
             new SimpleMeterRegistry(), transactionTemplate);
 

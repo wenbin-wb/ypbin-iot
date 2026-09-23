@@ -13,6 +13,7 @@ import cn.ypbin.admin.iot.entity.MaintenanceWindow;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import java.time.LocalDateTime;
 import java.util.List;
+import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
@@ -56,6 +57,57 @@ public interface MaintenanceWindowMapper extends BaseMapper<MaintenanceWindow> {
     Long sumMaintenanceSecondsInWindow(@Param("tenantId") Long tenantId, @Param("deviceId") Long deviceId,
                                        @Param("from") LocalDateTime from, @Param("to") LocalDateTime to,
                                        @Param("now") LocalDateTime now);
+
+    /**
+     * 在这些租户里，哪些已经有「进行中」的交接窗口（幂等用）。
+     *
+     * <p>写成 Mapper 原生 SQL 而不是服务层手写 {@code in(tenantId, ...)}：租户隔离条件由插件统一追加，
+     * 服务层手写会被 {@code IotTenantIsolationGateTest} 拦下（本仓铁律）。</p>
+     *
+     * @param tenantIds 租户 ID（调用方保证非空）
+     * @param source    来源码
+     * @return 已有进行中窗口的租户 ID
+     */
+    @Select("<script>SELECT tenant_id FROM maintenance_window WHERE is_deleted = 0 AND end_ts IS NULL "
+        + "AND source = #{source} AND tenant_id IN "
+        + "<foreach collection='tenantIds' item='id' open='(' separator=',' close=')'>#{id}</foreach>"
+        + "</script>")
+    List<Long> findTenantsWithOpenHandover(@Param("tenantIds") List<Long> tenantIds,
+                                           @Param("source") String source);
+
+    /**
+     * 批量插入维护窗口（租约交接自动窗口用；id 由调用方用 {@code IdWorker} 预生成——
+     * 批量语句绕过 MP 的字段填充，不显式给 id 会写入 0 并在第二行冲突，与租约分配同一处理）。
+     *
+     * @param list 待插入窗口（调用方保证非空）
+     * @return 受影响行数
+     */
+    @Insert("<script>INSERT INTO maintenance_window "
+        + "(id, tenant_id, device_id, start_ts, end_ts, source, reason, create_time, update_time, "
+        + "status, is_deleted) VALUES "
+        + "<foreach collection='list' item='item' separator=','>"
+        + "(#{item.id}, #{item.tenantId}, NULL, #{item.startTs}, NULL, #{item.source}, #{item.reason}, "
+        + "NOW(), NOW(), 1, 0)"
+        + "</foreach></script>")
+    int insertBatch(@Param("list") List<MaintenanceWindow> list);
+
+    /**
+     * 关闭一批「进行中」的租约交接窗口（接管成功时调用）。
+     *
+     * <p>只关**没有 end_ts** 的：已人工关闭/已结算的窗口不得被改写（否则会把历史窗口拉长，
+     * 让那段时间被凭空排除）。</p>
+     *
+     * @param tenantIds 租户 ID（调用方保证非空）
+     * @param source    来源码
+     * @param endTs     结束时刻
+     * @return 受影响行数
+     */
+    @Update("<script>UPDATE maintenance_window SET end_ts = #{endTs,jdbcType=TIMESTAMP}, "
+        + "update_time = NOW() WHERE is_deleted = 0 AND end_ts IS NULL AND source = #{source} "
+        + "AND tenant_id IN <foreach collection='tenantIds' item='id' open='(' separator=',' close=')'>"
+        + "#{id}</foreach></script>")
+    int closeOpenWindows(@Param("tenantIds") List<Long> tenantIds, @Param("source") String source,
+                         @Param("endTs") LocalDateTime endTs);
 
     /**
      * 窗口内**断档落在维护里**的秒数（分子里要剔除的部分）。

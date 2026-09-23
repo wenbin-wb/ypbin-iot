@@ -454,7 +454,7 @@ ERROR The build could not read 1 project
 |---|---|---|
 | **A1** | ~~access 侧上报接线~~ **已落地**（`HttpAccessReadingSink`）：有界队列 → 微批 → `/internal/readings`，含丢弃/失败/非法计数与超时；EMQX 传输**待 Q4** | 已收口；仍有限制见 A9/A10 |
 | **A9** | **上报失败不重试**（本批丢弃） | 刻意为之：重试会占住 flush 线程并放大远端压力；代价是读数丢失会让断档缺口被算长一些 ⇒ 以 `iot.access.egress.failed`/`dropped` 暴露。彻底解决要等 EMQX/MQ 的持久化通道（Q4）与「断档判定对丢失不敏感」的补偿口径 |
-| **A10** | **扫描无租约/归属联动**（= A6 的另一面） | 同 A6：表与窗口来源已备好，**自动开/关窗未接线**（下一步：租约释放/过期→开窗、接管成功→关窗） |
+| **A10** | ~~**扫描无租约/归属联动**~~（= A6 的另一面）✅ **已落地**（2026-09-23） | 同 A6：租约释放/过期→开交接窗口、接管成功→关窗，真库 IT 覆盖（起点=失效时刻、接管后 `end_ts` 非空） |
 | **A12** | 指标**未接大盘/告警** | `iot.access.egress.*`（accepted/dropped/sent/failed/invalid/pending）与可用率侧无 Prometheus 抓取/告警/大盘定义，仅文档提及名字（复核 R8 未核实项） |
 | **A15** | `poll_interval_ms` 可被**过期但为正**的旧快照回退 | 该列是**配置**不是时间戳（1s→10s 是合法变更），故刻意不做单调；代价是另一副本的旧周期写回后阈值 `K×周期` 偏大 ⇒ 检测略滞后、可用率略偏高。若要收口需引入「配置版本号」判新旧（与 `config_epoch` 同类机制） |
 | **A16** | `outageCount` 口径含「裁剪后重叠 0 秒」的行 | 聚合用 `COUNT(*)`（满足窗口重叠条件的行都计），而旧的 Java 求和会跳过重叠 ≤0 的行 ⇒ 次数可能比旧实现大（只影响展示的次数，不影响秒数与可用率）。已在 Mapper Javadoc 写明 |
@@ -463,7 +463,7 @@ ERROR The build could not read 1 project
 | **A3** | ~~维护窗口排除未做~~ ✅ **已落地**（2026-09-23，见「四点十五」） | 新增 `maintenance_window` 表（人工 + 预留租约交接两类来源）：统计总时长 = 窗口 − 维护，且**断档落在维护内的部分也从分子里剔除**（只缩分母会让计划停机仍拉低可用率，与 spec 意图相反）；聚合用一次 SQL（含每行与维护求交后上限封顶）保证明细截断不影响精度；内部端点 `POST/GET /internal/maintenance/windows` 可声明/关闭/查询；响应回显 `maintenanceSeconds`/`effectiveWindowSeconds`/`outageInMaintenanceSeconds`/窗口列表 |
 | **A4** | 阈值/目标全局常量 | 按设备覆盖目标可用率/最长断档属后续增量 |
 | **A5** | 只有 `NO_GOOD_DATA` 一个原因码 | 链路级原因（断链/设备离线/未接管）与租约联动未做 |
-| **A6** | 租约转移导致的停采仍算断档 | 活性行感知不到归属变化：租户被接管到别的节点后，本节点的最后一次有效数据之后就会被算成断档。**已铺路**：`maintenance_window` 已预留 `source=LEASE_HANDOVER`（租户级窗口，`device_id` 为空），**但自动开/关窗的租约侧接线尚未落地**（本轮只落地人工路径）——在那之前，交接空档仍会按断档计（可用率偏低方向），运维可临时用内部端点人工声明窗口 |
+| **A6** | ~~租约转移导致的停采仍算断档~~ ✅ **已落地**（2026-09-23） | 租约侧自动接线：**释放**（`release`）与**过期扫描**（`markExpired`）时按租户开 `source=LEASE_HANDOVER` 的维护窗口（过期那条的起点取**该行 `lease_expire_at`**，不是扫描时刻），**接管成功**（`acquire`）时批量关闭；幂等（已有进行中窗口则跳过）。⇒ 交接空档不再计入断档。仅「原因码细分」仍属 A5 |
 | **A7** | 平台自身停机期间的断档不可分辨原因 | 停机期间没有扫描；恢复后按 `lastGoodAt` 补开一条，跨越停机——时长方向正确，但无法区分「设备断档」与「平台停机」 |
 | **A8** | ~~采集周期当前靠兜底值~~ **已闭环** | access 已随读数上报 `pollIntervalMs`（来自 `DeviceSpec.pollInterval`）；只有上游未给周期（0/null）时才走 `fallback-interval-ms` |
 
@@ -563,8 +563,8 @@ ERROR The build could not read 1 project
 
 **验收证据（本机实跑）**
 
-- `ypbin-iot` 单测 **140/0**（+14：`AvailabilityCalculatorTest` +4 维护口径、`AvailabilityServiceImplTest` +2（维护排除与回显 + **真实请求链路租户来自 TenantProvider**）、
-  `MaintenanceWindowServiceImplTest` +7（租户守卫/区间校验/只关进行中/查询映射/**租户来自 provider**/**重叠拒绝**）、源码门禁 +1 维护聚合）；
+- `ypbin-iot` 单测 **143/0**（+17：`AvailabilityCalculatorTest` +4 维护口径、`AvailabilityServiceImplTest` +2（维护排除与回显 + **真实请求链路租户来自 TenantProvider**）、
+  `MaintenanceWindowServiceImplTest` +7（…/**重叠拒绝**）、**`LeaseServiceImplTest` +2（交接开窗起点=失效时刻 / 幂等）**、源码门禁 +1）；
 - 真库 IT `OutageAvailabilityIT` +2（`-Pit` 由 CI 执行）：维护窗口同时从分母与分子排除（可用率 100%、
   另一台设备的窗口不影响本设备）、租户级窗口对所有设备生效；
 - 源码级门禁把「不得出现派生表/相关子查询」「与维护求交（JOIN）」「显式租户/逻辑删除/jdbcType」钉在构建期；维护剔除的**算术**在 Java 侧，因此「不减维护内断档」这类变异由 `AvailabilityServiceImplTest` 单测咬住（复核实测过：早期把剔除写在 SQL 里时，「把子查询结果乘 0」能逃逸子串门禁——那正是把剔除搬到 Java 侧的动机之一）。
@@ -573,7 +573,7 @@ ERROR The build could not read 1 project
 
 | # | 事项 | 现状 |
 |---|---|---|
-| **M1** | 租约交接**自动**开/关窗 | 表与 `source=LEASE_HANDOVER` 已备好，租约侧接线未做（释放/过期→开窗、接管成功→关窗）⇒ 交接空档仍按断档计（A6/A10 保持登记） |
+| **M1** | ~~租约交接**自动**开/关窗~~ ✅ **已落地**（2026-09-23） | `release` / `markExpired` → 开窗（过期用 `lease_expire_at` 作起点）、`acquire` → 批量关窗；幂等靠一次「已有进行中窗口」查询（服务层不手写租户过滤——租户隔离门禁会拦，改由 Mapper 原生 SQL 承担）；真库 IT 覆盖 |
 | **M2** | 管理台与权限码 | 当前只有内部端点（平台侧调用）；面向运维的页面/权限码属后续增量 |
 | **M4** | 租户来源（**本片修掉了一个既有缺陷**） | A11 的可用率查询与新端点原先只读 `TenantContext`（ThreadLocal），而真实请求链路上绑定的是 `IdentityContext`（网关身份头 → 过滤器），`TenantContext` 只有显式 `executeWithTenant` 才非空 ⇒ 两个端点在真实请求下都会误报「缺少租户上下文」。现改为**与 MP 租户插件同源**：`TenantContext` 优先、其次 `TenantProvider`（`MicroserviceTenantProvider` 读 `IdentityContext`）；并补了「TenantContext 为空、provider 有租户」的用例 |
 | **M5** | **缺过滤器链级端点用例** | 端点可用性目前由「provider 桩 + 真实 service」覆盖（等价于身份已解析这一步），**没有**走完整 MockMvc + `IdentityHeaderFilter` 的端到端用例；外委复核是用探针实测的（POST 返回 200 且 tenantId 正确），仓库内**没有**这条门禁 |
