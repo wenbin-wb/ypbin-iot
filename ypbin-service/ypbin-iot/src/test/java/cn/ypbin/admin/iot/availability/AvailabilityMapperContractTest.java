@@ -13,6 +13,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import org.junit.jupiter.api.DisplayName;
@@ -129,6 +130,44 @@ class AvailabilityMapperContractTest {
             .contains("w.tenant_id = o.tenant_id").contains("o.tenant_id = #{tenantId}")
             .contains("o.is_deleted = 0").contains("w.is_deleted = 0")
             .doesNotContain("(SELECT");
+    }
+
+    @Test
+    @DisplayName("★ A6/A10：交接窗口的批量 SQL 必须显式带租户/逻辑删除、可解析，且关闭只缩短不延长")
+    void handoverWindowSqlMustBeScopedAndShortenOnly() throws IOException {
+        Path mapper = REPO_ROOT.resolve(
+            "ypbin-service/ypbin-iot/src/main/java/cn/ypbin/admin/iot/mapper/MaintenanceWindowMapper.java");
+        String overlapping = methodSql(mapper, "findTenantsWithOverlappingWindow", "@Select");
+        String insertBatch = methodSql(mapper, "insertBatch", "@Insert");
+        String close = methodSql(mapper, "closeOpenWindows", "@Update");
+
+        assertThat(overlapping).as("重叠判定必须显式带租户与逻辑删除 + 双端区间裁剪，且不得用派生表")
+            .contains("tenant_id IN").contains("is_deleted = 0")
+            .contains("start_ts &lt; #{to,jdbcType=TIMESTAMP}")
+            .contains("end_ts IS NULL OR end_ts &gt; #{from,jdbcType=TIMESTAMP}")
+            .doesNotContain("(SELECT");
+        assertThat(insertBatch).as("批量插入必须带 tenant_id 与 end_ts（上界，防无人接管时窗口永久开）")
+            .contains("tenant_id").contains("#{item.endTs}").contains("#{item.startTs}");
+        assertThat(close).as("关闭必须**只缩短**（LEAST）：延长会把接管后的真实采集时间也排除掉")
+            .contains("LEAST(COALESCE(end_ts").contains("tenant_id IN");
+    }
+
+    @Test
+    @DisplayName("★ A6/A10：租约侧对租户表的跨租户读写必须包在 executeIgnore 里（该路径无租户上下文）")
+    void handoverCallsMustBeWrappedInExecuteIgnore() throws IOException {
+        // 依据（复核实测）：/internal/lease/** 与定时扫描线程没有租户上下文，而 maintenance_window 是租户表
+        // ⇒ 租户插件 fail-closed 会直接抛；同仓可用率扫描早就用 executeIgnore 处理平台级访问。
+        String source = Files.readString(REPO_ROOT.resolve(
+            "ypbin-service/ypbin-iot/src/main/java/cn/ypbin/admin/iot/service/impl/LeaseServiceImpl.java"),
+            StandardCharsets.UTF_8);
+        for (String call : List.of("findTenantsWithOverlappingWindow", "insertBatch", "closeOpenWindows")) {
+            int index = source.indexOf("maintenanceWindowMapper." + call);
+            assertThat(index).as("LeaseServiceImpl 里应存在对 %s 的调用", call).isPositive();
+            int windowStart = Math.max(0, index - 400);
+            assertThat(source.substring(windowStart, index)).as(
+                "%s 必须包在 TenantContext.executeIgnore(...) 里（无租户上下文时插件 fail-closed）", call)
+                .contains("executeIgnore");
+        }
     }
 
     /** 剥离行注释与块注释（文本门禁必须作用在代码上，否则注释里的示例会制造假绿）。 */

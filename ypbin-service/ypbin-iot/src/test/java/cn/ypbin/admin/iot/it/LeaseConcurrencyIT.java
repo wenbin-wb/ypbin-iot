@@ -13,6 +13,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import cn.ypbin.admin.iot.entity.AccessNode;
 import cn.ypbin.admin.iot.entity.TenantLedger;
+import cn.ypbin.admin.iot.entity.MaintenanceWindow;
 import cn.ypbin.admin.iot.entity.TenantNodeAssignment;
 import cn.ypbin.admin.iot.lease.AccessNodeRegistry;
 import cn.ypbin.admin.iot.lease.LeaseAcquireReq;
@@ -20,6 +21,7 @@ import cn.ypbin.admin.iot.lease.LeaseProperties;
 import cn.ypbin.admin.iot.lease.LeaseState;
 import cn.ypbin.admin.iot.mapper.AccessNodeMapper;
 import cn.ypbin.admin.iot.mapper.TenantLedgerMapper;
+import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
 import cn.ypbin.admin.iot.mapper.TenantNodeAssignmentMapper;
 import cn.ypbin.admin.iot.service.impl.LeaseServiceImpl;
 import cn.ypbin.starter.test.condition.EnabledIfMySqlAvailable;
@@ -102,6 +104,8 @@ class LeaseConcurrencyIT {
     private static HikariDataSource dataSource;
     private static SqlSessionTemplate sqlSessionTemplate;
     private static TenantNodeAssignmentMapper assignmentMapper;
+
+    private static MaintenanceWindowMapper maintenanceWindowMapper;
     private static AccessNodeMapper accessNodeMapper;
     private static TenantLedgerMapper ledgerMapper;
     private static TransactionTemplate transactionTemplate;
@@ -124,6 +128,7 @@ class LeaseConcurrencyIT {
         configuration.setMapUnderscoreToCamelCase(true);
         configuration.addInterceptor(new MybatisPlusInterceptor());
         configuration.addMapper(TenantNodeAssignmentMapper.class);
+        configuration.addMapper(MaintenanceWindowMapper.class);
         configuration.addMapper(AccessNodeMapper.class);
         configuration.addMapper(TenantLedgerMapper.class);
         MybatisSqlSessionFactoryBean factoryBean = new MybatisSqlSessionFactoryBean();
@@ -137,6 +142,7 @@ class LeaseConcurrencyIT {
         }
         sqlSessionTemplate = new SqlSessionTemplate(factory);
         assignmentMapper = sqlSessionTemplate.getMapper(TenantNodeAssignmentMapper.class);
+        maintenanceWindowMapper = sqlSessionTemplate.getMapper(MaintenanceWindowMapper.class);
         accessNodeMapper = sqlSessionTemplate.getMapper(AccessNodeMapper.class);
         ledgerMapper = sqlSessionTemplate.getMapper(TenantLedgerMapper.class);
         transactionTemplate = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
@@ -234,7 +240,7 @@ class LeaseConcurrencyIT {
         LeaseProperties properties = new LeaseProperties();
         properties.setTtl(Duration.ofSeconds(30));
         properties.setAssignableTenantIds(List.of());
-        return new LeaseServiceImpl(assignmentMapper, registry, ledgerMapper, properties,
+        return new LeaseServiceImpl(assignmentMapper, maintenanceWindowMapper, registry, ledgerMapper, properties,
             new SimpleMeterRegistry(), transactionTemplate);
     }
 

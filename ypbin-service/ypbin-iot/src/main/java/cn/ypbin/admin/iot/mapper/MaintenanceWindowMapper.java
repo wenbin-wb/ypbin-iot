@@ -13,6 +13,7 @@ import cn.ypbin.admin.iot.entity.MaintenanceWindow;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import java.time.LocalDateTime;
 import java.util.List;
+import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
@@ -56,6 +57,66 @@ public interface MaintenanceWindowMapper extends BaseMapper<MaintenanceWindow> {
     Long sumMaintenanceSecondsInWindow(@Param("tenantId") Long tenantId, @Param("deviceId") Long deviceId,
                                        @Param("from") LocalDateTime from, @Param("to") LocalDateTime to,
                                        @Param("now") LocalDateTime now);
+
+    /**
+     * 在这些租户里，哪些已经有**与给定区间重叠**的维护窗口（自动开窗前的重叠判定/幂等）。
+     *
+     * <p>为什么用「重叠」而不是「进行中」：人工窗口与自动交接窗口一旦重叠，聚合会**重复计数**
+     * （分母重复扣 ⇒ 统计总时长偏小，极端下 fail-open），而人工路径 {@code open} 是拒绝重叠的
+     * ⇒ 自动路径必须同一不变量。区间取本批次的**并集范围**（{@code [from, to)}）做保守判定：
+     * 只要与该范围有交集就跳过——宁可少开一个窗口（那段空档按断档计，方向保守），也不制造重叠。</p>
+     *
+     * @param tenantIds 租户 ID（调用方保证非空）
+     * @param from      批次最早起点
+     * @param to        批次最晚终点（含上界）
+     * @return 已有重叠窗口的租户 ID
+     */
+    @Select("<script>SELECT DISTINCT tenant_id FROM maintenance_window WHERE is_deleted = 0 "
+        + "AND start_ts &lt; #{to,jdbcType=TIMESTAMP} "
+        + "AND (end_ts IS NULL OR end_ts &gt; #{from,jdbcType=TIMESTAMP}) AND tenant_id IN "
+        + "<foreach collection='tenantIds' item='id' open='(' separator=',' close=')'>#{id}</foreach>"
+        + "</script>")
+    List<Long> findTenantsWithOverlappingWindow(@Param("tenantIds") List<Long> tenantIds,
+                                                @Param("from") LocalDateTime from,
+                                                @Param("to") LocalDateTime to);
+
+    /**
+     * 批量插入维护窗口（租约交接自动窗口用；id 由调用方用 {@code IdWorker} 预生成——
+     * 批量语句绕过 MP 的字段填充，不显式给 id 会写入 0 并在第二行冲突，与租约分配同一处理）。
+     *
+     * @param list 待插入窗口（调用方保证非空）
+     * @return 受影响行数
+     */
+    @Insert("<script>INSERT INTO maintenance_window "
+        + "(id, tenant_id, device_id, start_ts, end_ts, source, reason, create_time, update_time, "
+        + "status, is_deleted) VALUES "
+        + "<foreach collection='list' item='item' separator=','>"
+        + "(#{item.id}, #{item.tenantId}, NULL, #{item.startTs}, #{item.endTs}, #{item.source}, #{item.reason}, "
+        + "NOW(), NOW(), 1, 0)"
+        + "</foreach></script>")
+    int insertBatch(@Param("list") List<MaintenanceWindow> list);
+
+    /**
+     * 关闭一批「进行中」的租约交接窗口（接管成功时调用）。
+     *
+     * <p>只关**没有 end_ts** 的：已人工关闭/已结算的窗口不得被改写（否则会把历史窗口拉长，
+     * 让那段时间被凭空排除）。</p>
+     *
+     * @param tenantIds 租户 ID（调用方保证非空）
+     * @param source    来源码
+     * @param endTs     结束时刻
+     * @return 受影响行数
+     */
+    @Update("<script>UPDATE maintenance_window SET "
+        // **只缩短**：交接窗口开出时已带 TTL 上界，接管更早发生就把它缩到接管时刻；
+        // 绝不延长（延长会把接管之后的真实采集时间也排除掉）
+        + "end_ts = LEAST(COALESCE(end_ts, #{endTs,jdbcType=TIMESTAMP}), #{endTs,jdbcType=TIMESTAMP}), "
+        + "update_time = NOW() WHERE is_deleted = 0 AND source = #{source} "
+        + "AND (end_ts IS NULL OR end_ts &gt; #{endTs,jdbcType=TIMESTAMP}) "
+        + "AND tenant_id IN <foreach collection='tenantIds' item='id' open='(' separator=',' close=')'>"
+        + "#{id}</foreach></script>")
+    int closeOpenWindows(@Param("tenantIds") List<Long> tenantIds, @Param("source") String source,
+                         @Param("endTs") LocalDateTime endTs);
 
     /**
      * 窗口内**断档落在维护里**的秒数（分子里要剔除的部分）。

@@ -9,6 +9,8 @@
  */
 package cn.ypbin.admin.iot.service.impl;
 
+import cn.ypbin.admin.iot.availability.MaintenanceSource;
+import cn.ypbin.admin.iot.entity.MaintenanceWindow;
 import cn.ypbin.admin.iot.entity.TenantNodeAssignment;
 import cn.ypbin.admin.iot.lease.AccessNodeRegisterReq;
 import cn.ypbin.admin.iot.lease.AccessNodeRegistry;
@@ -27,20 +29,24 @@ import cn.ypbin.admin.iot.lease.LeaseState;
 import cn.ypbin.admin.iot.lease.TenantEpochBatchResp;
 import cn.ypbin.admin.iot.lease.TenantEpochItem;
 import cn.ypbin.admin.iot.entity.TenantLedger;
+import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
 import cn.ypbin.admin.iot.mapper.TenantLedgerMapper;
 import cn.ypbin.admin.iot.mapper.TenantNodeAssignmentMapper;
 import cn.ypbin.admin.iot.service.LeaseService;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.core.exception.GlobalErrorCode;
 import cn.ypbin.starter.core.util.LogSanitizer;
+import cn.ypbin.starter.tenant.core.TenantContext;
 import com.baomidou.mybatisplus.core.toolkit.IdWorker;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -83,6 +89,9 @@ public class LeaseServiceImpl implements LeaseService {
     static final String METRIC_PREFIX = "iot.lease.";
 
     private final TenantNodeAssignmentMapper mapper;
+
+    /** 维护窗口（租约交接自动开/关窗：交接空档不是设备断档，spec §12.5）。 */
+    private final MaintenanceWindowMapper maintenanceWindowMapper;
     private final AccessNodeRegistry nodeRegistry;
 
     /** 租户台账（M0b-2：可分配租户来源 + config_epoch）。 */
@@ -102,11 +111,13 @@ public class LeaseServiceImpl implements LeaseService {
      * @param meterRegistry       指标注册表
      * @param transactionTemplate 事务模板（领取需要在「锁内、事务中」执行，见 {@link #acquire}）
      */
-    public LeaseServiceImpl(TenantNodeAssignmentMapper mapper, AccessNodeRegistry nodeRegistry,
+    public LeaseServiceImpl(TenantNodeAssignmentMapper mapper,
+            MaintenanceWindowMapper maintenanceWindowMapper, AccessNodeRegistry nodeRegistry,
             TenantLedgerMapper ledgerMapper, LeaseProperties properties, MeterRegistry meterRegistry,
             TransactionTemplate transactionTemplate) {
         this.transactionTemplate = transactionTemplate;
         this.mapper = mapper;
+        this.maintenanceWindowMapper = maintenanceWindowMapper;
         this.nodeRegistry = nodeRegistry;
         this.ledgerMapper = ledgerMapper;
         this.properties = properties;
@@ -214,7 +225,10 @@ public class LeaseServiceImpl implements LeaseService {
         // M0b-4 收口：把**服务端（数据库）时间**带给接入侧——它据此校准本地到期判据，
         // 节点钟快/慢不再影响「是否仍在租约期内」的语义
         resp.setServerTime(now);
-        resp.setAssignments(listAssignmentsOf(node));
+        List<LeaseAssignmentDto> assignments = listAssignmentsOf(node);
+        // 接管完成 ⇒ 交接空档结束：关掉本节点现在持有的这些租户的进行中交接窗口
+        closeHandoverWindows(assignments.stream().map(LeaseAssignmentDto::getTenantId).toList(), now);
+        resp.setAssignments(assignments);
         log.info("[iot] 节点领取完成：node={} 持有租户={}", LogSanitizer.sanitize(node),
             LogSanitizer.sanitize(resp.getAssignments().stream().map(LeaseAssignmentDto::getTenantId).toList()));
         return resp;
@@ -296,8 +310,91 @@ public class LeaseServiceImpl implements LeaseService {
             .set(TenantNodeAssignment::getState, LeaseState.RELEASED.getCode())
             .set(TenantNodeAssignment::getLeaseExpireAt, now)
             .set(TenantNodeAssignment::getUpdateTime, now));
+        // 交接窗口（A6/A10）：节点主动释放 ⇒ 它随即停采，直到别的节点接管前都是「交接空档」，
+        // 不是设备断档。只对**确实变成 released** 的租户开窗（请求里可能含不属于它的租户）。
+        if (rows > 0) {
+            List<TenantNodeAssignment> released = mapper.selectList(
+                Wrappers.<TenantNodeAssignment>lambdaQuery()
+                    .eq(TenantNodeAssignment::getAccessNode, req.getAccessNode())
+                    .eq(TenantNodeAssignment::getState, LeaseState.RELEASED.getCode())
+                    .in(TenantNodeAssignment::getTenantId, req.getTenantIds()));
+            Map<Long, LocalDateTime> starts = new LinkedHashMap<>();
+            for (TenantNodeAssignment row : released) {
+                starts.putIfAbsent(row.getTenantId(), now);
+            }
+            openHandoverWindows(starts, "节点释放");
+        }
         log.info("[iot] 节点释放租户：node={} 请求={} 实际释放={}", LogSanitizer.sanitize(req.getAccessNode()),
             req.getTenantIds().size(), rows);
+    }
+
+    /**
+     * 打开「租约交接」维护窗口（幂等：已有进行中窗口的租户跳过）。
+     *
+     * <p>为什么用维护窗口表达：计划外的**交接空档**（旧节点已停采、新节点尚未接管）在活性行看来就是
+     * 「没有有效数据」⇒ 会被算成断档，把可用率压低（A6/A10）。窗口起点取**租约真正失效的时刻**
+     * （过期扫描用该行的 {@code lease_expire_at}，释放用处理时刻），终点由接管成功时关闭。</p>
+     *
+     * @param startsByTenant 租户 → 窗口起点（调用方保证非空才调用）
+     * @param reason         说明（写进窗口，便于报告解释）
+     */
+    private void openHandoverWindows(Map<Long, LocalDateTime> startsByTenant, String reason) {
+        if (startsByTenant.isEmpty()) {
+            // 批量 IN 前先判空短路：空集合会让 SQL 变成 IN () 语法错误
+            return;
+        }
+        List<Long> tenantIds = List.copyOf(startsByTenant.keySet());
+        // 一次查询拿到「已有进行中交接窗口」的租户：避免「先查后插」的循环内 DB 调用（N+1 门禁）
+        // ⚠️ 租约侧**没有租户上下文**（/internal/lease/** 只有内部凭证）：maintenance_window 是**租户表**，
+        //    租户插件在无上下文时 fail-closed ⇒ 跨租户读写必须显式 executeIgnore（与可用率扫描同一取向）。
+        //    安全性来自显式 tenant_id：查询/更新按入参租户集合收敛，插入的 tenant_id 逐行给出。
+        // 批次区间的**并集**（保守判定：与它有任何交集就跳过，宁可少开也不制造重叠）
+        LocalDateTime from = startsByTenant.values().stream().min(LocalDateTime::compareTo)
+            .orElseThrow();
+        Duration ttl = properties.getHandoverWindowTtl();
+        LocalDateTime to = startsByTenant.values().stream().max(LocalDateTime::compareTo)
+            .orElseThrow().plus(ttl);
+        Set<Long> alreadyCovered = Set.copyOf(TenantContext.executeIgnore(
+            () -> maintenanceWindowMapper.findTenantsWithOverlappingWindow(tenantIds, from, to)));
+        List<MaintenanceWindow> toInsert = new ArrayList<>();
+        for (Map.Entry<Long, LocalDateTime> entry : startsByTenant.entrySet()) {
+            if (alreadyCovered.contains(entry.getKey())) {
+                continue;
+            }
+            MaintenanceWindow window = new MaintenanceWindow();
+            // 批量语句绕过 MP 字段填充 ⇒ id 必须显式预生成（与租约分配同一处理）
+            window.setId(IdWorker.getId());
+            window.setTenantId(entry.getKey());
+            window.setStartTs(entry.getValue());
+            // 必须有**上界**：否则无人接管时窗口永久开、可用率恒 100%（fail-open，复核点出）
+            window.setEndTs(entry.getValue().plus(ttl));
+            window.setSource(MaintenanceSource.LEASE_HANDOVER.getCode());
+            window.setReason(reason);
+            toInsert.add(window);
+        }
+        if (!toInsert.isEmpty()) {
+            TenantContext.executeIgnore(() -> maintenanceWindowMapper.insertBatch(toInsert));
+            // 日志用入参租户集合：**不在服务层引用租户实体的 getTenantId**（租户隔离门禁：隔离条件统一由插件追加）
+            log.info("[iot] 打开租约交接维护窗口 {} 个（交接空档不计为断档）：{}", toInsert.size(),
+                LogSanitizer.sanitize(List.copyOf(startsByTenant.keySet())));
+        }
+    }
+
+    /**
+     * 关闭已交接完成的租约交接窗口（接管成功后调用）。
+     *
+     * @param tenantIds 现在归本节点持有的租户（调用方保证非空才调用）
+     * @param now       结束时刻（数据库时钟）
+     */
+    private void closeHandoverWindows(List<Long> tenantIds, LocalDateTime now) {
+        if (tenantIds == null || tenantIds.isEmpty()) {
+            return;
+        }
+        int closed = TenantContext.executeIgnore(() -> maintenanceWindowMapper.closeOpenWindows(tenantIds,
+            MaintenanceSource.LEASE_HANDOVER.getCode(), now));
+        if (closed > 0) {
+            log.info("[iot] 交接完成，关闭交接维护窗口 {} 个", closed);
+        }
     }
 
     @Override
@@ -346,6 +443,17 @@ public class LeaseServiceImpl implements LeaseService {
         if (rows > 0) {
             expiredCounter.increment(rows);
             log.warn("[iot] 失效扫描：{} 个租约已到期，置为待接管", rows);
+            // 过期即「旧节点必须停采」⇒ 开交接窗口，起点用**该行租约真正失效的时刻**（不是本轮扫描时刻，
+            // 否则会把「早已失效但仍被扫描器滞后处理」的那段时间漏掉）
+            List<TenantNodeAssignment> lapsed = mapper.selectList(
+                Wrappers.<TenantNodeAssignment>lambdaQuery()
+                    .eq(TenantNodeAssignment::getState, LeaseState.PENDING_TAKEOVER.getCode())
+                    .le(TenantNodeAssignment::getLeaseExpireAt, now));
+            Map<Long, LocalDateTime> starts = new LinkedHashMap<>();
+            for (TenantNodeAssignment row : lapsed) {
+                starts.putIfAbsent(row.getTenantId(), row.getLeaseExpireAt());
+            }
+            openHandoverWindows(starts, "租约到期待接管");
         }
         return rows;
     }
