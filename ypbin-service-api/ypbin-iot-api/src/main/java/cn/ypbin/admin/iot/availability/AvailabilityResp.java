@@ -64,10 +64,31 @@ public class AvailabilityResp {
     private long maxAllowedOutageSeconds;
 
     /**
+     * 维护窗口（永不为 null）。
+     *
+     * @return 维护窗口列表
+     */
+    public List<MaintenanceWindowDto> getMaintenanceWindows() {
+        return maintenanceWindows == null ? List.of() : maintenanceWindows;
+    }
+
+    /**
      * 断档明细（**最新优先**：按开始时间倒序），最多返回 {@code AvailabilityRules.MAX_OUTAGE_ROWS} 条；
      * 超出时置 {@link #truncated}——注意**汇总（可用率/次数/总时长）不受截断影响**（来自精确聚合）。
      */
     private List<OutageEventResp> outages = new ArrayList<>();
+
+    /** 统计**总时长**（秒）= 窗口时长 − 维护窗口时长：可用率的分母（spec §12.5）。 */
+    private Long effectiveWindowSeconds;
+
+    /** 窗口内的维护时长（秒）：分母里被排除的计划停机。 */
+    private Long maintenanceSeconds;
+
+    /** 被排除的断档（秒）：断档落在维护窗口内的部分（只缩分母会让计划停机仍拉低可用率，故一并剔除）。 */
+    private Long outageInMaintenanceSeconds;
+
+    /** 与本设备重叠的维护窗口（最多 {@code AvailabilityRules.MAX_MAINTENANCE_ROWS} 条，用于解释口径）。 */
+    private List<MaintenanceWindowDto> maintenanceWindows = new ArrayList<>();
 
     /** 断档明细是否被截断（窗口内事件数超过返回上限）。 */
     private Boolean truncated;

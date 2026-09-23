@@ -88,26 +88,49 @@ class AvailabilityMapperContractTest {
     void windowSummaryMustBeExactAggregate() throws IOException {
         String sql = outageMapperSql("summarizeInWindow");
 
-        assertThat(sql).as("抽取到的 SQL 不能为空").isNotBlank();
-        assertThat(sql).as("必须一次聚合出精确值（明细截断不影响汇总）").contains("SUM(").contains("MAX(")
-            .contains("COUNT(*)");
+        assertThat(sql).as("抽取到的 SQL 不能为空，否则本门禁恒真（空跑）").isNotBlank();
+        assertThat(sql).as("必须一次聚合出精确值（明细截断不影响汇总）").contains("COUNT(*)")
+            .contains("SUM(per_row.sec - per_row.msec)").contains("MAX(GREATEST(0, per_row.sec - per_row.msec))")
+            .contains("SUM(per_row.msec)");
         // 显式写的理由（按实测更正）：租户条件其实会被 MP 的租户拦截器**重写追加**，显式写属纵深防御
         // （executeIgnore 等跨租户场景下它是唯一护栏）；而**逻辑删除不会被追加** ⇒ is_deleted 必须显式写
         assertThat(sql).as("tenant_id 与 is_deleted 都必须显式写：前者是纵深防御，后者是必需（逻辑删除不会被自动追加）")
-            .contains("tenant_id = #{tenantId}").contains("is_deleted = 0");
-        // SUM 与 MAX **各自**都要有防负（只给 SUM 加会被漏掉一条路径）
-        assertThat(sql).as("SUM 侧的单条防负不得缺失（否则脏数据会把可用率抬高）")
-            .contains("SUM(GREATEST(0, TIMESTAMPDIFF");
-        assertThat(sql).as("MAX 侧的单条防负不得缺失").contains("MAX(GREATEST(0, TIMESTAMPDIFF");
-        // 窗口裁剪要**两端都在**，且整段窗口谓词不得被删掉（否则汇总会变成「该设备全历史断档」）
-        assertThat(sql).as("窗口裁剪：起点侧").contains("GREATEST(start_ts, #{from,jdbcType=TIMESTAMP})");
+            .contains("tenant_id = #{tenantId}").contains("o.is_deleted = 0");
+        assertThat(sql).as("单条断档不得为负（否则脏数据会把可用率抬高）")
+            .contains("GREATEST(0, TIMESTAMPDIFF");
+        assertThat(sql).as("窗口裁剪：起点侧").contains("GREATEST(o.start_ts, #{from,jdbcType=TIMESTAMP})");
         assertThat(sql).as("窗口裁剪：终点侧（进行中的断档结算到 now，now 缺失时退回数据库时钟）")
-            .contains("LEAST(COALESCE(end_ts, COALESCE(#{now,jdbcType=TIMESTAMP}, NOW())), "
+            .contains("LEAST(COALESCE(o.end_ts, COALESCE(#{now,jdbcType=TIMESTAMP}, NOW())), "
                 + "#{to,jdbcType=TIMESTAMP})");
-        assertThat(sql).as("窗口谓词不得被删掉").contains("start_ts < #{to,jdbcType=TIMESTAMP}")
-            .contains("(end_ts IS NULL OR end_ts > #{from,jdbcType=TIMESTAMP})");
+        assertThat(sql).as("窗口谓词不得被删掉").contains("o.start_ts < #{to,jdbcType=TIMESTAMP}")
+            .contains("(o.end_ts IS NULL OR o.end_ts > #{from,jdbcType=TIMESTAMP})");
         assertThat(sql).as("可空时间参数必须带 jdbcType（与观测状态更新同一条纪律）")
             .contains("jdbcType=TIMESTAMP");
+        // 维护窗口（spec §12.5）：每行断档要与维护窗口求交、并从该行里剔除；子查询自己也要收敛租户与逻辑删除
+        assertThat(sql).as("必须把维护窗口内的断档从分子里剔除（否则计划停机仍拉低可用率）")
+            .contains("FROM maintenance_window w").contains("(w.device_id IS NULL OR w.device_id = o.device_id)")
+            .contains("w.is_deleted = 0").contains("w.tenant_id = o.tenant_id");
+        assertThat(sql).as("维护重叠不得超过该行自身断档时长（上限封顶，保证计入断档不为负）")
+            .contains("LEAST(GREATEST(0, TIMESTAMPDIFF(SECOND, GREATEST(o.start_ts, "
+                + "#{from,jdbcType=TIMESTAMP}),");
+    }
+
+    @Test
+    @DisplayName("★ A3：维护时长聚合必须收敛设备范围（租户级窗口对所有设备生效）且显式带租户/逻辑删除")
+    void maintenanceAggregateMustScopeDeviceAndTenant() throws IOException {
+        String sql = methodSql(REPO_ROOT.resolve(
+            "ypbin-service/ypbin-iot/src/main/java/cn/ypbin/admin/iot/mapper/MaintenanceWindowMapper.java"),
+            "sumMaintenanceSecondsInWindow", "@Select");
+
+        assertThat(sql).as("抽取到的 SQL 不能为空").isNotBlank();
+        assertThat(sql).as("设备范围：显式 NULL 表示该租户全部设备").contains("(device_id IS NULL OR device_id = #{deviceId})");
+        assertThat(sql).as("原生聚合 SQL 必须显式收敛租户与逻辑删除，且时间参数带 jdbcType")
+            .contains("tenant_id = #{tenantId}").contains("is_deleted = 0").contains("jdbcType=TIMESTAMP");
+        assertThat(sql).as("窗口裁剪与「不得为负」都要在 SQL 里").contains("GREATEST(start_ts, #{from,jdbcType=TIMESTAMP})")
+            .contains("LEAST(COALESCE(end_ts, #{now,jdbcType=TIMESTAMP}), #{to,jdbcType=TIMESTAMP})")
+            .contains("GREATEST(0, TIMESTAMPDIFF");
+        assertThat(sql).as("窗口谓词不得被删掉").contains("start_ts < #{to,jdbcType=TIMESTAMP}")
+            .contains("(end_ts IS NULL OR end_ts > #{from,jdbcType=TIMESTAMP})");
     }
 
     /** 抽取某个 Mapper 方法注解里的 SQL 文本（把 Java 字符串拼接还原成一行；支持 @Update 与 @Select）。 */

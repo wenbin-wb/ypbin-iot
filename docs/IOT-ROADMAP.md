@@ -454,16 +454,16 @@ ERROR The build could not read 1 project
 |---|---|---|
 | **A1** | ~~access 侧上报接线~~ **已落地**（`HttpAccessReadingSink`）：有界队列 → 微批 → `/internal/readings`，含丢弃/失败/非法计数与超时；EMQX 传输**待 Q4** | 已收口；仍有限制见 A9/A10 |
 | **A9** | **上报失败不重试**（本批丢弃） | 刻意为之：重试会占住 flush 线程并放大远端压力；代价是读数丢失会让断档缺口被算长一些 ⇒ 以 `iot.access.egress.failed`/`dropped` 暴露。彻底解决要等 EMQX/MQ 的持久化通道（Q4）与「断档判定对丢失不敏感」的补偿口径 |
-| **A10** | **扫描无租约/归属联动**（= A6 的另一面） | 租户被接管到别的节点后，本节点的活性行停止更新 ⇒ 会被算成断档。需要判据（如「本节点仍持有该租户」）或上报里带「本节点是否在采」 |
+| **A10** | **扫描无租约/归属联动**（= A6 的另一面） | 同 A6：表与窗口来源已备好，**自动开/关窗未接线**（下一步：租约释放/过期→开窗、接管成功→关窗） |
 | **A12** | 指标**未接大盘/告警** | `iot.access.egress.*`（accepted/dropped/sent/failed/invalid/pending）与可用率侧无 Prometheus 抓取/告警/大盘定义，仅文档提及名字（复核 R8 未核实项） |
 | **A15** | `poll_interval_ms` 可被**过期但为正**的旧快照回退 | 该列是**配置**不是时间戳（1s→10s 是合法变更），故刻意不做单调；代价是另一副本的旧周期写回后阈值 `K×周期` 偏大 ⇒ 检测略滞后、可用率略偏高。若要收口需引入「配置版本号」判新旧（与 `config_epoch` 同类机制） |
 | **A16** | `outageCount` 口径含「裁剪后重叠 0 秒」的行 | 聚合用 `COUNT(*)`（满足窗口重叠条件的行都计），而旧的 Java 求和会跳过重叠 ≤0 的行 ⇒ 次数可能比旧实现大（只影响展示的次数，不影响秒数与可用率）。已在 Mapper Javadoc 写明 |
 | **A13** | 多副本相关用例的成本面 | 谓词与饥饿两条用例是**真库 IT**（CI 才跑）；本地由源码级门禁 `AvailabilityMapperContractTest` 兜底（它只断言 SQL 文本，不执行 SQL） |
 | **A2** | 读数**值**不落库、Redis 最新值未做 | 依赖 Q8（IoTDB 树/表模型）；本轮刻意只上报「质量+时刻」，不发明取值契约 |
-| **A3** | 维护窗口排除未做 | spec 口径里「统计总时长排除可配置维护窗口」尚未实现，当前窗口时长 = `to - from` |
+| **A3** | ~~维护窗口排除未做~~ ✅ **已落地**（2026-09-23，见「四点十五」） | 新增 `maintenance_window` 表（人工 + 预留租约交接两类来源）：统计总时长 = 窗口 − 维护，且**断档落在维护内的部分也从分子里剔除**（只缩分母会让计划停机仍拉低可用率，与 spec 意图相反）；聚合用一次 SQL（含每行与维护求交后上限封顶）保证明细截断不影响精度；内部端点 `POST/GET /internal/maintenance/windows` 可声明/关闭/查询；响应回显 `maintenanceSeconds`/`effectiveWindowSeconds`/`outageInMaintenanceSeconds`/窗口列表 |
 | **A4** | 阈值/目标全局常量 | 按设备覆盖目标可用率/最长断档属后续增量 |
 | **A5** | 只有 `NO_GOOD_DATA` 一个原因码 | 链路级原因（断链/设备离线/未接管）与租约联动未做 |
-| **A6** | 租约转移导致的停采仍算断档 | 活性行感知不到归属变化：租户被接管到别的节点后，本节点的最后一次有效数据之后就会被算成断档。需要与归属/租约联动（或在上报里带「本次采集是否仍在进行」） |
+| **A6** | 租约转移导致的停采仍算断档 | 活性行感知不到归属变化：租户被接管到别的节点后，本节点的最后一次有效数据之后就会被算成断档。**已铺路**：`maintenance_window` 已预留 `source=LEASE_HANDOVER`（租户级窗口，`device_id` 为空），**但自动开/关窗的租约侧接线尚未落地**（本轮只落地人工路径）——在那之前，交接空档仍会按断档计（可用率偏低方向），运维可临时用内部端点人工声明窗口 |
 | **A7** | 平台自身停机期间的断档不可分辨原因 | 停机期间没有扫描；恢复后按 `lastGoodAt` 补开一条，跨越停机——时长方向正确，但无法区分「设备断档」与「平台停机」 |
 | **A8** | ~~采集周期当前靠兜底值~~ **已闭环** | access 已随读数上报 `pollIntervalMs`（来自 `DeviceSpec.pollInterval`）；只有上游未给周期（0/null）时才走 `fallback-interval-ms` |
 
@@ -534,6 +534,46 @@ ERROR The build could not read 1 project
 | **C4** | 接入侧指标**暴露链路未接** | gauge 已注册，但本仓没有 `management.endpoints.web.exposure` 配置、pom 里也没有任何 micrometer registry ⇒ **实际抓不到**（Spring Boot 默认只暴露 health）。与 iot 侧的 A12 同类，需统一决策 |
 | **C5** | 偏移越过告警阈值的判据必须**对称** | 已改用 `Duration#abs().compareTo(5s) > 0`：`Duration.toSeconds()` 对负值**向下取整**（-5.5s→-6），原先的 `Math.abs(toSeconds())` 会让 +5.5s 判成「未超阈值」而 -5.5s 判成「超阈值」（复核实测 +6.0s/-5.0s 不对称）；已有单测覆盖四种符号/边界 |
 
+
+### 四点十五、M-2 可用率口径：维护窗口排除（A3）
+
+**解决什么问题**：spec §12.5 的统计总时长是「**排除可配置维护窗口**后的时长」——自用场景设备夜间/周末停机是常态，
+用墙钟当分母会把计划停机算成断档，可用率被系统性低估（运维看到 90% 却以为是故障）。
+
+**口径实现（比 spec 的一句话更严）**：spec 只写了分母要排除维护窗口；但计划停机期间**不会产生有效数据**，
+只缩分母的话那段时间仍会以「断档」进入**分子**，可用率照旧被拉低——与 spec「计划停机不算断档」的意图相反。
+因此本实现**分子分母同时排除**：
+
+```
+统计总时长 = 窗口时长 − Σ(维护窗口 ∩ 窗口)
+计入断档   = Σ(断档 ∩ 窗口) − Σ(断档 ∩ 维护窗口)
+可用率     = 1 − 计入断档 / 统计总时长        （统计总时长为 0 时不判不达标、按 100%）
+```
+
+**做了什么**
+
+| 面 | 实现 |
+|---|---|
+| 表 | `maintenance_window`（租户表，006 与迁移逐字等价）：`device_id` 为空=该租户全部设备；`end_ts` 为空=进行中；`source` = `MANUAL` / `LEASE_HANDOVER`（后者为租约交接预留） |
+| 精确聚合 | `OutageEventMapper.summarizeInWindow` 改为「派生表 + 与维护窗口求交」：每行断档先算自身时长 `sec`，再算它落在维护内的 `msec`（**上限封顶到 `sec`**），返回计入断档 `Σ(sec−msec)`、计入最长断档 `MAX(sec−msec)`、被剔除 `Σmsec` 与精确次数；`MaintenanceWindowMapper.sumMaintenanceSecondsInWindow` 给分母的维护时长。两者都是单条 SQL（明细截断不影响精度） |
+| 计算与响应 | `AvailabilityCalculator` 增加维护输入（维护时长封顶到窗口、被剔除断档取下限）；`AvailabilityResp` 回显 `maintenanceSeconds`/`effectiveWindowSeconds`/`outageInMaintenanceSeconds` 与窗口列表（最多 50 条），让「这段时间为什么不算断档」在响应里自解释 |
+| 可配置 | 内部端点 `POST /internal/maintenance/windows`（声明，租户取自上下文、时间基准取数据库时钟、结束必须晚于开始）、`POST /{id}/close`（**只关进行中**）、`GET`（按设备/区间查询）；服务层 `MaintenanceWindowService` |
+
+**验收证据（本机实跑）**
+
+- `ypbin-iot` 单测 **137/0**（+11：`AvailabilityCalculatorTest` +4 维护口径、`AvailabilityServiceImplTest` +1 维护排除与回显、
+  `MaintenanceWindowServiceImplTest` +5（租户守卫/区间校验/只关进行中/查询映射）、源码门禁 +1 维护聚合）；
+- 真库 IT `OutageAvailabilityIT` +2（`-Pit` 由 CI 执行）：维护窗口同时从分母与分子排除（可用率 100%、
+  另一台设备的窗口不影响本设备）、租户级窗口对所有设备生效；
+- 源码级门禁把「与维护求交」「上限封顶」「显式租户/逻辑删除/jdbcType」钉在构建期。
+
+**仍未闭环（本片相关）**
+
+| # | 事项 | 现状 |
+|---|---|---|
+| **M1** | 租约交接**自动**开/关窗 | 表与 `source=LEASE_HANDOVER` 已备好，租约侧接线未做（释放/过期→开窗、接管成功→关窗）⇒ 交接空档仍按断档计（A6/A10 保持登记） |
+| **M2** | 管理台与权限码 | 当前只有内部端点（平台侧调用）；面向运维的页面/权限码属后续增量 |
+| **M3** | 维护窗口与断档的**边界**语义 | 窗口起止与断档起止都按秒结算；若窗口正好在断档中间结束，只剔除重叠部分（本实现如此），未做「整段断档都不计」的宽松口径 |
 
 ### 五、替换缝（3a 已备好，3b-2 只需新增自动配置）
 3a 的 `LoggingTenantLinkManager` 已去掉 `@Component`，由 `AccessLeaseConfiguration`（`@AutoConfiguration`

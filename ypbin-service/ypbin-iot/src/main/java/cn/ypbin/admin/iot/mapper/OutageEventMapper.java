@@ -50,6 +50,11 @@ public interface OutageEventMapper extends BaseMapper<OutageEvent> {
      * {@code LEAST(COALESCE(end_ts, now), to)}）与「单条不得为负」都在 SQL 里完成，
      * 与 {@code AvailabilityCalculator} 的口径一致。</p>
      *
+     * <p>M-2 维护窗口：每行断档**落在维护窗口内的秒数**（{@code msec}）从该行里剔除，因此
+     * {@code outageSeconds}/{@code longestOutageSeconds} 都是「**排除维护后**」的值，
+     * 并额外返回 {@code outageInMaintenanceSeconds}（被剔除的部分）供报告解释。
+     * 计划停机不再是「断档」——只缩分母不缩分子会让计划停机仍然拉低可用率，与 spec §12.5 的意图相反。</p>
+     *
      * <p><b>为什么显式写 {@code tenant_id} 与 {@code is_deleted = 0}</b>（措辞已按实测更正）：</p>
      * <ul>
      *   <li><b>租户条件</b>：MyBatis-Plus 的 {@code TenantLineInnerInterceptor} 会解析并重写原生 SQL，
@@ -73,15 +78,27 @@ public interface OutageEventMapper extends BaseMapper<OutageEvent> {
      * @return 含 outageCount / outageSeconds / longestOutageSeconds 的映射（永不为 null）
      */
     @Select("SELECT COUNT(*) AS outageCount, "
-        + "COALESCE(SUM(GREATEST(0, TIMESTAMPDIFF(SECOND, GREATEST(start_ts, #{from,jdbcType=TIMESTAMP}), "
-        + "LEAST(COALESCE(end_ts, COALESCE(#{now,jdbcType=TIMESTAMP}, NOW())), #{to,jdbcType=TIMESTAMP})))), 0) "
-        + "AS outageSeconds, "
-        + "COALESCE(MAX(GREATEST(0, TIMESTAMPDIFF(SECOND, GREATEST(start_ts, #{from,jdbcType=TIMESTAMP}), "
-        + "LEAST(COALESCE(end_ts, COALESCE(#{now,jdbcType=TIMESTAMP}, NOW())), #{to,jdbcType=TIMESTAMP})))), 0) "
-        + "AS longestOutageSeconds "
-        + "FROM outage_event WHERE tenant_id = #{tenantId} AND device_id = #{deviceId} "
-        + "AND is_deleted = 0 AND start_ts < #{to,jdbcType=TIMESTAMP} "
-        + "AND (end_ts IS NULL OR end_ts > #{from,jdbcType=TIMESTAMP})")
+        + "COALESCE(SUM(per_row.sec - per_row.msec), 0) AS outageSeconds, "
+        + "COALESCE(MAX(GREATEST(0, per_row.sec - per_row.msec)), 0) AS longestOutageSeconds, "
+        + "COALESCE(SUM(per_row.msec), 0) AS outageInMaintenanceSeconds "
+        + "FROM ("
+        + "SELECT GREATEST(0, TIMESTAMPDIFF(SECOND, GREATEST(o.start_ts, #{from,jdbcType=TIMESTAMP}), "
+        + "LEAST(COALESCE(o.end_ts, COALESCE(#{now,jdbcType=TIMESTAMP}, NOW())), #{to,jdbcType=TIMESTAMP}))) AS sec, "
+        // 每行断档落在维护窗口内的秒数（与 sec 上限封顶：维护重叠不可能超过这一行自身的断档时长）
+        + "LEAST(GREATEST(0, TIMESTAMPDIFF(SECOND, GREATEST(o.start_ts, #{from,jdbcType=TIMESTAMP}), "
+        + "LEAST(COALESCE(o.end_ts, COALESCE(#{now,jdbcType=TIMESTAMP}, NOW())), #{to,jdbcType=TIMESTAMP}))), "
+        + "COALESCE((SELECT SUM(GREATEST(0, TIMESTAMPDIFF(SECOND, "
+        + "GREATEST(o.start_ts, w.start_ts, #{from,jdbcType=TIMESTAMP}), "
+        + "LEAST(COALESCE(o.end_ts, COALESCE(#{now,jdbcType=TIMESTAMP}, NOW())), "
+        + "COALESCE(w.end_ts, #{to,jdbcType=TIMESTAMP}), #{to,jdbcType=TIMESTAMP}))))) "
+        + "FROM maintenance_window w WHERE w.tenant_id = o.tenant_id AND w.is_deleted = 0 "
+        + "AND (w.device_id IS NULL OR w.device_id = o.device_id) "
+        + "AND w.start_ts < #{to,jdbcType=TIMESTAMP} "
+        + "AND (w.end_ts IS NULL OR w.end_ts > #{from,jdbcType=TIMESTAMP})), 0)) AS msec "
+        + "FROM outage_event o WHERE o.tenant_id = #{tenantId} AND o.device_id = #{deviceId} "
+        + "AND o.is_deleted = 0 AND o.start_ts < #{to,jdbcType=TIMESTAMP} "
+        + "AND (o.end_ts IS NULL OR o.end_ts > #{from,jdbcType=TIMESTAMP})"
+        + ") per_row")
     Map<String, Object> summarizeInWindow(@Param("tenantId") Long tenantId, @Param("deviceId") Long deviceId,
                                           @Param("from") LocalDateTime from,
                                           @Param("to") LocalDateTime to,

@@ -57,7 +57,10 @@ public final class AvailabilityRules {
      */
     public static final ZoneId PLATFORM_ZONE = ZoneId.of("GMT+8");
 
-    /** 断档明细一次返回的最大条数（超出则截断并置 {@code truncated}，避免一个长窗口把响应撑爆）。 */
+        /** 维护窗口回显上限（响应里解释口径用；不影响统计精度）。 */
+    public static final int MAX_MAINTENANCE_ROWS = 50;
+
+/** 断档明细一次返回的最大条数（超出则截断并置 {@code truncated}，避免一个长窗口把响应撑爆）。 */
     public static final int MAX_OUTAGE_ROWS = 200;
 
     private AvailabilityRules() {

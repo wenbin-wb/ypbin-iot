@@ -19,9 +19,11 @@ import cn.ypbin.admin.iot.availability.ReadingIngestReq;
 import cn.ypbin.admin.iot.availability.ReadingObservationDto;
 import cn.ypbin.admin.iot.entity.DeviceLiveness;
 import cn.ypbin.admin.iot.entity.IotDevice;
+import cn.ypbin.admin.iot.entity.MaintenanceWindow;
 import cn.ypbin.admin.iot.entity.OutageEvent;
 import cn.ypbin.admin.iot.mapper.DeviceLivenessMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
+import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
 import cn.ypbin.admin.iot.mapper.OutageEventMapper;
 import cn.ypbin.admin.iot.service.impl.AvailabilityServiceImpl;
 import cn.ypbin.starter.tenant.core.TenantContext;
@@ -83,6 +85,8 @@ class OutageAvailabilityIT {
     private static HikariDataSource dataSource;
     private static DeviceLivenessMapper livenessMapper;
     private static OutageEventMapper outageMapper;
+
+    private static MaintenanceWindowMapper maintenanceWindowMapper;
     private static IotDeviceMapper deviceMapper;
     private static AvailabilityServiceImpl service;
 
@@ -121,8 +125,9 @@ class OutageAvailabilityIT {
         livenessMapper = sessionTemplate.getMapper(DeviceLivenessMapper.class);
         outageMapper = sessionTemplate.getMapper(OutageEventMapper.class);
         deviceMapper = sessionTemplate.getMapper(IotDeviceMapper.class);
-        service = new AvailabilityServiceImpl(livenessMapper, outageMapper, deviceMapper,
-            new AvailabilityProperties());
+        maintenanceWindowMapper = sessionTemplate.getMapper(MaintenanceWindowMapper.class);
+        service = new AvailabilityServiceImpl(livenessMapper, outageMapper, maintenanceWindowMapper,
+            deviceMapper, new AvailabilityProperties());
         cleanup();
         seedDevices();
     }
@@ -141,6 +146,7 @@ class OutageAvailabilityIT {
      */
     @BeforeEach
     void resetOutageState() {
+        execute("DELETE FROM maintenance_window WHERE tenant_id = " + TENANT);
         execute("DELETE FROM outage_event WHERE tenant_id = " + TENANT);
         execute("DELETE FROM device_liveness WHERE tenant_id = " + TENANT);
     }
@@ -262,7 +268,7 @@ class OutageAvailabilityIT {
         AvailabilityProperties oneByOne = new AvailabilityProperties();
         oneByOne.setScanBatchSize(1);
         AvailabilityServiceImpl tightScan = new AvailabilityServiceImpl(livenessMapper, outageMapper,
-            deviceMapper, oneByOne);
+            maintenanceWindowMapper, deviceMapper, oneByOne);
         // 两个「设备不存在」的垃圾活性行（id 更小 ⇒ 优先被候选查询选中）+ 一个真断档设备
         insertOrphanLiveness(1L, 999_998L, dbNow.minusHours(1));
         insertOrphanLiveness(2L, 999_999L, dbNow.minusHours(1));
@@ -374,6 +380,63 @@ class OutageAvailabilityIT {
     }
 
     @Test
+    @DisplayName("★ A3：维护窗口必须**同时**从统计总时长与断档里排除（计划停机不算断档）")
+    void maintenanceWindowMustBeExcludedFromAvailability() {
+        LocalDateTime dbNow = livenessMapper.selectNow().withNano(0);
+        service.ingest(req(observation(DEVICE, 5_000, AvailabilityRules.QUALITY_GOOD,
+            dbNow.minusHours(3))));
+        // 造一段 1 小时断档：[now-2h, now-1h]
+        execute("INSERT INTO outage_event (id, tenant_id, device_id, start_ts, end_ts, duration_sec, reason, "
+            + "create_time, update_time) VALUES (30001, " + TENANT + ", " + DEVICE + ", '"
+            + dbNow.minusHours(2).format(SQL_DATE_TIME) + "', '" + dbNow.minusHours(1).format(SQL_DATE_TIME)
+            + "', 3600, 'NO_GOOD_DATA', NOW(), NOW())");
+        // ① 该设备的维护窗口正好覆盖这段断档；② 另一台设备的窗口不得影响本设备
+        insertMaintenanceWindow(DEVICE, dbNow.minusHours(2), dbNow.minusHours(1), "MANUAL");
+        insertMaintenanceWindow(999_999L, dbNow.minusHours(4), dbNow, "MANUAL");
+
+        AvailabilityResp resp = inTenant(() -> service.query(DEVICE, dbNow.minusHours(4), dbNow));
+
+        assertThat(resp.getMaintenanceSeconds()).as("只算本设备（或租户级）的窗口：1 小时").isEqualTo(3_600L);
+        assertThat(resp.getEffectiveWindowSeconds()).as("分母 = 4h − 1h 维护").isEqualTo(3 * 3_600L);
+        assertThat(resp.getOutageSeconds()).as("维护内的断档被剔除").isZero();
+        assertThat(resp.getOutageInMaintenanceSeconds()).as("剔除部分要能解释").isEqualTo(3_600L);
+        assertThat(resp.getAvailability()).as("计划停机不算断档 ⇒ 可用率 100%")
+            .isEqualByComparingTo(new BigDecimal("1.000000"));
+        assertThat(resp.getMaintenanceWindows()).as("响应回显窗口，便于解释口径").hasSize(1);
+    }
+
+    @Test
+    @DisplayName("★ A3：租户级窗口（device_id 为空）对该租户所有设备生效")
+    void tenantWideMaintenanceWindowMustApplyToEveryDevice() {
+        LocalDateTime dbNow = livenessMapper.selectNow().withNano(0);
+        service.ingest(req(observation(DEVICE, 5_000, AvailabilityRules.QUALITY_GOOD,
+            dbNow.minusHours(3))));
+        insertMaintenanceWindow(null, dbNow.minusHours(1), dbNow, "LEASE_HANDOVER");
+
+        AvailabilityResp resp = inTenant(() -> service.query(DEVICE, dbNow.minusHours(4), dbNow));
+
+        assertThat(resp.getMaintenanceSeconds()).as("租户级窗口 1 小时").isEqualTo(3_600L);
+        assertThat(resp.getEffectiveWindowSeconds()).isEqualTo(3 * 3_600L);
+        assertThat(resp.getMaintenanceWindows()).singleElement()
+            .satisfies(dto -> assertThat(dto.getSource()).isEqualTo("LEASE_HANDOVER"));
+    }
+
+    /** 插一条维护窗口（deviceId 为空=租户级）。 */
+    private static void insertMaintenanceWindow(Long deviceId, LocalDateTime from, LocalDateTime to,
+            String source) {
+        MaintenanceWindow row = new MaintenanceWindow();
+        row.setDeviceId(deviceId);
+        row.setStartTs(from);
+        row.setEndTs(to);
+        row.setSource(source);
+        row.setReason("IT 造数");
+        inTenant(() -> {
+            maintenanceWindowMapper.insert(row);
+            return 1;
+        });
+    }
+
+    @Test
     @DisplayName("★ 租户隔离：无租户上下文时新表被插件拒绝（fail-closed，证明它们确实是租户表）")
     void tenantTablesMustFailClosedWithoutContext() {
         assertThatThrownBy(() -> livenessMapper.selectOne(Wrappers.<DeviceLiveness>lambdaQuery()
@@ -429,6 +492,7 @@ class OutageAvailabilityIT {
     }
 
     private static void cleanup() {
+        execute("DELETE FROM maintenance_window WHERE tenant_id = " + TENANT);
         execute("DELETE FROM outage_event WHERE tenant_id = " + TENANT);
         execute("DELETE FROM device_liveness WHERE tenant_id = " + TENANT);
         execute("DELETE FROM iot_device WHERE tenant_id = " + TENANT);
