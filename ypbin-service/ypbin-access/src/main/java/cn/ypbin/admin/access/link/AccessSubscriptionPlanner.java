@@ -156,9 +156,8 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
             //    对账会认为无需重试 ⇒ 该设备**永久停止采集**且只有一行 ERROR 日志。
             //    现在失败不写 ⇒ 下一个租约周期自动重试。
             inFlight.add(device.deviceId());
-            boolean started;
             try {
-                started = startSubscribe(session, request, listener, device, addresses);
+                startSubscribe(session, request, listener, device, addresses);
             } catch (RuntimeException ex) {
                 // ⚠️ 同步抛出（适配器契约并不禁止）：必须立刻摘掉在途标记，否则该设备**永久无法订阅**
                 //    ——注释自己说了「不移除比重复订阅更糟」，那就不能只防异步失败这条路径。
@@ -167,9 +166,6 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
                 armFailureBackoff(device.deviceId(), session);
                 log.error("[access] 订阅调用同步抛出异常（退避后重试）：deviceId={} addresses={}",
                     device.deviceId(), addresses.size(), ex);
-                continue;
-            }
-            if (!started) {
                 continue;
             }
             // 返回值是「本次**发起**的订阅数」：完成与否是异步的，调用方不得据此判断成功
@@ -186,11 +182,10 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
      * @param listener  数据监听器
      * @param device    设备规格
      * @param addresses 点位地址（日志用）
-     * @return 是否真的发起了订阅（无点位时为 {@code false}）
      */
-    private boolean startSubscribe(DeviceSession session, SubscribeRequest request,
-                                   PointMappingDataListener listener, DeviceSpec device,
-                                   List<PointAddress> addresses) {
+    private void startSubscribe(DeviceSession session, SubscribeRequest request,
+                                PointMappingDataListener listener, DeviceSpec device,
+                                List<PointAddress> addresses) {
         session.subscribe(request, listener).whenComplete((handle, error) -> {
             // 无论成败都要摘掉「在途」标记，否则该设备再也不会被订阅（比重复订阅更糟）
             inFlight.remove(device.deviceId());
@@ -209,7 +204,6 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
                     addresses.size());
             }
         });
-        return true;
     }
 
     /**

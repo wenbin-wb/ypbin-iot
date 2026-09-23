@@ -346,6 +346,9 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
                 // 规格变了：重新 ADD（框架会先解绑再绑定），revision 必须继续递增
                 registry.emit(new DeviceChange(ChangeType.ADD, entry.getValue(),
                     registry.nextRevision(entry.getKey())));
+                // 与新增一致：重新 ADD 后也预置一次退避（同轮/下一轮不必马上再发）
+                rebindBackoff.put(entry.getKey(),
+                    new Backoff(1, clock.instant().plus(REBIND_BACKOFF_BASE)));
                 changed++;
             }
         }

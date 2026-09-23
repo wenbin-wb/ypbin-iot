@@ -479,7 +479,7 @@ ERROR The build could not read 1 project
 
 | 面 | 实现 |
 |---|---|
-| 重发 ADD（N-2） | 新增链路：**每次 `startCollecting`**（由采集周期驱动，默认 15s；`reconcile` 不调用）查「仍无会话」的设备（`SubscriptionPlanner#devicesWithoutSession`，默认空实现给日志桩/测试替身）并**重发 ADD**（新 revision）让框架重新 bind。三重节制：逐设备指数退避 **30s→2min**、每轮上限 **20**（超出计 `iot.access.device.rebind.deferred`）、**首次 ADD 当轮先预置一次退避**（建链结果下一轮才看得出来，同轮再发纯属浪费）。会话建立即清退避；fence/设备下架同步清理 |
+| 重发 ADD（N-2） | 新增链路：**每次 `startCollecting`**（由采集周期驱动，默认 15s；`reconcile` 不调用）查「仍无会话」的设备（`SubscriptionPlanner#devicesWithoutSession`，默认空实现给日志桩/测试替身）并**重发 ADD**（新 revision）让框架重新 bind。三重节制：逐设备指数退避 **30s→2min**、每轮上限 **20**（**每租户每轮**：`startCollecting` 按租户调用，多租户同 tick 合计可超过 20；超出计 `iot.access.device.rebind.deferred`）、**首次 ADD 当轮先预置一次退避**（建链结果下一轮才看得出来，同轮再发纯属浪费）。会话建立即清退避；fence/设备下架同步清理 |
 | 订阅失败退避（G1） | `AccessSubscriptionPlanner` 记 `{会话实例, 连续失败次数, 下次可重试时刻}`，指数退避 30s→2min；**会话实例变化即作废退避**（框架重连说明换了链路，立刻重试才对——否则一次失败会把「设备恢复」也挡在窗口外）；成功即清除；新增跳过计数 `iot.access.subscribe.backoff.skipped` |
 | 在途去重（G1） | `Set<String> inFlight`：`subscribe` 发起后加入、`whenComplete` **无论成败**都移除（不移除会让该设备再也不能被订阅，比重复订阅更糟）；在途期间下一轮直接跳过并计 `iot.access.subscribe.inflight.skipped` |
 
@@ -488,7 +488,7 @@ ERROR The build could not read 1 project
 - `ypbin-access` 单测 **82/0**（原 68 → **+14**：`AccessSubscriptionPlannerTest` 3→10、`IotProtocolTenantLinkManagerTest` 14→21；含复核整改后补的公平轮转、退避封顶、同步抛出、下架清退避 4 条）；
 - `ypbin-iot` 125/0、`ypbin-architecture-tests` 41/0、`tools/check-iot-sql-equivalence.sh` OK；
 - 变异 **5 处**全部精确转红（见本节提交信息与验收证据段）：去掉在途去重、去掉失败退避、去掉「会话实例变化作废退避」、
-  去掉重发 ADD、去掉重发退避判断——各自只让目标用例失败；复核整改后又补 5 处（去掉公平轮转排序 / 去掉 reconcile 的退避清理 / 去掉同步抛出的 try-catch / 去掉 forget 清在途 / 去掉退避封顶），同样各自精确转红；
+  去掉重发 ADD、去掉重发退避判断——各自只让目标用例失败；复核整改后又补 6 处（去掉公平轮转排序 / 去掉 reconcile 的退避清理 / 去掉同步抛出的 try-catch / 去掉 forget 清在途 / 去掉退避封顶），同样各自精确转红；
 - 无需真库（本片全是 access 侧内存态逻辑，不涉及 SQL/租户）。
 
 **仍未闭环（本片相关）**

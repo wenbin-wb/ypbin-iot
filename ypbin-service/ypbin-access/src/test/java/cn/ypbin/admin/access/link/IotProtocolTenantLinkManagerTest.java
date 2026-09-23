@@ -30,6 +30,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -305,8 +306,7 @@ class IotProtocolTenantLinkManagerTest {
         // 每台设备至少出现两次 ADD（首次采集 1 次 + 至少 1 次重发）
         Map<String, Long> addCount = framework.actions.stream()
             .filter(action -> action.startsWith("ADD:"))
-            .collect(java.util.stream.Collectors.groupingBy(action -> action.substring(4),
-                java.util.stream.Collectors.counting()));
+            .collect(Collectors.groupingBy(action -> action.substring(4), Collectors.counting()));
         assertThat(addCount).hasSize(total);
         assertThat(addCount.values()).as("每台都必须被重发过（轮转而非按列表顺序吃配额）")
             .allMatch(count -> count >= 2L, "count>=2");
