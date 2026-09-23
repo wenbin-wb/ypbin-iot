@@ -30,6 +30,7 @@ import cn.ypbin.admin.iot.mapper.TenantNodeAssignmentMapper;
 import cn.ypbin.admin.iot.service.impl.LeaseServiceImpl;
 import cn.ypbin.starter.tenant.autoconfigure.TenantProperties;
 import cn.ypbin.starter.tenant.handler.DefaultTenantLineHandler;
+import cn.ypbin.starter.tenant.core.TenantContext;
 import cn.ypbin.starter.test.condition.EnabledIfMySqlAvailable;
 import cn.ypbin.starter.test.container.MySqlIntegrationTestSupport;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
@@ -217,9 +218,11 @@ class LeaseDbClockIT {
 
         assertThat(service.markExpired()).as("必须完成一次失效标记").isGreaterThan(0);
 
-        MaintenanceWindow opened = maintenanceWindowMapper.selectOne(Wrappers.<MaintenanceWindow>lambdaQuery()
-            .eq(MaintenanceWindow::getTenantId, TENANT)
-            .eq(MaintenanceWindow::getSource, "LEASE_HANDOVER"));
+        // 测试侧读租户表同样要带租户上下文（生产同款插件 fail-closed）
+        MaintenanceWindow opened = TenantContext.executeWithTenant(TENANT, () ->
+            maintenanceWindowMapper.selectOne(Wrappers.<MaintenanceWindow>lambdaQuery()
+                .eq(MaintenanceWindow::getTenantId, TENANT)
+                .eq(MaintenanceWindow::getSource, "LEASE_HANDOVER")));
         assertThat(opened).as("过期即开交接窗口（交接空档不是设备断档）").isNotNull();
         assertThat(opened.getEndTs()).as("交接窗口带 TTL 上界（无人接管时不会永久开）")
             .isEqualTo(expiredAt.plus(properties.getHandoverWindowTtl()));
@@ -228,9 +231,10 @@ class LeaseDbClockIT {
 
         // 接管（同一节点把待接管租户重新领回）⇒ 交接完成 ⇒ 关窗
         service.acquire(acquireReq());
-        MaintenanceWindow closed = maintenanceWindowMapper.selectOne(Wrappers.<MaintenanceWindow>lambdaQuery()
-            .eq(MaintenanceWindow::getTenantId, TENANT)
-            .eq(MaintenanceWindow::getSource, "LEASE_HANDOVER"));
+        MaintenanceWindow closed = TenantContext.executeWithTenant(TENANT, () ->
+            maintenanceWindowMapper.selectOne(Wrappers.<MaintenanceWindow>lambdaQuery()
+                .eq(MaintenanceWindow::getTenantId, TENANT)
+                .eq(MaintenanceWindow::getSource, "LEASE_HANDOVER")));
         assertThat(closed.getEndTs()).as("接管成功后必须关窗（否则后半段空档会被继续排除）").isNotNull();
     }
 
