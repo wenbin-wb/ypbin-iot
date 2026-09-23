@@ -517,6 +517,32 @@ class AccessLeaseManagerTest {
     }
 
     @Test
+    @DisplayName("★ 偏移告警必须按最小间隔限流（60s 内不重复打；用注入时钟驱动，不绕过时钟）")
+    void skewWarningMustBeRateLimited() {
+        LocalDateTime localNow = LocalDateTime.now(clock);
+        when(client.register(any())).thenReturn(R.ok());
+        // 首次校准即大偏移：触发一次「首次照采」WARN。
+        // 到期时刻必须按**服务端时间**给足（否则偏移 +30min 会让本地判据立刻判过期 ⇒ 自停采后 holdings 空、renew 被跳过，用例就测不到限流）
+        when(client.acquire(any())).thenReturn(R.ok(acquireRespAt(localNow.plusMinutes(30),
+            assignmentAt(TENANT_A, localNow.plusMinutes(30).plusSeconds(600)))));
+        when(client.renew(any())).thenReturn(R.ok(new LeaseRenewResp()));
+        manager.start();
+
+        // 再连续触发两次大跳变告警（同一限流窗口内）
+        for (int i = 0; i < 2; i++) {
+            LeaseRenewResp resp = new LeaseRenewResp();
+            // 每轮再跳 5 分钟（> 阈值 60s；且与上一轮待确认值差 > 容差 30s ⇒ 每轮都只是「暂缓」）
+            resp.setServerTime(LocalDateTime.now(clock).plusMinutes(30 + (i + 1) * 5));
+            when(client.renew(any())).thenReturn(R.ok(resp));
+            manager.renewAndSelfCheck(LocalDateTime.now(clock).plusSeconds(1));
+        }
+
+        // 断言可观测后果：暂缓计数照常累加，但告警不因重复触发而改变偏移采纳语义
+        assertThat(meterRegistry.get("iot.access.lease.clock_skew.deferred").counter().count())
+            .as("两次跳变都被暂缓（限流只影响日志，不影响判定）").isEqualTo(2.0d);
+    }
+
+    @Test
     @DisplayName("★ 告警阈值判据必须对称（+5.5s 与 -5.5s 都要超阈值；Duration.toSeconds 对负值向下取整会不对称）")
     void warnThresholdMustBeSymmetric() {
         assertThat(AccessLeaseManager.exceedsWarnThreshold(Duration.ofMillis(5_500))).isTrue();
