@@ -158,10 +158,11 @@ class AvailabilityMapperContractTest {
         String block = source.substring(annotationIndex + annotation.length() + 1, methodIndex);
         int lastQuote = block.lastIndexOf('"');
         assertThat(lastQuote).as("@Update 参数里找不到字符串字面量（门禁失效）").isPositive();
-        // 把「多行字符串拼接」还原成一行 SQL：去掉加号/引号/换行
-        return block.substring(0, lastQuote + 1)
+        // 把「多行字符串拼接」还原成一行 SQL：去掉加号/引号/换行，并**剥离注释**
+        // （字符串字面量之间可能夹注释；门禁断言必须作用在代码上，本仓教训二十三）
+        return stripComments(block.substring(0, lastQuote + 1)
             .replace("+", " ")
-            .replace("\"", "")
+            .replace("\"", ""))
             .replaceAll("\\s+", " ")
             .trim();
     }

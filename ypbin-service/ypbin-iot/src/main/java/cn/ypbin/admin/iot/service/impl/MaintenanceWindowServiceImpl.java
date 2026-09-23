@@ -77,9 +77,13 @@ public class MaintenanceWindowServiceImpl implements MaintenanceWindowService {
         // 重叠校验：同设备范围（本设备 + 租户级）内的窗口**不得重叠**——聚合按「逐窗口求交后求和」统计，
         // 重叠会重复计数（分子被断档封顶 ⇒ 可用率偏高；分母重复扣 ⇒ 统计总时长偏小、极端下 fail-open）。
         LocalDateTime probeTo = endTs == null ? LocalDateTime.of(9999, 12, 31, 23, 59, 59) : endTs;
+        // ⚠️ 设备范围谓词只在**新窗口是设备级**时收窄：租户级窗口与「该租户的任意窗口」（含各设备级）
+        //    都可能重叠——早先只写 `(device_id IS NULL OR device_id = #{deviceId})`，新窗口为租户级时
+        //    退化成只看租户级窗口，**看不到已有设备级窗口** ⇒ 先声明设备级、再声明同区间租户级就绕过了不变量
+        //    （外委复核实测：重复计数会把可用率抬成 100% 且判达标 = fail-open）。
         List<MaintenanceWindow> overlapped = mapper.selectList(Wrappers.<MaintenanceWindow>lambdaQuery()
-            .and(wrapper -> wrapper.isNull(MaintenanceWindow::getDeviceId)
-                .or().eq(req.getDeviceId() != null, MaintenanceWindow::getDeviceId, req.getDeviceId()))
+            .and(req.getDeviceId() != null, wrapper -> wrapper.isNull(MaintenanceWindow::getDeviceId)
+                .or().eq(MaintenanceWindow::getDeviceId, req.getDeviceId()))
             .lt(MaintenanceWindow::getStartTs, probeTo)
             .and(wrapper -> wrapper.isNull(MaintenanceWindow::getEndTs)
                 .or().gt(MaintenanceWindow::getEndTs, startTs)));

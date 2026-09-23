@@ -556,7 +556,7 @@ ERROR The build could not read 1 project
 |---|---|
 | 表 | `maintenance_window`（租户表，006 与迁移逐字等价）：`device_id` 为空=该租户全部设备；`end_ts` 为空=进行中；`source` = `MANUAL` / `LEASE_HANDOVER`（后者为租约交接预留） |
 | 精确聚合（**两段简单 SQL + Java 侧相减**） | `OutageEventMapper.summarizeInWindow` 给**原始**断档合计/最长（保持简单可解析）；`MaintenanceWindowMapper.sumMaintenanceSecondsInWindow` 给分母维护时长；`sumOutageInMaintenanceSeconds` 用一次 `JOIN` 求「断档∩维护」。计入断档 = 原始 − min(断档∩维护, 原始)，在 Java 侧算。⚠️ **曾经写成「派生表 + 相关子查询」一行搞定，CI 真库连续两轮打回**：① MP 的 JSqlParser 解析失败（拦截器改写不了就**拒绝执行**）② 关掉拦截器后 MySQL 自身报语法错误 ⇒ 改为两段简单 SQL（源码门禁新增「不得出现派生表/相关子查询」的回归防线） |
-| 重叠不变量 | 聚合按「逐个维护窗口求交后求和」统计 ⇒ 同设备范围内**窗口重叠会重复计数**（分子封顶后偏小 ⇒ 可用率偏高；分母重复扣 ⇒ 统计总时长偏小，极端下 `effectiveWindow=0` 直接判 100% 达标 = fail-open）。`open` 因此**拒绝重叠声明**（含租户级窗口），并在文档写明「直接改库绕过校验会破坏该前提」 |
+| 重叠不变量 | 聚合按「逐个维护窗口求交后求和」统计 ⇒ 同设备范围内**窗口重叠会重复计数**（分子封顶后偏小 ⇒ 可用率偏高；分母重复扣 ⇒ 统计总时长偏小，极端下 `effectiveWindow=0` 直接判 100% 达标 = fail-open）。`open` 因此**拒绝重叠声明**（设备级声明会匹配「该设备 + 租户级」窗口；**租户级声明会匹配该租户全部窗口** ——外委复核实测过只收窄成「租户级窗口」时，先设备级再同区间租户级即可绕过不变量），并在文档写明「直接改库绕过校验会破坏该前提」 |
 | 最长断档的近似 | 「计入的最长单次断档」取 `min(原始最长, 计入断档合计)`：要精确得到「排除维护后的单次最长」需要逐行求交（就是被 CI 拒绝的复杂 SQL）⇒ 该近似**方向偏严**（可能把一半落在维护里的最长断档算得更长 ⇒ 达标更难），已如实登记 |
 | 计算与响应 | `AvailabilityCalculator` 增加维护输入（维护时长封顶到窗口、被剔除断档取下限）；`AvailabilityResp` 回显 `maintenanceSeconds`/`effectiveWindowSeconds`/`outageInMaintenanceSeconds` 与窗口列表（最多 50 条），让「这段时间为什么不算断档」在响应里自解释 |
 | 可配置 | 内部端点 `POST /internal/maintenance/windows`（声明，租户取自上下文、时间基准取数据库时钟、结束必须晚于开始）、`POST /{id}/close`（**只关进行中**）、`GET`（按设备/区间查询）；服务层 `MaintenanceWindowService` |
@@ -576,6 +576,8 @@ ERROR The build could not read 1 project
 | **M1** | 租约交接**自动**开/关窗 | 表与 `source=LEASE_HANDOVER` 已备好，租约侧接线未做（释放/过期→开窗、接管成功→关窗）⇒ 交接空档仍按断档计（A6/A10 保持登记） |
 | **M2** | 管理台与权限码 | 当前只有内部端点（平台侧调用）；面向运维的页面/权限码属后续增量 |
 | **M4** | 租户来源（**本片修掉了一个既有缺陷**） | A11 的可用率查询与新端点原先只读 `TenantContext`（ThreadLocal），而真实请求链路上绑定的是 `IdentityContext`（网关身份头 → 过滤器），`TenantContext` 只有显式 `executeWithTenant` 才非空 ⇒ 两个端点在真实请求下都会误报「缺少租户上下文」。现改为**与 MP 租户插件同源**：`TenantContext` 优先、其次 `TenantProvider`（`MicroserviceTenantProvider` 读 `IdentityContext`）；并补了「TenantContext 为空、provider 有租户」的用例 |
+| **M5** | **缺过滤器链级端点用例** | 端点可用性目前由「provider 桩 + 真实 service」覆盖（等价于身份已解析这一步），**没有**走完整 MockMvc + `IdentityHeaderFilter` 的端到端用例；外委复核是用探针实测的（POST 返回 200 且 tenantId 正确），仓库内**没有**这条门禁 |
+| **M6** | 「整窗维护 ⇒ `meetsTarget=true`」的语义**待用户确认** | 现行为：统计总时长为 0 时按「无有效统计时长 ⇒ 不构成设备不合格的证据」处理，返回可用率 100% 且达标；响应里 `effectiveWindowSeconds=0` 已披露。**但报表上「整窗维护」与「真的全绿」不可区分**——外委建议改成三态（未评估/不可评定），需用户拍板 |
 | **M3** | 维护窗口与断档的**边界**语义 | 窗口起止与断档起止都按秒结算；若窗口正好在断档中间结束，只剔除重叠部分（本实现如此），未做「整段断档都不计」的宽松口径 |
 
 ### 五、替换缝（3a 已备好，3b-2 只需新增自动配置）

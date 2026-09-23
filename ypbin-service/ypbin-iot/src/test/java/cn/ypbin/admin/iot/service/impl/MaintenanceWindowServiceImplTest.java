@@ -129,6 +129,27 @@ class MaintenanceWindowServiceImplTest {
     }
 
     @Test
+    @DisplayName("★ 声明：**租户级**新窗口必须看到已有**设备级**窗口（否则先设备级、再同区间租户级即可绕过不变量）")
+    void tenantWideDeclarationMustSeeDeviceLevelWindows() {
+        // 已有：设备 77 的窗口。新窗口是租户级（deviceId=null）——谓词不得收窄成「只看租户级窗口」
+        MaintenanceWindow deviceLevel = new MaintenanceWindow();
+        deviceLevel.setId(9L);
+        deviceLevel.setDeviceId(77L);
+        deviceLevel.setStartTs(T0);
+        deviceLevel.setEndTs(T0.plusHours(1));
+        when(mapper.selectList(any())).thenReturn(List.of(deviceLevel));
+        MaintenanceWindowReq req = new MaintenanceWindowReq();
+        req.setDeviceId(null);
+        req.setStartTs(T0.plusMinutes(30));
+        req.setEndTs(T0.plusHours(2));
+
+        assertThatThrownBy(() -> TenantContext.executeWithTenant(TENANT, () -> service.open(req)))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("重叠")
+            .hasMessageContaining("ID=9");
+    }
+
+    @Test
     @DisplayName("★ 声明：缺少租户上下文必须拒绝（不得写「无租户」的维护窗口）")
     void openWithoutTenantMustBeRejected() {
         MaintenanceWindowReq req = new MaintenanceWindowReq();

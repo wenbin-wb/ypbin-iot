@@ -12,6 +12,10 @@ package cn.ypbin.admin.iot.it;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import cn.ypbin.admin.iot.availability.MaintenanceWindowReq;
+import cn.ypbin.admin.iot.service.MaintenanceWindowService;
+import cn.ypbin.admin.iot.service.impl.MaintenanceWindowServiceImpl;
+import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.admin.iot.availability.AvailabilityProperties;
 import cn.ypbin.admin.iot.availability.AvailabilityResp;
 import cn.ypbin.admin.iot.availability.AvailabilityRules;
@@ -406,6 +410,28 @@ class OutageAvailabilityIT {
         assertThat(resp.getAvailability()).as("计划停机不算断档 ⇒ 可用率 100%")
             .isEqualByComparingTo(new BigDecimal("1.000000"));
         assertThat(resp.getMaintenanceWindows()).as("响应回显窗口，便于解释口径").hasSize(1);
+    }
+
+    @Test
+    @DisplayName("★ A3：声明接口的重叠判定必须在真库生效（设备级 → 同区间租户级 = 重叠，必须拒绝）")
+    void overlappingDeclarationMustBeRejectedInRealDatabase() {
+        LocalDateTime dbNow = livenessMapper.selectNow().withNano(0);
+        MaintenanceWindowService service = new MaintenanceWindowServiceImpl(maintenanceWindowMapper,
+            () -> java.util.Optional.of(TENANT));
+        MaintenanceWindowReq first = new MaintenanceWindowReq();
+        first.setDeviceId(DEVICE);
+        first.setStartTs(dbNow.plusHours(1));
+        first.setEndTs(dbNow.plusHours(2));
+        assertThat(inTenant(() -> service.open(first))).as("设备级窗口：正常声明").isNotNull();
+
+        // 同区间的**租户级**窗口：与上面那条设备级窗口重叠 ⇒ 必须被拒（否则同一时段被统计两次）
+        MaintenanceWindowReq second = new MaintenanceWindowReq();
+        second.setDeviceId(null);
+        second.setStartTs(dbNow.plusHours(1).plusMinutes(30));
+        second.setEndTs(dbNow.plusHours(3));
+        assertThatThrownBy(() -> inTenant(() -> service.open(second)))
+            .as("租户级声明必须能看到设备级窗口").isInstanceOf(BusinessException.class)
+            .hasMessageContaining("重叠");
     }
 
     @Test
