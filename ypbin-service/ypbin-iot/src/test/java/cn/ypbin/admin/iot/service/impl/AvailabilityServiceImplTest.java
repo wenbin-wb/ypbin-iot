@@ -12,6 +12,8 @@ package cn.ypbin.admin.iot.service.impl;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -28,12 +30,15 @@ import cn.ypbin.admin.iot.availability.ReadingIngestReq;
 import cn.ypbin.admin.iot.availability.ReadingObservationDto;
 import cn.ypbin.admin.iot.entity.DeviceLiveness;
 import cn.ypbin.admin.iot.entity.IotDevice;
+import cn.ypbin.admin.iot.entity.MaintenanceWindow;
 import cn.ypbin.admin.iot.entity.OutageEvent;
 import cn.ypbin.admin.iot.mapper.DeviceLivenessMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
+import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
 import cn.ypbin.admin.iot.mapper.OutageEventMapper;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.tenant.core.TenantContext;
+import cn.ypbin.starter.tenant.core.TenantProvider;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import java.math.BigDecimal;
@@ -65,6 +70,11 @@ class AvailabilityServiceImplTest {
 
     private DeviceLivenessMapper livenessMapper;
     private OutageEventMapper outageMapper;
+
+    private MaintenanceWindowMapper maintenanceWindowMapper;
+
+    /** 租户提供者桩：真实请求链路上租户来自 IdentityContext（见 MicroserviceTenantProvider），这里模拟之。 */
+    private TenantProvider tenantProvider;
     private IotDeviceMapper deviceMapper;
     private AvailabilityProperties properties;
     private AvailabilityServiceImpl service;
@@ -88,9 +98,20 @@ class AvailabilityServiceImplTest {
     void setUp() {
         livenessMapper = mock(DeviceLivenessMapper.class);
         outageMapper = mock(OutageEventMapper.class);
+        maintenanceWindowMapper = mock(MaintenanceWindowMapper.class);
+        tenantProvider = mock(TenantProvider.class);
+        lenient().when(tenantProvider.getCurrentTenantId()).thenReturn(java.util.Optional.empty());
+        // 默认无维护窗口（既有用例的口径不受影响）
+        lenient().when(maintenanceWindowMapper.sumMaintenanceSecondsInWindow(anyLong(), anyLong(), any(),
+            any(), any())).thenReturn(0L);
+        lenient().when(maintenanceWindowMapper.sumOutageInMaintenanceSeconds(anyLong(), anyLong(), any(),
+            any(), any())).thenReturn(0L);
+        lenient().when(maintenanceWindowMapper.listOverlappingInWindow(anyLong(), anyLong(), any(), any(),
+            anyInt())).thenReturn(List.of());
         deviceMapper = mock(IotDeviceMapper.class);
         properties = new AvailabilityProperties();
-        service = new AvailabilityServiceImpl(livenessMapper, outageMapper, deviceMapper, properties);
+        service = new AvailabilityServiceImpl(livenessMapper, outageMapper, maintenanceWindowMapper, deviceMapper,
+            properties, tenantProvider);
         when(livenessMapper.selectNow()).thenReturn(T0.plusHours(10));
         when(deviceMapper.selectBatchIds(any())).thenReturn(List.of(device()));
     }
@@ -316,6 +337,41 @@ class AvailabilityServiceImplTest {
     }
 
     @Test
+    @DisplayName("★ 维护窗口：查询必须把维护时长与「维护内断档」都剔除，并回显窗口")
+    void queryMustExcludeMaintenanceWindows() {
+        when(deviceMapper.selectById(DEVICE)).thenReturn(device());
+        when(livenessMapper.selectNow()).thenReturn(T0.plusHours(10));
+        when(livenessMapper.selectOne(any())).thenReturn(liveness(T0, T0, null));
+        // 10h 窗口里有 2h 维护；聚合里的断档已由 SQL 剔除维护内部分（计入 0s、剔除 3_600s）
+        when(maintenanceWindowMapper.sumMaintenanceSecondsInWindow(eq(TENANT), eq(DEVICE), any(), any(),
+            any())).thenReturn(7_200L);
+        // 原始断档 3600s，其中 3600s 落在维护里 ⇒ Java 侧相减后计入 0s（剔除在 Java 做：两段 SQL 都保持简单可解析）
+        when(outageMapper.summarizeInWindow(eq(TENANT), eq(DEVICE), any(), any(), any()))
+            .thenReturn(Map.of("outageCount", 1L, "outageSeconds", 3_600L, "longestOutageSeconds", 3_600L));
+        when(maintenanceWindowMapper.sumOutageInMaintenanceSeconds(eq(TENANT), eq(DEVICE), any(), any(),
+            any())).thenReturn(3_600L);
+        MaintenanceWindow window = new MaintenanceWindow();
+        window.setId(7L);
+        window.setStartTs(T0.plusHours(1));
+        window.setEndTs(T0.plusHours(3));
+        window.setSource("MANUAL");
+        window.setReason("夜间停产");
+        when(maintenanceWindowMapper.listOverlappingInWindow(eq(TENANT), eq(DEVICE), any(), any(),
+            anyInt())).thenReturn(List.of(window));
+
+        AvailabilityResp resp = TenantContext.executeWithTenant(TENANT,
+            () -> service.query(DEVICE, T0, T0.plusHours(10)));
+
+        assertThat(resp.getMaintenanceSeconds()).as("维护时长（分母排除）").isEqualTo(7_200L);
+        assertThat(resp.getEffectiveWindowSeconds()).as("统计总时长 = 10h − 2h").isEqualTo(8 * 3_600L);
+        assertThat(resp.getOutageInMaintenanceSeconds()).as("维护内断档（分子排除）").isEqualTo(3_600L);
+        assertThat(resp.getOutageSeconds()).isZero();
+        assertThat(resp.getAvailability()).isEqualByComparingTo(new BigDecimal("1.000000"));
+        assertThat(resp.getMaintenanceWindows()).singleElement()
+            .satisfies(dto -> assertThat(dto.getSource()).isEqualTo("MANUAL"));
+    }
+
+    @Test
     @DisplayName("★ A11：明细被截断（只返回上限条数）时，汇总仍取**精确聚合**值（次数不被截成 200）")
     void queryMustKeepExactSummaryWhenDetailsTruncated() {
         when(deviceMapper.selectById(DEVICE)).thenReturn(device());
@@ -339,6 +395,22 @@ class AvailabilityServiceImplTest {
         assertThat(resp.getOutageCount()).as("次数是精确值，不是明细条数").isEqualTo(201);
         assertThat(resp.getOutageSeconds()).as("断档合计来自精确聚合，不因截断变小").isEqualTo(6_030L);
         assertThat(resp.getAvailability()).isEqualByComparingTo(new BigDecimal("0.832500"));
+    }
+
+    @Test
+    @DisplayName("★ 查询：租户来自 TenantProvider（真实请求链路：IdentityContext → provider，TenantContext 为空）")
+    void queryMustResolveTenantFromProviderOnRealRequestPath() {
+        when(deviceMapper.selectById(DEVICE)).thenReturn(device());
+        when(livenessMapper.selectNow()).thenReturn(T0.plusHours(10));
+        when(livenessMapper.selectOne(any())).thenReturn(liveness(T0, T0, null));
+        when(outageMapper.summarizeInWindow(eq(TENANT), eq(DEVICE), any(), any(), any()))
+            .thenReturn(Map.of("outageCount", 0L, "outageSeconds", 0L, "longestOutageSeconds", 0L));
+        when(tenantProvider.getCurrentTenantId()).thenReturn(java.util.Optional.of(TENANT));
+
+        // 刻意**不**用 executeWithTenant：这正是网关注入身份后的真实形状（TenantContext 为空）
+        AvailabilityResp resp = service.query(DEVICE, T0, T0.plusHours(1));
+
+        assertThat(resp.getDeviceId()).isEqualTo(DEVICE);
     }
 
     @Test

@@ -34,7 +34,7 @@ class AvailabilityCalculatorTest {
     @Test
     @DisplayName("无断档：可用率 100% 且达标")
     void noOutageMeansFullAvailability() {
-        Summary summary = AvailabilityCalculator.summarize(WINDOW, 0L, 0L, 0, INTERVAL_MS, false);
+        Summary summary = AvailabilityCalculator.summarize(WINDOW, 0L, 0L, 0L, 0L, 0, INTERVAL_MS, false);
 
         assertThat(summary.windowSeconds()).isEqualTo(WINDOW);
         assertThat(summary.outageSeconds()).isZero();
@@ -47,7 +47,7 @@ class AvailabilityCalculatorTest {
     @Test
     @DisplayName("窗口内 1 小时断档：可用率 = 1 - 3600/36000 = 0.9，不达标")
     void outageMustReduceAvailability() {
-        Summary summary = AvailabilityCalculator.summarize(WINDOW, 3_600L, 3_600L, 1, INTERVAL_MS, false);
+        Summary summary = AvailabilityCalculator.summarize(WINDOW, 0L, 3_600L, 3_600L, 0L, 1, INTERVAL_MS, false);
 
         assertThat(summary.outageSeconds()).isEqualTo(3_600L);
         assertThat(summary.longestOutageSeconds()).isEqualTo(3_600L);
@@ -59,7 +59,7 @@ class AvailabilityCalculatorTest {
     @Test
     @DisplayName("★ 脏数据：断档合计超过窗口时封顶到窗口（可用率不得为负）")
     void outageBeyondWindowMustBeClamped() {
-        Summary summary = AvailabilityCalculator.summarize(WINDOW, WINDOW * 3, WINDOW * 2, 2, INTERVAL_MS,
+        Summary summary = AvailabilityCalculator.summarize(WINDOW, 0L, WINDOW * 3, WINDOW * 2, 0L, 2, INTERVAL_MS,
             false);
 
         assertThat(summary.outageSeconds()).as("合计封顶").isEqualTo(WINDOW);
@@ -71,7 +71,7 @@ class AvailabilityCalculatorTest {
     @Test
     @DisplayName("★ 脏数据：负数断档不得把可用率抬高（逐项下限 0）")
     void negativeOutageMustNotInflateAvailability() {
-        Summary summary = AvailabilityCalculator.summarize(WINDOW, -5_000L, -5_000L, 3, INTERVAL_MS, false);
+        Summary summary = AvailabilityCalculator.summarize(WINDOW, 0L, -5_000L, -5_000L, 0L, 3, INTERVAL_MS, false);
 
         assertThat(summary.outageSeconds()).isZero();
         assertThat(summary.longestOutageSeconds()).isZero();
@@ -83,7 +83,7 @@ class AvailabilityCalculatorTest {
     void meetsTargetMustRequireBothConditions() {
         // 窗口 72h + 断档 15 分钟 ⇒ 可用率 99.65%（≥99.5%），但最长断档 900s > 600s（10×5s=50s ⇒ 取下限）
         long window = 72 * 3600L;
-        Summary summary = AvailabilityCalculator.summarize(window, 900L, 900L, 1, INTERVAL_MS, false);
+        Summary summary = AvailabilityCalculator.summarize(window, 0L, 900L, 900L, 0L, 1, INTERVAL_MS, false);
 
         assertThat(summary.availability()).isEqualByComparingTo(new BigDecimal("0.996528"));
         assertThat(summary.availability()).isGreaterThanOrEqualTo(AvailabilityRules.TARGET_AVAILABILITY);
@@ -95,7 +95,7 @@ class AvailabilityCalculatorTest {
     @Test
     @DisplayName("窗口时长为 0（区间给反/相等）：不判不达标、可用率记 100%，不把参数错误装成重大断档")
     void emptyWindowMustNotBeReportedAsOutage() {
-        Summary summary = AvailabilityCalculator.summarize(0L, 600L, 600L, 1, INTERVAL_MS, false);
+        Summary summary = AvailabilityCalculator.summarize(0L, 0L, 600L, 600L, 0L, 1, INTERVAL_MS, false);
 
         assertThat(summary.windowSeconds()).isZero();
         assertThat(summary.outageSeconds()).isZero();
@@ -104,9 +104,56 @@ class AvailabilityCalculatorTest {
     }
 
     @Test
+    @DisplayName("★ 维护窗口：计划停机从**分母**里排除（分母变小、可用率不被计划停机拉低）")
+    void maintenanceMustShrinkStatisticsWindow() {
+        // 10h 窗口里 2h 计划维护、0 断档 ⇒ 统计总时长 8h、可用率 100%
+        Summary summary = AvailabilityCalculator.summarize(WINDOW, 7_200L, 0L, 0L, 0L, 0, INTERVAL_MS, false);
+
+        assertThat(summary.maintenanceSeconds()).isEqualTo(7_200L);
+        assertThat(summary.effectiveWindowSeconds()).as("分母 = 窗口 − 维护").isEqualTo(WINDOW - 7_200L);
+        assertThat(summary.availability()).isEqualByComparingTo(BigDecimal.ONE);
+        assertThat(summary.meetsTarget()).isTrue();
+    }
+
+    @Test
+    @DisplayName("★ 维护窗口：断档落在维护内的部分**也从分子里剔除**（否则计划停机仍拉低可用率）")
+    void outageInsideMaintenanceMustBeExcludedFromNumerator() {
+        // 10h 窗口：2h 维护；计入断档 0s（另 3_600s 断档落在维护内被剔除）
+        Summary summary = AvailabilityCalculator.summarize(WINDOW, 7_200L, 0L, 0L, 3_600L, 1, INTERVAL_MS,
+            false);
+
+        assertThat(summary.outageSeconds()).as("计入断档（已排除维护内部分）").isZero();
+        assertThat(summary.outageInMaintenanceSeconds()).as("被剔除的部分要能解释").isEqualTo(3_600L);
+        assertThat(summary.availability()).isEqualByComparingTo(BigDecimal.ONE);
+    }
+
+    @Test
+    @DisplayName("★ 维护窗口：整段都在维护里 ⇒ 无统计时长，不判不达标（不得伪装成全窗口断档）")
+    void fullyMaintainedWindowMustNotBeReportedAsOutage() {
+        Summary summary = AvailabilityCalculator.summarize(WINDOW, WINDOW, WINDOW, WINDOW, WINDOW, 1,
+            INTERVAL_MS, false);
+
+        assertThat(summary.effectiveWindowSeconds()).isZero();
+        assertThat(summary.outageSeconds()).isZero();
+        assertThat(summary.availability()).isEqualByComparingTo(BigDecimal.ONE);
+        assertThat(summary.meetsTarget()).isTrue();
+    }
+
+    @Test
+    @DisplayName("★ 维护窗口：维护时长超过窗口时封顶到窗口（统计总时长不得为负）")
+    void maintenanceBeyondWindowMustBeClamped() {
+        Summary summary = AvailabilityCalculator.summarize(WINDOW, WINDOW * 2, 100L, 100L, 0L, 1,
+            INTERVAL_MS, false);
+
+        assertThat(summary.maintenanceSeconds()).isEqualTo(WINDOW);
+        assertThat(summary.effectiveWindowSeconds()).isZero();
+        assertThat(summary.availability()).isEqualByComparingTo(BigDecimal.ONE);
+    }
+
+    @Test
     @DisplayName("★ 明细截断不影响汇总：truncated 只透传，断档秒数/次数照旧（这是 A11 的核心）")
     void truncatedDetailsMustNotChangeSummary() {
-        Summary summary = AvailabilityCalculator.summarize(WINDOW, 6_030L, 30L, 201, INTERVAL_MS, true);
+        Summary summary = AvailabilityCalculator.summarize(WINDOW, 0L, 6_030L, 30L, 0L, 201, INTERVAL_MS, true);
 
         assertThat(summary.truncated()).isTrue();
         assertThat(summary.outageCount()).as("次数是精确值，不因为明细只返回 200 条而变成 200")

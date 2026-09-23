@@ -50,11 +50,17 @@ public interface OutageEventMapper extends BaseMapper<OutageEvent> {
      * {@code LEAST(COALESCE(end_ts, now), to)}）与「单条不得为负」都在 SQL 里完成，
      * 与 {@code AvailabilityCalculator} 的口径一致。</p>
      *
+     * <p>M-2 维护窗口：本方法只返回**原始**断档合计/最长（不做维护剔除）——剔除需要与维护窗口求交，
+     * 而复杂 SQL 会被 JSqlParser/MySQL 拒绝（见上）。剔除在 Java 侧完成：
+     * `MaintenanceWindowMapper.sumOutageInMaintenanceSeconds` 给「断档∩维护」，服务层相减得到计入断档，
+     * 因此响应里的 {@code outageSeconds} 才是「排除维护后」的值。</p>
+     *
      * <p><b>为什么显式写 {@code tenant_id} 与 {@code is_deleted = 0}</b>（措辞已按实测更正）：</p>
      * <ul>
-     *   <li><b>租户条件</b>：MyBatis-Plus 的 {@code TenantLineInnerInterceptor} 会解析并重写原生 SQL，
-     *       实测**确实会**追加 {@code tenant_id = ?}（所以显式写是**纵深防御 + 可读性**：多了个同值谓词，
-     *       不改变结果；但在 {@code executeIgnore} 这类显式跨租户场景下，它是唯一还能收敛租户的护栏）；</li>
+     *   <li><b>租户条件</b>：MyBatis-Plus 的租户拦截器会解析并重写原生 SQL、追加 {@code tenant_id = ?}
+     *       （前提是 SQL 能被 JSqlParser 解析——本 PR 曾用过派生表 + 相关子查询的形状，CI 真库实测被
+     *       JSqlParser 与 MySQL 双重拒绝，现已回到简单形状）。显式写租户条件是**纵深防御 + 可读性**；
+     *       同时它也是「万一有人去掉拦截器」时的兜底。</li>
      *   <li><b>逻辑删除</b>：{@code is_deleted = 0} **必须**显式写——逻辑删除由 BaseMapper 的注入器实现，
      *       原生 SQL 不会被追加该条件（漏写会把已删断档算进可用率）。</li>
      *   <li><b>时间参数一律显式 {@code jdbcType=TIMESTAMP}</b>：不写不报错，但会按 {@code jdbcTypeForNull}
@@ -72,6 +78,11 @@ public interface OutageEventMapper extends BaseMapper<OutageEvent> {
      * @param now      当前时刻（进行中的断档结算到它）
      * @return 含 outageCount / outageSeconds / longestOutageSeconds 的映射（永不为 null）
      */
+    // 说明：本方法刻意保持**简单可解析**的 SQL（无派生表/相关子查询）——本 PR 曾用「派生表 + 相关子查询」做
+    // 维护窗口剔除，CI 真库实测：① MyBatis-Plus 的 JSqlParser 解析失败（拦截器改写不了就拒绝执行）；
+    // ② 即便关掉拦截器，MySQL 也报语法错误。维护剔除改为在 Java 侧做（见 AvailabilityServiceImpl）：
+    // 本方法给**原始**断档合计/最长，MaintenanceWindowMapper.sumOutageInMaintenanceSeconds 给「落在维护内的断档」，
+    // 两者相减得到计入断档——这样两段 SQL 都简单、都能被插件安全解析。
     @Select("SELECT COUNT(*) AS outageCount, "
         + "COALESCE(SUM(GREATEST(0, TIMESTAMPDIFF(SECOND, GREATEST(start_ts, #{from,jdbcType=TIMESTAMP}), "
         + "LEAST(COALESCE(end_ts, COALESCE(#{now,jdbcType=TIMESTAMP}, NOW())), #{to,jdbcType=TIMESTAMP})))), 0) "
