@@ -417,11 +417,11 @@ class AccessLeaseManagerTest {
 
         manager.start();
 
-        assertThat(Math.abs(manager.clockSkewSeconds()))
-            .as("取调用前后中点 ⇒ 偏移应≈0；若退回「调用前时刻」，这里会是 RTT/2≈0.6s")
-            .isLessThanOrEqualTo(0L);
+        assertThat(manager.clockSkewSeconds())
+            .as("取调用前后中点 ⇒ 偏移应≈0 秒（若退回「调用前时刻」会是 RTT/2=0.6s）").isZero();
         assertThat(Math.abs(meterRegistry.get("iot.access.lease.clock_skew_seconds").gauge().value()))
-            .as("gauge 同样是中点口径（允许毫秒级误差）").isLessThan(200.0d);
+            .as("gauge 单位是**秒**：允许 0.2s（200ms）以内；退回调用前时刻会到 0.6s")
+            .isLessThan(0.2d);
     }
 
     @Test
@@ -435,9 +435,12 @@ class AccessLeaseManagerTest {
         manager.start();
         assertThat(manager.clockSkewSeconds()).isEqualTo(60L);
 
-        // 第二次：DB 故障切换/时区误配导致偏移 30 分钟 ⇒ 必须拒绝采用（保留 60s）
-        when(client.acquire(any())).thenReturn(R.ok(acquireRespAt(LocalDateTime.now(clock).plusMinutes(30),
-            assignment(TENANT_A, 600))));
+        // 第二次：DB 故障切换/时区误配导致偏移 30 分钟 ⇒ 必须拒绝采用（保留 60s）。
+        // 这里走 **renew** 路径：它每次都会校准（acquire 重领受 acquire-interval 门控，
+        // 用 acquire 会「没到点 ⇒ 没校准 ⇒ 断言恒真」，属于自己骗自己）。
+        LeaseRenewResp absurd = new LeaseRenewResp();
+        absurd.setServerTime(LocalDateTime.now(clock).plusMinutes(30));
+        when(client.renew(any())).thenReturn(R.ok(absurd));
         manager.renewAndSelfCheck(LocalDateTime.now(clock).plusSeconds(1));
 
         assertThat(manager.clockSkewSeconds())
