@@ -503,6 +503,38 @@ ERROR The build could not read 1 project
 | **L6** | 宿主 re-ADD 与框架 reconnect 的并发 bind | 两者可能同时 `bind` 同一设备（框架 `reconnect()` 不持 `deviceLocks`）——**仅代码推理，未实测**；需真 socket 长跑观测 |
 | **L7** | 订阅 Future **永不完成**时仍会锁死 | 同步抛出已用 `try/catch` 覆盖（+ `forget` 清在途）；但若适配器返回一个永不完成的 Future，`whenComplete` 不回调 ⇒ 该设备仍永久无法订阅。当前 tcp 实现是同步完成 Future，风险在接 mqtt/opcua 后兑现 |
 
+### 四点十四、M-2 时钟收口：租约契约带服务端时间（M0b-4 残留）
+
+**解决什么问题**：续约/接管的时间基准早已统一到**数据库时钟**（M0b-4 服务端一半），但**接入侧**判断
+「本地租约是否已过期（该自停采）」用的仍是**本机时钟**：节点钟快 ⇒ 提前自行停采（数据凭空变少）、
+钟慢 ⇒ 服务端已判定接管后仍多采一段（**双采**）。这是「时钟漂移把正确性变成概率」的典型形态。
+
+**做了什么**
+
+| 面 | 实现 |
+|---|---|
+| 契约 | `LeaseAcquireResp.serverTime` / `LeaseRenewResp.serverTime`（**数据库时钟**；续约被节点级否决时也带上，便于接入侧继续校准） |
+| 服务端 | `LeaseServiceImpl` 在 acquire / renew（含 `nodeFenced` 早退分支）里把 `mapper.selectNow()` 的结果放进响应——与 `leaseExpireAt` **同一次读取**，两者必然自洽 |
+| 接入侧 | `AccessLeaseManager` 维护 `clockSkew = serverTime - 本地采样`（单次采样的 NTP 式估计：取**调用前后本地时刻的中点**抵消往返延迟）；到期判据用 `本地 now + skew`；**回执不带 serverTime 时保留上次校准**（不得退回 0）；|skew| > 5s 时打 WARN（抑制噪声：只在跨阈值或明显变化时告警）；偏移上 gauge `iot.access.lease.clock_skew_seconds`（正 = 本机慢） |
+
+**验收证据（本机实跑）**
+
+- `ypbin-access` 单测 **90/0**（本片 +8；另有合并 main（PR #19）带入的 14 条：合并前本分支为 76/0）：本机钟快不得提前停采 / 钟慢必须按服务端时钟停采 / 缺 serverTime 保留上次校准 / **中点采样抵消 RTT** / **首次校准照采** / **跳变需连续两次确认** / 告警阈值对称）；
+- `ypbin-iot` 单测 **126/0**（+1：领取与续约响应必须带服务端时间）；
+- 真库 IT `LeaseDbClockIT` 增 1 例（响应中的服务端时间必须落在调用窗口内、且续约不早于领取），由 CI 的 `-Pit` 执行；
+- 变异 **9 处**（判据退回本机时刻 / 缺 serverTime 时把校准清零 / 服务端不填 serverTime / 去掉中点采样 / 去掉跳变暂缓 / 去掉「首次照采」 / 去掉暂缓上限 / 去掉阈值对称判据 / 每次都用本机时刻）各自精确转红；其中「去掉中点采样」初稿时**逃逸**（71 条全绿、实测引入 +1.2s 偏差）、「跳变保护」初版形状本身是**功能回归**（复核 A/B 实测每轮拆链），都是靠复核与变异才发现。
+
+**仍未闭环（本片相关）**
+
+| # | 事项 | 现状 |
+|---|---|---|
+| **C1** | 偏移估计的**精度上限≈1 秒**（初稿「百毫秒级」**已被复核实测证伪**） | 两处**独立的秒级截断**：① 线上格式 `yyyy-MM-dd HH:mm:ss`（starter 的 `JacksonProperties` 默认，纳秒被丢弃，探针实测）；② `SELECT NOW()`（MySQL 无 fsp 参数即整秒）。⇒ 偏移**单向偏小**（最多晚停采 ~1s，属「超期多采」侧）；网络**非对称**误差 ≤ RTT/2（本仓最坏 RTT 4s ⇒ ≤2s）。未做多采样中位数/滤波 |
+| **C2** | 校准点覆盖 | 已在 acquire、**周期重领（`refreshAssignmentsIfDue`）**、renew 三处校准；renew 的本地采样改为**紧贴调用前**（原先用本轮起点，把 selfFence/组装耗时算进去程、偏移偏正）。两次校准之间若发生 NTP 阶跃，仍会短暂用旧偏移（最长一个周期）——但见 C3 的上限保护 |
+| **C3** | 偏移保护的**形状**（初版写错过，被复核 A/B 实测判为功能回归；二次修正在复验中又暴露「永不收敛」） | 初版「绝对量级超过 10min 就拒绝采用并一直用旧值」**是错的**：容器时区误配（本机比 DB 快 8h）时首次读数即被拒、旧值就是未校准的 0 ⇒ 判据退回本机原始时钟 ⇒ **每轮拆链**（把可用变成不可用）。现为三条：① **首次校准一律照采**（未校准的判据比大偏移更危险）；② 相对**已校准值**的跳变超过 `ypbin.access.clock-skew-jump-threshold`（默认 **60s**，可配）时**暂缓采纳**、保留原校准；③ 读数与上次待确认值差 ≤ `SKEW_CONFIRM_TOLERANCE`（**30s** ≈ 5× 最坏噪声：秒级截断 ±1s + 非对称 ≤RTT/2）即采纳，**或连续暂缓达 `SKEW_CONFIRM_MAX_DEFERRALS`（3 次 ≈3 个续约周期）强制采纳**——没有这条上限时，读数每轮漂移都超过容差就**永不收敛**（判据停在旧值、大偏移方向不利时继续每轮拆链，复核实测过），这也是「收敛」不是必要条件的原因。暂缓次数计 `iot.access.lease.clock_skew.deferred`，告警按 60s 限流（用注入时钟）。**保护范围说明**：它管的是「**是否采纳**这次跳变读数」；`selfFenceExpiredLocally` 在 `renew` 之前执行、用的是**上一轮**的校准，因此「向前阶跃当轮就批量自停采」并不在本保护范围内（最长一个周期后才修正） |
+| **C4** | 接入侧指标**暴露链路未接** | gauge 已注册，但本仓没有 `management.endpoints.web.exposure` 配置、pom 里也没有任何 micrometer registry ⇒ **实际抓不到**（Spring Boot 默认只暴露 health）。与 iot 侧的 A12 同类，需统一决策 |
+| **C5** | 偏移越过告警阈值的判据必须**对称** | 已改用 `Duration#abs().compareTo(5s) > 0`：`Duration.toSeconds()` 对负值**向下取整**（-5.5s→-6），原先的 `Math.abs(toSeconds())` 会让 +5.5s 判成「未超阈值」而 -5.5s 判成「超阈值」（复核实测 +6.0s/-5.0s 不对称）；已有单测覆盖四种符号/边界 |
+
+
 ### 五、替换缝（3a 已备好，3b-2 只需新增自动配置）
 3a 的 `LoggingTenantLinkManager` 已去掉 `@Component`，由 `AccessLeaseConfiguration`（`@AutoConfiguration`
 + `@Bean @ConditionalOnMissingBean`）装配，并有源码门禁守着（四处变异全咬）。⇒ 3b-2 提供真实现时

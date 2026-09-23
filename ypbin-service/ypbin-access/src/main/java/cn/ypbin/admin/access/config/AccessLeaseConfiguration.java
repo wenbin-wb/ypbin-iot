@@ -82,6 +82,8 @@ public class AccessLeaseConfiguration {
     public AccessLeaseManager accessLeaseManager(ILeaseClient leaseClient, TenantLinkManager linkManager,
             AccessProperties properties, MeterRegistry meterRegistry,
             ConfigEpochReconciler reconciler) {
-        return new AccessLeaseManager(leaseClient, linkManager, properties, meterRegistry, reconciler);
+        // Clock 给系统时钟：时钟校准的时间源，单测注入可推进/可偏移的假时钟
+        return new AccessLeaseManager(leaseClient, linkManager, properties, meterRegistry, reconciler,
+            Clock.systemDefaultZone());
     }
 }

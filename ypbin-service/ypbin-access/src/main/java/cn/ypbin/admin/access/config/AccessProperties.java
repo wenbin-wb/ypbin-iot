@@ -9,6 +9,7 @@
  */
 package cn.ypbin.admin.access.config;
 
+import java.time.Duration;
 import lombok.Getter;
 import lombok.Setter;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -27,7 +28,20 @@ public class AccessProperties {
     /** 配置前缀。 */
     public static final String PREFIX = "ypbin.access";
 
-    /** 节点标识：租约归属的键，**必须全局唯一**（为空则拒绝启动）。 */
+        /**
+     * 时钟偏移**跳变**阈值（默认 60 秒）。
+     *
+     * <p>语义是「相对**已校准值**的跳变」，不是「绝对量级」：首次校准一律采纳（不校准的判据比大偏移更危险）；
+     * 跳变则**暂缓**，待读数一致或暂缓达上限（{@code AccessLeaseManager.SKEW_CONFIRM_MAX_DEFERRALS}，
+     * 约 3 个周期）才采纳——避免 NTP 阶跃/DB 故障切换的过渡态把全部租户误判过期。</p>
+     *
+     * <p>默认取 60s（而非分钟级）：与接入侧无关的租约 {@code ttl} 是**服务端**配置（默认 30s），
+     * 接入侧看不到；60s 既能挡住「明显是坏读数」的小跳变，又不会把正常校时拖长——
+     * 采纳延迟由暂缓上限封顶，与阈值大小无关。</p>
+     */
+    private Duration clockSkewJumpThreshold = Duration.ofSeconds(60);
+
+/** 节点标识：租约归属的键，**必须全局唯一**（为空则拒绝启动）。 */
     private String nodeId = "";
 
     /** 最多可持有租户数；{@code null} = 不限（单节点全量）。 */

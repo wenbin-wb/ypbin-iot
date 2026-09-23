@@ -28,10 +28,11 @@ import java.time.LocalDateTime;
 public record LeaseSnapshot(LocalDateTime leaseExpireAt, Long epoch) {
 
     /**
-     * 本地是否必须停采。
+     * 本地租约是否已过期（该自停采）。
      *
-     * @param now 当前时刻
-     * @return 必须停采返回 {@code true}
+     * @param now **校准到服务端时钟**的当前时刻（{@code AccessLeaseManager} 已把本地时钟偏移算进去）；
+     *            传本机原始时刻会让钟快的节点提前停采、钟慢的节点超期多采
+     * @return 需要自停采返回 {@code true}
      */
     boolean mustSelfFence(LocalDateTime now) {
         return LeaseEpochRules.needsSelfFence(LeaseState.ACTIVE, leaseExpireAt, now);

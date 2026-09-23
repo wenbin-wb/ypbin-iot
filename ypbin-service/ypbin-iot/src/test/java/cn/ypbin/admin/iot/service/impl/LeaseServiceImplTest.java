@@ -154,6 +154,27 @@ class LeaseServiceImplTest {
     }
 
     @Test
+    @DisplayName("★ M0b-4：领取/续约响应必须带**服务端（数据库）时间**，供接入侧校准本地到期判据")
+    void responsesMustCarryDatabaseClockForAccessSideCalibration() {
+        LocalDateTime dbNow = LocalDateTime.of(2026, 9, 21, 12, 0);
+        when(mapper.selectNow()).thenReturn(dbNow);
+        registerNode();
+        when(mapper.update(isNull(), any())).thenReturn(1);
+        when(mapper.selectList(any())).thenReturn(List.of(assignment(11L, NODE, 1L, LeaseState.ACTIVE)));
+
+        LeaseAcquireResp acquired = service.acquire(acquireReq(NODE));
+        assertThat(acquired.getServerTime())
+            .as("接入侧要用它判到期：节点钟快会提前停采、钟慢会超期多采")
+            .isEqualTo(dbNow);
+
+        LeaseRenewReq req = new LeaseRenewReq();
+        req.setAccessNode(NODE);
+        req.setLeases(List.of(renewItem(11L, 1L)));
+        LeaseRenewResp renewed = service.renew(req);
+        assertThat(renewed.getServerTime()).isEqualTo(dbNow);
+    }
+
+    @Test
     @DisplayName("领取：先续期自己在采的（单条 UPDATE，守卫 access_node + state=active）")
     void acquireShouldRenewHeldTenantsWithSingleCasUpdate() {
         registerNode();
