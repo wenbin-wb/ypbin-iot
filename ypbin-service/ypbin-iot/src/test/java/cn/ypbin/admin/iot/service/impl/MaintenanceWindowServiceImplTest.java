@@ -147,6 +147,15 @@ class MaintenanceWindowServiceImplTest {
             .isInstanceOf(BusinessException.class)
             .hasMessageContaining("重叠")
             .hasMessageContaining("ID=9");
+        // ⚠️ 光靠 mock 返回值咬不住「谓词写错」：mock 永远返回同一条 ⇒ 必须断言**真的下推了正确的谓词**。
+        // 租户级新窗口不得收窄设备范围（否则看不到设备级窗口，先设备级再同区间租户级即可绕过不变量）。
+        org.mockito.ArgumentCaptor<com.baomidou.mybatisplus.core.conditions.Wrapper<MaintenanceWindow>>
+            captor = org.mockito.ArgumentCaptor.forClass(
+                com.baomidou.mybatisplus.core.conditions.Wrapper.class);
+        verify(mapper).selectList(captor.capture());
+        assertThat(captor.getValue().getSqlSegment())
+            .as("租户级声明必须匹配该租户**全部**窗口（谓词里不得出现 device_id 收窄）")
+            .doesNotContain("device_id");
     }
 
     @Test
