@@ -113,7 +113,8 @@ class LeaseServiceImplTest {
         mapper = Mockito.mock(TenantNodeAssignmentMapper.class);
         maintenanceWindowMapper = Mockito.mock(MaintenanceWindowMapper.class);
         // 默认无进行中的交接窗口（既有用例语义不变）
-        lenient().when(maintenanceWindowMapper.selectList(any())).thenReturn(List.of());
+        lenient().when(maintenanceWindowMapper.findTenantsWithOverlappingWindow(any(), any(), any()))
+            .thenReturn(List.of());
         accessNodeMapper = Mockito.mock(AccessNodeMapper.class);
         ledgerMapper = Mockito.mock(TenantLedgerMapper.class);
         // 节点表桩：按**查询里的节点名**返回（否则「未注册节点」会被误判为已注册，负向用例恒真）
@@ -181,6 +182,8 @@ class LeaseServiceImplTest {
             assertThat(window.getTenantId()).isEqualTo(11L);
             assertThat(window.getStartTs()).as("起点必须是租约真正失效时刻，不是扫描时刻").isEqualTo(expireAt);
             assertThat(window.getSource()).isEqualTo("LEASE_HANDOVER");
+            assertThat(window.getEndTs()).as("必须有上界：无人接管时窗口不得永久开（否则可用率恒 100%）")
+                .isEqualTo(expireAt.plus(properties.getHandoverWindowTtl()));
         });
 
         // 接管：acquire 结束时应关闭这些租户的进行中交接窗口（节点必须先注册，否则会被 fail-closed 拒绝）
@@ -197,7 +200,7 @@ class LeaseServiceImplTest {
         TenantNodeAssignment lapsed = assignment(11L, "access-old", 1L, LeaseState.PENDING_TAKEOVER);
         lapsed.setLeaseExpireAt(LocalDateTime.of(2026, 9, 21, 11, 59));
         when(mapper.selectList(any())).thenReturn(List.of(lapsed));
-        when(maintenanceWindowMapper.findTenantsWithOpenHandover(any(), any()))
+        when(maintenanceWindowMapper.findTenantsWithOverlappingWindow(any(), any(), any()))
             .thenReturn(List.of(11L));
 
         service.markExpired();

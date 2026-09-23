@@ -463,7 +463,7 @@ ERROR The build could not read 1 project
 | **A3** | ~~维护窗口排除未做~~ ✅ **已落地**（2026-09-23，见「四点十五」） | 新增 `maintenance_window` 表（人工 + 预留租约交接两类来源）：统计总时长 = 窗口 − 维护，且**断档落在维护内的部分也从分子里剔除**（只缩分母会让计划停机仍拉低可用率，与 spec 意图相反）；聚合用一次 SQL（含每行与维护求交后上限封顶）保证明细截断不影响精度；内部端点 `POST/GET /internal/maintenance/windows` 可声明/关闭/查询；响应回显 `maintenanceSeconds`/`effectiveWindowSeconds`/`outageInMaintenanceSeconds`/窗口列表 |
 | **A4** | 阈值/目标全局常量 | 按设备覆盖目标可用率/最长断档属后续增量 |
 | **A5** | 只有 `NO_GOOD_DATA` 一个原因码 | 链路级原因（断链/设备离线/未接管）与租约联动未做 |
-| **A6** | ~~租约转移导致的停采仍算断档~~ ✅ **已落地**（2026-09-23） | 租约侧自动接线：**释放**（`release`）与**过期扫描**（`markExpired`）时按租户开 `source=LEASE_HANDOVER` 的维护窗口（过期那条的起点取**该行 `lease_expire_at`**，不是扫描时刻），**接管成功**（`acquire`）时批量关闭；幂等（已有进行中窗口则跳过）。⇒ 交接空档不再计入断档。仅「原因码细分」仍属 A5 |
+| **A6** | ~~租约转移导致的停采仍算断档~~ ✅ **已落地**（2026-09-23） | 租约侧自动接线：**释放**（`release`）与**过期扫描**（`markExpired`）时按租户开 `source=LEASE_HANDOVER` 的维护窗口（过期那条的起点取**该行 `lease_expire_at`**，不是扫描时刻），**接管成功**（`acquire`）时批量关闭；幂等（已有进行中窗口则跳过）。⇒ 交接空档不再计入断档（窗口带 TTL 上界，超期未接管则重新按断档计；租约侧无租户上下文，跨租户读写已包 `executeIgnore`）。仅「原因码细分」仍属 A5 |
 | **A7** | 平台自身停机期间的断档不可分辨原因 | 停机期间没有扫描；恢复后按 `lastGoodAt` 补开一条，跨越停机——时长方向正确，但无法区分「设备断档」与「平台停机」 |
 | **A8** | ~~采集周期当前靠兜底值~~ **已闭环** | access 已随读数上报 `pollIntervalMs`（来自 `DeviceSpec.pollInterval`）；只有上游未给周期（0/null）时才走 `fallback-interval-ms` |
 
@@ -573,11 +573,13 @@ ERROR The build could not read 1 project
 
 | # | 事项 | 现状 |
 |---|---|---|
-| **M1** | ~~租约交接**自动**开/关窗~~ ✅ **已落地**（2026-09-23） | `release` / `markExpired` → 开窗（过期用 `lease_expire_at` 作起点）、`acquire` → 批量关窗；幂等靠一次「已有进行中窗口」查询（服务层不手写租户过滤——租户隔离门禁会拦，改由 Mapper 原生 SQL 承担）；真库 IT 覆盖 |
+| **M1** | ~~租约交接**自动**开/关窗~~ ✅ **已落地**（2026-09-23） | `release` / `markExpired` → 开窗（过期用 `lease_expire_at` 作起点、**带 TTL 上界** `ypbin.lease.handover-window-ttl`，默认 1h）、`acquire` → 批量关窗（**只缩短**）；幂等/重叠靠一次「与该批次区间重叠的窗口」查询（保守：宁可少开也不制造重叠）。⚠️ **租约侧无租户上下文**，对租户表 `maintenance_window` 的跨租户读写必须包 `TenantContext.executeIgnore`（复核用生产同款插件实测：不包则 fail-closed，三条路整段回滚）；真库 IT 已装生产同款租户插件覆盖该路径，源码门禁另钉「三处调用必须 executeIgnore」 |
 | **M2** | 管理台与权限码 | 当前只有内部端点（平台侧调用）；面向运维的页面/权限码属后续增量 |
 | **M4** | 租户来源（**本片修掉了一个既有缺陷**） | A11 的可用率查询与新端点原先只读 `TenantContext`（ThreadLocal），而真实请求链路上绑定的是 `IdentityContext`（网关身份头 → 过滤器），`TenantContext` 只有显式 `executeWithTenant` 才非空 ⇒ 两个端点在真实请求下都会误报「缺少租户上下文」。现改为**与 MP 租户插件同源**：`TenantContext` 优先、其次 `TenantProvider`（`MicroserviceTenantProvider` 读 `IdentityContext`）；并补了「TenantContext 为空、provider 有租户」的用例 |
 | **M5** | **缺过滤器链级端点用例** | 端点可用性目前由「provider 桩 + 真实 service」覆盖（等价于身份已解析这一步），**没有**走完整 MockMvc + `IdentityHeaderFilter` 的端到端用例；外委复核是用探针实测的（POST 返回 200 且 tenantId 正确），仓库内**没有**这条门禁 |
 | **M6** | 「整窗维护 ⇒ `meetsTarget=true`」的语义**待用户确认** | 现行为：统计总时长为 0 时按「无有效统计时长 ⇒ 不构成设备不合格的证据」处理，返回可用率 100% 且达标；响应里 `effectiveWindowSeconds=0` 已披露。**但报表上「整窗维护」与「真的全绿」不可区分**——外委建议改成三态（未评估/不可评定），需用户拍板 |
+| **M7** | 自动交接窗口的**并发重复**风险 | 幂等是「先查后插」且无唯一键（MySQL 不支持带 `NOW()` 的部分唯一索引）⇒ 两副本同时扫描/接管交错时理论上可各插一条重叠窗口（聚合会重复计数）。已用「重叠判定」把窗口收敛为零重叠的常见路径；残余风险登记在此，彻底解决需 per-tenant 锁或独立 `handover_seq` 唯一列 |
+| **M8** | 自动开窗的重叠判定取**批次并集区间**（保守） | 同批次多个租户的区间不同，而一次 SQL 无法按租户分别判区间 ⇒ 用并集范围判定：与该范围有任何交集就跳过该租户（少开窗口 ⇒ 那段空档按断档计）。方向保守但可能少覆盖一些本可开窗的租户 |
 | **M3** | 维护窗口与断档的**边界**语义 | 窗口起止与断档起止都按秒结算；若窗口正好在断档中间结束，只剔除重叠部分（本实现如此），未做「整段断档都不计」的宽松口径 |
 
 ### 五、替换缝（3a 已备好，3b-2 只需新增自动配置）

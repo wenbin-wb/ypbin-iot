@@ -59,21 +59,26 @@ public interface MaintenanceWindowMapper extends BaseMapper<MaintenanceWindow> {
                                        @Param("now") LocalDateTime now);
 
     /**
-     * 在这些租户里，哪些已经有「进行中」的交接窗口（幂等用）。
+     * 在这些租户里，哪些已经有**与给定区间重叠**的维护窗口（自动开窗前的重叠判定/幂等）。
      *
-     * <p>写成 Mapper 原生 SQL 而不是服务层手写 {@code in(tenantId, ...)}：租户隔离条件由插件统一追加，
-     * 服务层手写会被 {@code IotTenantIsolationGateTest} 拦下（本仓铁律）。</p>
+     * <p>为什么用「重叠」而不是「进行中」：人工窗口与自动交接窗口一旦重叠，聚合会**重复计数**
+     * （分母重复扣 ⇒ 统计总时长偏小，极端下 fail-open），而人工路径 {@code open} 是拒绝重叠的
+     * ⇒ 自动路径必须同一不变量。区间取本批次的**并集范围**（{@code [from, to)}）做保守判定：
+     * 只要与该范围有交集就跳过——宁可少开一个窗口（那段空档按断档计，方向保守），也不制造重叠。</p>
      *
      * @param tenantIds 租户 ID（调用方保证非空）
-     * @param source    来源码
-     * @return 已有进行中窗口的租户 ID
+     * @param from      批次最早起点
+     * @param to        批次最晚终点（含上界）
+     * @return 已有重叠窗口的租户 ID
      */
-    @Select("<script>SELECT tenant_id FROM maintenance_window WHERE is_deleted = 0 AND end_ts IS NULL "
-        + "AND source = #{source} AND tenant_id IN "
+    @Select("<script>SELECT DISTINCT tenant_id FROM maintenance_window WHERE is_deleted = 0 "
+        + "AND start_ts &lt; #{to,jdbcType=TIMESTAMP} "
+        + "AND (end_ts IS NULL OR end_ts &gt; #{from,jdbcType=TIMESTAMP}) AND tenant_id IN "
         + "<foreach collection='tenantIds' item='id' open='(' separator=',' close=')'>#{id}</foreach>"
         + "</script>")
-    List<Long> findTenantsWithOpenHandover(@Param("tenantIds") List<Long> tenantIds,
-                                           @Param("source") String source);
+    List<Long> findTenantsWithOverlappingWindow(@Param("tenantIds") List<Long> tenantIds,
+                                                @Param("from") LocalDateTime from,
+                                                @Param("to") LocalDateTime to);
 
     /**
      * 批量插入维护窗口（租约交接自动窗口用；id 由调用方用 {@code IdWorker} 预生成——
@@ -86,7 +91,7 @@ public interface MaintenanceWindowMapper extends BaseMapper<MaintenanceWindow> {
         + "(id, tenant_id, device_id, start_ts, end_ts, source, reason, create_time, update_time, "
         + "status, is_deleted) VALUES "
         + "<foreach collection='list' item='item' separator=','>"
-        + "(#{item.id}, #{item.tenantId}, NULL, #{item.startTs}, NULL, #{item.source}, #{item.reason}, "
+        + "(#{item.id}, #{item.tenantId}, NULL, #{item.startTs}, #{item.endTs}, #{item.source}, #{item.reason}, "
         + "NOW(), NOW(), 1, 0)"
         + "</foreach></script>")
     int insertBatch(@Param("list") List<MaintenanceWindow> list);
@@ -102,8 +107,12 @@ public interface MaintenanceWindowMapper extends BaseMapper<MaintenanceWindow> {
      * @param endTs     结束时刻
      * @return 受影响行数
      */
-    @Update("<script>UPDATE maintenance_window SET end_ts = #{endTs,jdbcType=TIMESTAMP}, "
-        + "update_time = NOW() WHERE is_deleted = 0 AND end_ts IS NULL AND source = #{source} "
+    @Update("<script>UPDATE maintenance_window SET "
+        // **只缩短**：交接窗口开出时已带 TTL 上界，接管更早发生就把它缩到接管时刻；
+        // 绝不延长（延长会把接管之后的真实采集时间也排除掉）
+        + "end_ts = LEAST(COALESCE(end_ts, #{endTs,jdbcType=TIMESTAMP}), #{endTs,jdbcType=TIMESTAMP}), "
+        + "update_time = NOW() WHERE is_deleted = 0 AND source = #{source} "
+        + "AND (end_ts IS NULL OR end_ts &gt; #{endTs,jdbcType=TIMESTAMP}) "
         + "AND tenant_id IN <foreach collection='tenantIds' item='id' open='(' separator=',' close=')'>"
         + "#{id}</foreach></script>")
     int closeOpenWindows(@Param("tenantIds") List<Long> tenantIds, @Param("source") String source,

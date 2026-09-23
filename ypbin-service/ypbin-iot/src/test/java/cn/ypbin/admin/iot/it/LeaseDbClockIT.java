@@ -116,7 +116,6 @@ class LeaseDbClockIT {
 
         MybatisConfiguration configuration = new MybatisConfiguration();
         configuration.setMapUnderscoreToCamelCase(true);
-        configuration.addInterceptor(new MybatisPlusInterceptor());
         configuration.addMapper(TenantNodeAssignmentMapper.class);
         // 装上**生产同款**租户拦截器（含平台表 ignore 列表）：交接窗口落在**租户表** maintenance_window 上，
         // 而租约侧没有租户上下文 ⇒ 服务层必须 executeIgnore 才能跨租户读写（本 IT 就是来钉这件事的）
@@ -222,7 +221,8 @@ class LeaseDbClockIT {
             .eq(MaintenanceWindow::getTenantId, TENANT)
             .eq(MaintenanceWindow::getSource, "LEASE_HANDOVER"));
         assertThat(opened).as("过期即开交接窗口（交接空档不是设备断档）").isNotNull();
-        assertThat(opened.getEndTs()).as("刚开的窗口是进行中").isNull();
+        assertThat(opened.getEndTs()).as("交接窗口带 TTL 上界（无人接管时不会永久开）")
+            .isEqualTo(expiredAt.plus(properties.getHandoverWindowTtl()));
         assertThat(opened.getStartTs()).as("起点必须是租约真正失效的时刻，不是扫描时刻")
             .isEqualTo(expiredAt);
 

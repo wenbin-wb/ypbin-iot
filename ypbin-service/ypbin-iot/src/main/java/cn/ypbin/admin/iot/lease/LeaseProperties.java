@@ -33,6 +33,16 @@ public class LeaseProperties {
     /** 是否启用租约维护（关闭时内部端点与失效扫描都不装配）。 */
     private boolean enabled = true;
 
+    /**
+     * 租约交接窗口的**上界**（默认 1 小时）。
+     *
+     * <p>为什么必须给上界：交接窗口（{@code source=LEASE_HANDOVER}）会从可用率统计里排除，
+     * 若它一直不关（例如租户被释放后**没有任何节点接管**），排除范围会随查询不断延展
+     * ⇒ 该租户可用率恒 100% 且恒判达标（fail-open）。给上界后：超过它仍未接管，空档重新按**断档**计
+     * ——「没人采集」本来就该算可用率损失，这才是保守方向。</p>
+     */
+    private Duration handoverWindowTtl = Duration.ofHours(1);
+
     /** 租约有效期：access 必须在这段时间内续约，否则可被判定失效并接管。 */
     private Duration ttl = Duration.ofSeconds(30);
 

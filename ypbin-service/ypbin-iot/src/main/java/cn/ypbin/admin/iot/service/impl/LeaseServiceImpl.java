@@ -41,6 +41,7 @@ import com.baomidou.mybatisplus.core.toolkit.IdWorker;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -347,12 +348,17 @@ public class LeaseServiceImpl implements LeaseService {
         // ⚠️ 租约侧**没有租户上下文**（/internal/lease/** 只有内部凭证）：maintenance_window 是**租户表**，
         //    租户插件在无上下文时 fail-closed ⇒ 跨租户读写必须显式 executeIgnore（与可用率扫描同一取向）。
         //    安全性来自显式 tenant_id：查询/更新按入参租户集合收敛，插入的 tenant_id 逐行给出。
-        Set<Long> alreadyOpen = Set.copyOf(TenantContext.executeIgnore(
-            () -> maintenanceWindowMapper.findTenantsWithOpenHandover(tenantIds,
-                MaintenanceSource.LEASE_HANDOVER.getCode())));
+        // 批次区间的**并集**（保守判定：与它有任何交集就跳过，宁可少开也不制造重叠）
+        LocalDateTime from = startsByTenant.values().stream().min(LocalDateTime::compareTo)
+            .orElseThrow();
+        Duration ttl = properties.getHandoverWindowTtl();
+        LocalDateTime to = startsByTenant.values().stream().max(LocalDateTime::compareTo)
+            .orElseThrow().plus(ttl);
+        Set<Long> alreadyCovered = Set.copyOf(TenantContext.executeIgnore(
+            () -> maintenanceWindowMapper.findTenantsWithOverlappingWindow(tenantIds, from, to)));
         List<MaintenanceWindow> toInsert = new ArrayList<>();
         for (Map.Entry<Long, LocalDateTime> entry : startsByTenant.entrySet()) {
-            if (alreadyOpen.contains(entry.getKey())) {
+            if (alreadyCovered.contains(entry.getKey())) {
                 continue;
             }
             MaintenanceWindow window = new MaintenanceWindow();
@@ -360,6 +366,8 @@ public class LeaseServiceImpl implements LeaseService {
             window.setId(IdWorker.getId());
             window.setTenantId(entry.getKey());
             window.setStartTs(entry.getValue());
+            // 必须有**上界**：否则无人接管时窗口永久开、可用率恒 100%（fail-open，复核点出）
+            window.setEndTs(entry.getValue().plus(ttl));
             window.setSource(MaintenanceSource.LEASE_HANDOVER.getCode());
             window.setReason(reason);
             toInsert.add(window);
