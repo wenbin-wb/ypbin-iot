@@ -485,7 +485,8 @@ public class AvailabilityServiceImpl implements AvailabilityService {
         return TenantContext.getTenantId().or(tenantProvider::getCurrentTenantId).orElse(null);
     }
 
-    /**\n     * 聚合结果取值（驱动差异：MySQL 的 COUNT 是 Long、SUM 可能是 BigDecimal/Integer）。
+    /**
+     * 聚合结果取值（驱动差异：MySQL 的 COUNT 是 Long、SUM 可能是 BigDecimal/Integer）。
      *
      * @param value 聚合值（可空）
      * @return 长整型；空返回 0
