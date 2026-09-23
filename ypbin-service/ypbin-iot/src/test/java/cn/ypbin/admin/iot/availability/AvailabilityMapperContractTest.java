@@ -156,7 +156,10 @@ class AvailabilityMapperContractTest {
 
     /** 断言该聚合方法显式关闭租户拦截器，且 SQL 里显式带租户条件与逻辑删除。 */
     private static void assertExplicitlyIgnored(Path mapperPath, String methodName) throws IOException {
-        String source = Files.readString(mapperPath, StandardCharsets.UTF_8);
+        // ⚠️ 必须**剥离注释**再匹配：方法 Javadoc 里就写着 {@code @InterceptorIgnore(tenantLine = "true")}
+        // 作解释，直接在原文本里搜会在「注解已删」时仍然命中（本仓教训二十三：文本门禁要作用在剥离注释后的代码上；
+        // 我第一版没剥注释，去掉注解的变异照样全绿）
+        String source = stripComments(Files.readString(mapperPath, StandardCharsets.UTF_8));
         int methodIndex = source.indexOf(" " + methodName + "(");
         assertThat(methodIndex).as("找不到方法 %s", methodName).isPositive();
         assertThat(source.lastIndexOf("@InterceptorIgnore(tenantLine = \"true\")", methodIndex) > 0)
@@ -167,7 +170,12 @@ class AvailabilityMapperContractTest {
         assertThat(sql).as("逻辑删除不会被自动追加，必须显式写：%s", methodName).contains("is_deleted");
     }
 
-    /** 抽取某个 Mapper 方法注解里的 SQL 文本    /** 抽取某个 Mapper 方法注解里的 SQL 文本（把 Java 字符串拼接还原成一行；支持 @Update 与 @Select）。 */
+    /** 剥离行注释与块注释（文本门禁必须作用在代码上，否则注释里的示例会制造假绿）。 */
+    private static String stripComments(String source) {
+        return source.replaceAll("(?s)/\\*.*?\\*/", " ").replaceAll("//[^\\n]*", " ");
+    }
+
+    /** 抽取某个 Mapper 方法注解里的 SQL 文本（把 Java 字符串拼接还原成一行；支持 @Update 与 @Select）。 */
     private static String methodSql(String methodName) throws IOException {
         return methodSql(MAPPER, methodName, "@Update");
     }
