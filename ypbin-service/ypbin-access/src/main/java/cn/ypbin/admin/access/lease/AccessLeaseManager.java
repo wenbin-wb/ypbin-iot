@@ -34,6 +34,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -98,12 +100,29 @@ public class AccessLeaseManager {
     private final AtomicReference<Duration> lastWarnedSkew = new AtomicReference<>(null);
 
     /**
-     * 可以接受的**最大**时钟偏移：超过它说明「其中一个时钟坏了」（DB 故障切换、容器时区误配、NTP 未同步）。
+     * 是否**已成功校准过**。
      *
-     * <p>此时**拒绝采用**本次读数并保留上一次校准，同时告警——比「照着一个离谱的偏移把全部租户判过期、
-     * 整批拆链」安全得多（NTP 向前阶跃时 {@code serverNow} 会突然前跳 2Δ，那种批量自停采没有意义）。</p>
+     * <p>首次读数**一律采纳**（哪怕偏移很大）：未校准时判据用的是本机原始时钟——那正是本能力要消灭的形态
+     * （钟快提前停采、钟慢超期多采）。外委复核 A/B 实测过反面：若首次大偏移被拒，判据退回未校准，
+     * 「容器时区误配」场景会变成**每轮拆链**（比不设保护更糟）。</p>
      */
-    static final Duration MAX_ACCEPTED_SKEW = Duration.ofMinutes(10);
+    private final AtomicBoolean calibrated = new AtomicBoolean(false);
+
+    /** 上一次「跳变待确认」的读数：与下一次一致（容差内）才采纳。 */
+    private final AtomicReference<Duration> pendingJump = new AtomicReference<>(null);
+
+    /** 跳变被暂缓（待确认）的累计次数。 */
+    private final Counter skewDeferredCounter;
+
+    private final AtomicLong lastSkewWarnAt = new AtomicLong(Long.MIN_VALUE);
+
+    /**
+     * 「连续两次一致」的确认容差：跳变读数只有与上一次待确认读数差在此范围内才算收敛。
+     */
+    static final Duration SKEW_CONFIRM_TOLERANCE = Duration.ofSeconds(5);
+
+    /** 拒绝/待确认告警的最小间隔（避免每轮 10s 一条把日志打爆）。 */
+    static final long SKEW_WARN_INTERVAL_MS = 60_000L;
 
     /** 本地时间源（生产=系统时钟；单测注入可推进/可偏移的假时钟）。 */
     private final Clock clock;
@@ -131,6 +150,8 @@ public class AccessLeaseManager {
         this.selfFencedCounter = Counter.builder(METRIC_PREFIX + "self_fenced").register(meterRegistry);
         this.nodeFencedCounter = Counter.builder(METRIC_PREFIX + "node_fenced").register(meterRegistry);
         this.acquiredCounter = Counter.builder(METRIC_PREFIX + "acquired").register(meterRegistry);
+        this.skewDeferredCounter = Counter.builder(METRIC_PREFIX + "clock_skew.deferred")
+            .description("时钟偏移跳变被暂缓（待连续两次确认）的次数").register(meterRegistry);
         // 偏移量上大盘：节点钟漂移是「数据看起来莫名变少/变多」的常见根因
         Gauge.builder(METRIC_PREFIX + "clock_skew_seconds", clockSkew,
                 ref -> ref.get().toMillis() / 1000.0d)
@@ -206,14 +227,33 @@ public class AccessLeaseManager {
             return;
         }
         Duration skew = Duration.between(localSample, serverTime);
-        if (skew.abs().compareTo(MAX_ACCEPTED_SKEW) > 0) {
-            // 拒绝离谱读数：宁可继续用上一次校准 + 告警，也不要照着它把全部租户判过期（批量拆链）
-            log.warn("时钟偏移 {} 秒超过可接受上限 {} 秒，**拒绝采用**本次读数（保留上次校准 {} 秒；"
-                + "请检查 DB/容器/NTP 时钟，可能是故障切换或时区误配）：node={}", skew.toSeconds(),
-                MAX_ACCEPTED_SKEW.toSeconds(), clockSkew.get().toSeconds(),
+        Duration current = clockSkew.get();
+        Duration jumpThreshold = properties.getClockSkewJumpThreshold();
+        if (!calibrated.get()) {
+            if (skew.abs().compareTo(jumpThreshold) > 0) {
+                // 首次校准就很大：**照采**——未校准的判据（本机原始时钟）比大偏移更危险
+                log.warn("首次时钟校准发现较大偏移 {} 秒（跳变阈值 {} 秒）⇒ **照采**"
+                    + "（不校准的判据会让钟快节点提前停采、钟慢节点超期多采）：node={}", skew.toSeconds(),
+                    jumpThreshold.toSeconds(), LogSanitizer.sanitize(properties.getNodeId()));
+            }
+        } else if (skew.minus(current).abs().compareTo(jumpThreshold) > 0) {
+            // 相对**已校准值**的跳变：只暂缓本次，等下一次读数确认（NTP 阶跃/DB 故障切换的过渡态）
+            Duration pending = pendingJump.get();
+            if (pending == null || skew.minus(pending).abs().compareTo(SKEW_CONFIRM_TOLERANCE) > 0) {
+                pendingJump.set(skew);
+                skewDeferredCounter.increment();
+                warnSkewRateLimited("时钟偏移相对已校准值跳变 {} 秒（阈值 {} 秒）⇒ **暂缓采纳**，"
+                    + "保留原校准 {} 秒；连续两次读数一致才采纳（请查 NTP/DB/容器时区）：node={}",
+                    skew.minus(current).toSeconds(), jumpThreshold.toSeconds(), current.toSeconds(),
+                    LogSanitizer.sanitize(properties.getNodeId()));
+                return;
+            }
+            log.warn("时钟偏移跳变 {} 秒经连续两次确认一致 ⇒ 采纳新偏移（原 {} 秒）：node={}",
+                skew.minus(current).toSeconds(), current.toSeconds(),
                 LogSanitizer.sanitize(properties.getNodeId()));
-            return;
         }
+        calibrated.set(true);
+        pendingJump.set(null);
         clockSkew.set(skew);
         Duration warned = lastWarnedSkew.get();
         boolean crossed = exceedsWarnThreshold(skew)
@@ -229,8 +269,18 @@ public class AccessLeaseManager {
         }
     }
 
+    /** 跳变/大偏移告警按最小间隔打（默认 60s），避免每轮一条。 */
+    private void warnSkewRateLimited(String format, Object... args) {
+        long now = System.currentTimeMillis();
+        long last = lastSkewWarnAt.get();
+        if (now - last < SKEW_WARN_INTERVAL_MS || !lastSkewWarnAt.compareAndSet(last, now)) {
+            return;
+        }
+        log.warn(format, args);
+    }
+
     /**
-     * 本地时刻中点：调用前采样到「现在」的中点，作为服务端时间的本地对应点，抵消大部分往返延迟。
+     * 本地时刻中点：取「调用前采样」到「现在」的中点，作为服务端时间的本地对应点，抵消大部分往返延迟。
      *
      * @param localBefore 调用前的本地时刻
      * @return 调用前到现在的近似中点

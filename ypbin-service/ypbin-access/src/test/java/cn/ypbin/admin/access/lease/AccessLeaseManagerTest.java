@@ -425,27 +425,55 @@ class AccessLeaseManagerTest {
     }
 
     @Test
-    @DisplayName("★ 离谱偏移必须被拒绝采用（保留上次校准），避免照着坏时钟把全部租户判过期")
-    void absurdSkewMustBeRejectedInsteadOfAdopted() {
+    @DisplayName("★ 首次校准即使偏移很大也必须**照采**（未校准的判据比大偏移更危险）")
+    void firstCalibrationMustBeAdoptedEvenIfLarge() {
+        // 容器时区误配：本机比 DB 快 8 小时（复核实测过的反面场景：若拒绝，判据退回本机原始时钟 ⇒ 每轮拆链）
         LocalDateTime localNow = LocalDateTime.now(clock);
+        LocalDateTime serverNow = localNow.minusHours(8);
         when(client.register(any())).thenReturn(R.ok());
-        // 第一次：正常偏移 1 分钟（会被采用）
-        when(client.acquire(any())).thenReturn(R.ok(acquireRespAt(localNow.plusMinutes(1),
+        when(client.acquire(any())).thenReturn(R.ok(acquireRespAt(serverNow,
+            assignmentAt(TENANT_A, serverNow.plusMinutes(10)))));
+        when(client.renew(any())).thenReturn(R.ok(new LeaseRenewResp()));
+
+        manager.start();
+        assertThat(manager.clockSkewSeconds())
+            .as("首次读数必须采纳（-28800 ± 往返误差）").isBetween(-28_801L, -28_799L);
+
+        // 租约按服务端时间还有 10 分钟：必须继续采集，不得因未校准而每轮拆链
+        manager.renewAndSelfCheck(localNow.plusSeconds(20));
+        assertThat(manager.heldTenants()).containsExactly(TENANT_A);
+        assertThat(meterRegistry.get("iot.access.lease.self_fenced").counter().count())
+            .as("不得拆链（若首次读数被拒，这里会每轮 +1）").isZero();
+    }
+
+    @Test
+    @DisplayName("★ 相对已校准值的**跳变**必须连续两次确认才采纳（过渡态不得改判据）")
+    void jumpMustBeConfirmedBeforeAdoption() {
+        LocalDateTime localNow = LocalDateTime.now(clock);
+        // 已校准：偏移 7 分钟（刻意避开与阈值同量级，防常量边界耦合）
+        when(client.register(any())).thenReturn(R.ok());
+        when(client.acquire(any())).thenReturn(R.ok(acquireRespAt(localNow.plusMinutes(7),
             assignment(TENANT_A, 600))));
         manager.start();
-        assertThat(manager.clockSkewSeconds()).isEqualTo(60L);
+        assertThat(manager.clockSkewSeconds()).isBetween(419L, 421L);
 
-        // 第二次：DB 故障切换/时区误配导致偏移 30 分钟 ⇒ 必须拒绝采用（保留 60s）。
-        // 这里走 **renew** 路径：它每次都会校准（acquire 重领受 acquire-interval 门控，
-        // 用 acquire 会「没到点 ⇒ 没校准 ⇒ 断言恒真」，属于自己骗自己）。
-        LeaseRenewResp absurd = new LeaseRenewResp();
-        absurd.setServerTime(LocalDateTime.now(clock).plusMinutes(30));
-        when(client.renew(any())).thenReturn(R.ok(absurd));
+        // 跳变 30 分钟：第一次只暂缓（保留 7 分钟校准），计数 +1
+        LocalDateTime jumped = LocalDateTime.now(clock).plusMinutes(30);
+        LeaseRenewResp first = new LeaseRenewResp();
+        first.setServerTime(jumped);
+        when(client.renew(any())).thenReturn(R.ok(first));
         manager.renewAndSelfCheck(LocalDateTime.now(clock).plusSeconds(1));
+        assertThat(manager.clockSkewSeconds()).as("跳变首次读数不得改判据").isBetween(419L, 421L);
+        assertThat(meterRegistry.get("iot.access.lease.clock_skew.deferred").counter().count())
+            .isEqualTo(1.0d);
 
+        // 第二次读数与上一次待确认**一致** ⇒ 收敛，采纳
+        LeaseRenewResp second = new LeaseRenewResp();
+        second.setServerTime(LocalDateTime.now(clock).plusMinutes(30));
+        when(client.renew(any())).thenReturn(R.ok(second));
+        manager.renewAndSelfCheck(LocalDateTime.now(clock).plusSeconds(1));
         assertThat(manager.clockSkewSeconds())
-            .as("超过可接受上限（%s）的读数不得被采用", AccessLeaseManager.MAX_ACCEPTED_SKEW)
-            .isEqualTo(60L);
+            .as("连续两次一致 ⇒ 采纳（约 1800 秒）").isBetween(1_795L, 1_805L);
     }
 
     @Test
