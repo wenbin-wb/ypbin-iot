@@ -139,44 +139,35 @@ class AvailabilityMapperContractTest {
     }
 
     @Test
-    @DisplayName("★ 复杂聚合 SQL：要么能被 JSqlParser 解析，要么必须显式关闭租户拦截器（否则真库会被拒绝执行）")
-    void complexAggregateMustBeParseableOrExplicitlyIgnored() throws IOException {
-        // CI 真库实测过：派生表 + 相关子查询让 MP 的 JSqlParser 抛 ParseException，
-        // 而租户拦截器**改写不了就拒绝执行** ⇒ 这里把「可解析性」钉在本地（不必等 CI 才发现）。
-        assertParseableOrIgnored(REPO_ROOT.resolve(
+    @DisplayName("★ 复杂聚合必须显式关闭租户拦截器（CI 真库实测：这两条 SQL 会被 JSqlParser 拒绝执行）")
+    void complexAggregateMustExplicitlyIgnoreTenantInterceptor() throws IOException {
+        // 事实依据（不是猜测）：CI 真库跑出 `MybatisPlusException: Failed to process ... ParseException:
+        // Encountered unexpected token: "("`——派生表 + 相关子查询让租户拦截器改写不了，改写不了就**拒绝执行**。
+        // 我曾想用「本地能 parse 就放行」的软门禁，但那会假绿（普通 CCJSqlParserUtil 用 MP 的解析特性不同、
+        // 本地能过、真库仍红）⇒ 这里改成**硬规则**：这两条聚合必须带 @InterceptorIgnore(tenantLine = "true")，
+        // 且必须显式写租户与逻辑删除（关掉拦截器后它们是唯一护栏）。
+        assertExplicitlyIgnored(REPO_ROOT.resolve(
             "ypbin-service/ypbin-iot/src/main/java/cn/ypbin/admin/iot/mapper/OutageEventMapper.java"),
             "summarizeInWindow");
-        assertParseableOrIgnored(REPO_ROOT.resolve(
+        assertExplicitlyIgnored(REPO_ROOT.resolve(
             "ypbin-service/ypbin-iot/src/main/java/cn/ypbin/admin/iot/mapper/MaintenanceWindowMapper.java"),
             "sumMaintenanceSecondsInWindow");
     }
 
-    /** 断言：SQL 可被 JSqlParser 解析，或该方法显式关闭了租户拦截器（关了就要求显式租户条件）。 */
-    private static void assertParseableOrIgnored(Path mapperPath, String methodName) throws IOException {
+    /** 断言该聚合方法显式关闭租户拦截器，且 SQL 里显式带租户条件与逻辑删除。 */
+    private static void assertExplicitlyIgnored(Path mapperPath, String methodName) throws IOException {
         String source = Files.readString(mapperPath, StandardCharsets.UTF_8);
         int methodIndex = source.indexOf(" " + methodName + "(");
         assertThat(methodIndex).as("找不到方法 %s", methodName).isPositive();
-        boolean ignored = source.lastIndexOf("@InterceptorIgnore(tenantLine = \"true\")", methodIndex) > 0;
-        String sql = methodSql(mapperPath, methodName, "@Select")
-            .replaceAll("#\\{[^}]*}", "?");
-        boolean parseable;
-        try {
-            net.sf.jsqlparser.parser.CCJSqlParserUtil.parse(sql);
-            parseable = true;
-        } catch (Exception ex) {
-            parseable = false;
-        }
-        if (parseable) {
-            return;
-        }
-        assertThat(ignored)
-            .as("SQL 无法被 JSqlParser 解析（%s），而租户拦截器改写不了就会拒绝执行 ⇒ "
-                + "必须加 @InterceptorIgnore(tenantLine = \"true\") 并用显式 tenant_id 兜住隔离", methodName)
+        assertThat(source.lastIndexOf("@InterceptorIgnore(tenantLine = \"true\")", methodIndex) > 0)
+            .as("方法 %s 必须显式关闭租户拦截器（否则真库会因 JSqlParser 拒绝执行而无结果）", methodName)
             .isTrue();
-        assertThat(sql).as("关闭拦截器后，显式租户条件就是唯一护栏").contains("tenant_id");
+        String sql = methodSql(mapperPath, methodName, "@Select");
+        assertThat(sql).as("关闭拦截器后，显式租户条件是唯一护栏：%s", methodName).contains("tenant_id");
+        assertThat(sql).as("逻辑删除不会被自动追加，必须显式写：%s", methodName).contains("is_deleted");
     }
 
-    /** 抽取某个 Mapper 方法注解里的 SQL 文本（把 Java 字符串拼接还原成一行；支持 @Update 与 @Select）。 */
+    /** 抽取某个 Mapper 方法注解里的 SQL 文本    /** 抽取某个 Mapper 方法注解里的 SQL 文本（把 Java 字符串拼接还原成一行；支持 @Update 与 @Select）。 */
     private static String methodSql(String methodName) throws IOException {
         return methodSql(MAPPER, methodName, "@Update");
     }
