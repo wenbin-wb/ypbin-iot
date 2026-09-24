@@ -574,7 +574,7 @@ ERROR The build could not read 1 project
 | # | 事项 | 现状 |
 |---|---|---|
 | **M1** | ~~租约交接**自动**开/关窗~~ ✅ **已落地**（2026-09-23） | `release` / `markExpired` → 开窗（过期用 `lease_expire_at` 作起点、**带 TTL 上界** `ypbin.lease.handover-window-ttl`，默认 1h）、`acquire` → 批量关窗（**只缩短**）；幂等/重叠靠一次「与该批次区间重叠的窗口」查询（保守：宁可少开也不制造重叠）。⚠️ **租约侧无租户上下文**，对租户表 `maintenance_window` 的跨租户读写必须包 `TenantContext.executeIgnore`（复核用生产同款插件实测：不包则 fail-closed，三条路整段回滚）；真库 IT 已装生产同款租户插件覆盖该路径，源码门禁另钉「三处调用必须 executeIgnore」 |
-| **M2** | 管理台与权限码 | ✅ **端点/权限码/菜单已落地**（`IotMaintenanceWindowController` + `iot:maintenance:{list,create,close}` + 菜单 3203，006/007 与迁移双写、并补 `sys_role_menu`/`sys_template_menu`；门禁新增「每个 IoT 菜单 id 必须被两张授权表覆盖」）；⏳ **前端页面**在 `ypbin-iot-ui`（PR #15）；⚠️ **权限码在当前部署形态下不生效**——见四点十六 |
+| **M2** | 管理台与权限码 | ✅ **端点/权限码/菜单已落地**（`IotMaintenanceWindowController` + `iot:maintenance:{list,create,close}` + 菜单 3203，006/007 与迁移双写、并补 `sys_role_menu`/`sys_template_menu`；门禁新增「每个 IoT 菜单 id 必须被两张授权表覆盖」）；⏳ **前端页面**在 `ypbin-iot-ui`（PR #15）；✅ **权限码已真正生效**（starter 3.5.0 起，四点十六已关闭） |
 | **M4** | 租户来源（**本片修掉了一个既有缺陷**） | A11 的可用率查询与新端点原先只读 `TenantContext`（ThreadLocal），而真实请求链路上绑定的是 `IdentityContext`（网关身份头 → 过滤器），`TenantContext` 只有显式 `executeWithTenant` 才非空 ⇒ 两个端点在真实请求下都会误报「缺少租户上下文」。现改为**与 MP 租户插件同源**：`TenantContext` 优先、其次 `TenantProvider`（`MicroserviceTenantProvider` 读 `IdentityContext`）；并补了「TenantContext 为空、provider 有租户」的用例 |
 | **M5** | **缺过滤器链级端点用例** | 端点可用性目前由「provider 桩 + 真实 service」覆盖（等价于身份已解析这一步），**没有**走完整 MockMvc + `IdentityHeaderFilter` 的端到端用例；外委复核是用探针实测的（POST 返回 200 且 tenantId 正确），仓库内**没有**这条门禁 |
 | **M6** | 「整窗维护 ⇒ `meetsTarget=true`」的语义**待用户确认** | 现行为：统计总时长为 0 时按「无有效统计时长 ⇒ 不构成设备不合格的证据」处理，返回可用率 100% 且达标；响应里 `effectiveWindowSeconds=0` 已披露。**但报表上「整窗维护」与「真的全绿」不可区分**——外委建议改成三态（未评估/不可评定），需用户拍板 |
@@ -582,11 +582,16 @@ ERROR The build could not read 1 project
 | **M8** | 自动开窗的重叠判定取**批次并集区间**（保守） | 同批次多个租户的区间不同，而一次 SQL 无法按租户分别判区间 ⇒ 用并集范围判定：与该范围有任何交集就跳过该租户（少开窗口 ⇒ 那段空档按断档计）。方向保守但可能少覆盖一些本可开窗的租户 |
 | **M3** | 维护窗口与断档的**边界**语义 | 窗口起止与断档起止都按秒结算；若窗口正好在断档中间结束，只剔除重叠部分（本实现如此），未做「整段断档都不计」的宽松口径 |
 
-### 四点十六、⚠️ **平台级**：微服务下游的 `@SaCheckPermission` 实际不生效（2026-09-24 外委复核实证）
+### 四点十六、✅ **已关闭**：微服务下游的 `@SaCheckPermission` 实际不生效（2026-09-24 外委复核实证 → 同日随 starter 3.5.0 关闭）
 
-**结论**：本仓微服务下游服务（`ypbin-system` / `ypbin-iot` / `ypbin-ai` / `ypbin-access` …）的 Nacos 配置里
+> **关闭说明（2026-09-24）**：starter **3.5.0** 已把「登录态校验」（`ypbin.security.interceptor`）与
+> 「方法级注解鉴权」（新增 `ypbin.security.annotation-check`）拆成两个独立开关，并新增 `IdentityStpLogic`
+> 身份头账号体系桥 ⇒ 下游可只关前者、保留后者。本仓已升级 starter 至 3.5.0 并删除临时防线
+> `IotPermissionGuard`（单测 162 项全绿）。下方「当前是装饰性的」「已做的临时防线」为**关闭前的历史记录**。
+
+**结论（关闭前）**：本仓微服务下游服务（`ypbin-system` / `ypbin-iot` / `ypbin-ai` / `ypbin-access` …）的 Nacos 配置里
 `ypbin.security.interceptor: false`，而 Sa-Token 的**注解鉴权（`@SaCheckPermission`）正是由 `SaInterceptor` 执行**
-（starter 的 `SaTokenWebConfigurer` 注册它）⇒ 这些服务的权限码**当前是装饰性的**。
+（starter 的 `SaTokenWebConfigurer` 注册它）⇒ 这些服务的权限码**当时是装饰性的**。
 
 **证据（外委复核，机制层实证 + 类路径穷举）**：
 - `SecurityAutoConfiguration.saTokenWebConfigurer` 带 `@ConditionalOnProperty(prefix="ypbin.security", name="interceptor", havingValue="true")`；
@@ -603,10 +608,11 @@ starter 源码注释也明确「微服务下游走 `IdentityContext`、单体走
 **危害（不是"少个校验"）**：任何已登录的租户用户都能调用带权限码的写端点；就本仓而言，
 维护窗口会把断档从可用率的**分子与分母同时**剔除 ⇒ 无权限者可声明窗口"洗掉"断档、把可用率抬到 100%。
 
-**已做的临时防线（如实标注为临时）**：本仓对**影响可用率口径的端点**（维护窗口 list/open/close）加了
-`IotPermissionGuard` 显式校验（权限数据仍走 `PermissionProvider`，无身份/查询失败/缺码**一律拒绝**），
-并有单测 + 源码门禁（**逐方法**校验：list→list 码、open→create 码、close→close 码，防止复制粘贴错码）； 
-`iot.permission.denied` 计数暴露被拒情况。
+**已做的临时防线（如实标注为临时；已于 2026-09-24 删除）**：本仓曾对**影响可用率口径的端点**（维护窗口
+list/open/close）加 `IotPermissionGuard` 显式校验（权限数据仍走 `PermissionProvider`，无身份/查询失败/缺码
+**一律拒绝**），并有单测 + 源码门禁（**逐方法**校验：list→list 码、open→create 码、close→close 码，
+防止复制粘贴错码）；`iot.permission.denied` 计数暴露被拒情况。starter 3.5.0 起注解鉴权真正生效 ⇒
+该防线与其指标已删除，源码门禁迁移为「逐方法校验 `@SaCheckPermission` 权限码 + 禁止回退到临时防线」。
 ⚠️ 两条边界（外委复核第二轮点出，均已修/已登记）：
 ① 守卫**必须复用框架的通配语义**（`SaFoxUtil.vagueMatch`）——平台超管的权限集合只有 `*:*:*`
 （`SysPermissionServiceImpl` 超管短路），只做 `contains` 会把**平台管理员**挡在门外（第一版真实回归，
@@ -652,14 +658,16 @@ value=紧凑 JSON `{v,q,ts}`），写入时机是**上报事务提交后**（Red
 **[`STARTER-FEEDBACK.md`](STARTER-FEEDBACK.md)**（含现象/证据/影响/期望能力/验收标准/会被替换掉的临时实现），
 并同步在 `wenbin-wb/ypbin-starter` 开了 issue（便于那边新开会话直接动手）：
 
-| 编号 | 级别 | 摘要 | 本仓的临时处置 |
-|---|---|---|---|
-| **SF-1** | 高（安全） | 微服务下游 `@SaCheckPermission` 实际不生效（注解鉴权与登录拦截被 `ypbin.security.interceptor` 一个开关绑死） | `IotPermissionGuard` 显式 fail-closed 防线（**starter 支持后应删除**） |
-| **SF-2** | 中 | `@Idempotent` 默认键用 `Arrays.deepHashCode(args)`，对无 equals 的 Req DTO 形同虚设 | 仅登记（四点十六），未自造 workaround |
-| **SF-3** | 低（DX） | `LoginUser` 字段是 `id` 而非 `userId`；`IdentityContext` 与 `LoginUser` 分属两个包易 import 错 | 测试里改用构造器 |
+**状态：三项均已关闭（starter 3.5.0，2026-09-24 发布；PR #51 / 合并 `f3ab2f9`，四轮外委复核后 PASS）。**
 
-> 关闭约定：starter 侧落地后，在本表与 [`STARTER-FEEDBACK.md`](STARTER-FEEDBACK.md) 对应条目注明
-> 「starter 已支持（版本/PR）」，并删除 ypbin-iot 的临时实现（SF-1 对应 `IotPermissionGuard`）。
+| 编号 | 级别 | 摘要 | 本仓的临时处置（关闭后状态） |
+|---|---|---|---|
+| **SF-1** | 高（安全） | 微服务下游 `@SaCheckPermission` 实际不生效（注解鉴权与登录拦截被 `ypbin.security.interceptor` 一个开关绑死） | ✅ `IotPermissionGuard` **已删除**；端点由 starter 注解鉴权保护，源码门禁迁移为「逐方法校验注解权限码 + 禁止回退到临时防线」 |
+| **SF-2** | 中 | `@Idempotent` 默认键用 `Arrays.deepHashCode(args)`，对无 equals 的 Req DTO 形同虚设 | ✅ starter 已支持（默认键改为按字段值展开的 SHA-256 摘要）；本仓无需改动 |
+| **SF-3** | 低（DX） | `LoginUser` 字段是 `id` 而非 `userId`；`IdentityContext` 与 `LoginUser` 分属两个包易 import 错 | ✅ starter 已支持（新增 `getUserId()/setUserId()` 别名 + Javadoc 互指）；本仓无需改动 |
+
+> **关闭记录（2026-09-24）**：本仓已把 `ypbin-starter.version` 升级至 **3.5.0** 并删除 SF-1 的临时防线；
+> 详见 [`STARTER-FEEDBACK.md`](STARTER-FEEDBACK.md) 各条目的「状态」标注。
 
 ### 四点十九、数据保留清理（D0.8 落地片）
 

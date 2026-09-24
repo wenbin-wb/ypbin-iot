@@ -11,7 +11,6 @@ package cn.ypbin.admin.iot.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
 import cn.ypbin.admin.iot.availability.MaintenanceWindowDto;
-import cn.ypbin.admin.iot.core.IotPermissionGuard;
 import cn.ypbin.admin.iot.availability.MaintenanceWindowReq;
 import cn.ypbin.admin.iot.service.MaintenanceWindowService;
 import cn.ypbin.starter.core.model.R;
@@ -38,6 +37,10 @@ import org.springframework.web.bind.annotation.RestController;
  *
  * <p>网关路由 {@code /iot/**} 且 StripPrefix=1 ⇒ 前端调用路径为 {@code /iot/maintenance/windows}。</p>
  *
+ * <p><strong>权限保护</strong>：三个端点的 {@code @SaCheckPermission} 由 starter 的注解鉴权执行——自 starter
+ * 3.5.0 起，下游服务（本服务配 {@code interceptor: false} + {@code identity.enabled: true}）的注解鉴权
+ * 真正生效，因此原先为「注解不生效」而存在的临时防线 {@code IotPermissionGuard} 已按 SF-1 关闭约定删除。</p>
+ *
  * @author wenbin
  * @since 2026-09-23
  */
@@ -46,21 +49,7 @@ import org.springframework.web.bind.annotation.RestController;
 @RequiredArgsConstructor
 public class IotMaintenanceWindowController {
 
-    /** 权限码（与 007-iot-data.sql 登记的一致；{@code IotPermissionCodeGateTest} 会校验其已登记）。 */
-    private static final String PERM_LIST = "iot:maintenance:list";
-
-    private static final String PERM_CREATE = "iot:maintenance:create";
-
-    private static final String PERM_CLOSE = "iot:maintenance:close";
-
     private final MaintenanceWindowService maintenanceWindowService;
-
-    /**
-     * 显式权限校验：本仓微服务下游的 {@code @SaCheckPermission} 目前**不生效**
-     * （下游无 Sa-Token 会话 ⇒ 拦截器被配置关掉，而注解鉴权由它执行），而维护窗口会直接影响
-     * 可用率口径 ⇒ 这几个端点必须自己做一次拒绝优先的校验（详见 {@link IotPermissionGuard}）。
-     */
-    private final IotPermissionGuard permissionGuard;
 
     /**
      * 查询维护窗口（可用率报表用：解释「这段时间为什么不算断档」）。
@@ -78,7 +67,6 @@ public class IotMaintenanceWindowController {
             @DateTimeFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime from,
             @RequestParam(value = "to", required = false)
             @DateTimeFormat(pattern = "yyyy-MM-dd HH:mm:ss") LocalDateTime to) {
-        permissionGuard.require(PERM_LIST);
         return R.ok(maintenanceWindowService.list(deviceId, from, to));
     }
 
@@ -93,7 +81,6 @@ public class IotMaintenanceWindowController {
     @Idempotent
     @Log("声明维护窗口")
     public R<Long> open(@Valid @RequestBody MaintenanceWindowReq req) {
-        permissionGuard.require(PERM_CREATE);
         return R.ok(maintenanceWindowService.open(req));
     }
 
@@ -108,7 +95,6 @@ public class IotMaintenanceWindowController {
     @Idempotent
     @Log("关闭维护窗口")
     public R<Integer> close(@PathVariable("id") Long id) {
-        permissionGuard.require(PERM_CLOSE);
         return R.ok(maintenanceWindowService.close(id));
     }
 }

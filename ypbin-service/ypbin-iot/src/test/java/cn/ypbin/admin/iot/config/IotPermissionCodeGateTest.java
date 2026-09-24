@@ -42,9 +42,15 @@ import org.junit.jupiter.api.Test;
  */
 class IotPermissionCodeGateTest {
 
-    /** 从 Java 源码提取 {@code @SaCheckPermission("...")} 的字面量权限码。 */
+    /**
+     * 从 Java 源码提取 {@code @SaCheckPermission} 的字面量权限码。
+     *
+     * <p>必须同时兼容两种写法：{@code @SaCheckPermission("a:b:c")} 与 {@code @SaCheckPermission(value = "a:b:c")}。
+     * 只认前者会让后者**完全不被扫描**——写一个未登记的权限码也能全绿（外委复核用变异实证过的假绿盲区：
+     * 该门禁存在的全部意义就是抓「代码与数据不同步 ⇒ 非超管整块不可用」）。</p>
+     */
     private static final Pattern PERMISSION_ANNOTATION =
-        Pattern.compile("@SaCheckPermission\\(\\s*\"([^\"]+)\"\\s*\\)");
+        Pattern.compile("@SaCheckPermission\\(\\s*(?:value\\s*=\\s*)?\"([^\"]+)\"");
 
     /** 从 SQL 提取 IoT 权限码字面量（形如 {@code 'iot:product:list'}）。 */
     private static final Pattern SQL_AUTH_CODE = Pattern.compile("'(iot:[a-z-]+:[a-z-]+)'");
@@ -109,8 +115,11 @@ class IotPermissionCodeGateTest {
         try (Stream<Path> files = Files.list(CONTROLLER_DIR)) {
             for (Path path : files.filter(p -> p.getFileName().toString().endsWith("Controller.java"))
                 .toList()) {
-                Matcher matcher = PERMISSION_ANNOTATION.matcher(
-                    Files.readString(path, StandardCharsets.UTF_8));
+                // 文本匹配必须作用在**剥离注释后**的代码上：Javadoc 里举例写一个权限码不能被当成声明（教训二十三）
+                String code = Files.readString(path, StandardCharsets.UTF_8)
+                    .replaceAll("(?s)/\\*.*?\\*/", "")
+                    .replaceAll("//[^\\n]*", "");
+                Matcher matcher = PERMISSION_ANNOTATION.matcher(code);
                 while (matcher.find()) {
                     permissions.add(matcher.group(1));
                 }
