@@ -496,6 +496,10 @@ CREATE TABLE reading (
 ) WITH (TTL=7776000000);                               -- 90 天（毫秒）= D0.8 的原始时序保留
 ```
 
+**类型映射（先按值的词法形态判定，物模型类型覆盖为后续增量）**：数值（INT/LONG/FLOAT/DOUBLE）→ `value_double`
+（LONG 超 2^53 会丢精度 ⇒ 文档标注：此类点位改用 `value_text`，由物模型类型决定，服务端不猜）；
+布尔/字符串/枚举/JSON/字节数组（hex）→ `value_text`。**永不双写两列**（查询侧按列是否非空取值，避免"哪个才是真值"）。
+
 - 建表语法与列类别（`STRING TAG` / `DOUBLE FIELD` / `TIMESTAMP TIME`）来自官方一手文档
   [JDBC 示例](https://iotdb.incubator.apache.org/UserGuide/latest-Table/API/Programming-JDBC_apache.html)（访问 2026-09-24）；
   **表级 TTL** 用 `WITH (TTL=<毫秒>)`（同一示例），因此「90 天」在**建表时**给定。
