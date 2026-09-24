@@ -459,7 +459,7 @@ ERROR The build could not read 1 project
 | **A15** | `poll_interval_ms` 可被**过期但为正**的旧快照回退 | 该列是**配置**不是时间戳（1s→10s 是合法变更），故刻意不做单调；代价是另一副本的旧周期写回后阈值 `K×周期` 偏大 ⇒ 检测略滞后、可用率略偏高。若要收口需引入「配置版本号」判新旧（与 `config_epoch` 同类机制） |
 | **A16** | `outageCount` 口径含「裁剪后重叠 0 秒」的行 | 聚合用 `COUNT(*)`（满足窗口重叠条件的行都计），而旧的 Java 求和会跳过重叠 ≤0 的行 ⇒ 次数可能比旧实现大（只影响展示的次数，不影响秒数与可用率）。已在 Mapper Javadoc 写明 |
 | **A13** | 多副本相关用例的成本面 | 谓词与饥饿两条用例是**真库 IT**（CI 才跑）；本地由源码级门禁 `AvailabilityMapperContractTest` 兜底（它只断言 SQL 文本，不执行 SQL） |
-| **A2** | 读数**值**不落库、Redis 最新值未做 | **已代决**（2026-09-23，见设计文档 D0.7）：**IoTDB 2.x 表模型 + Redis 7 最新值**。**已启动并开 PR**：读数契约补 `propertyId`/`value` + `LatestValueWriter`/Redis 实现（Hash `iot:latest:{tenant}:{device}`）+ **事务提交后**写入 —— 见 **PR #27**（`feat/iot-values-d1`，本机 iot 152/0、access 93/0）；违规边界见**四点十七**。IoTDB 写入与 EMQX 入站待后续增量 |
+| **A2** | 读数**值**不落库、Redis 最新值未做 | **已代决**（2026-09-23，见设计文档 D0.7）：**IoTDB 2.x 表模型 + Redis 7 最新值**。**本 PR #27 交付（待合并）**：读数契约补 `propertyId`/`value` + `LatestValueWriter`/Redis 实现（Hash `iot:latest:{tenant}:{device}`）+ **事务提交后**写入 —— 见 **PR #27**（`feat/iot-values-d1`，本机 iot 152/0、access 93/0）；边界见**四点十七**。IoTDB 写入与 EMQX 入站待后续增量 |
 | **A3** | ~~维护窗口排除未做~~ ✅ **已落地**（2026-09-23，见「四点十五」） | 新增 `maintenance_window` 表（人工 + 预留租约交接两类来源）：统计总时长 = 窗口 − 维护，且**断档落在维护内的部分也从分子里剔除**（只缩分母会让计划停机仍拉低可用率，与 spec 意图相反）；聚合用一次 SQL（含每行与维护求交后上限封顶）保证明细截断不影响精度；内部端点 `POST/GET /internal/maintenance/windows` 可声明/关闭/查询；响应回显 `maintenanceSeconds`/`effectiveWindowSeconds`/`outageInMaintenanceSeconds`/窗口列表 |
 | **A4** | 阈值/目标全局常量 | 按设备覆盖目标可用率/最长断档属后续增量 |
 | **A5** | 只有 `NO_GOOD_DATA` 一个原因码 | 链路级原因（断链/设备离线/未接管）与租约联动未做 |
@@ -584,7 +584,7 @@ ERROR The build could not read 1 project
 
 ### 四点十七、读数「值」与最新值（Q8/D0.7 第一片，PR #27）
 
-**已落地**：读数契约补 `propertyId`/`value`（值字符串化，类型由物模型定义）；access 侧透传；
+**本 PR #27 交付（待合并）**：读数契约补 `propertyId`/`value`（值字符串化，类型由物模型定义）；access 侧透传；
 iot 侧 `LatestValueWriter` + Redis 实现（Hash `iot:latest:{tenant}:{device}`，field=点位，
 value=紧凑 JSON `{v,q,ts}`），写入时机是**上报事务提交后**（Redis 不参与数据库事务，写在事务里会出现
 「库回滚了、最新值却已生效」的不一致）；无 Redis 时用 `LoggingLatestValueWriter`（WARN 一次并丢弃，不静默）。
