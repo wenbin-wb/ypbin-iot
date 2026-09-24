@@ -9,6 +9,10 @@
  */
 package cn.ypbin.admin.iot.retention;
 
+import cn.ypbin.admin.iot.mapper.DeviceLivenessMapper;
+import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
+import cn.ypbin.admin.iot.mapper.OutageEventMapper;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.InitializingBean;
@@ -68,11 +72,10 @@ public class IotRetentionConfiguration implements InitializingBean {
      * @return 清理服务
      */
     @Bean
-    public RetentionCleanupService retentionCleanupService(
-            cn.ypbin.admin.iot.mapper.OutageEventMapper outageEventMapper,
-            cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper maintenanceWindowMapper,
-            cn.ypbin.admin.iot.mapper.DeviceLivenessMapper livenessMapper,
-            io.micrometer.core.instrument.MeterRegistry registry) {
+    public RetentionCleanupService retentionCleanupService(OutageEventMapper outageEventMapper,
+                                                           MaintenanceWindowMapper maintenanceWindowMapper,
+                                                           DeviceLivenessMapper livenessMapper,
+                                                           MeterRegistry registry) {
         return new RetentionCleanupServiceImpl(outageEventMapper, maintenanceWindowMapper, livenessMapper,
             properties, registry);
     }
