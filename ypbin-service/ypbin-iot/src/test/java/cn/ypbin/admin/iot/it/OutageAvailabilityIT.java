@@ -30,6 +30,7 @@ import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
 import cn.ypbin.admin.iot.mapper.OutageEventMapper;
 import cn.ypbin.admin.iot.service.impl.AvailabilityServiceImpl;
+import cn.ypbin.admin.iot.values.LatestValue;
 import cn.ypbin.starter.tenant.core.TenantContext;
 import cn.ypbin.starter.tenant.handler.DefaultTenantLineHandler;
 import cn.ypbin.starter.tenant.autoconfigure.TenantProperties;
@@ -94,6 +95,10 @@ class OutageAvailabilityIT {
     private static IotDeviceMapper deviceMapper;
     private static AvailabilityServiceImpl service;
 
+    /** 记录最新值写入（Q8）：IT 环境没有 Redis，但能证明「上报 → 提交后写最新值」的值是对的 */
+    private static final List<LatestValue> RECORDED_LATEST =
+        java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+
     @BeforeAll
     static void setUp() throws Exception {
         Map<String, String> properties = MySqlIntegrationTestSupport.springProperties();
@@ -134,7 +139,8 @@ class OutageAvailabilityIT {
         maintenanceWindowMapper = sessionTemplate.getMapper(MaintenanceWindowMapper.class);
         // IT 里显式给「固定租户」的 provider：等价于真实请求经 IdentityContext 解析出的租户
         service = new AvailabilityServiceImpl(livenessMapper, outageMapper, maintenanceWindowMapper,
-            deviceMapper, new AvailabilityProperties(), () -> java.util.Optional.of(TENANT));
+            deviceMapper, new AvailabilityProperties(), () -> java.util.Optional.of(TENANT),
+            RECORDED_LATEST::addAll);
         cleanup();
         seedDevices();
     }
@@ -275,7 +281,8 @@ class OutageAvailabilityIT {
         AvailabilityProperties oneByOne = new AvailabilityProperties();
         oneByOne.setScanBatchSize(1);
         AvailabilityServiceImpl tightScan = new AvailabilityServiceImpl(livenessMapper, outageMapper,
-            maintenanceWindowMapper, deviceMapper, oneByOne, () -> java.util.Optional.of(TENANT));
+            maintenanceWindowMapper, deviceMapper, oneByOne, () -> java.util.Optional.of(TENANT),
+            RECORDED_LATEST::addAll);
         // 两个「设备不存在」的垃圾活性行（id 更小 ⇒ 优先被候选查询选中）+ 一个真断档设备
         insertOrphanLiveness(1L, 999_998L, dbNow.minusHours(1));
         insertOrphanLiveness(2L, 999_999L, dbNow.minusHours(1));

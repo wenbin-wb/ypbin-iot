@@ -175,6 +175,9 @@ public class HttpAccessReadingSink implements AccessReadingSink {
         observation.setDeviceId(deviceId);
         observation.setPollIntervalMs(reading.pollIntervalMs());
         observation.setQuality(reading.quality());
+        // 点位与值（Q8/D0.7）：值字符串化后上报——类型由物模型定义，上报契约不做窄化（避免丢信息/精度）
+        observation.setPropertyId(reading.propertyId());
+        observation.setValue(reading.value() == null ? null : String.valueOf(reading.value()));
         // epoch 毫秒：跨服务不用字符串时间，避免两端时区/格式配置不一致
         observation.setTs(reading.timestamp().toEpochMilli());
         return observation;

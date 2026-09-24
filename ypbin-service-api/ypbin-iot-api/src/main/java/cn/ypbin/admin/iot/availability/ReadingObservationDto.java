@@ -46,6 +46,22 @@ public class ReadingObservationDto {
      */
     private Integer pollIntervalMs;
 
+    /**
+     * 点位标识（协议的 propertyId/pointId；可为空——空表示这条上报只用于可用率判定，不带值）。
+     *
+     * <p>与 {@link #value} 成对出现：两者都非空时，服务端会把它写进**最新值**存储（Redis）；
+     * 只给时刻+质量同样合法（老客户端/只做断档判定的采集器）。</p>
+     */
+    private String propertyId;
+
+    /**
+     * 读数**值**（字符串化的原值；类型由物模型属性定义，服务端不做隐式转换）。
+     *
+     * <p>为什么用字符串：协议栈的值类型多样（数值/布尔/字符串/字节数组），在上报契约里做窄化会丢信息；
+     * 存储层按物模型定义解析。空值合法（表示该点本次无值）。</p>
+     */
+    private String value;
+
     /** 质量码（与协议栈 Quality 的 name 对齐：GOOD | UNCERTAIN | BAD | STALE | NOT_CONNECTED | CONFIG_ERROR）。 */
     @NotBlank(message = "质量码不能为空")
     private String quality;
