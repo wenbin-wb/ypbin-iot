@@ -9,7 +9,9 @@
   `ypbin-auth`、`ypbin-system`、`ypbin-iot`（18084）、`ypbin-access`（18086）与 MySQL/Nacos/Redis；
 - 数据库里已执行 `deploy/sql/006-iot-schema.sql` + `007-iot-data.sql`（或走 `install.sh`）；
   菜单与权限码由 `007-iot-data.sql` 写入，并已授给平台管理员角色与租户模板；
-- 前端仓 `ypbin-iot-ui`（与后端仓同级目录，或在 `UI_REPO=` 指定）。
+- 前端仓 `ypbin-iot-ui`（与后端仓同级目录，或在 `UI_REPO=` 指定）；
+  ⚠️ **IoT 页面在 `feat/iot-pages-slice1`（PR #15）之后才在 `main` 上**：若 `main` 还没有 `views/iot`，
+  请用 `git clone -b <该分支>` 或 `UI_REPO=` 指向已含页面的工作副本，否则菜单能出来但页面会落到 fallback。
 
 ## 1. 一条命令
 
@@ -25,7 +27,8 @@ cd ypbin-iot/deploy
 拷到 `IOT_UI_DIST_DIR`（默认 `../iot-ui-dist`）、`docker compose up -d --no-deps ypbin-iot-ui`。
 
 - 产物已就绪（例如 CI 产出）时：`SKIP_BUILD=1 ./ui-up.sh`
-- 改端口：`.env` 里 `IOT_UI_PORT=19001`（与 `ypbin-admin-ui` 的 19000 并存，互不影响）
+- 改端口/产物目录：`deploy/.env` 里 `IOT_UI_PORT=19001`、`IOT_UI_DIST_DIR=../iot-ui-dist`
+  （脚本会 `source .env`，与 `docker compose` 读到的是同一份值；与 `ypbin-admin-ui` 的 19000 并存）
 
 ## 2. 打开
 

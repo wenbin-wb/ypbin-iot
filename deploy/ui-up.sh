@@ -11,6 +11,15 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# 读 deploy/.env（若存在）：与本目录其它部署脚本一致，让 .env 里的 IOT_UI_PORT / IOT_UI_DIST_DIR 生效。
+# 不读它会与文档承诺矛盾（外委复核实测：改了 .env 脚本仍去旧目录、仍打印旧端口 ⇒ 挂空目录白屏）。
+if [ -f .env ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . ./.env
+  set +a
+fi
+
 UI_REPO="${UI_REPO:-../ypbin-iot-ui}"
 DIST_DIR="${IOT_UI_DIST_DIR:-../iot-ui-dist}"
 UI_PORT="${IOT_UI_PORT:-19001}"
@@ -30,6 +39,13 @@ if [ "${SKIP_BUILD:-0}" != "1" ]; then
   SRC="$UI_REPO/apps/web-antd/dist"
   [ -d "$SRC" ] || die "构建完成但找不到产物目录：$SRC"
   log "暂存产物：$SRC → $DIST_DIR"
+  # 护栏：只允许删「本仓 deploy 目录的兄弟/子目录」，避免 IOT_UI_DIST_DIR 误指到别处被 rm -rf
+  case "$DIST_DIR" in
+    /*) die "IOT_UI_DIST_DIR 不能用绝对路径（会 rm -rf 任意目录）：$DIST_DIR" ;;
+  esac
+  case "$DIST_DIR" in
+    *..*..*) die "IOT_UI_DIST_DIR 含多级 ..，拒绝执行：$DIST_DIR" ;;
+  esac
   rm -rf "$DIST_DIR"
   mkdir -p "$DIST_DIR"
   cp -r "$SRC"/. "$DIST_DIR"/
