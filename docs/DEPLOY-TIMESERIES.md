@@ -21,7 +21,7 @@
    它是 DDL/迁移动作（会短暂影响数据可查询性），但**不需要重建表、不丢数据**。
 5. **`ypbin.timeseries.enabled: true` 是 fail-fast 的**：url 为空、表名非法、`batch-size`/`connect-timeout-ms`
    非正 → `ypbin-iot` **拒绝启动**（不是静默降级）。
-6. **⚠️ 前置条件：驱动必须真的被"注册"，光在类路径上不够**（已核实，部署阻塞级）。
+6. **⚠️ 前置条件：驱动必须真的被"注册"，光在类路径上不够**（jar 无 SPI 已核实；"缺它则启动失败"为**源码级推断**，部署阻塞级）。
    `org.apache.iotdb:iotdb-jdbc:2.0.1-beta` 的 jar **没有** `META-INF/services/java.sql.Driver`
    （本机下载 Central 制品 + `zipfile` 核验：jar 105258 字节，`META-INF/services` 条目 **0 个**，
    `org/apache/iotdb/jdbc/IoTDBDriver.class` 存在、只有 `OSGI-INF`）⇒ **JDBC 4 的 SPI 自动注册不会发生**，
@@ -33,9 +33,13 @@
    若在那个提交上 grep 为空（也就没有上述类），请先把 `ypbin.timeseries.enabled` 改回 `false`，否则服务起不来：
 
    ```bash
-   # 合并/部署前的硬检查：非空 = 注册代码在；空 = 不要按 enabled=true 部署
-   # ⚠️ 必须显式指定「要部署的那个提交」，别查工作树：工作树里可能正躺着未提交的修复（会假通过）
-   git grep -n "Class.forName\|ensureRegistered" <要部署的提交SHA> -- ypbin-service/ypbin-iot
+   # 合并/部署前的硬检查：恰好 1 条命中（生产调用点）才可带 enabled: true 上线；空则先改回 false。
+   # ⚠️ 两个必须注意的点（都踩过/推演过）：
+   #   1) 显式指定「要部署的那个提交」，别查工作树——工作树里可能正躺着未提交的修复（会假通过）；
+   #   2) 别用宽模式 `Class.forName\|ensureRegistered` 搜整个模块：它会命中**类自身的定义/Javadoc/测试**，
+   #      于是"类已提交但从未被调用"也会非空 ⇒ 死代码假通过（实测：宽模式 2 条命中里只有 1 条是生产调用点）。
+   git grep -n "IotDbDriverRegistrar\.ensureRegistered()" <要部署的提交SHA> -- \
+     ypbin-service/ypbin-iot/src/main/java/cn/ypbin/admin/iot/timeseries/IotTimeSeriesConfiguration.java
    ```
 
 ## 1. 组件与端口
@@ -267,3 +271,6 @@ docker exec ypbin-iotdb start-cli.sh -sql_dialect table -e "ALTER TABLE iot.read
 - Docker 对 `entrypoint` 覆盖时是否还注入镜像 `CMD`（结论：不注入；`iotdb-init` 因此不需要 `command: []`）—
   moby 官方源码 <https://raw.githubusercontent.com/moby/moby/master/daemon/commit.go>（`func merge`：
   `if len(userConf.Entrypoint) == 0 { … userConf.Cmd = imageConf.Cmd … }`）
+- JDBC 驱动的 SPI 自动注册机制（`DriverManager` 通过 `ServiceLoader` 加载 `java.sql.Driver` 实现；
+  因此"jar 里没有 `META-INF/services/java.sql.Driver`"就等于不会自动注册）—
+  Oracle JDK 官方 javadoc <https://docs.oracle.com/en/java/javase/21/docs/api/java.sql/java/sql/DriverManager.html>

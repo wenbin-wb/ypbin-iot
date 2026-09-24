@@ -154,10 +154,11 @@ services:
     entrypoint:
       - /bin/bash
       - /init/iotdb-init.sh
-    # 这里**不需要** `command: []`：覆盖 entrypoint 本身已使镜像的 CMD 不被继承
-    # （moby `daemon/commit.go` 的 `merge`：仅当 `len(userConf.Entrypoint) == 0` 时才注入镜像 CMD；
-    #   本服务 entrypoint 非空 ⇒ 实际进程就是 `/bin/bash /init/iotdb-init.sh`，无附加参数）。
-    # 注：第一版曾误以为镜像 CMD 会被当参数追加而写了 `command: []`，已按 moby 源码更正（2026-09-24）。
+    # 这里**不需要** `command: []`（源码级结论）：覆盖 entrypoint 本身已使镜像的 CMD 不被继承——
+    # moby `daemon/commit.go` 的 `merge` 在 `len(userConf.Entrypoint) == 0` 时才会
+    # `if len(userConf.Cmd) == 0 { userConf.Cmd = imageConf.Cmd }`，即注入镜像 CMD 的完整条件是
+    # 「entrypoint 与 cmd 都为空」；本服务 entrypoint 非空 ⇒ 实际进程就是 `/bin/bash /init/iotdb-init.sh`。
+    # （第一版曾误以为镜像 CMD 会被当参数追加而写了 `command: []`，已按 moby 源码更正，2026-09-24。）
     environment:
       # ⚠️ 口令的**第三处**：脚本默认 IOTDB_USER/IOTDB_PASSWORD=root。改 IoTDB 口令时，这三处必须一起改：
       #   ① IoTDB 内（ALTER USER root SET PASSWORD …）② Nacos ypbin.timeseries.password ③ 这里
