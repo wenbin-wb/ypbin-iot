@@ -9,6 +9,8 @@
   `ypbin-auth`、`ypbin-system`、`ypbin-iot`（18084）、`ypbin-access`（18086）与 MySQL/Nacos/Redis；
 - 数据库里已执行 `deploy/sql/006-iot-schema.sql` + `007-iot-data.sql`（或走 `install.sh`）；
   菜单与权限码由 `007-iot-data.sql` 写入，并已授给平台管理员角色与租户模板；
+- **时序库（Apache IoTDB）已随 `deploy/docker-compose.yml` 起好**（服务 `iotdb` + 一次性 `iotdb-init`）；
+  历史曲线/时序写入的部署、初始化与排障见 [`DEPLOY-TIMESERIES.md`](DEPLOY-TIMESERIES.md)；
 - 前端仓 `ypbin-iot-ui`（与后端仓同级目录，或在 `UI_REPO=` 指定）；
   ⚠️ **IoT 页面在 `feat/iot-pages-slice1`（PR #15）之后才在 `main` 上**：若 `main` 还没有 `views/iot`，
   请用 `git clone -b <该分支>` 或 `UI_REPO=` 指向已含页面的工作副本，否则菜单能出来但页面会落到 fallback。

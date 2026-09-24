@@ -63,3 +63,32 @@ ypbin:
     scan-batch-size: 200
     # 查询未给 from 时的默认窗口时长
     default-window-hours: 24
+
+  # 时序库（Apache IoTDB 表模型，D0.7/§5.2.1）：部署、初始化与排障见 docs/DEPLOY-TIMESERIES.md。
+  # enabled=true 时服务启动做**驱动自检**（org.apache.iotdb:iotdb-jdbc 已在 ypbin-iot 的 runtime 依赖里）：
+  # 驱动不在类路径、url 为空、batch-size/connect-timeout-ms 非正、表名非法 → **启动即拒绝**（fail-fast，
+  # 不静默降级）；表名会被拼进 SQL，故只允许字母/数字/下划线。
+  timeseries:
+    enabled: true
+    # ⚠️ URL 必须带库名 /iot：写入器与查询用的是**非限定表名**（INSERT INTO reading（…） / FROM reading），
+    # 而 IoTDB 对「未指定数据库」时的这类语句直接报 701: database is not specified（官方文档给出的错误输出）；
+    # 表模型还**必须**带 sql_dialect=table（官方 JDBC 文档）。带库名的 URL 形式同官方示例
+    # jdbc:iotdb://127.0.0.1:6667/test1?sql_dialect=table。
+    url: jdbc:iotdb://ypbin-iotdb:6667/iot?sql_dialect=table
+    # 下面是 IoTDB 官方**默认**用户/口令（官方 Authority Management：默认用户 root、默认口令 root）。
+    # 它不是本平台的部署密钥，所以和 ypbin-common.yaml 的 datasource.username: root 一样直写；
+    # ⚠️ 但默认口令是公开的 ⇒ 生产必须改，且改口令是**两处联动**（IoTDB 侧 + 本文件）：
+    #   1) IoTDB 侧（官方语法 ALTER USER，需 root 身份，见 docs/DEPLOY-TIMESERIES.md §6）：
+    #      docker exec -it ypbin-iotdb start-cli.sh -sql_dialect table -e "ALTER USER root SET PASSWORD '新口令'"
+    #   2) 本文件 password 改成同一个值，重导 Nacos（或直接在 Nacos 控制台改），再重启 ypbin-iot
+    #   注意：本文件**不走** install.sh 的占位符替换——它的替换键固定为 MYSQL_ROOT_PASSWORD /
+    #   REDIS_PASSWORD / INTERNAL_TOKEN / GATEWAY_SIGN_TOKEN 四个，所以别在这里写 ${IOTDB_PASSWORD} 之类：
+    #   那样既不会被替换、也不会被自动生成，只会多一层"以为配了、其实没配"的错觉。
+    username: root
+    password: root
+    # 表名，必须与 deploy/iotdb-init.sql 建的表一致
+    table-name: reading
+    # 一次 addBatch/executeBatch 的行数上限
+    batch-size: 500
+    # 连接超时（毫秒）。JDBC 只有全局登录超时，启动自检会用本值调用 DriverManager.setLoginTimeout
+    connect-timeout-ms: 3000
