@@ -5,11 +5,16 @@
 >
 > 维护约定：每条包含 **现象 / 证据 / 影响 / 期望能力 / 验收标准 / 会被替换掉的临时实现**；
 > 关闭本条时，请同时在 ypbin-iot 的 ROADMAP 对应条目上注明「starter 已支持（版本/PR）」。
-> 最后更新：2026-09-24（ypbin-iot `aa021b1`）。
+> 最后更新：2026-09-24 —— **三项均已关闭**：starter **3.5.0**（2026-09-24 发布；PR #51 / 合并 `f3ab2f9`，
+> 四轮外委复核后 PASS）；本仓已同步升级 starter 版本至 3.5.0 并删除 SF-1 的临时防线 `IotPermissionGuard`。
 
 ---
 
 ## SF-1（高｜安全）微服务下游的 `@SaCheckPermission` 实际不生效：注解鉴权与登录拦截被同一个开关绑死
+
+> **状态：✅ 已支持（starter 3.5.0，PR #51）** —— `annotation-check` 与 `interceptor` 已拆成两个独立开关，
+> 并新增 `IdentityStpLogic` 身份头账号体系桥（`identity.enabled=true` 时把身份头接进 Sa-Token 账号解析）；
+> 本仓已删除临时防线 `IotPermissionGuard`，单测 162 项全绿。
 
 **现象**：微服务下游服务（`ypbin-system` / `ypbin-iot` / `ypbin-ai` / `ypbin-access` …）在 Nacos 里配置
 `ypbin.security.interceptor: false`，而 Sa-Token 的**注解鉴权（`@SaCheckPermission` / `@SaCheckRole` 等）
@@ -49,13 +54,18 @@ starter 源码注释也明确「微服务下游走 `IdentityContext`、单体走
 3. `ypbin-iot` 侧删掉临时防线 `IotPermissionGuard` 后，其单测/IT 仍全绿（并在 ROADMAP 四点十六 标注关闭）。
 
 **会被替换掉的临时实现**：`ypbin-iot` 的 `IotPermissionGuard`（显式、fail-closed 校验三个维护窗口端点，
-含「不屏蔽超管通配」的用例）——它存在的唯一理由就是本条缺陷；starter 支持后应删除。
+含「不屏蔽超管通配」的用例）——它存在的唯一理由就是本条缺陷。**已于 2026-09-24 随 starter 3.5.0 升级删除**：
+三个端点上的 `@SaCheckPermission` 现由 starter 注解鉴权真正执行；配套源码门禁也已从
+「必须调用临时防线」迁移为「逐方法校验注解权限码正确 + 禁止回退到临时防线」。
 
 **关联文档**：ypbin-iot `docs/IOT-ROADMAP.md` 四点十六（含完整证据、危害与两条候选）。
 
 ---
 
 ## SF-2（中）`@Idempotent` 对「没有 equals/hashCode 的 Req DTO」形同虚设
+
+> **状态：✅ 已支持（starter 3.5.0，PR #51）** —— 默认幂等键改为按字段值展开的 SHA-256 摘要
+> （`ArgumentFingerprint`），同内容必得同键，且键里不含入参明文。
 
 **现象**：`IdempotentAspect` 的默认幂等键是
 `目标类名#方法名 + Arrays.deepHashCode(point.getArgs())`；而本仓规范**不允许**给 DTO 加 `@Data`
@@ -84,6 +94,9 @@ PROBE_IDEMPOTENT_CLOSE_KEYS >>> [...#close:73, ...#close:73]                # Lo
 ---
 
 ## SF-3（低｜DX）`LoginUser` 的字段名与常见用法不一致
+
+> **状态：✅ 已支持（starter 3.5.0，PR #51）** —— `LoginUser` 新增 `getUserId()/setUserId()` 等价别名，
+> 并与 `IdentityContext` 的 Javadoc 互相指明职责差异。
 
 **现象**：`cn.ypbin.starter.security.core.LoginUser` 的字段是 `id`（`getId()`），而业务侧直觉会写
 `setUserId(...)`；本仓在写测试时踩到（编译失败后改为 `new LoginUser(userId, username)`）。

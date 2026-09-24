@@ -11,10 +11,15 @@ package cn.ypbin.admin.iot.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import cn.dev33.satoken.annotation.SaCheckPermission;
+import cn.ypbin.admin.iot.availability.MaintenanceWindowReq;
+import cn.ypbin.admin.iot.controller.IotMaintenanceWindowController;
 import java.io.IOException;
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -31,8 +36,10 @@ import org.junit.jupiter.api.Test;
  * 否则菜单建出来但没人看得见；SQL 等价门禁只保证两份脚本一致、权限码门禁只看 {@code auth_code}，
  * **都发现不了**（复核用变异实证：两份 SQL 同时删掉授权后仍全绿）。</p>
  *
- * <p>② 管理端点的**显式权限守卫**必须真的被调用：本仓微服务下游的 {@code @SaCheckPermission} 不生效
- * （见 ROADMAP 四点十六），维护窗口又直接影响可用率口径。</p>
+ * <p>② 管理端点的权限码必须**挂在方法上且逐一对号**：starter 3.5.0 起微服务下游的
+ * {@code @SaCheckPermission} 真正生效（此前与登录拦截共用开关而静默失效，见 ROADMAP 四点十六），
+ * 因此本门禁从「必须显式调用临时防线 {@code IotPermissionGuard}」迁移为「三个方法各自的注解权限码正确，
+ * 且不得再回退到临时防线」——保护方式换了，门禁必须一起换，否则删除临时防线会被自己的门禁拦下。</p>
  *
  * @author wenbin
  * @since 2026-09-24
@@ -94,42 +101,41 @@ class IotMaintenanceAdminGateTest {
     }
 
     @Test
-    @DisplayName("★ 维护窗口管理端点的三个方法都必须调用显式权限守卫（下游注解鉴权不生效，见四点十六）")
-    void controllerMustCallExplicitPermissionGuard() throws IOException {
+    @DisplayName("★ 维护窗口三个端点各自的 @SaCheckPermission 权限码必须正确，且不得回退到临时防线")
+    void controllerMustDeclareCorrectPermissions() throws Exception {
+        // 逐个方法校验：只数总数会让「复制粘贴错权限码」或「两个方法对调」照样通过（复核变异 N4 实证）
+        assertPermission("list", new Class<?>[] {Long.class, LocalDateTime.class, LocalDateTime.class},
+            "iot:maintenance:list");
+        assertPermission("open", new Class<?>[] {MaintenanceWindowReq.class}, "iot:maintenance:create");
+        assertPermission("close", new Class<?>[] {Long.class}, "iot:maintenance:close");
+
+        // 反向断言：starter 3.5.0 起注解鉴权真正生效，临时防线不得复活
+        // （复活会造成「双份校验」并让「注解哪天又失效」重新变成不可见）
         String source = Files.readString(REPO_ROOT.resolve(
             "ypbin-service/ypbin-iot/src/main/java/cn/ypbin/admin/iot/controller"
                 + "/IotMaintenanceWindowController.java"), StandardCharsets.UTF_8);
-        // 门禁文本匹配必须作用在**剥离注释后**的代码上（教训二十三）
+        // 门禁文本匹配必须作用在**剥离注释后**的代码上（教训二十三：Javadoc 里提到 guard 不算违规）
         String code = source.replaceAll("(?s)/\\*.*?\\*/", "").replaceAll("//[^\\n]*", "");
-        long guardCalls = code.lines().filter(line -> line.contains("permissionGuard.require(")).count();
-        assertThat(guardCalls).as("三个端点（list/open/close）都要显式校验权限").isEqualTo(3);
-        // 逐个方法校验：只数总数会让「复制粘贴错权限码」或「两个方法对调」照样通过（复核变异 N4 实证）
-        assertGuard(code, "list", "PERM_LIST");
-        assertGuard(code, "open", "PERM_CREATE");
-        assertGuard(code, "close", "PERM_CLOSE");
-        assertThat(code).as("常量必须指向真实权限码（与 007 登记一致）")
-            .contains("PERM_LIST = \"iot:maintenance:list\"")
-            .contains("PERM_CREATE = \"iot:maintenance:create\"")
-            .contains("PERM_CLOSE = \"iot:maintenance:close\"");
+        assertThat(code)
+            .as("不得再引入临时防线 IotPermissionGuard（SF-1 关闭约定）")
+            .doesNotContain("IotPermissionGuard")
+            .doesNotContain("permissionGuard");
     }
 
     /**
-     * 断言某个端点方法内调用的是**它自己的**权限常量。
+     * 断言某个端点方法上的注解权限码与预期**逐一对应**。
      *
-     * @param code        Controller 源码（已剥注释）
-     * @param method      方法名
-     * @param permission  期望的权限常量名
+     * @param method         方法名
+     * @param parameterTypes 方法参数类型
+     * @param permission     期望的权限码
+     * @throws Exception 反射查找方法失败
      */
-    private static void assertGuard(String code, String method, String permission) {
-        int start = code.indexOf(" " + method + "(");
-        assertThat(start).as("找不到方法 %s", method).isPositive();
-        // 取方法签名后的一段（足够覆盖方法体；本 Controller 方法都很短）
-        String body = code.substring(start, Math.min(code.length(), start + 700));
-        int nextSignature = body.indexOf("\n    public ");
-        if (nextSignature > 0) {
-            body = body.substring(0, nextSignature);
-        }
-        assertThat(body).as("%s 必须调用 permissionGuard.require(%s)", method, permission)
-            .contains("permissionGuard.require(" + permission + ")");
+    private static void assertPermission(String method, Class<?>[] parameterTypes, String permission)
+        throws Exception {
+        Method target = IotMaintenanceWindowController.class.getMethod(method, parameterTypes);
+        SaCheckPermission annotation = target.getAnnotation(SaCheckPermission.class);
+        assertThat(annotation).as("%s 必须标注 @SaCheckPermission", method).isNotNull();
+        assertThat(annotation.value()).as("%s 的权限码必须与菜单登记一致", method)
+            .containsExactly(permission);
     }
 }
