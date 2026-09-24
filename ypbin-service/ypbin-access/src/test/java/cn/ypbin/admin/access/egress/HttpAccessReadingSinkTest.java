@@ -92,8 +92,27 @@ class HttpAccessReadingSinkTest {
         assertThat(first.getQuality()).isEqualTo("GOOD");
         assertThat(first.getTs()).as("epoch 毫秒（跨服务不用字符串时间）").isEqualTo(TS.toEpochMilli());
         assertThat(first.getPollIntervalMs()).isEqualTo(5_000);
+        // Q8/D0.7：点位与值必须透传（最新值链路的数据源）；值统一字符串化，类型由物模型定义
+        assertThat(first.getPropertyId()).isEqualTo("900");
+        assertThat(first.getValue()).isEqualTo("1");
         assertThat(sink.pendingCount()).isZero();
         assertThat(meterRegistry.get("iot.access.egress.sent").counter().count()).isEqualTo(3.0d);
+    }
+
+    @Test
+    @DisplayName("★ 值为 null 时必须上报 null（不得变成字符串 \"null\"，否则最新值会写进脏数据）")
+    void nullValueMustStayNull() {
+        when(client.ingest(any())).thenReturn(R.ok(1));
+        HttpAccessReadingSink sink = sink();
+        sink.accept(new AccessReading(DEVICE, "900", null, "GOOD", TS, 1_000));
+
+        sink.flush();
+
+        ArgumentCaptor<ReadingIngestReq> captor = ArgumentCaptor.forClass(ReadingIngestReq.class);
+        verify(client).ingest(captor.capture());
+        ReadingObservationDto observation = captor.getValue().getItems().getFirst();
+        assertThat(observation.getPropertyId()).isEqualTo("900");
+        assertThat(observation.getValue()).as("空值必须保持 null").isNull();
     }
 
     @Test

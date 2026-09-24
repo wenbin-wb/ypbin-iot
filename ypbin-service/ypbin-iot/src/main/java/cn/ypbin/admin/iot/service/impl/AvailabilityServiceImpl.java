@@ -20,6 +20,8 @@ import cn.ypbin.admin.iot.availability.OutageReason;
 import cn.ypbin.admin.iot.availability.ReadingIngestReq;
 import cn.ypbin.admin.iot.availability.ReadingObservationDto;
 import cn.ypbin.admin.iot.entity.DeviceLiveness;
+import cn.ypbin.admin.iot.values.LatestValue;
+import cn.ypbin.admin.iot.values.LatestValueWriter;
 import cn.ypbin.admin.iot.entity.IotDevice;
 import cn.ypbin.admin.iot.entity.MaintenanceWindow;
 import cn.ypbin.admin.iot.entity.OutageEvent;
@@ -48,6 +50,8 @@ import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
@@ -77,19 +81,26 @@ public class AvailabilityServiceImpl implements AvailabilityService {
 
     /** 租户来源：与 MP 租户插件**完全一致**（ThreadLocal 优先，其次 TenantProvider/IdentityContext）。 */
     private final TenantProvider tenantProvider;
+
+    /**
+     * 最新值写入器（Q8/D0.7：Redis Hash）。放在**事务提交后**写，避免"库回滚了但最新值已生效"的不一致；
+     * 写失败只计数+日志，绝不让上报事务回滚（见 {@link cn.ypbin.admin.iot.values.LatestValueWriter}）。
+     */
+    private final LatestValueWriter latestValueWriter;
     private final IotDeviceMapper deviceMapper;
     private final AvailabilityProperties properties;
 
     public AvailabilityServiceImpl(DeviceLivenessMapper livenessMapper, OutageEventMapper outageMapper,
                                    MaintenanceWindowMapper maintenanceWindowMapper,
                                    IotDeviceMapper deviceMapper, AvailabilityProperties properties,
-                                   TenantProvider tenantProvider) {
+                                   TenantProvider tenantProvider, LatestValueWriter latestValueWriter) {
         this.livenessMapper = livenessMapper;
         this.outageMapper = outageMapper;
         this.maintenanceWindowMapper = maintenanceWindowMapper;
         this.deviceMapper = deviceMapper;
         this.properties = properties;
         this.tenantProvider = tenantProvider;
+        this.latestValueWriter = latestValueWriter;
     }
 
     @Override
@@ -101,6 +112,9 @@ public class AvailabilityServiceImpl implements AvailabilityService {
         }
         Map<Long, DeviceReadingBatch> batches = aggregate(items);
         Map<Long, Long> tenantByDevice = resolveTenants(batches.keySet());
+        // 最新值（点位级）与可用率（设备级）是两条独立的关注点：这里只挑「带了点位与值」的读数，
+        // 且在**事务提交后**才写（见 writeLatestAfterCommit 的注释）
+        List<LatestValue> latestValues = collectLatestValues(items, tenantByDevice);
         int processed = 0;
         for (Map.Entry<Long, DeviceReadingBatch> entry : batches.entrySet()) {
             Long tenantId = tenantByDevice.get(entry.getKey());
@@ -114,7 +128,72 @@ public class AvailabilityServiceImpl implements AvailabilityService {
             DeviceReadingBatch batch = entry.getValue();
             processed += TenantContext.executeWithTenant(tenantId, () -> applyBatch(tenantId, deviceId, batch));
         }
+        writeLatestAfterCommit(latestValues);
         return processed;
+    }
+
+    /**
+     * 挑选「可写最新值」的读数（纯计算，无外部调用）：必须带点位与值，且设备已解析出租户。
+     *
+     * @param items          原始上报项
+     * @param tenantByDevice 设备 → 租户
+     * @return 待写最新值（可能为空）
+     */
+    private static List<LatestValue> collectLatestValues(List<ReadingObservationDto> items,
+                                                         Map<Long, Long> tenantByDevice) {
+        List<LatestValue> values = new ArrayList<>();
+        for (ReadingObservationDto item : items) {
+            if (item == null || item.getDeviceId() == null || item.getTs() == null) {
+                continue;
+            }
+            String propertyId = item.getPropertyId();
+            String value = item.getValue();
+            if (propertyId == null || propertyId.isBlank() || value == null) {
+                // 只做断档判定的采集器（只报时刻+质量）不带点位/值：合法，跳过最新值即可
+                continue;
+            }
+            Long tenantId = tenantByDevice.get(item.getDeviceId());
+            if (tenantId == null) {
+                // 设备不存在：上一段循环会 warn 并丢弃，这里不重复告警
+                continue;
+            }
+            values.add(new LatestValue(tenantId, item.getDeviceId(), propertyId, value,
+                item.getQuality(), item.getTs()));
+        }
+        return values;
+    }
+
+    /**
+     * 事务**提交后**再写最新值。
+     *
+     * <p>为什么不能直接写在事务里：Redis 不参与数据库事务，若本批因任何原因回滚，写在事务里的最新值
+     * 却已经生效 ⇒ 出现"库里有断档记录、最新值却说设备正常"的不一致。注册 afterCommit 回调可以保证
+     * 只有库侧真的成功才写；没有事务（如纯单测）时直接写——没有事务就没有回滚语义。</p>
+     *
+     * @param values 待写最新值
+     */
+    private void writeLatestAfterCommit(List<LatestValue> values) {
+        if (values.isEmpty()) {
+            return;
+        }
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            latestValueWriter.writeAll(values);
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                try {
+                    latestValueWriter.writeAll(values);
+                } catch (RuntimeException ex) {
+                    // 兜底：写入器实现（Redis/日志）自己已经 catch+计数；但如果将来换了实现且它抛异常，
+                    // 在 afterCommit 里抛出会**逃逸到调用方**——库已提交、接口却报错，调用方会误判整批失败。
+                    // 这里只记录，不改变「上报已成功落库」的事实（最新值属便利数据）。
+                    log.error("[iot] 最新值写入器抛出异常（已忽略，不影响本批上报结果）：条数={}",
+                        LogSanitizer.sanitize(values.size()), ex);
+                }
+            }
+        });
     }
 
     @Override

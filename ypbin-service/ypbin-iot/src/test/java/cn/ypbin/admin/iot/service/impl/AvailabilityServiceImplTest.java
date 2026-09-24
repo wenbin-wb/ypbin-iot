@@ -44,6 +44,8 @@ import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import cn.ypbin.admin.iot.values.LatestValue;
+import cn.ypbin.admin.iot.values.LatestValueWriter;
 import java.util.List;
 import java.util.Map;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
@@ -52,6 +54,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
  * 断档与可用率服务单测（M-2）：上报 / 扫描 / 查询三条链路的边界与失败语义。
@@ -75,6 +79,9 @@ class AvailabilityServiceImplTest {
 
     /** 租户提供者桩：真实请求链路上租户来自 IdentityContext（见 MicroserviceTenantProvider），这里模拟之。 */
     private TenantProvider tenantProvider;
+
+    /** 最新值写入器（Q8）：断言「带点位与值的读数才写」 */
+    private LatestValueWriter latestValueWriter;
     private IotDeviceMapper deviceMapper;
     private AvailabilityProperties properties;
     private AvailabilityServiceImpl service;
@@ -100,6 +107,7 @@ class AvailabilityServiceImplTest {
         outageMapper = mock(OutageEventMapper.class);
         maintenanceWindowMapper = mock(MaintenanceWindowMapper.class);
         tenantProvider = mock(TenantProvider.class);
+        latestValueWriter = mock(LatestValueWriter.class);
         lenient().when(tenantProvider.getCurrentTenantId()).thenReturn(java.util.Optional.empty());
         // 默认无维护窗口（既有用例的口径不受影响）
         lenient().when(maintenanceWindowMapper.sumMaintenanceSecondsInWindow(anyLong(), anyLong(), any(),
@@ -111,9 +119,79 @@ class AvailabilityServiceImplTest {
         deviceMapper = mock(IotDeviceMapper.class);
         properties = new AvailabilityProperties();
         service = new AvailabilityServiceImpl(livenessMapper, outageMapper, maintenanceWindowMapper, deviceMapper,
-            properties, tenantProvider);
+            properties, tenantProvider, latestValueWriter);
         when(livenessMapper.selectNow()).thenReturn(T0.plusHours(10));
         when(deviceMapper.selectBatchIds(any())).thenReturn(List.of(device()));
+    }
+
+    @Test
+    @DisplayName("★ Q8：带点位与值的读数必须写最新值；只报质量/时刻（无点位）的读数不写")
+    void ingestMustWriteLatestValuesOnlyForPointReadings() {
+        when(deviceMapper.selectBatchIds(any())).thenReturn(List.of(device()));
+        when(livenessMapper.selectList(any())).thenReturn(List.of());
+
+        ReadingObservationDto withPoint = new ReadingObservationDto();
+        withPoint.setDeviceId(DEVICE);
+        withPoint.setPropertyId("temperature");
+        withPoint.setValue("23.5");
+        withPoint.setQuality(AvailabilityRules.QUALITY_GOOD);
+        withPoint.setTs(1_700_000_000_000L);
+
+        ReadingObservationDto onlyQuality = new ReadingObservationDto();
+        onlyQuality.setDeviceId(DEVICE);
+        onlyQuality.setQuality(AvailabilityRules.QUALITY_GOOD);
+        onlyQuality.setTs(1_700_000_000_100L);
+
+        assertThat(service.ingest(req(withPoint, onlyQuality))).isEqualTo(2);
+
+        ArgumentCaptor<List<LatestValue>> captor = ArgumentCaptor.forClass(List.class);
+        verify(latestValueWriter).writeAll(captor.capture());
+        assertThat(captor.getValue()).singleElement().satisfies(value -> {
+            assertThat(value.tenantId()).as("租户必须来自设备台账（内部上报路径没有租户上下文）").isEqualTo(TENANT);
+            assertThat(value.deviceId()).isEqualTo(DEVICE);
+            assertThat(value.propertyId()).isEqualTo("temperature");
+            assertThat(value.value()).isEqualTo("23.5");
+        });
+    }
+
+    @Test
+    @DisplayName("★ Q8：最新值必须在**事务提交后**才写（库回滚了但最新值已生效 = 不一致）")
+    void latestValuesMustBeWrittenAfterCommitOnly() {
+        when(deviceMapper.selectBatchIds(any())).thenReturn(List.of(device()));
+        when(livenessMapper.selectList(any())).thenReturn(List.of());
+        ReadingObservationDto withPoint = new ReadingObservationDto();
+        withPoint.setDeviceId(DEVICE);
+        withPoint.setPropertyId("temperature");
+        withPoint.setValue("23.5");
+        withPoint.setQuality(AvailabilityRules.QUALITY_GOOD);
+        withPoint.setTs(1_700_000_000_000L);
+
+        // 模拟「事务已开启」：单测默认没有事务，直接写；这里显式开一个同步器来验证延迟语义
+        TransactionSynchronizationManager.initSynchronization();
+        try {
+            service.ingest(req(withPoint));
+            verify(latestValueWriter, never()).writeAll(any());
+        } finally {
+            TransactionSynchronizationManager.getSynchronizations()
+                .forEach(TransactionSynchronization::afterCommit);
+            TransactionSynchronizationManager.clearSynchronization();
+        }
+        verify(latestValueWriter).writeAll(any());
+    }
+
+    @Test
+    @DisplayName("★ Q8：全部读数都不带点位时，最新值写入器不得被调用（空批短路）")
+    void ingestMustNotWriteWhenNoPointReadings() {
+        when(deviceMapper.selectBatchIds(any())).thenReturn(List.of(device()));
+        when(livenessMapper.selectList(any())).thenReturn(List.of());
+        ReadingObservationDto onlyQuality = new ReadingObservationDto();
+        onlyQuality.setDeviceId(DEVICE);
+        onlyQuality.setQuality(AvailabilityRules.QUALITY_GOOD);
+        onlyQuality.setTs(1_700_000_000_000L);
+
+        service.ingest(req(onlyQuality));
+
+        verify(latestValueWriter, never()).writeAll(any());
     }
 
     @Test
