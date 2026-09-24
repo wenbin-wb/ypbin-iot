@@ -605,7 +605,15 @@ starter 源码注释也明确「微服务下游走 `IdentityContext`、单体走
 
 **已做的临时防线（如实标注为临时）**：本仓对**影响可用率口径的端点**（维护窗口 list/open/close）加了
 `IotPermissionGuard` 显式校验（权限数据仍走 `PermissionProvider`，无身份/查询失败/缺码**一律拒绝**），
-并有单测 + 源码门禁（三个方法必须调用守卫）；`iot.permission.denied` 计数暴露被拒情况。
+并有单测 + 源码门禁（**逐方法**校验：list→list 码、open→create 码、close→close 码，防止复制粘贴错码）； 
+`iot.permission.denied` 计数暴露被拒情况。
+⚠️ 两条边界（外委复核第二轮点出，均已修/已登记）：
+① 守卫**必须复用框架的通配语义**（`SaFoxUtil.vagueMatch`）——平台超管的权限集合只有 `*:*:*`
+（`SysPermissionServiceImpl` 超管短路），只做 `contains` 会把**平台管理员**挡在门外（第一版真实回归，
+探针实测 `vagueMatch("*:*:*","iot:maintenance:create")=true` 而守卫 DENY）；已修并补「超管放行」「部分通配放行」
+两个用例；
+② 菜单授权完整性门禁的正则必须匹配真实写法 `VALUES (3203, …)`（首版 `VALUES\(` 漏掉所有带空格的 id，
+**恰好漏掉本次新增的 3203/320301**；已修为 `VALUES\s*\(`，并用变异 N2 证明会咬）。
 
 **正解（属 starter 层，按「碰到底座先反馈」上报，不在业务仓自造长期 workaround）**，两条候选：
 1. **给下游服务一个以 `IdentityContext` 为基准的注解鉴权拦截器**：仍注册 `SaInterceptor`（保留注解鉴权），

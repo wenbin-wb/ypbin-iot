@@ -60,6 +60,26 @@ class IotPermissionGuardTest {
     }
 
     @Test
+    @DisplayName("★ 平台超管的 `*:*:*` 必须放行（超管权限集合里只有通配码，不能只做精确匹配）")
+    void mustPassForSuperAdminWildcard() {
+        loginAs(7L);
+        when(provider.getPermissions(any(), anyString())).thenReturn(List.of("*:*:*"));
+
+        guard.require(CODE);
+    }
+
+    @Test
+    @DisplayName("★ 部分通配（`iot:maintenance:*`）按框架语义放行；跨前缀通配不得放行")
+    void mustMatchWildcardLikeFramework() {
+        loginAs(7L);
+        when(provider.getPermissions(any(), anyString())).thenReturn(List.of("iot:maintenance:*"));
+        guard.require(CODE);
+
+        when(provider.getPermissions(any(), anyString())).thenReturn(List.of("iot:device:*"));
+        assertThatThrownBy(() -> guard.require(CODE)).isInstanceOf(BusinessException.class);
+    }
+
+    @Test
     @DisplayName("★ 没有该权限码 ⇒ 拒绝")
     void mustDenyWhenPermissionMissing() {
         loginAs(7L);

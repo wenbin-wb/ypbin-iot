@@ -42,7 +42,7 @@ class IotMaintenanceAdminGateTest {
     private static final Path REPO_ROOT = Path.of("..", "..").toAbsolutePath().normalize();
 
     /** 菜单 INSERT 的 id（`VALUES (3203, ...)` 或续行 `(320301, 3203, ...)`）。 */
-    private static final Pattern MENU_ID = Pattern.compile("VALUES\\(\\s*(\\d+)\\s*,");
+    private static final Pattern MENU_ID = Pattern.compile("VALUES\\s*\\(\\s*(\\d+)\\s*,");
 
     private static final Pattern MENU_ID_CONT = Pattern.compile("^\\(\\s*(\\d+)\\s*,");
 
@@ -103,8 +103,33 @@ class IotMaintenanceAdminGateTest {
         String code = source.replaceAll("(?s)/\\*.*?\\*/", "").replaceAll("//[^\\n]*", "");
         long guardCalls = code.lines().filter(line -> line.contains("permissionGuard.require(")).count();
         assertThat(guardCalls).as("三个端点（list/open/close）都要显式校验权限").isEqualTo(3);
-        for (String perm : List.of("iot:maintenance:list", "iot:maintenance:create", "iot:maintenance:close")) {
-            assertThat(code).as("权限码 %s 必须出现在 Controller 里", perm).contains(perm);
+        // 逐个方法校验：只数总数会让「复制粘贴错权限码」或「两个方法对调」照样通过（复核变异 N4 实证）
+        assertGuard(code, "list", "PERM_LIST");
+        assertGuard(code, "open", "PERM_CREATE");
+        assertGuard(code, "close", "PERM_CLOSE");
+        assertThat(code).as("常量必须指向真实权限码（与 007 登记一致）")
+            .contains("PERM_LIST = \"iot:maintenance:list\"")
+            .contains("PERM_CREATE = \"iot:maintenance:create\"")
+            .contains("PERM_CLOSE = \"iot:maintenance:close\"");
+    }
+
+    /**
+     * 断言某个端点方法内调用的是**它自己的**权限常量。
+     *
+     * @param code        Controller 源码（已剥注释）
+     * @param method      方法名
+     * @param permission  期望的权限常量名
+     */
+    private static void assertGuard(String code, String method, String permission) {
+        int start = code.indexOf(" " + method + "(");
+        assertThat(start).as("找不到方法 %s", method).isPositive();
+        // 取方法签名后的一段（足够覆盖方法体；本 Controller 方法都很短）
+        String body = code.substring(start, Math.min(code.length(), start + 700));
+        int nextSignature = body.indexOf("\n    public ");
+        if (nextSignature > 0) {
+            body = body.substring(0, nextSignature);
         }
+        assertThat(body).as("%s 必须调用 permissionGuard.require(%s)", method, permission)
+            .contains("permissionGuard.require(" + permission + ")");
     }
 }

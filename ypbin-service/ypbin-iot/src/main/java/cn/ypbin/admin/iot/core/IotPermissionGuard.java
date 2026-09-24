@@ -9,6 +9,7 @@
  */
 package cn.ypbin.admin.iot.core;
 
+import cn.dev33.satoken.util.SaFoxUtil;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.security.core.PermissionProvider;
 import cn.ypbin.starter.security.identity.IdentityContext;
@@ -34,8 +35,10 @@ import org.springframework.stereotype.Component;
  * （让下游服务的注解鉴权可用的身份桥）之前，这里对**这几个端点**做一次显式的、拒绝优先的校验。</p>
  *
  * <p>与框架的关系：权限数据仍走 starter 的 {@link PermissionProvider}（本服务实现为
- * {@code IotPermissionProvider} → {@code SysCache}），不新造权限模型；查询结果缺失/异常一律**拒绝**
- * （绝不静默放行）。</p>
+ * {@code IotPermissionProvider} → {@code SysCache}），**判定语义也复用框架的通配规则**
+ * （{@code SaFoxUtil.vagueMatch}）——平台超管的权限集合只有 `*:*:*`，**不得**屏蔽它，
+ * 否则平台管理员打开菜单后每个按钮都会报「没有权限」（这是本守卫第一版的真实回归，复核探针实测）。
+ * 查询结果缺失/异常一律**拒绝**（绝不静默放行）。</p>
  *
  * @author wenbin
  * @since 2026-09-24
@@ -80,10 +83,36 @@ public class IotPermissionGuard {
             log.error("[iot] 权限查询失败，按拒绝处理：userId={} code={}", userId, code, ex);
             throw new BusinessException("权限校验失败，请稍后重试");
         }
-        if (permissions == null || !permissions.contains(code)) {
+        // ⚠️ 判定语义必须与框架**完全一致**：sa-token 的默认 hasElement 先做精确匹配，失败再按
+        //    通配匹配（`SaFoxUtil.vagueMatch`）——平台超管的权限集合**只有** `*:*:*`（超管短路，
+        //    见 SysPermissionServiceImpl），用 `contains` 会把超管挡在门外（外委复核实测：整改前超管能用、
+        //    只做 contains 后三个端点全被拒 = 新引入的功能回归）。这里复用框架策略，不自己重写匹配规则。
+        if (!hasPermission(permissions, code)) {
             deny(code, "缺少权限码");
             return;
         }
+    }
+
+    /**
+     * 权限判定（与 sa-token 默认策略一致：精确匹配 → 通配匹配）。
+     *
+     * @param permissions 当前身份的权限码集合（可空）
+     * @param code        需要的权限码
+     * @return 是否具备
+     */
+    private static boolean hasPermission(List<String> permissions, String code) {
+        if (permissions == null || permissions.isEmpty()) {
+            return false;
+        }
+        if (permissions.contains(code)) {
+            return true;
+        }
+        for (String owned : permissions) {
+            if (owned != null && SaFoxUtil.vagueMatch(owned, code)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void deny(String code, String reason) {
