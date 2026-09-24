@@ -398,7 +398,7 @@ business 变更台账（产品/设备/点位映射/凭据）
 | status | `enabled`/`disabled`——**直接复用基类 `status`**（`EntityStatus`：1 启用 / 0 禁用），不另立列 |
 
 ### 4.2 凭据与认证
-- **MQTT 设备**：每设备一份 EMQX 账号（ACL 限 `$iot/dev/{t}/{d}/**`）；凭据轮换=新旧并存+到期踢旧会话。
+- **MQTT 设备**：每设备一份 EMQX 账号（ACL 限 `$iot/dev/{t}/{d}/**`）；凭据轮换=新旧并存+到期踢旧会话。（⚠️ **已被 D0.6 取代**：D0.6 定「username 稳定、只轮换口令」；原文保留追溯）
 - **直连协议**（Modbus/OPC UA/TCP）：设备口令单份无法并存 → 新口令失败回退旧口令 + 告警计数。
 - `credential_ref` 不透明、本地解析、明文永不下发（spec §3.1⑤，M0b 前定死契约）。
 - 认证形态三选一（EMQX 内建/外部 HTTP/mTLS）见 spec §12.4(C)，M-2 选型落地（§14）。
@@ -480,7 +480,7 @@ business 变更台账（产品/设备/点位映射/凭据）
 
 | 键 | 值 | 说明 |
 |---|---|---|
-| `iot:latest:{tenantId}:{deviceId}:{propertyId}` | `{value, quality, ts}` | 最新值（影子 reported 的数据源之一） |
+| `iot:latest:{tenantId}:{deviceId}:{propertyId}` | `{value, quality, ts}` | 最新值（影子 reported 的数据源之一） |（⚠️ **已被 D0.7 取代**：改为 Hash `iot:latest:{tenant}:{device}`，field=点位，value=`{v,ts,q}`；原文保留追溯）
 | `iot:shadow:{tenantId}:{deviceId}` | `{reported, desired}` | 影子文档 |
 | 一致性 | 写入：IoTDB 落库成功后更新 Redis（先时序后最新值，允许最终一致窗口） | 读多写少，Redis 为准 |
 

@@ -241,6 +241,24 @@ services:
       ypbin-net:
         ipv4_address: 172.20.0.40
 
+  # ---------- IoT 前端（与管理台前端同一模式：nginx 静态托管 + /api 反代网关）----------
+  ypbin-iot-ui:
+    image: ${REGISTRY_PREFIX:-}nginx:alpine
+    container_name: ypbin-iot-ui
+    volumes:
+      # 前端静态产物目录（由 deploy/ui-up.sh 或 CI 产出；默认 ../iot-ui-dist）
+      - ${IOT_UI_DIST_DIR:-../iot-ui-dist}:/usr/share/nginx/html:ro
+      # 与 admin-ui 共用同一份 nginx 配置：SPA 回退 + /api/ → ypbin-gateway:18080
+      - ./nginx-microservice.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "${IOT_UI_PORT:-19001}:80"
+    depends_on:
+      - ypbin-gateway
+    restart: unless-stopped
+    networks:
+      ypbin-net:
+        ipv4_address: 172.20.0.41
+
 networks:
   ypbin-net:
     driver: bridge
