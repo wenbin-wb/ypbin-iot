@@ -712,7 +712,7 @@ SQL 文本门禁 + `executeIgnore` 源码门禁都钉住了这两条约束（`Av
 
 | 步骤 | 内容 | 依赖/验证 | 状态 |
 |---|---|---|---|
-| **① IoTDB 表模型** | 建库/建表（含 90 天 TTL，设计见 §5.2.1）+ `TimeSeriesWriter`（JDBC 批量、afterCommit、失败计数不抛）+ 历史查询 `GET /devices/{id}/series` + 容器 IT | 需 IoTDB 实例；本机可验 SQL/绑定/类型映射/降级，真库往返需容器 IT ⇒ **`enabled` 默认 false 直到 IT 就位** | ⏳ 设计已定，待实现 |
+| **① IoTDB 表模型** | 建库/建表（含 90 天 TTL，设计见 §5.2.1）+ `TimeSeriesWriter`（JDBC 批量、afterCommit、失败计数不抛）+ 历史查询 `GET /devices/{id}/series` + 容器 IT | 需 IoTDB 实例；本机可验 SQL/绑定/类型映射/降级，真库往返需容器 IT ⇒ **`enabled` 默认 false 直到 IT 就位** | 🟡 **契约/配置/降级实现/调用点已落地**（`ypbin.timeseries.*` 默认 false；`enabled=true` 且实现未就位时**启动拒绝**，不假装在写）；**JDBC 写入器 + 历史查询 + 容器 IT 待做** |
 | **② EMQX 入站** | EMQX 5.x（内置库认证 + REST provisioning，username 稳定只换口令）+ iot 侧共享订阅消费者；**HTTP 上报通道保留**为降级/自测路径 | 需 EMQX 实例；协议/主题/ACL 约定要写成文档 + 容器 IT | ⏳ 待开始 |
 | **③ M-3 控制面** | 命令下行 + 影子同步 + 在线调试（§6） | 依赖 ①② 的数据面稳定 | ⏳ 待开始 |
 

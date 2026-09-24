@@ -20,6 +20,9 @@ import cn.ypbin.admin.iot.availability.OutageReason;
 import cn.ypbin.admin.iot.availability.ReadingIngestReq;
 import cn.ypbin.admin.iot.availability.ReadingObservationDto;
 import cn.ypbin.admin.iot.entity.DeviceLiveness;
+import cn.ypbin.admin.iot.timeseries.TimeSeriesPoint;
+import cn.ypbin.admin.iot.timeseries.TimeSeriesProperties;
+import cn.ypbin.admin.iot.timeseries.TimeSeriesWriter;
 import cn.ypbin.admin.iot.values.LatestValue;
 import cn.ypbin.admin.iot.values.LatestValueWriter;
 import cn.ypbin.admin.iot.entity.IotDevice;
@@ -87,13 +90,20 @@ public class AvailabilityServiceImpl implements AvailabilityService {
      * 写失败只计数+日志，绝不让上报事务回滚（见 {@link cn.ypbin.admin.iot.values.LatestValueWriter}）。
      */
     private final LatestValueWriter latestValueWriter;
+
+    /** 时序写入器（IoTDB 表模型，§5.2.1）：与最新值同一时机写；未启用时是「WARN 一次并丢弃」的实现。 */
+    private final TimeSeriesWriter timeSeriesWriter;
+
+    /** 时序配置：只在启用时才收集点位（默认关闭时不产生额外分配）。 */
+    private final TimeSeriesProperties timeSeriesProperties;
     private final IotDeviceMapper deviceMapper;
     private final AvailabilityProperties properties;
 
     public AvailabilityServiceImpl(DeviceLivenessMapper livenessMapper, OutageEventMapper outageMapper,
                                    MaintenanceWindowMapper maintenanceWindowMapper,
                                    IotDeviceMapper deviceMapper, AvailabilityProperties properties,
-                                   TenantProvider tenantProvider, LatestValueWriter latestValueWriter) {
+                                   TenantProvider tenantProvider, LatestValueWriter latestValueWriter,
+                                   TimeSeriesWriter timeSeriesWriter, TimeSeriesProperties timeSeriesProperties) {
         this.livenessMapper = livenessMapper;
         this.outageMapper = outageMapper;
         this.maintenanceWindowMapper = maintenanceWindowMapper;
@@ -101,6 +111,8 @@ public class AvailabilityServiceImpl implements AvailabilityService {
         this.properties = properties;
         this.tenantProvider = tenantProvider;
         this.latestValueWriter = latestValueWriter;
+        this.timeSeriesWriter = timeSeriesWriter;
+        this.timeSeriesProperties = timeSeriesProperties;
     }
 
     @Override
@@ -128,7 +140,10 @@ public class AvailabilityServiceImpl implements AvailabilityService {
             DeviceReadingBatch batch = entry.getValue();
             processed += TenantContext.executeWithTenant(tenantId, () -> applyBatch(tenantId, deviceId, batch));
         }
-        writeLatestAfterCommit(latestValues);
+        // 时序（历史曲线）与最新值同一时机写：只有启用时才收集，避免默认关闭时的无谓分配
+        List<TimeSeriesPoint> seriesPoints = timeSeriesProperties.isEnabled()
+            ? collectSeriesPoints(items, tenantByDevice) : List.of();
+        writeDerivedAfterCommit(latestValues, seriesPoints);
         return processed;
     }
 
@@ -164,36 +179,84 @@ public class AvailabilityServiceImpl implements AvailabilityService {
     }
 
     /**
-     * 事务**提交后**再写最新值。
+     * 挑选「可写时序」的读数（纯计算）：与最新值同一判据（必须有设备/点位/值 + 已解析出租户）。
+     *
+     * @param items          原始上报项
+     * @param tenantByDevice 设备 → 租户
+     * @return 待写时序点（可能为空）
+     */
+    private static List<TimeSeriesPoint> collectSeriesPoints(List<ReadingObservationDto> items,
+                                                             Map<Long, Long> tenantByDevice) {
+        List<TimeSeriesPoint> points = new ArrayList<>();
+        for (ReadingObservationDto item : items) {
+            if (item == null || item.getDeviceId() == null || item.getTs() == null) {
+                continue;
+            }
+            String propertyId = item.getPropertyId();
+            String value = item.getValue();
+            if (propertyId == null || propertyId.isBlank() || value == null) {
+                continue;
+            }
+            Long tenantId = tenantByDevice.get(item.getDeviceId());
+            if (tenantId == null) {
+                continue;
+            }
+            points.add(new TimeSeriesPoint(tenantId, item.getDeviceId(), propertyId, value,
+                item.getQuality(), item.getTs()));
+        }
+        return points;
+    }
+
+    /**
+     * 事务**提交后**再写「派生数据」（最新值 + 时序）。
      *
      * <p>为什么不能直接写在事务里：Redis 不参与数据库事务，若本批因任何原因回滚，写在事务里的最新值
      * 却已经生效 ⇒ 出现"库里有断档记录、最新值却说设备正常"的不一致。注册 afterCommit 回调可以保证
      * 只有库侧真的成功才写；没有事务（如纯单测）时直接写——没有事务就没有回滚语义。</p>
      *
-     * @param values 待写最新值
+     * @param values       待写最新值
+     * @param seriesPoints 待写时序点
      */
-    private void writeLatestAfterCommit(List<LatestValue> values) {
-        if (values.isEmpty()) {
+    private void writeDerivedAfterCommit(List<LatestValue> values, List<TimeSeriesPoint> seriesPoints) {
+        if (values.isEmpty() && seriesPoints.isEmpty()) {
             return;
         }
         if (!TransactionSynchronizationManager.isSynchronizationActive()) {
-            latestValueWriter.writeAll(values);
+            writeDerived(values, seriesPoints);
             return;
         }
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
             public void afterCommit() {
-                try {
-                    latestValueWriter.writeAll(values);
-                } catch (RuntimeException ex) {
-                    // 兜底：写入器实现（Redis/日志）自己已经 catch+计数；但如果将来换了实现且它抛异常，
-                    // 在 afterCommit 里抛出会**逃逸到调用方**——库已提交、接口却报错，调用方会误判整批失败。
-                    // 这里只记录，不改变「上报已成功落库」的事实（最新值属便利数据）。
-                    log.error("[iot] 最新值写入器抛出异常（已忽略，不影响本批上报结果）：条数={}",
-                        LogSanitizer.sanitize(values.size()), ex);
-                }
+                writeDerived(values, seriesPoints);
             }
         });
+    }
+
+    /**
+     * 写派生数据（最新值 + 时序）：**各自兜底**——在 afterCommit 里抛异常会逃逸到调用方（库已提交、
+     * 接口却报错，调用方会误判整批失败），因此任一路失败都只记录，不改变「上报已成功落库」的事实。
+     *
+     * @param values       最新值
+     * @param seriesPoints 时序点
+     */
+    private void writeDerived(List<LatestValue> values, List<TimeSeriesPoint> seriesPoints) {
+        if (!values.isEmpty()) {
+            try {
+                latestValueWriter.writeAll(values);
+            } catch (RuntimeException ex) {
+                log.error("[iot] 最新值写入器抛出异常（已忽略，不影响本批上报结果）：条数={}",
+                    LogSanitizer.sanitize(values.size()), ex);
+            }
+        }
+        if (!seriesPoints.isEmpty()) {
+            try {
+                timeSeriesWriter.writeAll(seriesPoints);
+            } catch (RuntimeException ex) {
+                log.error("[iot] 时序写入器抛出异常（已忽略，历史曲线缺失但上报已落库）：条数={}",
+                    LogSanitizer.sanitize(seriesPoints.size()), ex);
+            }
+        }
     }
 
     @Override

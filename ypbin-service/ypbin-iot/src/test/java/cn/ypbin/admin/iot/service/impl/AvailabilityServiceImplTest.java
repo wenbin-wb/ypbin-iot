@@ -44,6 +44,9 @@ import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import cn.ypbin.admin.iot.timeseries.TimeSeriesPoint;
+import cn.ypbin.admin.iot.timeseries.TimeSeriesProperties;
+import cn.ypbin.admin.iot.timeseries.TimeSeriesWriter;
 import cn.ypbin.admin.iot.values.LatestValue;
 import cn.ypbin.admin.iot.values.LatestValueWriter;
 import java.util.List;
@@ -82,6 +85,11 @@ class AvailabilityServiceImplTest {
 
     /** 最新值写入器（Q8）：断言「带点位与值的读数才写」 */
     private LatestValueWriter latestValueWriter;
+
+    /** 时序写入器（§5.2.1）：默认关闭时不应被调用 */
+    private TimeSeriesWriter timeSeriesWriter;
+
+    private TimeSeriesProperties timeSeriesProperties;
     private IotDeviceMapper deviceMapper;
     private AvailabilityProperties properties;
     private AvailabilityServiceImpl service;
@@ -108,6 +116,8 @@ class AvailabilityServiceImplTest {
         maintenanceWindowMapper = mock(MaintenanceWindowMapper.class);
         tenantProvider = mock(TenantProvider.class);
         latestValueWriter = mock(LatestValueWriter.class);
+        timeSeriesWriter = mock(TimeSeriesWriter.class);
+        timeSeriesProperties = new TimeSeriesProperties();
         lenient().when(tenantProvider.getCurrentTenantId()).thenReturn(java.util.Optional.empty());
         // 默认无维护窗口（既有用例的口径不受影响）
         lenient().when(maintenanceWindowMapper.sumMaintenanceSecondsInWindow(anyLong(), anyLong(), any(),
@@ -119,7 +129,7 @@ class AvailabilityServiceImplTest {
         deviceMapper = mock(IotDeviceMapper.class);
         properties = new AvailabilityProperties();
         service = new AvailabilityServiceImpl(livenessMapper, outageMapper, maintenanceWindowMapper, deviceMapper,
-            properties, tenantProvider, latestValueWriter);
+            properties, tenantProvider, latestValueWriter, timeSeriesWriter, timeSeriesProperties);
         when(livenessMapper.selectNow()).thenReturn(T0.plusHours(10));
         when(deviceMapper.selectBatchIds(any())).thenReturn(List.of(device()));
     }
@@ -177,6 +187,49 @@ class AvailabilityServiceImplTest {
             TransactionSynchronizationManager.clearSynchronization();
         }
         verify(latestValueWriter).writeAll(any());
+    }
+
+    @Test
+    @DisplayName("★ §5.2.1：默认关闭（enabled=false）时**不得**收集/写入时序")
+    void mustNotWriteSeriesWhenDisabled() {
+        when(deviceMapper.selectBatchIds(any())).thenReturn(List.of(device()));
+        when(livenessMapper.selectList(any())).thenReturn(List.of());
+        ReadingObservationDto withPoint = new ReadingObservationDto();
+        withPoint.setDeviceId(DEVICE);
+        withPoint.setPropertyId("temperature");
+        withPoint.setValue("23.5");
+        withPoint.setQuality(AvailabilityRules.QUALITY_GOOD);
+        withPoint.setTs(1_700_000_000_000L);
+
+        service.ingest(req(withPoint));
+
+        verify(timeSeriesWriter, never()).writeAll(any());
+    }
+
+    @Test
+    @DisplayName("★ §5.2.1：启用时序时按批写点位（含租户/设备/点位/值/质量/时刻），且仍在提交后")
+    void mustWriteSeriesWhenEnabled() {
+        timeSeriesProperties.setEnabled(true);
+        when(deviceMapper.selectBatchIds(any())).thenReturn(List.of(device()));
+        when(livenessMapper.selectList(any())).thenReturn(List.of());
+        ReadingObservationDto withPoint = new ReadingObservationDto();
+        withPoint.setDeviceId(DEVICE);
+        withPoint.setPropertyId("temperature");
+        withPoint.setValue("23.5");
+        withPoint.setQuality(AvailabilityRules.QUALITY_GOOD);
+        withPoint.setTs(1_700_000_000_000L);
+
+        service.ingest(req(withPoint));
+
+        ArgumentCaptor<List<TimeSeriesPoint>> captor = ArgumentCaptor.forClass(List.class);
+        verify(timeSeriesWriter).writeAll(captor.capture());
+        assertThat(captor.getValue()).singleElement().satisfies(point -> {
+            assertThat(point.tenantId()).isEqualTo(TENANT);
+            assertThat(point.deviceId()).isEqualTo(DEVICE);
+            assertThat(point.propertyId()).isEqualTo("temperature");
+            assertThat(point.value()).isEqualTo("23.5");
+            assertThat(point.ts()).isEqualTo(1_700_000_000_000L);
+        });
     }
 
     @Test
