@@ -13,6 +13,7 @@ import cn.ypbin.admin.iot.entity.MaintenanceWindow;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import java.time.LocalDateTime;
 import java.util.List;
+import org.apache.ibatis.annotations.Delete;
 import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
@@ -29,6 +30,18 @@ import org.apache.ibatis.annotations.Update;
  * @since 2026-09-23
  */
 public interface MaintenanceWindowMapper extends BaseMapper<MaintenanceWindow> {
+
+    /**
+     * 删除开始时刻早于截止时刻的维护窗口（保留清理，D0.8）。
+     *
+     * <p>跨租户操作：调用方必须包 {@code TenantContext.executeIgnore}（理由同
+     * {@code OutageEventMapper#deleteStartedBefore}）。</p>
+     *
+     * @param cutoff 截止时刻（数据库时钟算出）
+     * @return 删除行数
+     */
+    @Delete("DELETE FROM maintenance_window WHERE start_ts < #{cutoff,jdbcType=TIMESTAMP}")
+    int deleteStartedBefore(@Param("cutoff") LocalDateTime cutoff);
 
     /**
      * 数据库当前时间（维护窗口的时间基准：与断档/可用率的比较必须同源）。

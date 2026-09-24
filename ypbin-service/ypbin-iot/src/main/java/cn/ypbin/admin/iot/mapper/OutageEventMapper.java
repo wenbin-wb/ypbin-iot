@@ -13,6 +13,7 @@ import cn.ypbin.admin.iot.entity.OutageEvent;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import java.time.LocalDateTime;
 import java.util.Map;
+import org.apache.ibatis.annotations.Delete;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
@@ -27,6 +28,18 @@ import org.apache.ibatis.annotations.Update;
  * @since 2026-09-22
  */
 public interface OutageEventMapper extends BaseMapper<OutageEvent> {
+
+    /**
+     * 删除开始时刻早于截止时刻的断档事件（保留清理，D0.8）。
+     *
+     * <p>跨租户操作：调用方必须包 {@code TenantContext.executeIgnore}（清理没有租户身份，
+     * 租户表在无上下文时会被插件 fail-closed 拒绝）。单条语句完成，不在循环里做数据库调用。</p>
+     *
+     * @param cutoff 截止时刻（数据库时钟算出）
+     * @return 删除行数
+     */
+    @Delete("DELETE FROM outage_event WHERE start_ts < #{cutoff,jdbcType=TIMESTAMP}")
+    int deleteStartedBefore(@Param("cutoff") LocalDateTime cutoff);
 
     /**
      * 闭合一条进行中的断档。
