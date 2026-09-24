@@ -10,6 +10,7 @@
 package cn.ypbin.admin.iot.availability;
 
 import java.time.LocalDateTime;
+import jakarta.validation.constraints.Size;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -36,5 +37,6 @@ public class MaintenanceWindowReq {
     private LocalDateTime endTs;
 
     /** 说明。 */
+    @Size(max = 255, message = "说明最长 255 字符")
     private String reason;
 }
