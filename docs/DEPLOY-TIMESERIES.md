@@ -26,10 +26,17 @@
    （本机下载 Central 制品 + `zipfile` 核验：jar 105258 字节，`META-INF/services` 条目 **0 个**，
    `org/apache/iotdb/jdbc/IoTDBDriver.class` 存在、只有 `OSGI-INF`）⇒ **JDBC 4 的 SPI 自动注册不会发生**，
    必须由代码显式 `Class.forName("org.apache.iotdb.jdbc.IoTDBDriver")`（官方 JDBC 示例正是这么写的）。
-   平台侧做这件事的是 `IotDbDriverRegistrar.ensureRegistered()`（在启动自检里先注册再 `DriverManager.getDriver`）。
+   平台侧需要显式注册（本分支的修复以 `IotDbDriverRegistrar.ensureRegistered()` 的形式引入，
+   在启动自检里先注册再 `DriverManager.getDriver`）。
    **没有它，`enabled: true` 会让 `ypbin-iot` 启动即失败**（`DriverManager.getDriver` 抛 SQLException →
-   `IotTimeSeriesConfiguration` 抛 IllegalStateException）。部署前请确认该注册代码在你要部署的提交里；
-   若不在，先把 `ypbin.timeseries.enabled` 改回 `false`。
+   `IotTimeSeriesConfiguration` 抛 IllegalStateException）。⚠️ 因此部署前**必须核对注册代码在你要部署的提交里**（下面这条命令**输出必须非空**，才可带 `enabled: true` 上线）；
+   若在那个提交上 grep 为空（也就没有上述类），请先把 `ypbin.timeseries.enabled` 改回 `false`，否则服务起不来：
+
+   ```bash
+   # 合并/部署前的硬检查：非空 = 注册代码在；空 = 不要按 enabled=true 部署
+   # ⚠️ 必须显式指定「要部署的那个提交」，别查工作树：工作树里可能正躺着未提交的修复（会假通过）
+   git grep -n "Class.forName\|ensureRegistered" <要部署的提交SHA> -- ypbin-service/ypbin-iot
+   ```
 
 ## 1. 组件与端口
 
