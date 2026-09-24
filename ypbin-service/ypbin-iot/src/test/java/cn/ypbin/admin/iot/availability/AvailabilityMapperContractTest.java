@@ -190,9 +190,9 @@ class AvailabilityMapperContractTest {
     @DisplayName("★ D0.8：保留清理的跨租户调用必须包在 executeIgnore 里（无租户上下文的定时任务）")
     void retentionCallsMustBeWrappedInExecuteIgnore() throws IOException {
         // 依据（复核实测）：去掉包裹后 5 例单测仍全绿 ⇒ 需要源码级门禁兜住这个关键安全属性
-        String source = Files.readString(REPO_ROOT.resolve(
+        String source = stripComments(Files.readString(REPO_ROOT.resolve(
             "ypbin-service/ypbin-iot/src/main/java/cn/ypbin/admin/iot/retention"
-                + "/RetentionCleanupServiceImpl.java"), StandardCharsets.UTF_8);
+                + "/RetentionCleanupServiceImpl.java"), StandardCharsets.UTF_8));
         for (String call : List.of("outageEventMapper.deleteStartedBefore",
                 "maintenanceWindowMapper.deleteStartedBefore")) {
             int index = source.indexOf(call);
