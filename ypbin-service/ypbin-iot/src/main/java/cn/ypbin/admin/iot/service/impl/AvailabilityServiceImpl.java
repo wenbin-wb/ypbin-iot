@@ -183,7 +183,15 @@ public class AvailabilityServiceImpl implements AvailabilityService {
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
             public void afterCommit() {
-                latestValueWriter.writeAll(values);
+                try {
+                    latestValueWriter.writeAll(values);
+                } catch (RuntimeException ex) {
+                    // 兜底：写入器实现（Redis/日志）自己已经 catch+计数；但如果将来换了实现且它抛异常，
+                    // 在 afterCommit 里抛出会**逃逸到调用方**——库已提交、接口却报错，调用方会误判整批失败。
+                    // 这里只记录，不改变「上报已成功落库」的事实（最新值属便利数据）。
+                    log.error("[iot] 最新值写入器抛出异常（已忽略，不影响本批上报结果）：条数={}",
+                        LogSanitizer.sanitize(values.size()), ex);
+                }
             }
         });
     }

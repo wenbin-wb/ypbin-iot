@@ -11,6 +11,7 @@ package cn.ypbin.admin.iot.availability;
 
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Size;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -32,6 +33,9 @@ import lombok.Setter;
 @Getter
 @Setter
 public class ReadingObservationDto {
+
+    /** 读数值的最大长度（防单条超大值灌进最新值存储与日志；协议原值字符串化后不应超过这个量级）。 */
+    public static final int MAX_VALUE_LENGTH = 4096;
 
     /** 设备 ID（iot_device.id）。 */
     @NotNull(message = "设备 ID 不能为空")
@@ -60,6 +64,8 @@ public class ReadingObservationDto {
      * <p>为什么用字符串：协议栈的值类型多样（数值/布尔/字符串/字节数组），在上报契约里做窄化会丢信息；
      * 存储层按物模型定义解析。空值合法（表示该点本次无值）。</p>
      */
+    @Size(max = ReadingObservationDto.MAX_VALUE_LENGTH,
+        message = "读数值过长（超过 " + ReadingObservationDto.MAX_VALUE_LENGTH + " 字符）")
     private String value;
 
     /** 质量码（与协议栈 Quality 的 name 对齐：GOOD | UNCERTAIN | BAD | STALE | NOT_CONNECTED | CONFIG_ERROR）。 */

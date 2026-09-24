@@ -23,9 +23,11 @@ import org.springframework.data.redis.core.StringRedisTemplate;
  * <p>装配规则：有 {@link StringRedisTemplate} ⇒ {@link RedisLatestValueWriter}；
  * 没有 ⇒ {@link LoggingLatestValueWriter}（WARN 暴露，不静默）。</p>
  *
- * <p>⚠️ 这里用 `@Bean` + `ObjectProvider` 而不是把实现类标 `@Component`：本仓教训三十一——
- * 「可替换」只有在装配层做才成立，实现类加 `@Component` 会让宿主再定义自己的实现时直接
- * `NoUniqueBeanDefinitionException`。</p>
+ * <p>⚠️ 这里用 `@Bean` + `ObjectProvider` 而不是把实现类标 `@Component`：**防的是「实现类被双装配」**
+ * （既当组件扫进来、又在装配层再定义一次）。注意：**本类不是自动配置**（没有
+ * `@ConditionalOnMissingBean`），因此**不承诺宿主可替换**——宿主自行定义 `LatestValueWriter`
+ * 会与本 bean 冲突（`NoUniqueBeanDefinitionException`）；真要做成可替换，需要升级为
+ * `@AutoConfiguration` + `@ConditionalOnMissingBean`（见本仓教训三十一的完整条件）。</p>
  *
  * @author wenbin
  * @since 2026-09-24

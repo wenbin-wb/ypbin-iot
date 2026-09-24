@@ -67,6 +67,23 @@ class RedisLatestValueWriterTest {
     }
 
     @Test
+    @DisplayName("★ 批内按 ts 取新：无论到达顺序，落库的都是读数时刻最新的那条")
+    void mustKeepNewestWithinBatch() {
+        stubHash();
+        // 先旧后新 / 先新后旧 两种顺序都必须只剩 ts=2000
+        writer.writeAll(List.of(value(1_000L, "OLD"), value(2_000L, "NEW")));
+        writer.writeAll(List.of(value(3_000L, "OLD3"), value(2_500L, "NEW3")));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<Object, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(hashOperations, org.mockito.Mockito.times(2)).putAll(anyString(), captor.capture());
+        assertThat(String.valueOf(captor.getAllValues().get(0).get("temperature")))
+            .contains("\"v\":\"NEW\"");
+        assertThat(String.valueOf(captor.getAllValues().get(1).get("temperature")))
+            .contains("\"v\":\"OLD3\"").contains("\"ts\":3000");
+    }
+
+    @Test
     @DisplayName("★ 空批次直接返回（不做任何 Redis 调用）")
     void mustShortCircuitEmptyBatch() {
         writer.writeAll(List.of());
