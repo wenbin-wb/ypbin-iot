@@ -34,13 +34,18 @@ public interface MaintenanceWindowMapper extends BaseMapper<MaintenanceWindow> {
     /**
      * 删除开始时刻早于截止时刻的维护窗口（保留清理，D0.8）。
      *
+     * <p><b>只删已闭合的行</b>（{@code end_ts IS NOT NULL}）：进行中的维护窗口若被删，等价于
+     * 「悄悄结束维护」——之后 {@code close(id)} 只会返回 0 行，运维以为关了其实记录已不存在；
+     * 同时可用率分母会突然变大（方向偏严但仍属语义漂移）。</p>
+     *
      * <p>跨租户操作：调用方必须包 {@code TenantContext.executeIgnore}（理由同
      * {@code OutageEventMapper#deleteStartedBefore}）。</p>
      *
      * @param cutoff 截止时刻（数据库时钟算出）
      * @return 删除行数
      */
-    @Delete("DELETE FROM maintenance_window WHERE start_ts < #{cutoff,jdbcType=TIMESTAMP}")
+    @Delete("DELETE FROM maintenance_window WHERE start_ts < #{cutoff,jdbcType=TIMESTAMP} "
+        + "AND end_ts IS NOT NULL")
     int deleteStartedBefore(@Param("cutoff") LocalDateTime cutoff);
 
     /**

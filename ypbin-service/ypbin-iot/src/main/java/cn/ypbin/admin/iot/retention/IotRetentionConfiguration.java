@@ -57,6 +57,9 @@ public class IotRetentionConfiguration implements InitializingBean {
         if (properties.getCleanupIntervalMs() <= 0) {
             throw new IllegalStateException(RetentionProperties.PREFIX + ".cleanup-interval-ms 必须为正数");
         }
+        if (properties.getInitialDelayMs() < 0) {
+            throw new IllegalStateException(RetentionProperties.PREFIX + ".initial-delay-ms 不能为负数");
+        }
         log.info("[iot] 保留清理已启用：断档事件 {} 天、维护窗口 {} 天，每 {} ms 清理一次",
             properties.getOutageEventDays(), properties.getMaintenanceWindowDays(),
             properties.getCleanupIntervalMs());

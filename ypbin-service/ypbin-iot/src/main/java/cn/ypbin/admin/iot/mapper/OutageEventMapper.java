@@ -32,13 +32,19 @@ public interface OutageEventMapper extends BaseMapper<OutageEvent> {
     /**
      * 删除开始时刻早于截止时刻的断档事件（保留清理，D0.8）。
      *
+     * <p><b>只删已闭合的行</b>（{@code end_ts IS NOT NULL}）：进行中的断档是可用率报表的**活数据**
+     * ——一条 {@code start_ts} 早已越过保留期、但至今未闭合的断档（设备长期离线/已废弃）若被删掉，
+     * 该设备在窗口内的断档时长会归零、可用率显示 100% 且判达标（**fail-open**）。
+     * 进行中的行每设备至多一条，留着不影响保留目标。</p>
+     *
      * <p>跨租户操作：调用方必须包 {@code TenantContext.executeIgnore}（清理没有租户身份，
      * 租户表在无上下文时会被插件 fail-closed 拒绝）。单条语句完成，不在循环里做数据库调用。</p>
      *
      * @param cutoff 截止时刻（数据库时钟算出）
      * @return 删除行数
      */
-    @Delete("DELETE FROM outage_event WHERE start_ts < #{cutoff,jdbcType=TIMESTAMP}")
+    @Delete("DELETE FROM outage_event WHERE start_ts < #{cutoff,jdbcType=TIMESTAMP} "
+        + "AND end_ts IS NOT NULL")
     int deleteStartedBefore(@Param("cutoff") LocalDateTime cutoff);
 
     /**
