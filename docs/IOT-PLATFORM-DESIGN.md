@@ -498,7 +498,7 @@ CREATE TABLE reading (
 );
 ```
 
-**类型映射（写入前由服务端按物模型属性类型决定写哪一列）**：数值（INT/LONG/FLOAT/DOUBLE）→ `value_double`
+**类型映射（先按值的词法形态判定，物模型类型覆盖为后续增量）**：数值（INT/LONG/FLOAT/DOUBLE）→ `value_double`
 （LONG 超 2^53 会丢精度 ⇒ 文档标注：此类点位改用 `value_text`，由物模型类型决定，服务端不猜）；
 布尔/字符串/枚举/JSON/字节数组（hex）→ `value_text`。**永不双写两列**（查询侧按列是否非空取值，避免"哪个才是真值"）。
 
