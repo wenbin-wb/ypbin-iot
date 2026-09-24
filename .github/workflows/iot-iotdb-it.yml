@@ -1,0 +1,99 @@
+name: IoT IoTDB Integration Tests
+
+# 为什么单独一个工作流（而不是改 ci.yml）：本仓继承来的 ci.yml 是 **DB-free** 的 `mvn -B clean verify`，
+# 承载不了「需要真实 IoTDB 实例」的验证；而 §5.2.1 的验证计划里，「真库写入-查询往返 / 同刻重写 /
+# 表级 TTL / sql_dialect=table 兼容性」明确是**只能靠容器 IT 证明**的部分（本机跑不了 IoTDB）。
+#
+# 镜像：`apache/iotdb:2.0.11-standalone`（有一手来源，访问 2026-09-24）
+#   - 命名规约 `apache/iotdb:<version>-standalone`：官方 docker/ReadMe.md（"From 2.0.5, we maintain 4
+#     images: datanode, confignode, standalone and ainode"）+ 官方 Docker Deployment 页；
+#   - 具体 tag 2.0.11-standalone：官方 Docker Hub 仓库元数据返回该 tag（amd64+arm64，2026-09-14 推送），
+#     且官方 Download 页当前最新 release 为 2.0.11；本仓 JDBC 驱动固定在 2.0.1-beta，官方明确
+#     「不要用更新的客户端连更旧的服务端」⇒ 服务端不得比驱动更旧，2.0.11 满足。
+#   ⚠️ 容器由 IT 内的 Testcontainers 拉起（runner 自带 Docker）；这里显式传镜像名是为了让版本可见、
+#      升级时只改一处（IT 侧的默认值同样指向该 tag）。
+#
+# ⚠️ 关键防假绿：IT 用 @EnabledIfIotDbAvailable，IoTDB 不可用时**跳过**。跳过 == 没测，
+#    所以下面有一步专门断言「报告存在 + 执行条数 ≥1 + 无跳过」，否则整条工作流转红。
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: ['feat/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  iotdb-integration:
+    name: 集成测试（-Pit，真 IoTDB 容器）
+    runs-on: ubuntu-latest
+    env:
+      # 与 IotDbIntegrationTestSupport.DEFAULT_IOTDB_IMAGE 保持一致（tag 的一手来源见文件头注释）
+      YPBIN_TEST_IOTDB_IMAGE: apache/iotdb:2.0.11-standalone
+    steps:
+      - name: 检出 ypbin-iot 代码
+        uses: actions/checkout@v7
+
+      - name: 配置 JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: 读取本仓要求的 starter 版本
+        id: starter_version
+        run: |
+          set -euo pipefail
+          version="$(grep -oP '(?<=<ypbin-starter.version>)[^<]+' pom.xml)"
+          echo "本仓依赖 starter ${version}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      # 必须按 **tag** 取源而不能用 master：集成测试要用的 ypbin-starter-test 模块未发布到远程仓库
+      # （Central 只有 pom、无 jar），只能从与 ypbin-starter.version 同版本的 tag 源码本地安装获得。
+      - name: 检出 ypbin-starter（tag v${{ steps.starter_version.outputs.version }}）
+        uses: actions/checkout@v7
+        with:
+          repository: wenbin-wb/ypbin-starter
+          ref: v${{ steps.starter_version.outputs.version }}
+          path: ypbin-starter
+
+      - name: 本地安装 ypbin-starter（含未发布的 ypbin-starter-test）
+        run: mvn -B clean install -DskipTests -Djacoco.skip=true
+        working-directory: ypbin-starter
+
+      # 只跑 ypbin-iot 及其依赖的 IT；Testcontainers 用 runner 自带 Docker 拉起官方 IoTDB 镜像
+      - name: 执行集成测试（-Pit；Testcontainers 用 runner 自带 Docker）
+        run: mvn -B -Pit -pl ypbin-service/ypbin-iot -am verify -Dsurefire.skip=true
+
+      # 防假绿：@EnabledIfIotDbAvailable 在 IoTDB 不可用时跳过，必须显式断言「真的执行了」
+      - name: 断言 IoTDB 集成测试真的执行了（防静默跳过造成假绿）
+        run: |
+          set -euo pipefail
+          report="ypbin-service/ypbin-iot/target/failsafe-reports/cn.ypbin.admin.iot.it.IotDbTimeSeriesIT.txt"
+          if [ ! -f "$report" ]; then
+            echo "::error::未生成集成测试报告 $report ⇒ 集成测试没有执行（假绿）"
+            exit 1
+          fi
+          echo "--- $report ---"
+          cat "$report"
+          if grep -Eq "Skipped: [1-9]" "$report"; then
+            echo "::error::集成测试被跳过（IoTDB 容器不可用）——跳过等于没测，不得以跳过收场"
+            exit 1
+          fi
+          total="$(grep -oP 'Tests run: \K[0-9]+' "$report" | head -1)"
+          if [ -z "$total" ] || [ "$total" -lt 1 ]; then
+            echo "::error::集成测试执行条数为 0"
+            exit 1
+          fi
+          echo "OK：IoTDB 集成测试执行 ${total} 条，无跳过"
+
+      - name: 上传集成测试报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iot-iotdb-failsafe-reports
+          path: ypbin-service/ypbin-iot/target/failsafe-reports/
+          if-no-files-found: warn
