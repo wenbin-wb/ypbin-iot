@@ -54,10 +54,35 @@ class ReadingValueMapperTest {
     }
 
     @Test
+    @DisplayName("★ 边界：Long.MIN_VALUE 不得走数值列（Math.abs 溢出会误判）；全角数字/前导零走文本列")
+    void mustHandleBoundaryForms() {
+        assertThat(ReadingValueMapper.map(String.valueOf(Long.MIN_VALUE)).column())
+            .as("Long.MIN_VALUE 的 Math.abs 仍为负 ⇒ 必须靠区间判定，否则会静默丢精度")
+            .isEqualTo(ReadingValueMapper.COLUMN_TEXT);
+        assertThat(ReadingValueMapper.map(String.valueOf(Long.MAX_VALUE)).column())
+            .isEqualTo(ReadingValueMapper.COLUMN_TEXT);
+        assertThat(ReadingValueMapper.map("１２３").column())
+            .as("全角数字不是协议侧形态（且与数值解析口径不一致）⇒ 文本列")
+            .isEqualTo(ReadingValueMapper.COLUMN_TEXT);
+        assertThat(ReadingValueMapper.map("007").column())
+            .as("前导零整数通常是编码/序列号 ⇒ 文本列，不丢形态").isEqualTo(ReadingValueMapper.COLUMN_TEXT);
+        assertThat(ReadingValueMapper.map("0").numeric()).as("单个 0 是正常数值").isTrue();
+    }
+
+    @Test
+    @DisplayName("★ 文本行的 numericValue 必须是 null（防止下一段 JDBC 写入器把 0.0 写进数值列）")
+    void textRowsMustHaveNullNumericValue() {
+        assertThat(ReadingValueMapper.map("GOOD").numericValue()).isNull();
+        assertThat(ReadingValueMapper.map("007").numericValue()).isNull();
+        assertThat(ReadingValueMapper.map("23").numericValue()).isEqualTo(23d);
+    }
+
+    @Test
     @DisplayName("空串落文本列（不猜 0）；文本列保留原值")
     void mustNotGuessForBlank() {
         assertThat(ReadingValueMapper.map("").column()).isEqualTo(ReadingValueMapper.COLUMN_TEXT);
         assertThat(ReadingValueMapper.map("").text()).isEmpty();
         assertThat(ReadingValueMapper.map(" meter-01 ").text()).isEqualTo("meter-01");
+        assertThat(ReadingValueMapper.map("   ").text()).as("空白串返回 trim 后的值（与其它文本分支一致）").isEmpty();
     }
 }
