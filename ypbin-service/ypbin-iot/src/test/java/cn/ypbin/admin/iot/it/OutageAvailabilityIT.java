@@ -30,6 +30,8 @@ import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
 import cn.ypbin.admin.iot.mapper.OutageEventMapper;
 import cn.ypbin.admin.iot.service.impl.AvailabilityServiceImpl;
+import cn.ypbin.admin.iot.timeseries.TimeSeriesPoint;
+import cn.ypbin.admin.iot.timeseries.TimeSeriesProperties;
 import cn.ypbin.admin.iot.values.LatestValue;
 import cn.ypbin.starter.tenant.core.TenantContext;
 import cn.ypbin.starter.tenant.handler.DefaultTenantLineHandler;
@@ -96,6 +98,10 @@ class OutageAvailabilityIT {
     private static AvailabilityServiceImpl service;
 
     /** 记录最新值写入（Q8）：IT 环境没有 Redis，但能证明「上报 → 提交后写最新值」的值是对的 */
+    /** 记录时序写入（§5.2.1）：IT 环境没有 IoTDB，但能证明「启用后确实按批把点位写到这里」。 */
+    private static final List<TimeSeriesPoint> RECORDED_SERIES =
+        java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+
     private static final List<LatestValue> RECORDED_LATEST =
         java.util.Collections.synchronizedList(new java.util.ArrayList<>());
 
@@ -140,7 +146,7 @@ class OutageAvailabilityIT {
         // IT 里显式给「固定租户」的 provider：等价于真实请求经 IdentityContext 解析出的租户
         service = new AvailabilityServiceImpl(livenessMapper, outageMapper, maintenanceWindowMapper,
             deviceMapper, new AvailabilityProperties(), () -> java.util.Optional.of(TENANT),
-            RECORDED_LATEST::addAll);
+            RECORDED_LATEST::addAll, RECORDED_SERIES::addAll, new TimeSeriesProperties());
         cleanup();
         seedDevices();
     }
@@ -282,7 +288,7 @@ class OutageAvailabilityIT {
         oneByOne.setScanBatchSize(1);
         AvailabilityServiceImpl tightScan = new AvailabilityServiceImpl(livenessMapper, outageMapper,
             maintenanceWindowMapper, deviceMapper, oneByOne, () -> java.util.Optional.of(TENANT),
-            RECORDED_LATEST::addAll);
+            RECORDED_LATEST::addAll, RECORDED_SERIES::addAll, new TimeSeriesProperties());
         // 两个「设备不存在」的垃圾活性行（id 更小 ⇒ 优先被候选查询选中）+ 一个真断档设备
         insertOrphanLiveness(1L, 999_998L, dbNow.minusHours(1));
         insertOrphanLiveness(2L, 999_999L, dbNow.minusHours(1));

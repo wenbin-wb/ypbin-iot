@@ -706,6 +706,19 @@ SQL 文本门禁 + `executeIgnore` 源码门禁都钉住了这两条约束（`Av
 **未做**：IoTDB 原始时序的保留（表模型 TTL，需 IoTDB 实例）；保留策略的运维开关（手工触发端点）与
 「清理前置快照/审计」——都留给数据面后续增量。
 
+### 四点二十、数据面收口计划（D0.6/D0.7/D0.8 剩余部分，2026-09-24 排定）
+
+外委复核已关闭、反哺闭环（starter 3.5.0）完成，接下来按此顺序推进**数据面剩余部分**：
+
+| 步骤 | 内容 | 依赖/验证 | 状态 |
+|---|---|---|---|
+| **① IoTDB 表模型** | 建库/建表（含 90 天 TTL，设计见 §5.2.1）+ `TimeSeriesWriter`（JDBC 批量、afterCommit、失败计数不抛）+ 历史查询 `GET /devices/{id}/series` + 容器 IT | 需 IoTDB 实例；本机可验 SQL/绑定/类型映射/降级，真库往返需容器 IT ⇒ **`enabled` 默认 false 直到 IT 就位** | 🟡 **契约/配置/降级实现/调用点已落地**（`ypbin.timeseries.*` 默认 false；`enabled=true` 且实现未就位时**启动拒绝**，不假装在写）；**JDBC 写入器 + 历史查询 + 容器 IT 待做** |
+| **② EMQX 入站** | EMQX 5.x（内置库认证 + REST provisioning，username 稳定只换口令）+ iot 侧共享订阅消费者；**HTTP 上报通道保留**为降级/自测路径 | 需 EMQX 实例；协议/主题/ACL 约定要写成文档 + 容器 IT | ⏳ 待开始 |
+| **③ M-3 控制面** | 命令下行 + 影子同步 + 在线调试（§6） | 依赖 ①② 的数据面稳定 | ⏳ 待开始 |
+
+**纪律不变**：每步按 R6 外委复核后合并；不改继承来的 `ci.yml`（新增 workflow 文件，见四点十八 UP-1）；
+本机不跑容器 IT，真库结论以 CI 为准并如实标注。
+
 ### 五、替换缝（3a 已备好，3b-2 只需新增自动配置）
 3a 的 `LoggingTenantLinkManager` 已去掉 `@Component`，由 `AccessLeaseConfiguration`（`@AutoConfiguration`
 + `@Bean @ConditionalOnMissingBean`）装配，并有源码门禁守着（四处变异全咬）。⇒ 3b-2 提供真实现时

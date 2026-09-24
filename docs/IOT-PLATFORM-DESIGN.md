@@ -476,6 +476,62 @@ business 变更台账（产品/设备/点位映射/凭据）
 
 **未能核实（不得当既定事实）**：单节点名长度上限；database 数量硬上限；Linux 下路径是否保留大小写；乱序代价的量化数据；树模型**运行时**是否真的拒绝裸 `MAX`/`MIN`；官方两个函数参考页（`Function-and-Expression.md` 与 `Operator-and-Expression.md`）聚合表**互相矛盾**（两者均无 MAX/MIN，故核心结论不受影响）；表模型 `SUM` 是否在官方函数表；`insertTablet` 是否最快。
 
+### 5.2.1 IoTDB **表模型**落地设计（D0.7 实施依据，2026-09-24）
+
+> 选型见 §0 D0.7：**表模型为主**（`sql_dialect=table`），必要时用 tree-to-table view 兼容树路径。
+> 本节把「怎么建表、怎么写、怎么查、怎么保留」定死，避免实现时再发明。
+
+**① 库与表（一个库 + 一张测量表；多租户用 TAG 而不是分库分表）**
+
+```sql
+-- 建库时设定保留期（表模型**不支持改库级 TTL**：调整保留期要重建库或逐表改，见 §5.2 已核实项）
+CREATE DATABASE iot WITH TTL '90d';           -- D0.8：原始时序保留 90 天
+USE iot;
+CREATE TABLE reading (
+    tenant_id   STRING TAG,                    -- 租户（与平台租户同源，便于按租户清理/限流）
+    device_id   STRING TAG,                    -- 设备（文本形态，避免跨系统大整数语义差异）
+    property_id STRING TAG,                    -- 点位（物模型属性/事件字段）
+    ts          TIMESTAMP TIME,                -- 读数时刻（协议侧 epoch 毫秒 → IoTDB TIMESTAMP）
+    value_double DOUBLE FIELD,                 -- 数值型读数
+    value_text   STRING FIELD,                 -- 文本/布尔/JSON 型读数（布尔写 'true'/'false'）
+    quality      STRING FIELD                  -- 质量码（与断档口径同一套：GOOD/…）
+);
+```
+
+**类型映射（先按值的词法形态判定，物模型类型覆盖为后续增量）**：数值（INT/LONG/FLOAT/DOUBLE）→ `value_double`
+（LONG 超 2^53 会丢精度 ⇒ 文档标注：此类点位改用 `value_text`，由物模型类型决定，服务端不猜）；
+布尔/字符串/枚举/JSON/字节数组（hex）→ `value_text`。**永不双写两列**（查询侧按列是否非空取值，避免"哪个才是真值"）。
+
+**② 写入路径**：与最新值同一时机——`ingest` **事务提交后**（`afterCommit`）批量写；一批一次
+PreparedStatement 批量提交（`addBatch/executeBatch`，单次外部调用、不在循环里做 IO）；失败**计数 + error 日志**
+（带堆栈）且**不回滚上报事务**；批量大小可配（`ypbin.timeseries.batch-size`，默认 500）。
+未配置 `ypbin.timeseries.url` 时用「只记一条 WARN 后丢弃」的降级实现（与最新值同一取向：便利数据不静默，也不拖垮上报）。
+
+**③ 查询路径（历史曲线/报表）**：`GET /iot/devices/{deviceId}/series?propertyId=&from=&to=&limit=`
+（管理面，权限码 `iot:series:get`）⇒ 走 JDBC 查询（TAG 过滤 + 时间范围 + 按 `ts` 升序 + `LIMIT` 上限保护），
+返回 `[{ts, value, quality}]`；数值列与文本列合并为统一的 `value` 字符串（与上报契约一致，前端不再判类型）。
+**分页口径**：默认按时间倒序取最近 N 条（N 上限可配），不做跨页聚合（聚合属于后续 M-4 的规则/报表能力）。
+
+**④ 保留与运维（D0.8）**：原始时序 90 天由**建库/建表时的 TTL** 承担；调整保留期=重建库或逐表改
+（表模型限制，已核实）⇒ 部署文档要写明「改保留期是一次迁移动作，不是热配置」。清理副作用（TTL 过期是异步删除）
+要在监控里看（写失败/查询失败/表大小）。
+
+**类型映射的两条限制（登记）**：① **前导零整数**（如 `007`）与**全角数字**按文本列处理——前者是编码/序列号，
+落数值列会丢形态；后者不是协议侧的数据形态，且与数值解析路径口径不一致（实现只认 ASCII `0-9`）；
+② **物模型类型覆盖**（类型判定与词法形态冲突时以物模型为准）仍待后续增量——届时需先解决"写入热路径不逐批查库"
+（例如按产品维度缓存物模型类型）。
+
+**未能核实（不得当既定事实）**：IoTDB 表模型对「同一 (设备,点位,时间戳) 重复写入」的确切语义
+（覆盖/拒绝/保留先到）**未取得一手来源**（官方站点在本环境不可达）。写入器因此**不做**批内去重，
+由容器 IT 落地时用真库确认并回填本节；在上述语义确认前，`enabled` 保持 false。
+
+**⑤ 验证计划（本机无法跑 IoTDB，必须如实分层）**
+- **本机可验证**：SQL 与参数绑定（mock `Connection/PreparedStatement` 捕获语句与绑定值）、类型映射规则、
+  批量与失败语义（计数 + 不抛）、降级实现、查询参数校验与上限保护；
+- **需要实例/容器**：真库写入-查询往返、TTL 生效、`sql_dialect=table` 兼容性。**落地时必须补一个容器 IT**
+  （CI 已有 MySQL 容器脚手架可复用；新增 workflow 文件而不是改继承来的 `ci.yml`——见四点十八 UP-1）；
+- 未补容器 IT 前，`ypbin.timeseries.enabled` **默认 false**（不能把未验证的写入路径默认打开）。
+
 ### 5.3 最新值（Redis）
 
 | 键 | 值 | 说明 |
