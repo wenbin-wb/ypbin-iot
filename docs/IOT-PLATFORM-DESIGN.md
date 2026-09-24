@@ -512,8 +512,11 @@ CREATE TABLE reading (
 - 连接：`jdbc:iotdb://<host>:6667/iot?sql_dialect=table`（表模型**必须**带 `sql_dialect=table`；
   ⚠️ **URL 必须带库名 `/iot`**：写入器与查询用的是**非限定表名**且**不发 `USE`**，少库名会直接报
   `701: database is not specified`——官方
-  [Authority Management](https://iotdb.incubator.apache.org/UserGuide/latest-Table/User-Manual/Authority-Management-Upgrade_apache.html)
-  示例的错误输出就是这一条；带库名的 URL 形式同 [JDBC 示例](https://iotdb.incubator.apache.org/UserGuide/latest-Table/API/Programming-JDBC_apache.html)
+  [Authority Management（Before V2.0.7）](https://iotdb.incubator.apache.org/UserGuide/latest-Table/User-Manual/Authority-Management_apache.html)
+  §5.2 示例的错误输出就是这一条（⚠️ 该串出自 ≤2.0.7 版本文档，2.0.11 上的确切报文未实测；结论本身另有两条一手支撑：
+  [Database Management §1.1/§2.2](https://iotdb.incubator.apache.org/UserGuide/latest-Table/Basic-Concept/Database-Management_apache.html)
+  「未 `USE` 时表操作按当前库解析」+ JDBC 示例的带库名写法）；
+  带库名的 URL 形式同 [JDBC 示例](https://iotdb.incubator.apache.org/UserGuide/latest-Table/API/Programming-JDBC_apache.html)
   的 `jdbc:iotdb://127.0.0.1:6667/test1?sql_dialect=table`。⚠️ 不要把库名并进 `table-name`：
   表名有**白名单**（只允许字母/数字/下划线，防 SQL 注入），`iot.reading` 这类带点的值会被启动自检拒绝）。
   驱动类 `org.apache.iotdb.jdbc.IoTDBDriver`，依赖 `org.apache.iotdb:iotdb-jdbc:2.0.1-beta`

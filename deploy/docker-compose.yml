@@ -91,6 +91,9 @@ services:
   iotdb:
     image: ${REGISTRY_PREFIX:-}apache/iotdb:2.0.11-standalone
     container_name: ypbin-iotdb
+    # 与 cn_internal_address/dn_* 同名：官方 standalone compose 也是这么设的（hostname 与内部地址一致），
+    # 避免只靠 Docker DNS 解析容器名的隐式行为
+    hostname: ypbin-iotdb
     environment:
       # 这些**全小写**变量由镜像 entrypoint 写入 iotdb-system.properties
       # （官方 Dockerfile-1.0.0-standalone → entrypoint.sh → replace-conf-from-env.sh：把环境里
@@ -108,17 +111,21 @@ services:
       dn_data_region_consensus_port: "10760"
       dn_seed_config_node: ypbin-iotdb:10710
     ports:
-      # 6667 是客户端 RPC 口，且默认口令是公开的 root/root（官方 Authority Management：默认用户 root/默认口令 root）
-      # ⇒ 默认只绑回环。要对宿主机外提供接入时再设 INTERNAL_BIND_ADDR，并**先**按文档改口令。
-      - "${INTERNAL_BIND_ADDR:-127.0.0.1}:6667:6667"
+      # 6667 是客户端 RPC 口，且默认口令是公开的 root/root（官方 Authority Management：默认用户 root/默认口令 root）。
+      # ⚠️ 这里用**独立**变量 IOTDB_BIND_ADDR（而不是共用的 INTERNAL_BIND_ADDR）：本仓 .env.example 把
+      # INTERNAL_BIND_ADDR 设成 0.0.0.0，共用会把 6667 连同默认口令一起暴露到全网；独立变量的默认值是回环，
+      # 即"不显式设置就只允许宿主机内访问"（要用外部客户端接入时再设 IOTDB_BIND_ADDR，并**先**改口令）。
+      - "${IOTDB_BIND_ADDR:-127.0.0.1}:6667:6667"
     volumes:
       - ypbin-iotdb-data:/iotdb/data
       - ypbin-iotdb-logs:/iotdb/logs
     healthcheck:
-      # 官方**没有**为 Docker 部署提供健康检查端点或探针命令（官方自带 health_check.sh 是「部署环境体检」，
-      # 不是就绪探针）；官方 standalone 镜像也未安装 curl/nc（只额外装 lsof/dosunix/procps/unzip/dumb-init）
-      # ⇒ 这里用官方 CLI 的非交互批处理模式探活：
-      # `-e` 见官方 CLI 文档，镜像 PATH 已含 /iotdb/sbin 与 /iotdb/tools。
+      # 官方**没有**为 Docker 部署提供健康检查端点或探针命令（官方自带 health_check.sh 是「部署环境体检」：
+      # 查 JDK/内存/目录权限/端口占用/ulimit/swap，不是就绪探针）。
+      # 镜像里**有 curl**（基础镜像 eclipse-temurin:17-jre-focal 的 adoptium Dockerfile 显式安装 curl，
+      # 注释「curl required for historical reasons」；IoTDB 的 Dockerfile 未删任何包），但**没有 nc**；
+      # 不过 6667 是 Thrift RPC 口，curl 对它没有意义（不是 HTTP）⇒ 用官方 CLI 的非交互批处理模式探活：
+      # `-e` 见官方 CLI 文档，镜像 PATH 已含 /iotdb/sbin 与 /iotdb/tools（dos2unix 等包由官方 Dockerfile 安装）。
       # ⚠️ 该探针是我们自建的（非官方推荐做法），退出码语义未在真实容器里独立验证；
       #    因此它只用于 `docker compose ps` 观测，**不用它驱动别的服务启动顺序**（见 iotdb-init 的自重试）。
       test: ["CMD", "start-cli.sh", "-h", "127.0.0.1", "-p", "6667", "-u", "root", "-pw", "root", "-sql_dialect", "table", "-e", "SHOW DATABASES"]
@@ -146,6 +153,16 @@ services:
     entrypoint:
       - /bin/bash
       - /init/iotdb-init.sh
+    # 清空镜像继承的 CMD（官方镜像是 `CMD ["bash","-c","entrypoint.sh all"]`）：不清空的话实际 argv 会变成
+    # `/bin/bash /init/iotdb-init.sh bash -c "entrypoint.sh all"`——脚本虽然忽略多余参数、当前无害，
+    # 但"启动一次 IoTDB 服务端"的意图不该藏在被忽略的参数里
+    command: []
+    environment:
+      # ⚠️ 口令的**第三处**：脚本默认 IOTDB_USER/IOTDB_PASSWORD=root。改 IoTDB 口令时，这三处必须一起改：
+      #   ① IoTDB 内（ALTER USER root SET PASSWORD …）② Nacos ypbin.timeseries.password ③ 这里
+      # （见 docs/DEPLOY-TIMESERIES.md §6）——否则重跑本容器会连续 801（用户名或口令错）并最终 exit 1。
+      IOTDB_USER: root
+      IOTDB_PASSWORD: root
     volumes:
       - ./iotdb-init.sh:/init/iotdb-init.sh:ro
       - ./iotdb-init.sql:/init/iotdb-init.sql:ro

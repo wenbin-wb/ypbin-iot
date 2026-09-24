@@ -13,9 +13,9 @@
 2. **⚠️ 最容易踩的坑（已核实）**：写入器/查询用的是**非限定表名**（`INSERT INTO reading` / `FROM reading`），
    所以 Nacos 里的 JDBC URL **必须带库名** `jdbc:iotdb://ypbin-iotdb:6667/iot?sql_dialect=table`。
    少了 `/iot`，IoTDB 会直接报 `701: database is not specified`——服务能起来、写入全失败。
-3. **6667 默认绑回环**（`INTERNAL_BIND_ADDR` 未设时 = `127.0.0.1`），因为默认口令 `root/root` 是公开的。
-   ⚠️ 但本仓 `deploy/.env.example` 把 `INTERNAL_BIND_ADDR` 设成了 `0.0.0.0`——**用了那份 .env 就会对外暴露 6667**，
-   生产请按 §6 收窄或改口令。
+3. **6667 默认只绑回环**（用**独立**变量 `IOTDB_BIND_ADDR`，不设时 = `127.0.0.1`），因为默认口令
+   `root/root` 是公开的。之所以不复用 `INTERNAL_BIND_ADDR`：本仓 `deploy/.env.example` 把它设成了 `0.0.0.0`，
+   共用会让"手抄 .env.example"顺带把 6667 暴露到全网（详见 §1 与 §6）。
 4. **改保留期不是重建表**：官方支持 `ALTER TABLE iot.reading SET PROPERTIES TTL=<毫秒>`（见 §4），
    它是 DDL/迁移动作（会短暂影响数据可查询性），但**不需要重建表、不丢数据**。
 5. **`ypbin.timeseries.enabled: true` 是 fail-fast 的**：驱动不在类路径、url 为空、表名非法等会让
@@ -27,9 +27,9 @@
 | 项 | 值 | 说明 |
 |---|---|---|
 | 镜像 | `apache/iotdb:2.0.11-standalone` | 官方 Docker Hub `apache` 命名空间；tag 已用 `docker manifest inspect` 实测可解析（§8） |
-| 容器名 / 服务名 | `ypbin-iotdb` / `iotdb` | 应用侧 URL 用**服务名** `ypbin-iotdb`（compose 项目名无关） |
+| 服务名 / 容器名 | compose 服务名 `iotdb`；`container_name` 与 `hostname` 都是 `ypbin-iotdb` | 应用侧 JDBC URL 用 `ypbin-iotdb`（自定义网络内可解析）；容器内 CLI 互连也用 `-h iotdb`（服务名同样可解析） |
 | 固定 IP | `172.20.0.13` | `ypbin-net` 内既有占用：.10/.11/.12/.20-.24/.26/.30/.40/.41，.13 空闲 |
-| 客户端 RPC 口 | `6667` → 宿主 `${INTERNAL_BIND_ADDR:-127.0.0.1}:6667` | JDBC 走这个口 |
+| 客户端 RPC 口 | `6667` → 宿主 `${IOTDB_BIND_ADDR:-127.0.0.1}:6667` | JDBC 走这个口；⚠️ 用**独立**变量而非 `INTERNAL_BIND_ADDR`（后者在 `.env.example` 里是 `0.0.0.0`，共用会把公开默认口令的 6667 暴露到全网） |
 | 内部端口 | 10710/10720/10730/10740/10750/10760 | ConfigNode/DataNode 内部通信，**不发布到宿主**（仅容器网络内） |
 | 数据 / 日志卷 | `ypbin-iotdb-data` → `/iotdb/data`、`ypbin-iotdb-logs` → `/iotdb/logs` | 具名卷，`down` 不删；`down -v` 会删**全部时序数据** |
 | 健康检查 | `start-cli.sh … -e "SHOW DATABASES"` | **自建**探针（官方无 Docker 健康检查方案，§7），30s 间隔 / 90s 启动宽限 |
@@ -43,6 +43,12 @@
   `start-cli.sh -e "<语句>"` 逐条执行 → 回读 `SHOW TABLES FROM iot`。
 - 两者以只读方式挂进 `iotdb-init` 容器（`/init/…`）。该容器 `restart: "no"`，跑完即退出：
   **退出码 0 = 成功，非 0 = 失败**（`docker compose ps -a` 可见）。
+- **不会静默通过**（四道显式失败）：① `/init/iotdb-init.sql` 缺失或为空 → 立即 `exit 1`；
+  ② 文件里**一条可执行语句都没有**（只有空行/注释）→ `exit 1`（否则主循环零次执行会"顺利成功"）；
+  ③ 任一语句执行失败 → 整体重试 30×6s 后 `exit 1`；④ 末尾 `SHOW TABLES FROM iot` 回读失败 → `exit 1`。
+  （脚本行为已用桩 `start-cli.sh` 实跑覆盖：正常/持续失败/仅回读失败/全注释/文件缺失/末行无换行 六种路径。）
+- **口令**：`iotdb-init` 用 `IOTDB_USER`/`IOTDB_PASSWORD`（compose 里注入，默认 `root`/`root`）。
+  这是口令的**第三处**，改口令时三处必须一起改，见 §6。
 - 为什么不用 `install.sh` 而是放 compose：`install.sh` 的 Nacos 占位符替换键是**固定 4 个**
   （`MYSQL_ROOT_PASSWORD` / `REDIS_PASSWORD` / `INTERNAL_TOKEN` / `GATEWAY_SIGN_TOKEN`），时序初始化与它无耦合；
   放 compose 则 `up -d` 一条命令可复现，不需要动那个 96KB 的脚本。
@@ -50,6 +56,9 @@
   ```bash
   cd deploy && docker compose up -d --force-recreate iotdb-init && docker logs ypbin-iotdb-init
   ```
+- **启动顺序**：`ypbin-iot` **刻意不** `depends_on: iotdb`——时序写入失败本就不回滚上报事务（只计数 + ERROR 日志），
+  加硬依赖只会把"IoTDB 挂掉"放大成"整个 IoT 服务起不来"。代价是首次 `up -d` 后的一小段时间里
+  写入会失败、查询会抛 `BusinessException` ⇒ **等 `iotdb-init` 退出码为 0 之后再开始上报/查询**（§3.1）。
 
 > ⚠️ **`IF NOT EXISTS` 的语义**：表已存在时 `CREATE TABLE IF NOT EXISTS … WITH (TTL=…)` **不会**更新 TTL，
 > 只是跳过。改 TTL 必须显式 `ALTER TABLE`（§4）。
@@ -129,50 +138,64 @@ docker exec ypbin-iotdb start-cli.sh -sql_dialect table -e "ALTER TABLE iot.read
 | `ypbin-iot` 启动失败：`ypbin.timeseries.enabled=true，但 IoTDB JDBC 驱动不可用` | 运行时类路径缺 `iotdb-jdbc` | 确认 `ypbin-service/ypbin-iot/pom.xml` 里有 `org.apache.iotdb:iotdb-jdbc`（runtime scope）。本服务镜像是 Spring Boot 可执行 fat jar（`ypbin-service/ypbin-iot/Dockerfile`：`COPY target/ypbin-iot-*.jar /app/app.jar`），依赖打进 `BOOT-INF/lib`，**不是** `/app/lib`；在宿主机查证：`unzip -l ypbin-service/ypbin-iot/target/ypbin-iot-*.jar \| grep iotdb-jdbc`（temurin JRE 镜像里没有 `unzip`/`jar`，别在容器里查） |
 | 启动失败：`table-name 只允许字母/数字/下划线` | Nacos 里 `table-name` 写了非法值（如 `iot.reading`、带引号） | 只写裸表名 `reading`；库名放 URL 路径里 |
 | 写入失败日志 `701: database is not specified` | JDBC URL 缺库名（见 §0.2） | URL 改成 `jdbc:iotdb://ypbin-iotdb:6667/iot?sql_dialect=table` |
-| 写入/查询报「表/列不存在」 | 未跑 `iotdb-init`，或表名与 DDL 不一致 | `docker logs ypbin-iotdb-init`；必要时 `--force-recreate iotdb-init` |
-| 查询报「类型不匹配 / 列类型」 | 写入值与列类型不符（如把文本写进 `value_double`），或 DDL 与代码列顺序漂移 | 核对 `deploy/iotdb-init.sql` 与 `IotDbTimeSeriesWriter.COLUMNS` 是否逐列一致 |
-| `801: Username or password is wrong` | IoTDB 侧改了口令，Nacos 没同步（或反之） | §6 的两处联动 |
-| `iotdb-init` 一直重试后失败 | IoTDB 未就绪 / 资源不足（内存不够会被 OOM kill） | `docker logs ypbin-iotdb`；对照 §1 的资源下限 |
+| 写入/查询报「表/列不存在」（错误码 **616** `COLUMN_NOT_EXIST`） | 未跑 `iotdb-init`，或表名与 DDL 不一致 | `docker logs ypbin-iotdb-init`；必要时 `--force-recreate iotdb-init` |
+| 查询报「类型不匹配」（错误码 **614** `DATA_TYPE_MISMATCH`） | 写入值与列类型不符（如把文本写进 `value_double`），或 DDL 与代码列顺序漂移 | 核对 `deploy/iotdb-init.sql` 与 `IotDbTimeSeriesWriter.COLUMNS` 是否逐列一致 |
+| `801: Username or password is wrong` | IoTDB 侧改了口令，Nacos 或 `iotdb-init` 没同步（或反之） | §6 的**三处联动** |
+| `iotdb-init` 一直重试后失败 | IoTDB 未就绪 / 资源不足（内存不够会被 OOM kill）/ 口令未同步 | `docker logs ypbin-iotdb`、`docker logs ypbin-iotdb-init`；对照 §1 的资源下限与 §6 的三处口令 |
 | 健康检查一直是 `starting` | 自建 CLI 探针不被镜像支持或转义有问题 | 不影响读写；用 §3.2/§3.3 人工确认，或把 `healthcheck.test` 退化为 TCP 探活（见下方注） |
 
-**关于错误码 616 / 614（`COLUMN_NOT_EXIST` / `DATA_TYPE_MISMATCH`）**：⚠️ **未能核实**。
-官方 V2.0.x 状态码页（`/UserGuide/latest/Reference/Status-Codes.html`，最后更新 2024-01-17）里
-**没有 614/616**（该页止于 1403）。设计文档 §5.2.1 里写的这两个码本次未取得一手来源。
-排障时**以错误消息文本为准**（CLI 输出形如 `Msg: org.apache.iotdb.jdbc.IoTDBSQLException: <code>: <message>`），
-不要按码表猜。
+**关于错误码 614 / 616（✅ 已核实）**：官方表模型
+[Write & Update Data §1.4 Notes](https://iotdb.incubator.apache.org/UserGuide/latest-Table/Basic-Concept/Write-Updata-Data_apache.html)
+原文给出：`Referencing non-existent columns in SQL will result in an error code COLUMN_NOT_EXIST(616).`
+与 `Data type mismatches … DATA_TYPE_MISMATCH(614).`（访问 2026-09-24）。
+⚠️ 注意这两个码**不在**状态码总表里（[Status Codes](https://iotdb.incubator.apache.org/UserGuide/latest/Reference/Status-Codes.html)
+止于 1403），所以"状态码页查不到"不等于"没有这个码"——**这正是本次第一版文档踩过的坑，已更正**。
 
-> 附：**别把 `curl` 当可用工具**。官方 standalone 镜像的 Dockerfile 只在 `eclipse-temurin:17-jre-focal` 之上
-> 额外安装 `lsof dos2unix procps unzip dumb-init`——**其中不含 curl/nc**（基础镜像里是否有 curl，本次未在容器内实测，
-> 属"未核实"）。要用命令行探活，优先用 bash 内建能力：`docker exec ypbin-iotdb bash -c 'exec 3<>/dev/tcp/127.0.0.1/6667'`
-> （最轻量 TCP 探活），或直接用 §3.2 的 CLI 查询。
+> 附：镜像里**有 `curl`**（基础镜像 `eclipse-temurin:17-jre-focal` 的
+> [adoptium 官方 Dockerfile](https://raw.githubusercontent.com/adoptium/containers/e5b2b79da44d9488979a9a46d3cdebe992d3a804/17/jre/ubuntu/focal/Dockerfile)
+> 显式安装 curl，注释写明 `curl required for historical reasons`；IoTDB 的 Dockerfile 未删任何包），
+> **没有 `nc`**。但 6667 是 Thrift RPC 口，**curl 对它没有意义**（不是 HTTP）⇒ 探活请用
+> §3.2 的 CLI 查询，或最轻量的 bash TCP 探活 `docker exec ypbin-iotdb bash -c 'exec 3<>/dev/tcp/127.0.0.1/6667'`。
+> （curl 只有在启用了 IoTDB REST 服务时才有用，那是另一个端口。）
 
 ## 6. 安全与容量
 
 - **6667 = 明文 + 默认口令**。默认用户/口令是 `root` / `root`（官方 Authority Management 明文写的默认值）。
-  生产**必须**二选一或都做：① 只绑回环（`INTERNAL_BIND_ADDR=127.0.0.1`，默认已是）；② 改口令。
-  改口令要**两处联动**（IoTDB 侧 + Nacos，官方语法 `ALTER USER`）：
+  生产**必须**二选一或都做：① 只绑回环（`IOTDB_BIND_ADDR` 不设时默认就是 `127.0.0.1`，见 §1）；② 改口令。
+  改口令要**三处联动**（官方语法 `ALTER USER`，见 §8）：
   ```bash
+  # ① IoTDB 内改（官方语法 ALTER USER，需 root 身份）
   docker exec ypbin-iotdb start-cli.sh -sql_dialect table -e "ALTER USER root SET PASSWORD '换成强口令'"
-  # 再把 deploy/nacos/ypbin-iot.yaml 的 ypbin.timeseries.password 改成同一个值并重导 Nacos，重启 ypbin-iot
+  # ② deploy/nacos/ypbin-iot.yaml 的 ypbin.timeseries.password 改成同一个值，重导 Nacos，重启 ypbin-iot
+  # ③ deploy/docker-compose.yml 的 iotdb-init 服务里 IOTDB_PASSWORD（以及 IOTDB_USER）改成同一个值
+  #    ⚠️ 漏掉 ③ 的后果：以后每次 `docker compose up -d` 重跑 iotdb-init 都会连续 801 失败（约 3 分钟后 exit 1）
   ```
-  ⚠️ `deploy/nacos/ypbin-iot.yaml` **不走** `install.sh` 的占位符替换（其替换键固定 4 个，见 §2），
-  所以别在那里写 `${IOTDB_PASSWORD}` 之类的占位符：既不会被替换、也不会被自动生成。
-- **端口暴露面**：`ports` 只发布 6667；compose 网络内其他服务（`ypbin-iot`）用服务名直连，不经宿主端口。
+  ⚠️ `deploy/nacos/ypbin-iot.yaml` **也过** `install.sh` 的同一段 `sed`（7 个 nacos 配置一起处理），
+  但可替换键**只有 4 个**：`MYSQL_ROOT_PASSWORD` / `REDIS_PASSWORD` / `INTERNAL_TOKEN` / `GATEWAY_SIGN_TOKEN`
+  （该文件里的 `${GATEWAY_SIGN_TOKEN}` 正是会被替换的键之一）。所以别在 `password` 上写
+  `${IOTDB_PASSWORD}` 之类的新占位符：既不会被替换、也不会被自动生成，只会多一层"以为配了、其实没配"的错觉。
+- **端口暴露面**：`ports` 只发布 6667，且走**独立**变量 `IOTDB_BIND_ADDR`（默认回环）。
+  ⚠️ 本仓 `deploy/.env.example` 把 `INTERNAL_BIND_ADDR` 设成 `0.0.0.0`——若 IoTDB 复用那个变量，
+  手抄 `.env.example` 就会把"公开默认口令的 6667"暴露到全网（`install.sh` 生成的 `.env` 不含该键，反而安全）。
+  改用独立变量后，**不显式设置 `IOTDB_BIND_ADDR` 就只允许宿主机内访问**。compose 网络内其他服务
+  （`ypbin-iot`）用服务名直连，不经宿主端口。
 - **磁盘**：TTL 过期是异步物理删除，容量规划按「保留期内的写入量」算，不要假设过期即释放。
   官方换算公式：`测点数 × 频率(Hz) × 单点字节 × 保留秒数 / 压缩比`（standalone 副本因子 1）。
 - **备份**：时序数据在具名卷 `ypbin-iotdb-data` 里；`docker compose down -v` 会**删除**它。
   官方提供全量备份工具与数据导入导出（Tools System），需要时按官方文档做，别直接拷卷目录。
 
-## 7. 本次「未能核实」清单（部署前请留意）
+## 7. 核实状态清单（已核实 / 未能核实，部署前请留意）
 
 | 项 | 状态 | 保守做法 |
 |---|---|---|
 | 镜像 tag | ✅ 已核实：`2.0.11-standalone` 存在（Docker Hub API + `docker manifest inspect`） | 已固定该 tag，不用 `latest` |
 | 健康检查方式 | ⚠️ 官方**未提供** Docker 健康检查方案；自建 CLI 探针的**退出码语义**未在真实容器验证 | 探针只用于观测，不驱动其他服务启动；`iotdb-init` 用 `service_started` + 自重试；人工验证见 §3 |
 | 驱动 2.0.1-beta ↔ 服务端 2.0.11 实际互操作 | ⚠️ 仅核实官方「不要用更新的客户端连更旧的服务端」这一方向性约束（本组合是安全方向），**未做特性级实测** | 若嗅到协议/特性异常，把镜像换成同版本 `apache/iotdb:2.0.1-beta-standalone`（tag 已核实存在） |
-| 错误码 614 / 616 | ❌ 官方状态码页无此两项 | 按错误消息文本排障（§5） |
+| 错误码 614 / 616 | ✅ **已核实**（第一版误列为"未能核实"：错在只查了状态码总表，而它们在 Write & Update Data §1.4 Notes 里） | 见 §5 与 §8；总表查不到不等于没有这个码 |
 | `IOTDB_JMX_OPTS` / `CONFIGNODE_JMX_OPTS` 是否被 standalone 镜像读取 | ⚠️ 官方仓库 compose 设了这两个变量（大写），但镜像 entrypoint 只把**全小写**变量写进 conf ⇒ 生效路径未核实 | 本仓**不设**这两个变量，避免"以为限制了堆、其实没限制"；内存不足请实测 `docker stats` / 容器内 JVM 参数后再定 |
 | 显式声明 `time TIMESTAMP TIME` 的最低版本 | ⚠️ 官方 Table Management 说「V2.0.8 起支持自定义时间列命名」，我们固定 2.0.11 故可用 | 若把镜像降到 2.0.1-beta，须删掉 DDL 里 `time TIMESTAMP TIME,'` 一段 |
+| 镜像内是否**真的**有 curl | ⚠️ 按 adoptium 官方 Dockerfile 与 IoTDB Dockerfile **推断有**（未在容器内 `command -v curl` 实测） | 探针不依赖 curl（6667 是 Thrift 口，curl 也没用）；要用 curl 前先实测 |
+| `start-cli.sh -e` 在 SQL 出错时是否返回非 0 | ⚠️ 这是 `iotdb-init` 重试判定与 healthcheck 语义的**共同前提**，本机不允许跑容器故未实测 | 已用桩脚本覆盖脚本自身逻辑（§2）；真实退出码请在首次部署时用一条**故意写错**的语句观测一次 |
 
 ## 8. 来源（官方一手文档 + 访问日期 2026-09-24）
 
@@ -198,11 +221,22 @@ docker exec ypbin-iotdb start-cli.sh -sql_dialect table -e "ALTER TABLE iot.read
   <https://iotdb.incubator.apache.org/UserGuide/latest-Table/Basic-Concept/Database-Management_apache.html>
 - TTL（毫秒、`ALTER TABLE … SET PROPERTIES TTL=`、`TTL='INF'`、过期异步物理删除、改 TTL 短暂影响可访问性）—
   <https://iotdb.incubator.apache.org/UserGuide/latest-Table/Basic-Concept/TTL-Delete-Data_apache.html>
+- **错误码 614 / 616（`DATA_TYPE_MISMATCH` / `COLUMN_NOT_EXIST`）**、未指定列自动填 null —
+  <https://iotdb.incubator.apache.org/UserGuide/latest-Table/Basic-Concept/Write-Updata-Data_apache.html>（§1.4 Notes）
 - `count(*)` 语法 — <https://iotdb.incubator.apache.org/UserGuide/latest-Table/SQL-Manual/Select-Clause_apache.html>
-- 默认用户/口令 `root`/`root`、`ALTER USER … SET PASSWORD`（From V2.0.7 版本文档）—
+- 默认用户/口令 `root`/`root`、`ALTER USER … SET PASSWORD`（**From V2.0.7** 版本文档）—
   <https://iotdb.incubator.apache.org/UserGuide/latest-Table/User-Manual/Authority-Management-Upgrade_apache.html>
 - 「未指定数据库」时插入报表名错误 `701: database is not specified` —
-  同上 Authority Management 示例输出
+  <https://iotdb.incubator.apache.org/UserGuide/latest-Table/User-Manual/Authority-Management_apache.html>
+  （**Before V2.0.7** 版本文档 §5.2 的示例输出；From V2.0.7 那页只给 `803`。
+  ⚠️ 该串出自 ≤2.0.7 文档，**2.0.11 上的确切错误码/报文未实测**；结论"必须带库名"另有两条一手支撑：
+  [Database Management §1.1/§2.2](https://iotdb.incubator.apache.org/UserGuide/latest-Table/Basic-Concept/Database-Management_apache.html)
+  「未 `USE` 时表操作按当前库解析」+ [JDBC 示例](https://iotdb.incubator.apache.org/UserGuide/latest-Table/API/Programming-JDBC_apache.html)
+  的带库名 URL 写法）
 - 资源下限（standalone ≤10 万测点：2–4 核 / 2–4G）—
   <https://iotdb.incubator.apache.org/UserGuide/latest-Table/Deployment-and-Maintenance/Database-Resources_apache.html>
-- 状态码表（**不含** 614/616）— <https://iotdb.incubator.apache.org/UserGuide/latest/Reference/Status-Codes.html>
+- 状态码总表（**止于 1403、不含 614/616**；用来解释"为什么总表查不到不等于没有这个码"）—
+  <https://iotdb.incubator.apache.org/UserGuide/latest/Reference/Status-Codes.html>
+- 基础镜像是否自带 curl（adoptium 官方 focal Dockerfile 显式安装，注释 `curl required for historical reasons`；
+  该 tag 已 EOL，链接钉在最后一次含 focal 的提交）—
+  <https://raw.githubusercontent.com/adoptium/containers/e5b2b79da44d9488979a9a46d3cdebe992d3a804/17/jre/ubuntu/focal/Dockerfile>

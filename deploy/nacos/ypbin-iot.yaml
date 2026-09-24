@@ -77,12 +77,15 @@ ypbin:
     url: jdbc:iotdb://ypbin-iotdb:6667/iot?sql_dialect=table
     # 下面是 IoTDB 官方**默认**用户/口令（官方 Authority Management：默认用户 root、默认口令 root）。
     # 它不是本平台的部署密钥，所以和 ypbin-common.yaml 的 datasource.username: root 一样直写；
-    # ⚠️ 但默认口令是公开的 ⇒ 生产必须改，且改口令是**两处联动**（IoTDB 侧 + 本文件）：
+    # ⚠️ 但默认口令是公开的 ⇒ 生产必须改，且改口令是**三处联动**（漏一处就会以 801 失败）：
     #   1) IoTDB 侧（官方语法 ALTER USER，需 root 身份，见 docs/DEPLOY-TIMESERIES.md §6）：
     #      docker exec -it ypbin-iotdb start-cli.sh -sql_dialect table -e "ALTER USER root SET PASSWORD '新口令'"
     #   2) 本文件 password 改成同一个值，重导 Nacos（或直接在 Nacos 控制台改），再重启 ypbin-iot
-    #   注意：本文件**不走** install.sh 的占位符替换——它的替换键固定为 MYSQL_ROOT_PASSWORD /
-    #   REDIS_PASSWORD / INTERNAL_TOKEN / GATEWAY_SIGN_TOKEN 四个，所以别在这里写 ${IOTDB_PASSWORD} 之类：
+    #   3) deploy/docker-compose.yml 的 iotdb-init 服务（IOTDB_USER/IOTDB_PASSWORD）——它用同一镜像的
+    #      CLI 建库建表，不改就会在下次 `docker compose up -d` 时连续 801 后 exit 1
+    # 注意：本文件**也过** install.sh 那段 sed（7 个 nacos 配置一起处理），但可替换键固定为
+    #   MYSQL_ROOT_PASSWORD / REDIS_PASSWORD / INTERNAL_TOKEN / GATEWAY_SIGN_TOKEN 四个
+    #   （本文件里的 ${GATEWAY_SIGN_TOKEN} 正是其中之一）；所以别在 password 上写 ${IOTDB_PASSWORD} 之类的新占位符：
     #   那样既不会被替换、也不会被自动生成，只会多一层"以为配了、其实没配"的错觉。
     username: root
     password: root
