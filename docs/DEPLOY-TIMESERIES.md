@@ -179,12 +179,12 @@ docker exec ypbin-iotdb start-cli.sh -sql_dialect table -e "ALTER TABLE iot.read
 - Docker 部署（镜像名 `apache/iotdb:2.0.x-standalone`、端口 6667、环境变量、CLI 验证的“Congratulations”日志、
   集群不支持 bridge 网络）— <https://iotdb.incubator.apache.org/UserGuide/latest-Table/Deployment-and-Maintenance/Docker-Deployment_apache.html>
 - 官方 compose（standalone，含 `cn_*`/`dn_*` 环境变量与 `IOTDB_JMX_OPTS`）—
-  <https://github.com/apache/iotdb/blob/master/docker/src/main/DockerCompose/docker-compose-standalone.yml>
+  <https://github.com/apache/iotdb/blob/v2.0.11/docker/src/main/DockerCompose/docker-compose-standalone.yml>
 - 镜像 Dockerfile / entrypoint（基础镜像 `eclipse-temurin:17-jre-focal`、`PATH` 含 `/iotdb/sbin`、
-  小写环境变量写入 `iotdb-system.properties`）—
-  <https://github.com/apache/iotdb/blob/master/docker/src/main/Dockerfile-1.0.0-standalone>、
-  <https://github.com/apache/iotdb/blob/master/docker/src/main/DockerCompose/entrypoint.sh>、
-  <https://github.com/apache/iotdb/blob/master/docker/src/main/DockerCompose/replace-conf-from-env.sh>
+  小写环境变量写入 `iotdb-system.properties`；**链接钉在被部署的那个 tag `v2.0.11` 上**，不是 `master`）—
+  <https://github.com/apache/iotdb/blob/v2.0.11/docker/src/main/Dockerfile-1.0.0-standalone>、
+  <https://github.com/apache/iotdb/blob/v2.0.11/docker/src/main/DockerCompose/entrypoint.sh>、
+  <https://github.com/apache/iotdb/blob/v2.0.11/docker/src/main/DockerCompose/replace-conf-from-env.sh>
 - 镜像 tag 是否存在（131 个 tag，含 `2.0.11-standalone` / `2.0.1-beta-standalone` / `latest`）—
   <https://hub.docker.com/v2/repositories/apache/iotdb/tags>（Docker Hub 官方 `apache` 命名空间）
 - JDBC（URL 必须带 `sql_dialect=table`、驱动类、`iotdb-jdbc:2.0.1-beta`、带库名的 URL 形式、
