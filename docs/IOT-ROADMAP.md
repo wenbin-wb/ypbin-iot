@@ -646,6 +646,21 @@ value=紧凑 JSON `{v,q,ts}`），写入时机是**上报事务提交后**（Red
 **为什么先落最新值**：它是「设备详情/影子 reported」的直接数据源，也是 EMQX 入站后最容易被复用的写入口；
 时序库要等 IoTDB 实例与 CI 容器能力，先做它会让整片卡住。
 
+### 四点十八、反哺 starter 的需求清单（2026-09-24，交接材料）
+
+本仓在实现 M-2 过程中积累了三项**必须由 starter 层解决**的需求，已整理成自包含的交接文档
+**[`STARTER-FEEDBACK.md`](STARTER-FEEDBACK.md)**（含现象/证据/影响/期望能力/验收标准/会被替换掉的临时实现），
+并同步在 `wenbin-wb/ypbin-starter` 开了 issue（便于那边新开会话直接动手）：
+
+| 编号 | 级别 | 摘要 | 本仓的临时处置 |
+|---|---|---|---|
+| **SF-1** | 高（安全） | 微服务下游 `@SaCheckPermission` 实际不生效（注解鉴权与登录拦截被 `ypbin.security.interceptor` 一个开关绑死） | `IotPermissionGuard` 显式 fail-closed 防线（**starter 支持后应删除**） |
+| **SF-2** | 中 | `@Idempotent` 默认键用 `Arrays.deepHashCode(args)`，对无 equals 的 Req DTO 形同虚设 | 仅登记（四点十六），未自造 workaround |
+| **SF-3** | 低（DX） | `LoginUser` 字段是 `id` 而非 `userId`；`IdentityContext` 与 `LoginUser` 分属两个包易 import 错 | 测试里改用构造器 |
+
+> 关闭约定：starter 侧落地后，在本表与 [`STARTER-FEEDBACK.md`](STARTER-FEEDBACK.md) 对应条目注明
+> 「starter 已支持（版本/PR）」，并删除 ypbin-iot 的临时实现（SF-1 对应 `IotPermissionGuard`）。
+
 ### 五、替换缝（3a 已备好，3b-2 只需新增自动配置）
 3a 的 `LoggingTenantLinkManager` 已去掉 `@Component`，由 `AccessLeaseConfiguration`（`@AutoConfiguration`
 + `@Bean @ConditionalOnMissingBean`）装配，并有源码门禁守着（四处变异全咬）。⇒ 3b-2 提供真实现时
