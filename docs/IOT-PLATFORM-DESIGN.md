@@ -465,7 +465,7 @@ business 变更台账（产品/设备/点位映射/凭据）
 |---|---|
 | 批量写入 | 官方**明确推荐 `SessionPool`**（非裸 `Session`）；批量接口 `insertRecords`/`insertRecordsOfOneDevice`/`insertTablet(s)`/`insertAligned*`；批内有序时传 `haveSorted`/`sorted=true` 省服务端排序。⚠️ **「`insertTablet` 最快」无官方依据**（未核实，需自测） |
 | 乱序处理 | **seq/unseq 分空间**由配置模板确证（`enable_separate_data=true`：顺序/乱序数据分目录），跨空间合并由 `enable_cross_space_compaction`/`enable_auto_repair_compaction` 收敛；`enable_discard_out_of_order_data`（默认 `false`=不丢弃）存在于 ≤1.2.x，**1.3.0 起移除**；2.x 另有 `enable_delay_analyzer`（乱序水位）。⚠️ 机制描述仅见于**配置模板而非文档手册**（结论强度：较高）。**「代价=写放大」须删**：官方**无此表述**（0 命中），唯一官方代价表述是 **「Out-of-order data will impact the aggregation query a lot.」**（出自 ≤1.2 的配置注释）。**M-2 用官方 Benchmark 乱序参数实测**（`IS_OUT_OF_ORDER` / `OUT_OF_ORDER_MODE=POISSON` / `OUT_OF_ORDER_RATIO=0.5`）替代该表述 |
-| 数据保留（Q2） | TTL 语法与粒度已核实：`SET TTL TO <pathPattern> <毫秒>`（**单位恒为 ms，与 `timestamp_precision` 无关**）；粒度 **device 级**（≥1.3.3）与 pathPattern 级，**最多 1000 条规则**；后台任务 `ttl_check_interval` 默认 **7200000ms（2h）**、改后需重启生效；**过期数据立即不可查且不可写（错误码 607 `OUT_OF_TTL`）**，但**物理删除延迟到 compaction**；**降低/移除 TTL 会让原本不可见的数据重新可见**（合规上须与「删除」语义区分）。树模型库级 TTL 在建库时指定；**表模型不支持修改库级 TTL**。三方案与代价见 **Q2** |
+| 数据保留（Q2） | TTL 语法与粒度已核实：`SET TTL TO <pathPattern> <毫秒>`（**单位恒为 ms，与 `timestamp_precision` 无关**）；粒度 **device 级**（≥1.3.3）与 pathPattern 级，**最多 1000 条规则**；后台任务 `ttl_check_interval` 默认 **7200000ms（2h）**、改后需重启生效；**过期数据立即不可查且不可写（错误码 607 `OUT_OF_TTL`）**，但**物理删除延迟到 compaction**；**降低/移除 TTL 会让原本不可见的数据重新可见**（合规上须与「删除」语义区分）。树模型库级 TTL 在建库时指定；**表模型不支持修改库级 TTL**。⚠️ **2026-09-24 更正**：该结论与官方 [Database Management §2.6](https://iotdb.incubator.apache.org/UserGuide/latest-Table/Basic-Concept/Database-Management_apache.html) 给出的 `ALTER DATABASE … SET PROPERTIES TTL=` 相矛盾，**尚存疑**；本平台把 TTL 放在**表级**，不受该歧义影响（表级改法见 §5.2.1）。三方案与代价见 **Q2** |
 | ⚠️ 官方文档与出厂配置冲突 | `enable_timed_flush_unseq_memtable`：**文档手册写默认 `false`，出厂配置模板实为 `true`** ⇒ 以实际部署的 `iotdb-system.properties` 为准，勿按文档假设（直接影响小文件与合并压力判断） |
 
 **必须修正的 4 处原文**（已在上面表格修正）
@@ -498,8 +498,24 @@ CREATE TABLE reading (
 
 - 建表语法与列类别（`STRING TAG` / `DOUBLE FIELD` / `TIMESTAMP TIME`）来自官方一手文档
   [JDBC 示例](https://iotdb.incubator.apache.org/UserGuide/latest-Table/API/Programming-JDBC_apache.html)（访问 2026-09-24）；
-  **表级 TTL** 用 `WITH (TTL=<毫秒>)`（同一示例），因此「90 天」在**建表时**确定。
-- 连接：`jdbc:iotdb://<host>:6667?sql_dialect=table`（表模型**必须**带 `sql_dialect=table`），
+  **表级 TTL** 用 `WITH (TTL=<毫秒>)`（同一示例），因此「90 天」在**建表时**给定。
+  ⚠️ **2026-09-24 更正（原表述作废）**：原文写「调整保留期=重建库或逐表改（表模型限制）」⇒ **不必重建表**。
+  官方 [Table Management §2.5](https://iotdb.incubator.apache.org/UserGuide/latest-Table/Basic-Concept/Table-Management_apache.html)
+  明确 `SET PROPERTIES` 目前**只支持 TTL**，[TTL Delete Data §2.1 例 2](https://iotdb.incubator.apache.org/UserGuide/latest-Table/Basic-Concept/TTL-Delete-Data_apache.html)
+  给出同一语句：
+  ```sql
+  ALTER TABLE iot.reading SET PROPERTIES TTL=15552000000;   -- 改为 180 天
+  ALTER TABLE iot.reading SET PROPERTIES TTL='INF';         -- 取消 TTL（永不过期）
+  ```
+  因此改保留期是**一次 DDL/迁移动作**（官方提示：改 TTL 会短暂影响数据的可访问性、过期数据的物理删除是**异步**的），
+  但**不重建表、不丢数据**。
+- 连接：`jdbc:iotdb://<host>:6667/iot?sql_dialect=table`（表模型**必须**带 `sql_dialect=table`；
+  ⚠️ **URL 必须带库名 `/iot`**：写入器与查询用的是**非限定表名**且**不发 `USE`**，少库名会直接报
+  `701: database is not specified`——官方
+  [Authority Management](https://iotdb.incubator.apache.org/UserGuide/latest-Table/User-Manual/Authority-Management-Upgrade_apache.html)
+  示例的错误输出就是这一条；带库名的 URL 形式同 [JDBC 示例](https://iotdb.incubator.apache.org/UserGuide/latest-Table/API/Programming-JDBC_apache.html)
+  的 `jdbc:iotdb://127.0.0.1:6667/test1?sql_dialect=table`。⚠️ 不要把库名并进 `table-name`：
+  表名有**白名单**（只允许字母/数字/下划线，防 SQL 注入），`iot.reading` 这类带点的值会被启动自检拒绝）。
   驱动类 `org.apache.iotdb.jdbc.IoTDBDriver`，依赖 `org.apache.iotdb:iotdb-jdbc:2.0.1-beta`
   （同一文档页给出；⚠️ 官方提示 **不要用更新的客户端连更旧的服务端**）。
 - ⚠️ **性能取向（官方提示）**：JDBC 插入「可能达不到高性能写入」，Java 应用推荐用 **Native API 的
@@ -521,8 +537,13 @@ PreparedStatement 批量提交（`addBatch/executeBatch`，单次外部调用、
 返回 `[{ts, value, quality}]`；数值列与文本列合并为统一的 `value` 字符串（与上报契约一致，前端不再判类型）。
 **分页口径**：默认按时间倒序取最近 N 条（N 上限可配），不做跨页聚合（聚合属于后续 M-4 的规则/报表能力）。
 
-**④ 保留与运维（D0.8）**：原始时序 90 天由**建库/建表时的 TTL** 承担；调整保留期=重建库或逐表改
-（表模型限制，已核实）⇒ 部署文档要写明「改保留期是一次迁移动作，不是热配置」。清理副作用（TTL 过期是异步删除）
+**④ 保留与运维（D0.8）**：原始时序 90 天由**建表时的表级 TTL** 承担；调整保留期用
+`ALTER TABLE iot.reading SET PROPERTIES TTL=<毫秒>`（`TTL='INF'` 取消；见 §①，**已核实**）⇒ 部署文档写明
+「改保留期是一次 **DDL/迁移动作**，不是热配置」——⚠️ **但要写对**：它**不需要重建表、不丢数据**（2026-09-24 更正）。
+⚠️ 官方文档在「**库级** TTL 能否 ALTER」上自相矛盾（[TTL Delete Data §3](https://iotdb.incubator.apache.org/UserGuide/latest-Table/Basic-Concept/TTL-Delete-Data_apache.html)
+称「IoTDB 当前不支持修改数据库级 TTL」，而 [Database Management §2.6](https://iotdb.incubator.apache.org/UserGuide/latest-Table/Basic-Concept/Database-Management_apache.html)
+给出 `ALTER DATABASE … SET PROPERTIES TTL=`）——**已注意到、尚存疑**；我们把 TTL 放在**表级**正是为了绕开该歧义
+（表级 TTL 优先于库级，且表级改法有两条一致的一手来源）。清理副作用（TTL 过期是**异步**删除，物理回收等 compaction）
 要在监控里看（写失败/查询失败/表大小）。
 
 **类型映射的两条限制（登记）**：① **前导零整数**（如 `007`）与**全角数字**按文本列处理——前者是编码/序列号，
@@ -755,13 +776,13 @@ UI/OpenAPI → business(core.device)
 | # | 问题 | 影响 |
 |---|---|---|
 | Q1 | ~~事件是否纳入物模型服务层~~ **已定（2026-09-20）**：纳入，证据见 §3.6 | 物模型表结构 ✅ |
-| Q2 | **数据保留策略**（原始点保留多久/是否降采样）。三个候选与代价（§5.2 已核实的边界）：**(a) 表模型库级 TTL + 表级覆盖**——粒度最好；代价：表模型**不支持改库级 TTL**，调整保留期须重建库或逐表改，改库级**不回溯**已存在的表。**(b) 树模型按租户规则** `SET TTL TO root.t{t}.** <ms>`——语义清晰；代价：**1000 条规则硬上限**，租户数 >1000 即不可行。**(c) 统一规则 + 少数特例** `SET TTL TO root.** <ms>`——无上限风险；代价：失去按租户差异化。**无论选哪个都必须写进设计**：删除不即时（后台 2h + compaction 才物理删）；**降 TTL 会让旧数据复活**（合规风险）；早于 TTL 边界的写入被拒（607） | IoTDB TTL 与容量 | <br>⚠️ **已代决**（2026-09-23，见 **D0.8**）：分层保留 = 原始 90 天 / 断档·维护·台账·告警 13 个月 / 最新值无 TTL，全部可配（`ypbin.retention.*`）。**注意**：本行下文「表模型不支持改库级 TTL」的核实结论仍然成立 ⇒ 调整保留期需按表/逐表改，D0.8 的实现任务必须覆盖这一点（已登记 ROADMAP）
+| Q2 | **数据保留策略**（原始点保留多久/是否降采样）。三个候选与代价（§5.2 已核实的边界）：**(a) 表模型库级 TTL + 表级覆盖**——粒度最好；代价：表模型**不支持改库级 TTL**，调整保留期须重建库或逐表改，改库级**不回溯**已存在的表。**(b) 树模型按租户规则** `SET TTL TO root.t{t}.** <ms>`——语义清晰；代价：**1000 条规则硬上限**，租户数 >1000 即不可行。**(c) 统一规则 + 少数特例** `SET TTL TO root.** <ms>`——无上限风险；代价：失去按租户差异化。**无论选哪个都必须写进设计**：删除不即时（后台 2h + compaction 才物理删）；**降 TTL 会让旧数据复活**（合规风险）；早于 TTL 边界的写入被拒（607） | IoTDB TTL 与容量 | <br>⚠️ **已代决**（2026-09-23，见 **D0.8**）：分层保留 = 原始 90 天 / 断档·维护·台账·告警 13 个月 / 最新值无 TTL，全部可配（`ypbin.retention.*`）。**注意**：本行上文「表模型不支持改库级 TTL」**与官方 Database Management §2.6 的 ALTER DATABASE … TTL 相矛盾、尚存疑**（2026-09-24 更正）；调整保留期用**表级** `ALTER TABLE … SET PROPERTIES TTL=<毫秒>`（§5.2.1，**无需重建表**），D0.8 的实现任务必须覆盖这一点（已登记 ROADMAP）
 | Q3 | 命令超时全局默认值 | §3.5/§6.1 |
 | Q4 | EMQX provisioning 形态三选一（内建/HTTP/mTLS） | §4.2 | <br>⚠️ **已代决**（2026-09-23，见 **D0.6**）：EMQX 5.x + **内置数据库认证 + REST 管理**，不变量「MQTT username 稳定、只轮换口令」；`§12.4` 对内建认证挂的 ⚠️（持久化与集群复制语义）由 D0.6 承担为实施前置：必须核实持久化配置并在部署文档写明
 | Q5 | 通知渠道首期范围（webhook/邮件/短信） | §8.2 |
 | Q6 | 开放 API 是否拆独立模块 | §9 |
 | Q7 | **平台自身可观测与告警阈值**：指标（micrometer+Prometheus）/结构化日志/链路追踪（OTel）范围，以及**平台自告警阈值**（服务不可用/成功率/丢弃率/磁盘水位/租约指标——LEASE.md 已埋 `iot.lease.takeover|expired|revoked` 但阈值未定） | §2.1 部署视图（可观测为平台横切能力）；M-4 收口 |
-| Q8 | **IoTDB 选树模型还是表模型**（2.x 双模型）。**树模型**：路径即模型、写入直观、`SELECT LAST` 有微秒级缓存；代价：聚合无 `MAX`/`MIN`（用 `MAX_VALUE`/`MIN_VALUE`）、降采样只能用 `GROUP BY ([start,end), interval)`、无标准 `date_bin`、quality 需另建序列。**表模型**：标准 SQL（`date_bin`/裸 `MAX`/`MIN`/TAG+FIELD 建模）、TTL 粒度好；代价：模型迁移成本、库级 TTL 不可改。**建议 M-2 前做一次 POC**（`sql_dialect` 切换 + tree-to-table view），避免选型锁死 | §5.2 / §5.4 | <br>⚠️ **已代决**（2026-09-23，见 **D0.7**）：**表模型为主**（`sql_dialect=table`，必要时 tree-to-table view），本节建议的 POC **不取消**：D0.7 落地时仍以 POC 验证「映射→采集→落库」闭环（表模型口径）
+| Q8 | **IoTDB 选树模型还是表模型**（2.x 双模型）。**树模型**：路径即模型、写入直观、`SELECT LAST` 有微秒级缓存；代价：聚合无 `MAX`/`MIN`（用 `MAX_VALUE`/`MIN_VALUE`）、降采样只能用 `GROUP BY ([start,end), interval)`、无标准 `date_bin`、quality 需另建序列。**表模型**：标准 SQL（`date_bin`/裸 `MAX`/`MIN`/TAG+FIELD 建模）、TTL 粒度好；代价：模型迁移成本、库级 TTL 不可改（⚠️ 2026-09-24 更正：该说法与官方 Database Management §2.6 的 `ALTER DATABASE … TTL` 相矛盾、尚存疑；**表级** TTL 可用 `ALTER TABLE … SET PROPERTIES TTL=` 调整，见 §5.2.1）。**建议 M-2 前做一次 POC**（`sql_dialect` 切换 + tree-to-table view），避免选型锁死 | §5.2 / §5.4 | <br>⚠️ **已代决**（2026-09-23，见 **D0.7**）：**表模型为主**（`sql_dialect=table`，必要时 tree-to-table view），本节建议的 POC **不取消**：D0.7 落地时仍以 POC 验证「映射→采集→落库」闭环（表模型口径）
 
 ### 15.3 风险（继承 spec §14 + 新增）
 1. 全平台一次性设计面大，**实现必须分里程碑**（§14），避免「四个半成品」。
