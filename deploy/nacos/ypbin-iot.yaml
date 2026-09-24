@@ -85,7 +85,9 @@ ypbin:
     # 它不是本平台的部署密钥，所以和 ypbin-common.yaml 的 datasource.username: root 一样直写；
     # ⚠️ 但默认口令是公开的 ⇒ 生产必须改，且改口令是**三处联动**（漏一处就会以 801 失败）：
     #   1) IoTDB 侧（官方语法 ALTER USER，需 root 身份，见 docs/DEPLOY-TIMESERIES.md §6）：
-    #      docker exec -it ypbin-iotdb start-cli.sh -sql_dialect table -e "ALTER USER root SET PASSWORD '新口令'"
+    #      docker exec -it ypbin-iotdb start-cli.sh -h ypbin-iotdb -sql_dialect table -e "ALTER USER root SET PASSWORD '新口令'"
+    #      （⚠️ 必须带 -h ypbin-iotdb：dn_rpc_address 是绑定地址、服务端只绑容器 eth0，用 CLI 默认的
+    #        127.0.0.1 连不上；本机实测见 docs/DEPLOY-TIMESERIES.md §5/§7）
     #   2) 本文件 password 改成同一个值，重导 Nacos（或直接在 Nacos 控制台改），再重启 ypbin-iot
     #   3) deploy/docker-compose.yml 的 iotdb-init 服务（IOTDB_USER/IOTDB_PASSWORD）——它用同一镜像的
     #      CLI 建库建表，不改就会在下次 `docker compose up -d` 时连续 801 后 exit 1

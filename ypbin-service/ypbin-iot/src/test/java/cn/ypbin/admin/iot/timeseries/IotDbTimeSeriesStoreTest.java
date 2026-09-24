@@ -15,6 +15,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -22,9 +23,9 @@ import static org.mockito.Mockito.when;
 import cn.ypbin.starter.core.exception.BusinessException;
 import java.sql.Connection;
 import java.sql.DriverManager;
-import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
@@ -35,32 +36,35 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 
 /**
- * 查询存储的 SQL、参数绑定、列取值与失败语义（§5.2.1 查询路径）。
+ * 查询存储的 SQL 文本、列取值、注入防护与失败语义（§5.2.1 查询路径）。
  *
  * <p>三条口径在这里被钉住：① <b>数值列优先、文本列兜底</b>（写入侧「永不双写」的配套读法，
- * 若拿 0.0 当「无值」就会读出假真值）；② {@code from}/{@code to} 缺省用哨兵
- * （0 / {@link Long#MAX_VALUE}）让语句静态可复用；③ <b>失败必须抛</b>
- * （{@link BusinessException}），绝不能返回空列表——空列表会被读成「这段时间没数据」。</p>
+ * 若拿 0.0 当「无值」就会读出假真值）；② 时间范围缺省用哨兵（0 / {@link Long#MAX_VALUE}）；
+ * ③ <b>失败必须抛</b>（{@link BusinessException}），绝不能返回空列表——空列表会被读成「这段时间没数据」。</p>
+ *
+ * <p><b>为什么是字面量 SQL 而不是 {@code ?}</b>（真库实测，见 {@code IotDbTimeSeriesStore} 类注释）：
+ * 驱动对 {@code ?} 做无引号文本替换 ⇒ {@code tenant_id = ?} 报 {@code 701 STRING = INT32}、
+ * {@code property_id = ?} 报 {@code 616 Column 'x' cannot be resolved}。因此本测试断言的是
+ * <b>拼出来的完整 SQL 文本</b>，并额外覆盖 {@link IotDbTimeSeriesStore#propertyIdLiteral(String)}
+ * 的白名单拒绝（注入防护的第一道门）。</p>
  *
  * @author wenbin
  * @since 2026-09-24
  */
 class IotDbTimeSeriesStoreTest {
 
-    /** 表模型连接串必须带 {@code sql_dialect=table}（官方 JDBC 文档）。 */
-    private static final String URL = "jdbc:iotdb://127.0.0.1:6667?sql_dialect=table";
+    /** 表模型连接串必须带 {@code sql_dialect=table}（官方 JDBC 文档），并带库名（非限定表名的前提）。 */
+    private static final String URL = "jdbc:iotdb://127.0.0.1:6667/ypbin_it?sql_dialect=table";
 
     /** 读数时刻（epoch 毫秒）。 */
     private static final long TS = 1_700_000_000_000L;
 
-    /** 期望的 SELECT 文本（表名默认 reading；升序 + LIMIT 上限保护）。 */
-    private static final String EXPECTED_SQL =
-        "SELECT time, value_double, value_text, quality FROM reading"
-            + " WHERE tenant_id = ? AND device_id = ? AND property_id = ? AND time >= ? AND time <= ?"
-            + " ORDER BY time ASC LIMIT ?";
+    private static final Long TENANT_ID = 9L;
+
+    private static final Long DEVICE_ID = 100L;
 
     /** 一条查询链路上的三个 mock（每用例一份，避免跨用例串味）。 */
-    private record Stubs(Connection connection, PreparedStatement statement) {
+    private record Stubs(Connection connection, Statement statement) {
     }
 
     private static TimeSeriesProperties properties() {
@@ -71,10 +75,18 @@ class IotDbTimeSeriesStoreTest {
 
     private static Stubs stubs(ResultSet resultSet) throws SQLException {
         Connection connection = mock(Connection.class);
-        PreparedStatement statement = mock(PreparedStatement.class);
-        when(connection.prepareStatement(anyString())).thenReturn(statement);
-        when(statement.executeQuery()).thenReturn(resultSet);
+        Statement statement = mock(Statement.class);
+        when(connection.createStatement()).thenReturn(statement);
+        when(statement.executeQuery(anyString())).thenReturn(resultSet);
         return new Stubs(connection, statement);
+    }
+
+    /** 期望的 SQL（列名/顺序 + 字面量引号 + LIMIT 全在这里） */
+    private static String expectedSql(String propertyIdLiteral, long from, long to, int limit) {
+        return "SELECT time, value_double, value_text, quality FROM reading"
+            + " WHERE tenant_id = '9' AND device_id = '100' AND property_id = " + propertyIdLiteral
+            + " AND time >= " + from + " AND time <= " + to
+            + " ORDER BY time ASC LIMIT " + limit;
     }
 
     /** 一行结果：数值行（numeric=true，text 忽略）或文本行（numeric=false）。 */
@@ -90,21 +102,23 @@ class IotDbTimeSeriesStoreTest {
     }
 
     @Test
-    @DisplayName("★ 数值列优先：value_double 非空时取数值列（忽略文本列）")
-    void mustPreferNumericColumn() throws SQLException {
+    @DisplayName("★ SQL 文本：TAG 字面量带单引号、time 用 epoch 毫秒、LIMIT 内联（真驱动不吃 ? ）")
+    void mustBuildLiteralSqlForNumericRow() throws SQLException {
         Stubs stubs = stubs(singleRow(true, null));
         try (MockedStatic<DriverManager> driverManager = mockStatic(DriverManager.class)) {
             driverManager.when(() -> DriverManager.getConnection(anyString(), any(Properties.class)))
                 .thenReturn(stubs.connection());
 
             List<TimeSeriesPointResp> points =
-                new IotDbTimeSeriesStore(properties()).query(9L, 100L, "temp", TS, TS, 500);
+                new IotDbTimeSeriesStore(properties()).query(TENANT_ID, DEVICE_ID, "temp", TS, TS, 500);
 
+            ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+            verify(stubs.statement()).executeQuery(sql.capture());
+            assertThat(sql.getValue()).isEqualTo(expectedSql("'temp'", TS, TS, 500));
             assertThat(points).hasSize(1);
             assertThat(points.get(0).ts()).as("时间戳必须还原为 epoch 毫秒").isEqualTo(TS);
             assertThat(points.get(0).value()).isEqualTo("23.5");
             assertThat(points.get(0).quality()).isEqualTo("GOOD");
-            verify(stubs.statement()).setInt(6, 500);
         }
     }
 
@@ -117,7 +131,7 @@ class IotDbTimeSeriesStoreTest {
                 .thenReturn(stubs.connection());
 
             List<TimeSeriesPointResp> points =
-                new IotDbTimeSeriesStore(properties()).query(9L, 100L, "mode", TS, TS, 10);
+                new IotDbTimeSeriesStore(properties()).query(TENANT_ID, DEVICE_ID, "mode", TS, TS, 10);
 
             assertThat(points).hasSize(1);
             assertThat(points.get(0).value())
@@ -127,42 +141,42 @@ class IotDbTimeSeriesStoreTest {
     }
 
     @Test
-    @DisplayName("★ SQL 文本与参数绑定：TAG 转字符串、from/to 用 Timestamp、LIMIT 绑定")
-    void mustBindParametersInOrder() throws SQLException {
-        Stubs stubs = stubs(mock(ResultSet.class));
-        try (MockedStatic<DriverManager> driverManager = mockStatic(DriverManager.class)) {
-            driverManager.when(() -> DriverManager.getConnection(anyString(), any(Properties.class)))
-                .thenReturn(stubs.connection());
-
-            new IotDbTimeSeriesStore(properties()).query(9L, 100L, "temp", TS, TS + 5, 123);
-
-            ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
-            verify(stubs.connection()).prepareStatement(sql.capture());
-            assertThat(sql.getValue()).isEqualTo(EXPECTED_SQL);
-
-            verify(stubs.statement()).setString(1, "9");
-            verify(stubs.statement()).setString(2, "100");
-            verify(stubs.statement()).setString(3, "temp");
-            verify(stubs.statement()).setTimestamp(4, Timestamp.from(Instant.ofEpochMilli(TS)));
-            verify(stubs.statement()).setTimestamp(5, Timestamp.from(Instant.ofEpochMilli(TS + 5)));
-            verify(stubs.statement()).setInt(6, 123);
-        }
-    }
-
-    @Test
-    @DisplayName("★ from/to 为 null 时用哨兵（0 / Long.MAX_VALUE），语句保持静态可复用")
+    @DisplayName("★ from/to 为 null 时用哨兵（0 / Long.MAX_VALUE）")
     void mustUseSentinelsForMissingRange() throws SQLException {
         Stubs stubs = stubs(mock(ResultSet.class));
         try (MockedStatic<DriverManager> driverManager = mockStatic(DriverManager.class)) {
             driverManager.when(() -> DriverManager.getConnection(anyString(), any(Properties.class)))
                 .thenReturn(stubs.connection());
 
-            new IotDbTimeSeriesStore(properties()).query(9L, 100L, "temp", null, null, 10);
+            new IotDbTimeSeriesStore(properties()).query(TENANT_ID, DEVICE_ID, "temp", null, null, 10);
 
-            verify(stubs.statement())
-                .setTimestamp(4, Timestamp.from(Instant.ofEpochMilli(IotDbTimeSeriesStore.MIN_TS)));
-            verify(stubs.statement())
-                .setTimestamp(5, Timestamp.from(Instant.ofEpochMilli(Long.MAX_VALUE)));
+            ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+            verify(stubs.statement()).executeQuery(sql.capture());
+            assertThat(sql.getValue())
+                .isEqualTo(expectedSql("'temp'", IotDbTimeSeriesStore.MIN_TS, Long.MAX_VALUE, 10));
+        }
+    }
+
+    @Test
+    @DisplayName("★ 点位标识字面量：白名单内原样加引号，单引号按字面量规则转义")
+    void mustQuotePropertyIdLiteral() {
+        assertThat(IotDbTimeSeriesStore.propertyIdLiteral("temp")).isEqualTo("'temp'");
+        assertThat(IotDbTimeSeriesStore.propertyIdLiteral("a.b:c-1_2")).isEqualTo("'a.b:c-1_2'");
+        // 白名单已排除单引号；转义是纵深防御，这里直接验证「校验 + 转义」两道都不放行注入形态
+        assertThatThrownBy(() -> IotDbTimeSeriesStore.propertyIdLiteral("temp' OR '1'='1"))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("点位标识不合法");
+    }
+
+    @Test
+    @DisplayName("★ 非法点位标识（注入形态）在建连接之前就被拒（不静默过滤、不碰库）")
+    void mustRejectUnsafePropertyIdBeforeTouchingDatabase() {
+        try (MockedStatic<DriverManager> driverManager = mockStatic(DriverManager.class)) {
+            assertThatThrownBy(() -> new IotDbTimeSeriesStore(properties())
+                .query(TENANT_ID, DEVICE_ID, "temp'; DROP TABLE reading; --", null, null, 10))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("点位标识不合法");
+            driverManager.verifyNoInteractions();
         }
     }
 
@@ -177,7 +191,7 @@ class IotDbTimeSeriesStoreTest {
                 .thenReturn(stubs.connection());
 
             List<TimeSeriesPointResp> points =
-                new IotDbTimeSeriesStore(properties()).query(9L, 100L, "temp", null, null, 10);
+                new IotDbTimeSeriesStore(properties()).query(TENANT_ID, DEVICE_ID, "temp", null, null, 10);
             assertThat(points).isEmpty();
         }
     }
@@ -186,34 +200,32 @@ class IotDbTimeSeriesStoreTest {
     @DisplayName("★ 查询失败抛 BusinessException（不得返回空列表假装「这段时间没数据」）")
     void mustThrowBusinessExceptionOnSqlFailure() throws SQLException {
         Connection connection = mock(Connection.class);
-        PreparedStatement statement = mock(PreparedStatement.class);
-        when(connection.prepareStatement(anyString())).thenReturn(statement);
-        when(statement.executeQuery()).thenThrow(new SQLException("IoTDB 挂了"));
+        Statement statement = mock(Statement.class);
+        when(connection.createStatement()).thenReturn(statement);
+        when(statement.executeQuery(anyString())).thenThrow(new SQLException("IoTDB 挂了"));
         try (MockedStatic<DriverManager> driverManager = mockStatic(DriverManager.class)) {
             driverManager.when(() -> DriverManager.getConnection(anyString(), any(Properties.class)))
                 .thenReturn(connection);
 
-            assertThatThrownBy(
-                () -> new IotDbTimeSeriesStore(properties()).query(9L, 100L, "temp", null, null, 10))
+            assertThatThrownBy(() -> new IotDbTimeSeriesStore(properties())
+                .query(TENANT_ID, DEVICE_ID, "temp", null, null, 10))
                 .as("查询失败必须如实报错：空列表会被读成「这段时间没数据」")
                 .isInstanceOf(BusinessException.class)
                 .hasMessageContaining("历史时序查询失败");
-            verify(statement, times(1)).executeQuery();
+            verify(statement, times(1)).executeQuery(anyString());
         }
     }
 
     @Test
     @DisplayName("★ 连接失败同样抛 BusinessException（不静默降级为空）")
     void mustThrowBusinessExceptionOnConnectFailure() {
-        // 异常在静态 mock 之外构造：SQLException 构造器会调 DriverManager.getLogWriter()，
-        // 在插桩过程中构造它会被 Mockito 判成「未完成的 stubbing」
         SQLException failure = new SQLException("连不上");
         try (MockedStatic<DriverManager> driverManager = mockStatic(DriverManager.class)) {
             driverManager.when(() -> DriverManager.getConnection(anyString(), any(Properties.class)))
                 .thenThrow(failure);
 
-            assertThatThrownBy(
-                () -> new IotDbTimeSeriesStore(properties()).query(9L, 100L, "temp", null, null, 10))
+            assertThatThrownBy(() -> new IotDbTimeSeriesStore(properties())
+                .query(TENANT_ID, DEVICE_ID, "temp", null, null, 10))
                 .isInstanceOf(BusinessException.class)
                 .hasMessageContaining("历史时序查询失败");
         }
@@ -239,5 +251,19 @@ class IotDbTimeSeriesStoreTest {
             .isEqualTo("9.007199254740994E15");
         assertThat(IotDbTimeSeriesStore.formatNumeric(Double.POSITIVE_INFINITY)).isEqualTo("Infinity");
         assertThat(IotDbTimeSeriesStore.formatNumeric(Double.NaN)).isEqualTo("NaN");
+    }
+
+    @Test
+    @DisplayName("★ 不再使用 PreparedStatement（? 在真库对 TAG 谓词不可用）")
+    void mustNotPrepareStatements() throws SQLException {
+        Stubs stubs = stubs(mock(ResultSet.class));
+        try (MockedStatic<DriverManager> driverManager = mockStatic(DriverManager.class)) {
+            driverManager.when(() -> DriverManager.getConnection(anyString(), any(Properties.class)))
+                .thenReturn(stubs.connection());
+
+            new IotDbTimeSeriesStore(properties()).query(TENANT_ID, DEVICE_ID, "temp", TS, TS, 10);
+
+            verify(stubs.connection(), never()).prepareStatement(anyString());
+        }
     }
 }

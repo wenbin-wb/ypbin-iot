@@ -530,15 +530,31 @@ CREATE TABLE reading (
 不会产生重复行。⚠️ 但要注意**乱序到达会更新的方向**：若同刻的两条上报值不同，后到者覆盖先到者——
 消费方以最后一次写入为准（与最新值写入器的跨批次语义一致）。
 
-**② 写入路径**：与最新值同一时机——`ingest` **事务提交后**（`afterCommit`）批量写；一批一次
-PreparedStatement 批量提交（`addBatch/executeBatch`，单次外部调用、不在循环里做 IO）；失败**计数 + error 日志**
+**② 写入路径**：与最新值同一时机——`ingest` **事务提交后**（`afterCommit`）批量写；按 `batch-size` 分块、
+每块一次 `addBatch/executeBatch`（单次外部调用、不在循环里做 IO）；失败**计数 + error 日志**
 （带堆栈）且**不回滚上报事务**；批量大小可配（`ypbin.timeseries.batch-size`，默认 500）。
 未配置 `ypbin.timeseries.url` 时用「只记一条 WARN 后丢弃」的降级实现（与最新值同一取向：便利数据不静默，也不拖垮上报）。
+
+⚠️ **写入按读数类型分两条语句（真库实测，2026-09-24，容器 `apache/iotdb:2.0.11-standalone` + 驱动
+`iotdb-jdbc:2.0.1-beta`）**：数值行走
+`INSERT INTO <表>(tenant_id, device_id, property_id, time, value_double, quality)`、文本行走
+`… value_text, quality)`，**未用的值列不出现在语句里**（依赖官方「未指定的列自动填 null」）。
+原因：显式 `setNull` 会被驱动直接拒绝（`IoTDBPreparedStatement.setNull` →
+`SQLException: The parameter cannot be null`）；第一版按「一条语句 + 未用列写 NULL」实现，真库上**数值/文本行
+全部写入失败**——因为写入器只计数不抛，单测全绿而真库全丢，是最隐蔽的一类缺陷。插入路径的 `?` 参数在该驱动上
+**可用**（含 STRING TAG 列）。
 
 **③ 查询路径（历史曲线/报表）**：`GET /iot/devices/{deviceId}/series?propertyId=&from=&to=&limit=`
 （管理面，权限码 `iot:series:get`）⇒ 走 JDBC 查询（TAG 过滤 + 时间范围 + 按 `ts` 升序 + `LIMIT` 上限保护），
 返回 `[{ts, value, quality}]`；数值列与文本列合并为统一的 `value` 字符串（与上报契约一致，前端不再判类型）。
 **分页口径**：默认按时间倒序取最近 N 条（N 上限可配），不做跨页聚合（聚合属于后续 M-4 的规则/报表能力）。
+
+⚠️ **查询侧不能用 `?`（真库实测，同一容器/驱动）**：驱动对 `?` 做的是**无引号文本替换** ⇒
+`tenant_id = ?` + `setString` 报 `701: Cannot apply operator: STRING = INT32`；
+`property_id = ?` 报 `616: Column 'temp' cannot be resolved`；只有 `time` 谓词可用（官方表模型 JDBC 文档
+也只给 `Statement` 示例）。因此查询用**字面量 SQL**，并把**注入防护**做在点位标识上：
+白名单 `[A-Za-z0-9_.:-]{1,128}` + 单引号转义，非法即**报业务错误**（不静默过滤）；
+`tenantId`/`deviceId`/`limit`/`time` 拼接前由 `Long`/`int` 类型保证只含数字。
 
 **④ 保留与运维（D0.8）**：原始时序 90 天由**建表时的表级 TTL** 承担；调整保留期用
 `ALTER TABLE iot.reading SET PROPERTIES TTL=<毫秒>`（`TTL='INF'` 取消；见 §①，**已核实**）⇒ 部署文档写明
@@ -556,14 +572,23 @@ PreparedStatement 批量提交（`addBatch/executeBatch`，单次外部调用、
 
 **写入语句（已核实）**：`INSERT INTO <表> [(列...)] VALUES (值...)`，支持**多行 VALUES**（官方同一文档 §1.4）；
 未指定的列自动填 `null`；不存在的列会报 `COLUMN_NOT_EXIST(616)`，类型不匹配报 `DATA_TYPE_MISMATCH(614)`。
-⇒ 写入器用 `PreparedStatement` + `addBatch/executeBatch` 组装多行 INSERT（列顺序固定，与建表一致）。
+⇒ 写入器用 `PreparedStatement` + `addBatch/executeBatch`，**按类型分两条语句**组装（数值行/文本行的列清单各一条，
+列顺序与建表一致；见 ②）；查询侧因 `?` 在真库不可用改字面量（见 ③）。
 
-**⑤ 验证计划（本机无法跑 IoTDB，必须如实分层）**
-- **本机可验证**：SQL 与参数绑定（mock `Connection/PreparedStatement` 捕获语句与绑定值）、类型映射规则、
-  批量与失败语义（计数 + 不抛）、降级实现、查询参数校验与上限保护；
-- **需要实例/容器**：真库写入-查询往返、TTL 生效、`sql_dialect=table` 兼容性。**落地时必须补一个容器 IT**
-  （CI 已有 MySQL 容器脚手架可复用；新增 workflow 文件而不是改继承来的 `ci.yml`——见四点十八 UP-1）；
-- 未补容器 IT 前，`ypbin.timeseries.enabled` **默认 false**（不能把未验证的写入路径默认打开）。
+**⑤ 验证计划（已落地，2026-09-24 更新）**
+- **单测（mock `Connection`/`PreparedStatement`/`Statement`/`DriverManager`）**：写入侧 SQL 文本与列清单、
+  按 `batch-size` 分块次数、绑定值与「未用列不出现」、失败只计数不抛（含驱动对 null 抛 `RuntimeException`）、
+  空集合不连库；查询侧列取值（数值优先/文本兜底）、哨兵区间、字面量与引号、注入形态拒绝、失败抛
+  `BusinessException`；`TimeSeriesQueryService` 的参数校验与「存储不可用即报错」。
+- **容器 IT（已落地并**本机真跑通过**）**：`ypbin-service/ypbin-iot/src/test/java/cn/ypbin/admin/iot/it/IotDbTimeSeriesIT.java`
+  （`mvn -Pit -pl ypbin-service/ypbin-iot -am verify`；workflow `.github/workflows/iot-iotdb-it.yml`，**不改继承来的 `ci.yml`**）
+  ——真库建库建表（表级 TTL 90 天）→ 写入（一数值一文本 + 同刻重写）→ 存储查询，断言：读到、同刻重写生效、
+  原始列语义（`value_double`/`value_text` 互斥）、`SHOW TABLES` 的 `TTL(ms)=7776000000`、启用时装配 IoTDB 实现
+  （单测环境无真库，这条只能由 IT 承担）。2026-09-24 本机（Docker + `apache/iotdb:2.0.11-standalone`）实测
+  `Tests run: 5, Failures: 0, Errors: 0, Skipped: 0`。
+- **仍未覆盖（如实声明）**：TTL 过期后的**越界写/查**行为（官方只写「不可查、不可写」，未给错误码/异常类型，
+  故 IT 只断言表级 TTL 属性值）；物模型类型覆盖；乱序到达的最终值方向。
+- `ypbin.timeseries.enabled` 仍**默认 false**（是否打开是部署决策，与 IT 是否通过解耦）。
 
 ### 5.3 最新值（Redis）
 

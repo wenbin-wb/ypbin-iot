@@ -41,7 +41,13 @@ import org.testcontainers.utility.DockerImageName;
  * </ul>
  *
  * <p>⚠️ <b>未能核实</b>：官方文档没有给出「standalone 镜像从启动到 JDBC 可用的确定耗时」，
- * 因此容器就绪用「6667 端口可连」+ 建表阶段的**有界重试**兜底，而不是断言某个时间上限。</p>
+ * 因此容器就绪用「6667 端口可连」+ 建表阶段的**有界重试**兜底，而不是断言某个时间上限
+ * （本机实测：容器启动后建表一次成功，重试窗口未被用满）。</p>
+ *
+ * <p><b>本机实测（2026-09-24，非 CI）</b>：容器模式 + {@code dn_rpc_address=0.0.0.0} 下，
+ * {@code jdbc:iotdb://localhost:<映射端口>?sql_dialect=table} 可完成建库建表/写入/查询；
+ * 未设该变量时容器内日志为 {@code listening on ip 127.0.0.1 port 6667}，宿主端口连接被 reset
+ * （客户端表现为 {@code TTransportException: Connection reset}），且**永不自愈**。</p>
  *
  * @author wenbin
  * @since 2026-09-24
@@ -70,6 +76,21 @@ public final class IotDbIntegrationTestSupport {
 
     /** IoTDB 的 RPC/SQL 端口（官方 docker ReadMe 的端口说明）。 */
     static final int IOTDB_RPC_PORT = 6667;
+
+    /**
+     * DataNode RPC 监听地址的容器环境变量。
+     *
+     * <p><b>为什么必须覆盖</b>：官方镜像默认 {@code dn_rpc_address=127.0.0.1}（容器内日志实测
+     * {@code listening on ip 127.0.0.1 port 6667}），此时 Docker 把 6667 发布到宿主端口也**不可达**
+     * （客户端表现为 {@code TTransportException: Connection reset}）——端口发布只能转发到容器内
+     * 非 loopback 的监听套接字。官方 Docker Deployment 文档正是用环境变量覆盖
+     * {@code dn_rpc_address}/{@code cn_internal_address}/{@code dn_internal_address}
+     * （访问 2026-09-24）；本容器是单实例，只需把对外 RPC 监听改为全地址即可（内部通信仍走默认）。</p>
+     */
+    private static final String ENV_DN_RPC_ADDRESS = "dn_rpc_address";
+
+    /** 让 DataNode 监听容器内所有地址（端口发布才能转发进来）。 */
+    private static final String BIND_ALL_ADDRESSES = "0.0.0.0";
 
     /** 容器启动上限（含 ConfigNode + DataNode 就绪）。 */
     private static final Duration STARTUP_TIMEOUT = Duration.ofMinutes(5);
@@ -182,6 +203,8 @@ public final class IotDbIntegrationTestSupport {
         }
         String usedImage = image();
         GenericContainer<?> container = new GenericContainer<>(DockerImageName.parse(usedImage))
+            // 必须覆盖 dn_rpc_address：官方镜像默认绑 127.0.0.1，端口发布出去的连接会被 reset（见常量注释）
+            .withEnv(ENV_DN_RPC_ADDRESS, BIND_ALL_ADDRESSES)
             .withExposedPorts(IOTDB_RPC_PORT)
             .waitingFor(Wait.forListeningPorts(IOTDB_RPC_PORT).withStartupTimeout(STARTUP_TIMEOUT));
         container.start();

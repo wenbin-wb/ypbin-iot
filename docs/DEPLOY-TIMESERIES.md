@@ -52,7 +52,7 @@
 | 客户端 RPC 口 | `6667` → 宿主 `${IOTDB_BIND_ADDR:-127.0.0.1}:6667` | JDBC 走这个口；⚠️ 用**独立**变量而非 `INTERNAL_BIND_ADDR`（后者在 `.env.example` 里是 `0.0.0.0`，共用会把公开默认口令的 6667 暴露到全网） |
 | 内部端口 | 10710/10720/10730/10740/10750/10760 | ConfigNode/DataNode 内部通信，**不发布到宿主**（仅容器网络内） |
 | 数据 / 日志卷 | `ypbin-iotdb-data` → `/iotdb/data`、`ypbin-iotdb-logs` → `/iotdb/logs` | 具名卷，`down` 不删；`down -v` 会删**全部时序数据** |
-| 健康检查 | `start-cli.sh … -e "SHOW DATABASES"` | **自建**探针（官方无 Docker 健康检查方案，§7），30s 间隔 / 90s 启动宽限 |
+| 健康检查 | `start-cli.sh -h ypbin-iotdb … -e "SHOW DATABASES"` | **自建**探针（官方无 Docker 健康检查方案，§7），30s 间隔 / 90s 启动宽限。⚠️ **必须带 `-h ypbin-iotdb`**：`dn_rpc_address=ypbin-iotdb` 是**绑定地址**（只绑容器 eth0），`-h 127.0.0.1`（CLI 默认）**必然连不上**——本机实测见 §7 |
 | 资源下限 | 2–4 核 / 2–4G 内存（≤10 万测点，standalone） | 官方 Database Resources 给出的 standalone 档位（§8） |
 
 ## 2. 一次性初始化（`iotdb-init`）
@@ -98,21 +98,21 @@ docker logs --tail 40 ypbin-iotdb-init          # 期望：DDL 执行完毕 + SH
 
 ```bash
 # 库在不在（CLI 默认是树模型，表模型必须显式 -sql_dialect table）
-docker exec ypbin-iotdb start-cli.sh -sql_dialect table -e "SHOW DATABASES"
+docker exec ypbin-iotdb start-cli.sh -h ypbin-iotdb -sql_dialect table -e "SHOW DATABASES"
 
 # 表在不在、TTL 对不对（期望 TTL(ms)=7776000000）
-docker exec ypbin-iotdb start-cli.sh -sql_dialect table -e "SHOW TABLES FROM iot"
+docker exec ypbin-iotdb start-cli.sh -h ypbin-iotdb -sql_dialect table -e "SHOW TABLES FROM iot"
 ```
 
 ### 3.3 写入 → 查询往返（服务端侧，绕开应用）
 
 ```bash
 # 写一条（未指定 value_text，官方语义：未指定的列自动填 null）
-docker exec ypbin-iotdb start-cli.sh -sql_dialect table -e \
+docker exec ypbin-iotdb start-cli.sh -h ypbin-iotdb -sql_dialect table -e \
   "INSERT INTO iot.reading(tenant_id, device_id, property_id, time, value_double, quality) VALUES ('1','1','temp','2026-09-24 12:00:00', 1.5, 'GOOD')"
 
 # 读回来（count(*) 语法见官方 Select Clause §3.1.2）
-docker exec ypbin-iotdb start-cli.sh -sql_dialect table -e "SELECT count(*) FROM iot.reading"
+docker exec ypbin-iotdb start-cli.sh -h ypbin-iotdb -sql_dialect table -e "SELECT count(*) FROM iot.reading"
 ```
 
 > 若带库名的表名被 CLI 解析拒绝，改用交互式会话里 `USE iot;` 后再查，或先用 `SHOW TABLES FROM iot` 作为元数据判据。
@@ -135,11 +135,11 @@ docker logs ypbin-iot 2>&1 | grep "时序写入失败"
 
 ```bash
 # 表级 TTL 改 180 天（15552000000 ms）
-docker exec ypbin-iotdb start-cli.sh -sql_dialect table -e \
+docker exec ypbin-iotdb start-cli.sh -h ypbin-iotdb -sql_dialect table -e \
   "ALTER TABLE iot.reading SET PROPERTIES TTL=15552000000"
 
 # 去掉 TTL（永不过期）
-docker exec ypbin-iotdb start-cli.sh -sql_dialect table -e "ALTER TABLE iot.reading SET PROPERTIES TTL='INF'"
+docker exec ypbin-iotdb start-cli.sh -h ypbin-iotdb -sql_dialect table -e "ALTER TABLE iot.reading SET PROPERTIES TTL='INF'"
 ```
 
 要点：
@@ -164,7 +164,9 @@ docker exec ypbin-iotdb start-cli.sh -sql_dialect table -e "ALTER TABLE iot.read
 | 查询报「类型不匹配」（错误码 **614** `DATA_TYPE_MISMATCH`） | 写入值与列类型不符（如把文本写进 `value_double`），或 DDL 与代码列顺序漂移 | 核对 `deploy/iotdb-init.sql` 与 `IotDbTimeSeriesWriter.COLUMNS` 是否逐列一致 |
 | `801: Username or password is wrong` | IoTDB 侧改了口令，Nacos 或 `iotdb-init` 没同步（或反之） | §6 的**三处联动** |
 | `iotdb-init` 一直重试后失败 | IoTDB 未就绪 / 资源不足（内存不够会被 OOM kill）/ 口令未同步 | `docker logs ypbin-iotdb`、`docker logs ypbin-iotdb-init`；对照 §1 的资源下限与 §6 的三处口令 |
-| 健康检查一直是 `starting` | 自建 CLI 探针不被镜像支持或转义有问题 | 不影响读写；用 §3.2/§3.3 人工确认，或把 `healthcheck.test` 退化为 TCP 探活（见下方注） |
+| 健康检查一直是 `starting`/`unhealthy` | **本机实测根因**：探针写的是 `-h 127.0.0.1`（也是官方 CLI 的默认值），而 `dn_rpc_address=ypbin-iotdb` 是**绑定地址**、服务端只绑容器 eth0 ⇒ 容器内 loopback 无监听，`start-cli.sh` 报 `Connection Error` 并以退出码 1 结束 | 探针与文档命令都加 `-h ypbin-iotdb`（本仓 compose 与 §3 已如此）。**不影响数据面**：容器网络内按主机名/服务名连接一切正常（本机实测） |
+| 写入持续失败：`iot.timeseries.write.failed` 增长，ERROR 日志含 `The parameter cannot be null` | 对**未用的值列**显式 `setNull`，而驱动（`2.0.1-beta`）直接拒绝 null 参数（本机真库实测，`IoTDBPreparedStatement.setNull`） | 升级到含「按读数类型分两条 INSERT、未用列不出现在语句里」修复的版本；**不要**改回「一条语句 + setNull」——那种写法真库上数值/文本行**全部写不进去**，而写入器只计数不抛 ⇒ 单测照绿、数据全丢（本仓真实踩坑） |
+| 查询报 `616: Column 'xxx' cannot be resolved` 或 `701: Cannot apply operator: STRING = INT32`（即使只是按点位查） | 查询用了 `PreparedStatement` + `?`：驱动把参数做**无引号文本替换**（本机真库实测），STRING TAG 谓词因此失效；官方表模型 JDBC 文档也只给 `Statement` 示例 | 查询侧用字面量 SQL（`IotDbTimeSeriesStore` 已如此）；点位标识走白名单 `[A-Za-z0-9_.:-]{1,128}` + 单引号转义，非法即报业务错误（不静默过滤） |
 
 **关于错误码 614 / 616（✅ 已核实）**：官方表模型
 [Write & Update Data §1.4 Notes](https://iotdb.incubator.apache.org/UserGuide/latest-Table/Basic-Concept/Write-Updata-Data_apache.html)
@@ -188,7 +190,7 @@ docker exec ypbin-iotdb start-cli.sh -sql_dialect table -e "ALTER TABLE iot.read
   改口令要**三处联动**（官方语法 `ALTER USER`，见 §8）：
   ```bash
   # ① IoTDB 内改（官方语法 ALTER USER，需 root 身份）
-  docker exec ypbin-iotdb start-cli.sh -sql_dialect table -e "ALTER USER root SET PASSWORD '换成强口令'"
+  docker exec ypbin-iotdb start-cli.sh -h ypbin-iotdb -sql_dialect table -e "ALTER USER root SET PASSWORD '换成强口令'"
   # ② deploy/nacos/ypbin-iot.yaml 的 ypbin.timeseries.password 改成同一个值，重导 Nacos，重启 ypbin-iot
   # ③ deploy/docker-compose.yml 的 iotdb-init 服务里 IOTDB_PASSWORD（以及 IOTDB_USER）改成同一个值
   #    ⚠️ 漏掉 ③ 的后果：以后每次 `docker compose up -d` 重跑 iotdb-init 都会连续 801 失败（约 3 分钟后 exit 1）
@@ -212,15 +214,15 @@ docker exec ypbin-iotdb start-cli.sh -sql_dialect table -e "ALTER TABLE iot.read
 | 项 | 状态 | 保守做法 |
 |---|---|---|
 | 镜像 tag | ✅ 已核实：`2.0.11-standalone` 存在（Docker Hub API + `docker manifest inspect`） | 已固定该 tag，不用 `latest` |
-| 健康检查方式 | ⚠️ 官方**未提供** Docker 健康检查方案；自建 CLI 探针的**退出码语义**未在真实容器验证 | 探针只用于观测，不驱动其他服务启动；`iotdb-init` 用 `service_started` + 自重试；人工验证见 §3 |
-| 驱动 2.0.1-beta ↔ 服务端 2.0.11 实际互操作 | ⚠️ 仅核实官方「不要用更新的客户端连更旧的服务端」这一方向性约束（本组合是安全方向），**未做特性级实测** | 若嗅到协议/特性异常，把镜像换成同版本 `apache/iotdb:2.0.1-beta-standalone`（tag 已核实存在） |
+| 健康检查方式 | ✅ **退出码语义已实测**（2026-09-24，本机容器）：成功 `SHOW DATABASES` → 退出码 **0**；连不上（`-h 127.0.0.1` 而服务端只绑 eth0）→ `Connection Error` + 退出码 **1**。⚠️ 探针**必须**带 `-h ypbin-iotdb`（原因见 §5 首行） | 探针仍只用于观测，不驱动其他服务启动；`iotdb-init` 用 `service_started` + 自重试；人工验证见 §3 |
+| 驱动 2.0.1-beta ↔ 服务端 2.0.11 实际互操作 | ✅ **已实测**（2026-09-24，本机容器 `apache/iotdb:2.0.11-standalone`）：该组合下 `CREATE DATABASE/TABLE`、`INSERT`、`SELECT`、`SHOW TABLES`、`LIMIT`、`ORDER BY time` 全部可用；同时也实测出两处**该驱动特有的坑**（`setNull` 被拒、查询 `?` 无引号替换，见 §5） | 当前组合可用；若要换版本，按官方「不要用更新的客户端连更旧的服务端」保持服务端 ≥ 客户端 |
 | 错误码 614 / 616 | ✅ **已核实**（第一版误列为"未能核实"：错在只查了状态码总表，而它们在 Write & Update Data §1.4 Notes 里） | 见 §5 与 §8；总表查不到不等于没有这个码 |
 | `IOTDB_JMX_OPTS` / `CONFIGNODE_JMX_OPTS` 是否被 standalone 镜像读取 | ⚠️ 官方仓库 compose 设了这两个变量（大写），但镜像 entrypoint 只把**全小写**变量写进 conf ⇒ 生效路径未核实 | 本仓**不设**这两个变量，避免"以为限制了堆、其实没限制"；内存不足请实测 `docker stats` / 容器内 JVM 参数后再定 |
 | 显式声明 `time TIMESTAMP TIME` 的最低版本 | ⚠️ 官方 Table Management 说「V2.0.8 起支持自定义时间列命名」，我们固定 2.0.11 故可用 | 若把镜像降到 2.0.1-beta，须删掉 DDL 里 `time TIMESTAMP TIME,'` 一段 |
 | 镜像内是否**真的**有 curl | ⚠️ 按 adoptium 官方 Dockerfile 与 IoTDB Dockerfile **推断有**（未在容器内 `command -v curl` 实测） | 探针不依赖 curl（6667 是 Thrift 口，curl 也没用）；要用 curl 前先实测 |
 | `iotdb` 的 `hostname: ypbin-iotdb` 自解析 | ⚠️ 官方 standalone compose 同样把 hostname 设为内部地址同名，但**未在容器内验证**服务端自解析/绑定行为 | 若启动异常，先按官方 compose 的写法核查；容器名 `ypbin-iotdb` 在自定义网络内可解析属 Docker 文档化行为 |
-| **驱动是否被注册**（不是"是否在类路径"） | ✅ 已核实前提：`iotdb-jdbc:2.0.1-beta` 的 jar **无** `META-INF/services/java.sql.Driver` ⇒ 必须显式注册（§0.6）；⏳ "本分支的注册代码在部署提交里"需按提交核对 | 部署前 grep 部署提交里是否有 `Class.forName("org.apache.iotdb.jdbc.IoTDBDriver")`/`IotDbDriverRegistrar`；没有就把 `enabled` 改回 `false` |
-| `start-cli.sh -e` 在 SQL 出错时是否返回非 0 | ⚠️ 这是 `iotdb-init` 重试判定与 healthcheck 语义的**共同前提**，本机不允许跑容器故未实测 | 已用桩脚本覆盖脚本自身逻辑（§2）；真实退出码请在首次部署时用一条**故意写错**的语句观测一次 |
+| **驱动是否被注册**（不是"是否在类路径"） | ✅ 已核实前提：`iotdb-jdbc:2.0.1-beta` 的 jar **无** `META-INF/services/java.sql.Driver` ⇒ 必须显式注册（§0.6）；✅ 注册代码已在主线（`IotDbDriverRegistrar.ensureRegistered()` 在 `IotTimeSeriesConfiguration.afterPropertiesSet()` 与两个实现类的构造器里各调一次，本机实测启动自检通过） | 部署前仍建议 grep 一次部署提交：`git grep -n "IotDbDriverRegistrar" <部署提交>`；没有就把 `enabled` 改回 `false` |
+| `start-cli.sh -e` 的退出码语义 | ✅ **已实测**（2026-09-24，本机容器）：语句成功 `exit 0`；连接失败 `exit 1`（错误文本 `Error: Can't execute sql because Connection Error…`）。⚠️ **SQL 语法/语义出错时的退出码仍未实测**（只测了连接失败） | 这是 `iotdb-init` 重试判定与 healthcheck 语义的共同前提；首次部署时用一条**故意写错的**语句观测一次 SQL 层退出码 |
 
 ## 8. 来源（官方一手文档 + 访问日期 2026-09-24）
 

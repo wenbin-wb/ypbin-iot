@@ -24,14 +24,11 @@ import cn.ypbin.admin.iot.timeseries.TimeSeriesWriter;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.sql.Connection;
 import java.sql.DriverManager;
-import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.sql.Timestamp;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
@@ -55,6 +52,13 @@ import org.slf4j.LoggerFactory;
  * {@link IotDbIntegrationTestSupport} 的类注释），由
  * {@code mvn -Pit -pl ypbin-service/ypbin-iot -am verify -Dsurefire.skip=true} 触发。</p>
  *
+ * <p><b>本机实测（2026-09-24，Docker + 官方镜像，非 CI）</b>：{@code Tests run: 5, Failures: 0, Errors: 0,
+ * Skipped: 0}；观察到 {@code [iot-it] IoTDB 容器已启动：jdbc:iotdb://localhost:32852?sql_dialect=table}
+ * 与 {@code [iot-it] 用例库已就绪：ypbin_it_…（表 reading，TTL 90 天）}。
+ * 首次真跑暴露的两个**主源码缺陷**（{@code setNull} 被驱动拒绝、查询 {@code ?} 不可用）见
+ * {@code IotDbTimeSeriesWriter}/{@code IotDbTimeSeriesStore} 类注释；容器侧还必须
+ * {@code dn_rpc_address=0.0.0.0}，否则发布端口不通（见 {@link IotDbIntegrationTestSupport}）。</p>
+ *
  * <p><b>已验证的语法依据</b>（Apache IoTDB 官方文档，访问 2026-09-24）：DDL
  * {@code CREATE TABLE <t>(... STRING TAG / TIMESTAMP TIME / DOUBLE FIELD ...) WITH (TTL=<毫秒>)}、
  * {@code CREATE DATABASE (IF NOT EXISTS)?}、{@code SHOW TABLES (DETAILS)? ((FROM|IN) db)?}、
@@ -65,7 +69,8 @@ import org.slf4j.LoggerFactory;
  * 「超出生命周期的数据不可查询、不可写入」，<b>没有</b>给出写越界时刻时的异常类型/错误码，
  * 因此本 IT 只断言「表的 TTL 属性真的等于 90 天」（{@code SHOW TABLES} 的 {@code TTL(ms)} 列，
  * 官方有明确输出示例）；「越界写被拒/被丢弃」的强断言留待拿到确定语义后再补；
- * ② 官方未给出 standalone 容器「启动到 JDBC 可用」的耗时，故就绪判断是「6667 可连 + 建表有界重试」。</p>
+ * ② standalone 容器「启动到 JDBC 可用」的官方耗时仍无一手来源，故就绪判断是「6667 可连 + 建表有界重试」
+ * （本机实测容器起来后建表一次成功，20×2s 的窗口没被用满）。</p>
  *
  * @author wenbin
  * @since 2026-09-24
@@ -96,7 +101,14 @@ class IotDbTimeSeriesIT {
     /** 查询条数上限（本测试点位数远小于此，只为验证 LIMIT 不截断）。 */
     private static final int LIMIT = 10;
 
-    /** 建库建表的有界重试次数（容器「端口可连但尚未可服务」的窗口）。 */
+    /**
+     * 建库建表的有界重试次数。
+     *
+     * <p>⚠️ 重试**不是**「连不上」的解药：第一版本机实测连不上 40s 从不自愈，真根因是镜像默认
+     * {@code dn_rpc_address=127.0.0.1}（容器只监听 loopback，端口发布不可达）——已由启动参数修正
+     * （见 {@code IotDbIntegrationTestSupport}）。这里保留小窗口只是为了覆盖「端口已监听但服务尚未就绪」
+     * 这一未核实的中间态，不靠加长重试掩盖故障。</p>
+     */
     private static final int SCHEMA_ATTEMPTS = 20;
 
     /** 每次重试的间隔。 */
@@ -219,11 +231,14 @@ class IotDbTimeSeriesIT {
                 return;
             } catch (SQLException ex) {
                 last = ex;
-                log.warn("[iot-it] IoTDB 建库建表失败（第 {}/{} 次尝试，{} 后重试）：{}",
+                // 中间尝试只打一行 WARN + 把完整堆栈放 DEBUG（重试不是「吞异常」：最后一次会 error 带堆栈并抛出）
+                log.warn("[iot-it] IoTDB 尚未可服务（第 {}/{} 次尝试，{} 后重试）：{}",
                     attempt, SCHEMA_ATTEMPTS, SCHEMA_RETRY_DELAY, ex.getMessage());
+                log.debug("[iot-it] 建库建表失败详情", ex);
                 Thread.sleep(SCHEMA_RETRY_DELAY.toMillis());
             }
         }
+        log.error("[iot-it] IoTDB 建库建表在 {} 次尝试后仍失败（TTL={}ms）", SCHEMA_ATTEMPTS, TTL.toMillis(), last);
         throw new IllegalStateException("IoTDB 在 " + SCHEMA_ATTEMPTS + " 次尝试后仍无法完成建库建表（TTL="
             + TTL.toMillis() + "ms）", last);
     }
@@ -258,7 +273,13 @@ class IotDbTimeSeriesIT {
             int ttlColumn = columnIndex(resultSet, "TTL(ms)");
             while (resultSet.next()) {
                 if (TABLE.equalsIgnoreCase(resultSet.getString(1))) {
-                    return resultSet.getLong(ttlColumn);
+                    // 真驱动把 TTL(ms) 列按 TEXT 返回：getLong 会抛 UnsupportedOperationException(BinaryColumn)
+                    String raw = resultSet.getString(ttlColumn);
+                    try {
+                        return Long.parseLong(raw == null ? "" : raw.trim());
+                    } catch (NumberFormatException ex) {
+                        throw new IllegalStateException("SHOW TABLES 的 TTL(ms) 不是毫秒整数（实际：" + raw + "）", ex);
+                    }
                 }
             }
             throw new IllegalStateException("SHOW TABLES 未列出表 " + TABLE + "，无法核对 TTL");
@@ -288,41 +309,42 @@ class IotDbTimeSeriesIT {
 
     /** 读 value_double 原始列（无该 field 序列的点时返回 null）。 */
     private static Double numericColumn(long deviceId, String propertyId, long ts) throws SQLException {
+        String sql = "SELECT value_double FROM " + TABLE + " WHERE tenant_id = '" + TENANT_ID
+            + "' AND device_id = '" + deviceId + "' AND property_id = " + literal(propertyId)
+            + " AND time >= " + ts + " AND time <= " + ts;
         try (Connection connection = openDatabaseConnection();
-             PreparedStatement statement = connection.prepareStatement(
-                 "SELECT value_double FROM " + TABLE + " WHERE tenant_id = ? AND device_id = ?"
-                     + " AND property_id = ? AND time >= ? AND time <= ?")) {
-            bindPoint(statement, deviceId, propertyId, ts);
-            try (ResultSet resultSet = statement.executeQuery()) {
-                if (!resultSet.next()) {
-                    return null;
-                }
-                double value = resultSet.getDouble(1);
-                return resultSet.wasNull() ? null : value;
+             Statement statement = connection.createStatement();
+             ResultSet resultSet = statement.executeQuery(sql)) {
+            if (!resultSet.next()) {
+                return null;
             }
+            double value = resultSet.getDouble(1);
+            return resultSet.wasNull() ? null : value;
         }
     }
 
     /** 读 value_text 原始列（无该 field 序列的点时返回 null）。 */
     private static String textColumn(long deviceId, String propertyId, long ts) throws SQLException {
+        String sql = "SELECT value_text FROM " + TABLE + " WHERE tenant_id = '" + TENANT_ID
+            + "' AND device_id = '" + deviceId + "' AND property_id = " + literal(propertyId)
+            + " AND time >= " + ts + " AND time <= " + ts;
         try (Connection connection = openDatabaseConnection();
-             PreparedStatement statement = connection.prepareStatement(
-                 "SELECT value_text FROM " + TABLE + " WHERE tenant_id = ? AND device_id = ?"
-                     + " AND property_id = ? AND time >= ? AND time <= ?")) {
-            bindPoint(statement, deviceId, propertyId, ts);
-            try (ResultSet resultSet = statement.executeQuery()) {
-                return resultSet.next() ? resultSet.getString(1) : null;
-            }
+             Statement statement = connection.createStatement();
+             ResultSet resultSet = statement.executeQuery(sql)) {
+            return resultSet.next() ? resultSet.getString(1) : null;
         }
     }
 
-    private static void bindPoint(PreparedStatement statement, long deviceId, String propertyId, long ts)
-            throws SQLException {
-        statement.setString(1, String.valueOf(TENANT_ID));
-        statement.setString(2, String.valueOf(deviceId));
-        statement.setString(3, propertyId);
-        statement.setTimestamp(4, Timestamp.from(Instant.ofEpochMilli(ts)));
-        statement.setTimestamp(5, Timestamp.from(Instant.ofEpochMilli(ts)));
+    /**
+     * 测试内自用的字面量构造：本类的 propertyId 全是**本类常量**，直接加引号即可。
+     *
+     * <p>生产路径的同类构造带白名单校验与转义（{@code IotDbTimeSeriesStore#propertyIdLiteral}，
+     * 因为那里的 propertyId 来自请求）；这里刻意不复制那套逻辑，避免测试给出「已被校验」的错觉。
+     * 为什么不用 {@code ?}：真驱动对 {@code ?} 做无引号文本替换（{@code 701 STRING = INT32} /
+     * {@code 616 Column 'temp' cannot be resolved}），查询侧只能用字面量（详见存储类注释）。</p>
+     */
+    private static String literal(String propertyId) {
+        return "'" + propertyId + "'";
     }
 
     private static Connection openDatabaseConnection() throws SQLException {

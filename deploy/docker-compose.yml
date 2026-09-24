@@ -127,9 +127,14 @@ services:
       # ⚠️ 未在容器内 `command -v curl` 实测）、**没有 nc**；
       # 但 6667 是 Thrift RPC 口，curl 对它没有意义（不是 HTTP）⇒ 用官方 CLI 的非交互批处理模式探活：
       # `-e` 见官方 CLI 文档，镜像 PATH 已含 /iotdb/sbin 与 /iotdb/tools（dos2unix 等包由官方 Dockerfile 安装）。
-      # ⚠️ 该探针是我们自建的（非官方推荐做法），退出码语义未在真实容器里独立验证；
+      # ⚠️ 该探针是我们自建的（非官方推荐做法）；本机实测（2026-09-24）确认其退出码语义：
+      #    成功 = 0，连接失败 = 1（`Error: Can't execute sql because Connection Error…`）；
       #    因此它只用于 `docker compose ps` 观测，**不用它驱动别的服务启动顺序**（见 iotdb-init 的自重试）。
-      test: ["CMD", "start-cli.sh", "-h", "127.0.0.1", "-p", "6667", "-u", "root", "-pw", "root", "-sql_dialect", "table", "-e", "SHOW DATABASES"]
+      # ⚠️ 必须 `-h ypbin-iotdb` 而**不是** 127.0.0.1：`dn_rpc_address` 是**绑定地址**（IoTDBConfig 默认
+      #    127.0.0.1），设成 `ypbin-iotdb` 后服务端只绑容器 eth0，loopback 无监听 ⇒ 用 127.0.0.1（也是
+      #    start-cli.sh 的默认值）探活会**永远 unhealthy**（本机实测复现：同一容器 `-h <hostname>` exit 0、
+      #    `-h 127.0.0.1` exit 1）。这是观测性失真，不影响数据面（容器网络内按主机名连一切正常）。
+      test: ["CMD", "start-cli.sh", "-h", "ypbin-iotdb", "-p", "6667", "-u", "root", "-pw", "root", "-sql_dialect", "table", "-e", "SHOW DATABASES"]
       interval: 30s
       timeout: 20s
       retries: 10
