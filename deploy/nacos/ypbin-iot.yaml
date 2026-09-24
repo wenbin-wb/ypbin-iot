@@ -65,9 +65,15 @@ ypbin:
     default-window-hours: 24
 
   # 时序库（Apache IoTDB 表模型，D0.7/§5.2.1）：部署、初始化与排障见 docs/DEPLOY-TIMESERIES.md。
-  # enabled=true 时服务启动做**驱动自检**（org.apache.iotdb:iotdb-jdbc 已在 ypbin-iot 的 runtime 依赖里）：
-  # 驱动不在类路径、url 为空、batch-size/connect-timeout-ms 非正、表名非法 → **启动即拒绝**（fail-fast，
-  # 不静默降级）；表名会被拼进 SQL，故只允许字母/数字/下划线。
+  # enabled=true 时服务启动做**驱动自检**：url 为空、batch-size/connect-timeout-ms 非正、表名非法
+  # → **启动即拒绝**（fail-fast，不静默降级）；表名会被拼进 SQL，故只允许字母/数字/下划线。
+  # ⚠️ 部署前置（已核实，阻塞级）：**驱动必须真的被注册，光在类路径上不够**——
+  #   org.apache.iotdb:iotdb-jdbc:2.0.1-beta 的 jar **没有** META-INF/services/java.sql.Driver
+  #   （Central 制品核验：META-INF/services 条目 0 个）⇒ JDBC 4 的 SPI 自动注册不会发生，必须由代码显式
+  #   Class.forName("org.apache.iotdb.jdbc.IoTDBDriver")（IotDbDriverRegistrar.ensureRegistered()）。
+  #   缺这段注册代码时，enabled=true 会让 ypbin-iot **启动即失败**（DriverManager.getDriver 抛 SQLException
+  #   → IotTimeSeriesConfiguration 抛 IllegalStateException）⇒ 部署前请确认注册代码在你部署的提交里，
+  #   否则先把 enabled 改回 false。详见 docs/DEPLOY-TIMESERIES.md §0.6。
   timeseries:
     enabled: true
     # ⚠️ URL 必须带库名 /iot：写入器与查询用的是**非限定表名**（INSERT INTO reading（…） / FROM reading），

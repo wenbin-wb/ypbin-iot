@@ -122,9 +122,10 @@ services:
     healthcheck:
       # 官方**没有**为 Docker 部署提供健康检查端点或探针命令（官方自带 health_check.sh 是「部署环境体检」：
       # 查 JDK/内存/目录权限/端口占用/ulimit/swap，不是就绪探针）。
-      # 镜像里**有 curl**（基础镜像 eclipse-temurin:17-jre-focal 的 adoptium Dockerfile 显式安装 curl，
-      # 注释「curl required for historical reasons」；IoTDB 的 Dockerfile 未删任何包），但**没有 nc**；
-      # 不过 6667 是 Thrift RPC 口，curl 对它没有意义（不是 HTTP）⇒ 用官方 CLI 的非交互批处理模式探活：
+      # 镜像内**按 Dockerfile 推断有 curl**（基础镜像 eclipse-temurin:17-jre-focal 的 adoptium Dockerfile
+      # 显式安装 curl，注释「curl required for historical reasons」；IoTDB 的 Dockerfile 未删任何包；
+      # ⚠️ 未在容器内 `command -v curl` 实测）、**没有 nc**；
+      # 但 6667 是 Thrift RPC 口，curl 对它没有意义（不是 HTTP）⇒ 用官方 CLI 的非交互批处理模式探活：
       # `-e` 见官方 CLI 文档，镜像 PATH 已含 /iotdb/sbin 与 /iotdb/tools（dos2unix 等包由官方 Dockerfile 安装）。
       # ⚠️ 该探针是我们自建的（非官方推荐做法），退出码语义未在真实容器里独立验证；
       #    因此它只用于 `docker compose ps` 观测，**不用它驱动别的服务启动顺序**（见 iotdb-init 的自重试）。
@@ -153,10 +154,10 @@ services:
     entrypoint:
       - /bin/bash
       - /init/iotdb-init.sh
-    # 清空镜像继承的 CMD（官方镜像是 `CMD ["bash","-c","entrypoint.sh all"]`）：不清空的话实际 argv 会变成
-    # `/bin/bash /init/iotdb-init.sh bash -c "entrypoint.sh all"`——脚本虽然忽略多余参数、当前无害，
-    # 但"启动一次 IoTDB 服务端"的意图不该藏在被忽略的参数里
-    command: []
+    # 这里**不需要** `command: []`：覆盖 entrypoint 本身已使镜像的 CMD 不被继承
+    # （moby `daemon/commit.go` 的 `merge`：仅当 `len(userConf.Entrypoint) == 0` 时才注入镜像 CMD；
+    #   本服务 entrypoint 非空 ⇒ 实际进程就是 `/bin/bash /init/iotdb-init.sh`，无附加参数）。
+    # 注：第一版曾误以为镜像 CMD 会被当参数追加而写了 `command: []`，已按 moby 源码更正（2026-09-24）。
     environment:
       # ⚠️ 口令的**第三处**：脚本默认 IOTDB_USER/IOTDB_PASSWORD=root。改 IoTDB 口令时，这三处必须一起改：
       #   ① IoTDB 内（ALTER USER root SET PASSWORD …）② Nacos ypbin.timeseries.password ③ 这里

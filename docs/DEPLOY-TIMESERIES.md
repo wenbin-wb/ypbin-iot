@@ -12,15 +12,24 @@
    和 `iotdb-init`（一次性建库建表）。DDL 幂等（`IF NOT EXISTS`），重跑无副作用。
 2. **⚠️ 最容易踩的坑（已核实）**：写入器/查询用的是**非限定表名**（`INSERT INTO reading` / `FROM reading`），
    所以 Nacos 里的 JDBC URL **必须带库名** `jdbc:iotdb://ypbin-iotdb:6667/iot?sql_dialect=table`。
-   少了 `/iot`，IoTDB 会直接报 `701: database is not specified`——服务能起来、写入全失败。
+   少了 `/iot`，IoTDB 会拒绝这类语句（报"未指定数据库"；该报文的一手出处见 §8，出自 ≤2.0.7 文档，
+   2.0.11 上的确切码/文案**未实测**）——服务能起来、写入全失败。
 3. **6667 默认只绑回环**（用**独立**变量 `IOTDB_BIND_ADDR`，不设时 = `127.0.0.1`），因为默认口令
    `root/root` 是公开的。之所以不复用 `INTERNAL_BIND_ADDR`：本仓 `deploy/.env.example` 把它设成了 `0.0.0.0`，
    共用会让"手抄 .env.example"顺带把 6667 暴露到全网（详见 §1 与 §6）。
 4. **改保留期不是重建表**：官方支持 `ALTER TABLE iot.reading SET PROPERTIES TTL=<毫秒>`（见 §4），
    它是 DDL/迁移动作（会短暂影响数据可查询性），但**不需要重建表、不丢数据**。
-5. **`ypbin.timeseries.enabled: true` 是 fail-fast 的**：驱动不在类路径、url 为空、表名非法等会让
-   `ypbin-iot` **拒绝启动**（不是静默降级）。驱动 `org.apache.iotdb:iotdb-jdbc:2.0.1-beta` 已在本服务
-   运行时类路径（`ypbin-service/ypbin-iot/pom.xml`，runtime scope）。
+5. **`ypbin.timeseries.enabled: true` 是 fail-fast 的**：url 为空、表名非法、`batch-size`/`connect-timeout-ms`
+   非正 → `ypbin-iot` **拒绝启动**（不是静默降级）。
+6. **⚠️ 前置条件：驱动必须真的被"注册"，光在类路径上不够**（已核实，部署阻塞级）。
+   `org.apache.iotdb:iotdb-jdbc:2.0.1-beta` 的 jar **没有** `META-INF/services/java.sql.Driver`
+   （本机下载 Central 制品 + `zipfile` 核验：jar 105258 字节，`META-INF/services` 条目 **0 个**，
+   `org/apache/iotdb/jdbc/IoTDBDriver.class` 存在、只有 `OSGI-INF`）⇒ **JDBC 4 的 SPI 自动注册不会发生**，
+   必须由代码显式 `Class.forName("org.apache.iotdb.jdbc.IoTDBDriver")`（官方 JDBC 示例正是这么写的）。
+   平台侧做这件事的是 `IotDbDriverRegistrar.ensureRegistered()`（在启动自检里先注册再 `DriverManager.getDriver`）。
+   **没有它，`enabled: true` 会让 `ypbin-iot` 启动即失败**（`DriverManager.getDriver` 抛 SQLException →
+   `IotTimeSeriesConfiguration` 抛 IllegalStateException）。部署前请确认该注册代码在你要部署的提交里；
+   若不在，先把 `ypbin.timeseries.enabled` 改回 `false`。
 
 ## 1. 组件与端口
 
@@ -57,8 +66,10 @@
   cd deploy && docker compose up -d --force-recreate iotdb-init && docker logs ypbin-iotdb-init
   ```
 - **启动顺序**：`ypbin-iot` **刻意不** `depends_on: iotdb`——时序写入失败本就不回滚上报事务（只计数 + ERROR 日志），
-  加硬依赖只会把"IoTDB 挂掉"放大成"整个 IoT 服务起不来"。代价是首次 `up -d` 后的一小段时间里
-  写入会失败、查询会抛 `BusinessException` ⇒ **等 `iotdb-init` 退出码为 0 之后再开始上报/查询**（§3.1）。
+  加依赖只会把"启动顺序"和"IoTDB 可用性"耦合起来（用 `service_started` 只保证顺序、不会阻塞；一旦改成
+  `service_healthy`，IoTDB 不健康就会**直接阻塞 ypbin-iot 启动**，把单点故障放大成全链路起不来）。
+  代价是首次 `up -d` 后的一小段时间里写入会失败、查询会抛 `BusinessException`
+  ⇒ **等 `iotdb-init` 退出码为 0 之后再开始上报/查询**（§3.1）。
 
 > ⚠️ **`IF NOT EXISTS` 的语义**：表已存在时 `CREATE TABLE IF NOT EXISTS … WITH (TTL=…)` **不会**更新 TTL，
 > 只是跳过。改 TTL 必须显式 `ALTER TABLE`（§4）。
@@ -135,9 +146,9 @@ docker exec ypbin-iotdb start-cli.sh -sql_dialect table -e "ALTER TABLE iot.read
 
 | 现象 | 根因 | 处置 |
 |---|---|---|
-| `ypbin-iot` 启动失败：`ypbin.timeseries.enabled=true，但 IoTDB JDBC 驱动不可用` | 运行时类路径缺 `iotdb-jdbc` | 确认 `ypbin-service/ypbin-iot/pom.xml` 里有 `org.apache.iotdb:iotdb-jdbc`（runtime scope）。本服务镜像是 Spring Boot 可执行 fat jar（`ypbin-service/ypbin-iot/Dockerfile`：`COPY target/ypbin-iot-*.jar /app/app.jar`），依赖打进 `BOOT-INF/lib`，**不是** `/app/lib`；在宿主机查证：`unzip -l ypbin-service/ypbin-iot/target/ypbin-iot-*.jar \| grep iotdb-jdbc`（temurin JRE 镜像里没有 `unzip`/`jar`，别在容器里查） |
+| `ypbin-iot` 启动失败：`… IoTDB JDBC 驱动不可用（请确认 org.apache.iotdb:iotdb-jdbc 在运行时类路径）` | ① jar 不在运行时类路径；**或 ② jar 在但没被注册**（该 jar 无 `META-INF/services/java.sql.Driver`，SPI 不会自动注册，见 §0.6） | ①在宿主机查证打包结果：`unzip -l ypbin-service/ypbin-iot/target/ypbin-iot-*.jar \| grep iotdb-jdbc`（本服务镜像是 fat jar，依赖在 `BOOT-INF/lib`，**不是** `/app/lib`；temurin JRE 镜像里没有 `unzip`/`jar`，别在容器里查）；②确认部署的提交里有 `IotDbDriverRegistrar.ensureRegistered()`（显式 `Class.forName`） |
 | 启动失败：`table-name 只允许字母/数字/下划线` | Nacos 里 `table-name` 写了非法值（如 `iot.reading`、带引号） | 只写裸表名 `reading`；库名放 URL 路径里 |
-| 写入失败日志 `701: database is not specified` | JDBC URL 缺库名（见 §0.2） | URL 改成 `jdbc:iotdb://ypbin-iotdb:6667/iot?sql_dialect=table` |
+| 写入失败日志「未指定数据库」（设计文档/≤2.0.7 文档写的码是 `701`，2.0.11 确切码未实测） | JDBC URL 缺库名（见 §0.2） | URL 改成 `jdbc:iotdb://ypbin-iotdb:6667/iot?sql_dialect=table` |
 | 写入/查询报「表/列不存在」（错误码 **616** `COLUMN_NOT_EXIST`） | 未跑 `iotdb-init`，或表名与 DDL 不一致 | `docker logs ypbin-iotdb-init`；必要时 `--force-recreate iotdb-init` |
 | 查询报「类型不匹配」（错误码 **614** `DATA_TYPE_MISMATCH`） | 写入值与列类型不符（如把文本写进 `value_double`），或 DDL 与代码列顺序漂移 | 核对 `deploy/iotdb-init.sql` 与 `IotDbTimeSeriesWriter.COLUMNS` 是否逐列一致 |
 | `801: Username or password is wrong` | IoTDB 侧改了口令，Nacos 或 `iotdb-init` 没同步（或反之） | §6 的**三处联动** |
@@ -151,10 +162,11 @@ docker exec ypbin-iotdb start-cli.sh -sql_dialect table -e "ALTER TABLE iot.read
 ⚠️ 注意这两个码**不在**状态码总表里（[Status Codes](https://iotdb.incubator.apache.org/UserGuide/latest/Reference/Status-Codes.html)
 止于 1403），所以"状态码页查不到"不等于"没有这个码"——**这正是本次第一版文档踩过的坑，已更正**。
 
-> 附：镜像里**有 `curl`**（基础镜像 `eclipse-temurin:17-jre-focal` 的
+> 附：镜像内**按 Dockerfile 推断有 `curl`**（基础镜像 `eclipse-temurin:17-jre-focal` 的
 > [adoptium 官方 Dockerfile](https://raw.githubusercontent.com/adoptium/containers/e5b2b79da44d9488979a9a46d3cdebe992d3a804/17/jre/ubuntu/focal/Dockerfile)
-> 显式安装 curl，注释写明 `curl required for historical reasons`；IoTDB 的 Dockerfile 未删任何包），
-> **没有 `nc`**。但 6667 是 Thrift RPC 口，**curl 对它没有意义**（不是 HTTP）⇒ 探活请用
+> 显式安装 curl，注释写明 `curl required for historical reasons`；IoTDB 的 Dockerfile 未删任何包。
+> ⚠️ **未在容器内 `command -v curl` 实测**，因此这只是"按 Dockerfile 推断"），**没有 `nc`**。
+> 但 6667 是 Thrift RPC 口，**curl 对它没有意义**（不是 HTTP）⇒ 探活请用
 > §3.2 的 CLI 查询，或最轻量的 bash TCP 探活 `docker exec ypbin-iotdb bash -c 'exec 3<>/dev/tcp/127.0.0.1/6667'`。
 > （curl 只有在启用了 IoTDB REST 服务时才有用，那是另一个端口。）
 
@@ -195,6 +207,8 @@ docker exec ypbin-iotdb start-cli.sh -sql_dialect table -e "ALTER TABLE iot.read
 | `IOTDB_JMX_OPTS` / `CONFIGNODE_JMX_OPTS` 是否被 standalone 镜像读取 | ⚠️ 官方仓库 compose 设了这两个变量（大写），但镜像 entrypoint 只把**全小写**变量写进 conf ⇒ 生效路径未核实 | 本仓**不设**这两个变量，避免"以为限制了堆、其实没限制"；内存不足请实测 `docker stats` / 容器内 JVM 参数后再定 |
 | 显式声明 `time TIMESTAMP TIME` 的最低版本 | ⚠️ 官方 Table Management 说「V2.0.8 起支持自定义时间列命名」，我们固定 2.0.11 故可用 | 若把镜像降到 2.0.1-beta，须删掉 DDL 里 `time TIMESTAMP TIME,'` 一段 |
 | 镜像内是否**真的**有 curl | ⚠️ 按 adoptium 官方 Dockerfile 与 IoTDB Dockerfile **推断有**（未在容器内 `command -v curl` 实测） | 探针不依赖 curl（6667 是 Thrift 口，curl 也没用）；要用 curl 前先实测 |
+| `iotdb` 的 `hostname: ypbin-iotdb` 自解析 | ⚠️ 官方 standalone compose 同样把 hostname 设为内部地址同名，但**未在容器内验证**服务端自解析/绑定行为 | 若启动异常，先按官方 compose 的写法核查；容器名 `ypbin-iotdb` 在自定义网络内可解析属 Docker 文档化行为 |
+| **驱动是否被注册**（不是"是否在类路径"） | ✅ 已核实前提：`iotdb-jdbc:2.0.1-beta` 的 jar **无** `META-INF/services/java.sql.Driver` ⇒ 必须显式注册（§0.6）；⏳ "本分支的注册代码在部署提交里"需按提交核对 | 部署前 grep 部署提交里是否有 `Class.forName("org.apache.iotdb.jdbc.IoTDBDriver")`/`IotDbDriverRegistrar`；没有就把 `enabled` 改回 `false` |
 | `start-cli.sh -e` 在 SQL 出错时是否返回非 0 | ⚠️ 这是 `iotdb-init` 重试判定与 healthcheck 语义的**共同前提**，本机不允许跑容器故未实测 | 已用桩脚本覆盖脚本自身逻辑（§2）；真实退出码请在首次部署时用一条**故意写错**的语句观测一次 |
 
 ## 8. 来源（官方一手文档 + 访问日期 2026-09-24）
@@ -240,3 +254,9 @@ docker exec ypbin-iotdb start-cli.sh -sql_dialect table -e "ALTER TABLE iot.read
 - 基础镜像是否自带 curl（adoptium 官方 focal Dockerfile 显式安装，注释 `curl required for historical reasons`；
   该 tag 已 EOL，链接钉在最后一次含 focal 的提交）—
   <https://raw.githubusercontent.com/adoptium/containers/e5b2b79da44d9488979a9a46d3cdebe992d3a804/17/jre/ubuntu/focal/Dockerfile>
+- **驱动 jar 里有没有 SPI 元数据**（本机下载制品 + `zipfile` 核验：无 `META-INF/services`）—
+  <https://repo1.maven.org/maven2/org/apache/iotdb/iotdb-jdbc/2.0.1-beta/iotdb-jdbc-2.0.1-beta.jar>
+  （Maven Central 官方制品，105258 字节；判据：`zipfile.ZipFile(...).namelist()` 里 `META-INF/services*` 条目数 = 0）
+- Docker 对 `entrypoint` 覆盖时是否还注入镜像 `CMD`（结论：不注入；`iotdb-init` 因此不需要 `command: []`）—
+  moby 官方源码 <https://raw.githubusercontent.com/moby/moby/master/daemon/commit.go>（`func merge`：
+  `if len(userConf.Entrypoint) == 0 { … userConf.Cmd = imageConf.Cmd … }`）
