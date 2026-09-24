@@ -159,7 +159,12 @@ class SourceConventionTest {
             + "规避 max_allowed_packet，非逐行往返",
         "AiModelConfigServiceImpl#client.send",
         "误报：候选补全地址回退尝试（for 遍历 completionUrls，命中首个非 404 即 break），"
-            + "循环次数与数据量无关，不存在 N+1；规则只看「循环体里有没有 RPC 接收者」，识别不了 break 语义");
+            + "循环次数与数据量无关，不存在 N+1；规则只看「循环体里有没有 RPC 接收者」，识别不了 break 语义",
+        "IotDbTimeSeriesWriter#ReadingValueMapper.map",
+        "误报：ReadingValueMapper 是**纯词法映射**（读数文本 → 目标列，无任何 IO；见其类注释），"
+            + "与 MyBatis Mapper 无关；规则按「接收者名以 Mapper 结尾」判定，识别不了语义。"
+            + "写入器在按 `batch-size` 分块的循环里逐点判类型（数值行/文本行走两条 INSERT），"
+            + "循环体内只有纯函数调用与内存 add，不存在 N+1");
 
     /**
      * 构建实体继承例外清单。

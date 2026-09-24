@@ -3,8 +3,9 @@
 # 用法：
 #   docker compose -f docker-compose.yml up -d
 #
-# 说明：本文件编排基础设施（Nacos/Redis/MySQL/Sentinel）+ 微服务四件套 + 网关 + XXL-JOB 调度中心，
+# 说明：本文件编排基础设施（Nacos/Redis/MySQL/IoTDB 时序库）+ 微服务四件套 + 网关 + XXL-JOB 调度中心，
 # 单文件即可拉起全链路。账号密码一律从 .env 注入。
+# 时序库（IoTDB）的契约、初始化与排障另见 docs/DEPLOY-TIMESERIES.md。
 #
 # 网络：所有服务接入自定义网络 ypbin-net（固定 subnet + 固定 IP），
 # 容器重建不漂移 IP —— 避免 nginx 等"启动时解析一次"的代理因上游 IP 变化 502。
@@ -79,6 +80,105 @@ services:
     networks:
       ypbin-net:
         ipv4_address: 172.20.0.12
+
+  # ---------- 时序库（Apache IoTDB 表模型）----------
+  # 契约/DDL/运维见 docs/DEPLOY-TIMESERIES.md，设计见 docs/IOT-PLATFORM-DESIGN.md §5.2.1。
+  # image tag 已核实存在：apache/iotdb:2.0.11-standalone（Docker Hub 官方 apache 命名空间，
+  # `docker manifest inspect` 实测可解析，2026-09-24）。
+  # ⚠️ 平台侧驱动是 org.apache.iotdb:iotdb-jdbc:2.0.1-beta（ypbin-service/ypbin-iot/pom.xml，runtime scope），
+  #    官方约束「不要用更新的客户端连更旧的服务端」⇒ 服务端 >= 客户端是安全方向（当前 2.0.11 > 2.0.1-beta）；
+  #    若要严格同版本，可改镜像为 apache/iotdb:2.0.1-beta-standalone（该 tag 同样已核实存在）。
+  iotdb:
+    image: ${REGISTRY_PREFIX:-}apache/iotdb:2.0.11-standalone
+    container_name: ypbin-iotdb
+    # 与 cn_internal_address/dn_* 同名：官方 standalone compose 也是这么设的（hostname 与内部地址一致），
+    # 避免只靠 Docker DNS 解析容器名的隐式行为
+    hostname: ypbin-iotdb
+    environment:
+      # 这些**全小写**变量由镜像 entrypoint 写入 iotdb-system.properties
+      # （官方 Dockerfile-1.0.0-standalone → entrypoint.sh → replace-conf-from-env.sh：把环境里
+      #   「键名全小写」的变量逐个替换进 conf，2026-09-24 核实源码）。
+      # 地址必须与容器名一致：ypbin-iot 通过 jdbc:iotdb://ypbin-iotdb:6667/iot?sql_dialect=table 连接。
+      cn_internal_address: ypbin-iotdb
+      cn_internal_port: "10710"
+      cn_consensus_port: "10720"
+      cn_seed_config_node: ypbin-iotdb:10710
+      dn_rpc_address: ypbin-iotdb
+      dn_internal_address: ypbin-iotdb
+      dn_rpc_port: "6667"
+      dn_mpp_data_exchange_port: "10740"
+      dn_schema_region_consensus_port: "10750"
+      dn_data_region_consensus_port: "10760"
+      dn_seed_config_node: ypbin-iotdb:10710
+    ports:
+      # 6667 是客户端 RPC 口，且默认口令是公开的 root/root（官方 Authority Management：默认用户 root/默认口令 root）。
+      # ⚠️ 这里用**独立**变量 IOTDB_BIND_ADDR（而不是共用的 INTERNAL_BIND_ADDR）：本仓 .env.example 把
+      # INTERNAL_BIND_ADDR 设成 0.0.0.0，共用会把 6667 连同默认口令一起暴露到全网；独立变量的默认值是回环，
+      # 即"不显式设置就只允许宿主机内访问"（要用外部客户端接入时再设 IOTDB_BIND_ADDR，并**先**改口令）。
+      - "${IOTDB_BIND_ADDR:-127.0.0.1}:6667:6667"
+    volumes:
+      - ypbin-iotdb-data:/iotdb/data
+      - ypbin-iotdb-logs:/iotdb/logs
+    healthcheck:
+      # 官方**没有**为 Docker 部署提供健康检查端点或探针命令（官方自带 health_check.sh 是「部署环境体检」：
+      # 查 JDK/内存/目录权限/端口占用/ulimit/swap，不是就绪探针）。
+      # 镜像内**按 Dockerfile 推断有 curl**（基础镜像 eclipse-temurin:17-jre-focal 的 adoptium Dockerfile
+      # 显式安装 curl，注释「curl required for historical reasons」；IoTDB 的 Dockerfile 未删任何包；
+      # ⚠️ 未在容器内 `command -v curl` 实测）、**没有 nc**；
+      # 但 6667 是 Thrift RPC 口，curl 对它没有意义（不是 HTTP）⇒ 用官方 CLI 的非交互批处理模式探活：
+      # `-e` 见官方 CLI 文档，镜像 PATH 已含 /iotdb/sbin 与 /iotdb/tools（dos2unix 等包由官方 Dockerfile 安装）。
+      # ⚠️ 该探针是我们自建的（非官方推荐做法）；本机实测（2026-09-24）确认其退出码语义：
+      #    成功 = 0，连接失败 = 1（`Error: Can't execute sql because Connection Error…`）；
+      #    因此它只用于 `docker compose ps` 观测，**不用它驱动别的服务启动顺序**（见 iotdb-init 的自重试）。
+      # ⚠️ 必须 `-h ypbin-iotdb` 而**不是** 127.0.0.1：`dn_rpc_address` 是**绑定地址**（IoTDBConfig 默认
+      #    127.0.0.1），设成 `ypbin-iotdb` 后服务端只绑容器 eth0，loopback 无监听 ⇒ 用 127.0.0.1（也是
+      #    start-cli.sh 的默认值）探活会**永远 unhealthy**（本机实测复现：同一容器 `-h <hostname>` exit 0、
+      #    `-h 127.0.0.1` exit 1）。这是观测性失真，不影响数据面（容器网络内按主机名连一切正常）。
+      test: ["CMD", "start-cli.sh", "-h", "ypbin-iotdb", "-p", "6667", "-u", "root", "-pw", "root", "-sql_dialect", "table", "-e", "SHOW DATABASES"]
+      interval: 30s
+      timeout: 20s
+      retries: 10
+      start_period: 90s
+    restart: unless-stopped
+    networks:
+      ypbin-net:
+        ipv4_address: 172.20.0.13
+
+  # 一次性初始化：建库 iot + 建表 iot.reading（DDL 本体在 deploy/iotdb-init.sql，本处只做执行器）
+  # 为什么放 compose 而不是 install.sh：install.sh 的 Nacos 占位符替换键是固定的 4 个
+  # （MYSQL_ROOT_PASSWORD/REDIS_PASSWORD/INTERNAL_TOKEN/GATEWAY_SIGN_TOKEN），时序初始化与它无耦合；
+  # 放这里则 `docker compose up -d` 一条命令即可复现。
+  # 幂等：DDL 全用 IF NOT EXISTS，每次 up 重跑无副作用。
+  iotdb-init:
+    image: ${REGISTRY_PREFIX:-}apache/iotdb:2.0.11-standalone
+    container_name: ypbin-iotdb-init
+    depends_on:
+      iotdb:
+        # 刻意用 service_started + 自重试（同一镜像自带 CLI），不依赖上面的 healthcheck 语义
+        condition: service_started
+    entrypoint:
+      - /bin/bash
+      - /init/iotdb-init.sh
+    # 这里**不需要** `command: []`（源码级结论）：覆盖 entrypoint 本身已使镜像的 CMD 不被继承——
+    # moby `daemon/commit.go` 的 `merge` 在 `len(userConf.Entrypoint) == 0` 时才会
+    # `if len(userConf.Cmd) == 0 { userConf.Cmd = imageConf.Cmd }`，即注入镜像 CMD 的完整条件是
+    # 「entrypoint 与 cmd 都为空」；本服务 entrypoint 非空 ⇒ 实际进程就是 `/bin/bash /init/iotdb-init.sh`。
+    # （第一版曾误以为镜像 CMD 会被当参数追加而写了 `command: []`，已按 moby 源码更正，2026-09-24。）
+    environment:
+      # ⚠️ 口令的**第三处**：脚本默认 IOTDB_USER/IOTDB_PASSWORD=root。改 IoTDB 口令时，这三处必须一起改：
+      #   ① IoTDB 内（ALTER USER root SET PASSWORD …）② Nacos ypbin.timeseries.password ③ 这里
+      # （见 docs/DEPLOY-TIMESERIES.md §6）——否则重跑本容器会连续 801（用户名或口令错）并最终 exit 1。
+      IOTDB_USER: root
+      IOTDB_PASSWORD: root
+    volumes:
+      - ./iotdb-init.sh:/init/iotdb-init.sh:ro
+      - ./iotdb-init.sql:/init/iotdb-init.sql:ro
+    # 一次性任务：跑完就退出，不重启（退出码 0=成功，非 0=失败，见 docker compose ps -a）
+    restart: "no"
+    networks:
+      # 刻意**不**给固定 ipv4_address：本仓给固定 IP 是为了「容器重建不漂移、避免代理缓存上游 IP 而 502」，
+      # 而这是一次性任务、没有任何服务会缓存它的地址，占一个固定 IP 只有坏处（地址耗尽 + 语义误导）
+      - ypbin-net
 
   # 说明：Sentinel Dashboard 由 starter 的 deploy 提供（从官方 jar 自构建，
   # 镜像 ypbin/sentinel-dashboard:1.8.8），本文件不重复编排；如需限流控制台，
@@ -270,3 +370,5 @@ volumes:
   ypbin-redis-data:
   ypbin-mysql-data:
   ypbin-nacos-data:
+  ypbin-iotdb-data:
+  ypbin-iotdb-logs:

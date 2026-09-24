@@ -9,6 +9,9 @@
  */
 package cn.ypbin.admin.iot.timeseries;
 
+import io.micrometer.core.instrument.MeterRegistry;
+import java.sql.DriverManager;
+import java.sql.SQLException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.InitializingBean;
@@ -31,6 +34,9 @@ import org.springframework.context.annotation.Configuration;
 public class IotTimeSeriesConfiguration implements InitializingBean {
 
     private static final Logger log = LoggerFactory.getLogger(IotTimeSeriesConfiguration.class);
+
+    /** 表名白名单（会被拼进 SQL 的配置项必须校验）。 */
+    private static final String TABLE_NAME_PATTERN = "[A-Za-z_][A-Za-z0-9_]*";
 
     private final TimeSeriesProperties properties;
 
@@ -55,10 +61,26 @@ public class IotTimeSeriesConfiguration implements InitializingBean {
         if (properties.getConnectTimeoutMs() <= 0) {
             throw new IllegalStateException(TimeSeriesProperties.PREFIX + ".connect-timeout-ms 必须为正数");
         }
-        // 截至本增量：JDBC 写入器尚未实现 ⇒ 明确拒绝启动，绝不假装在写
-        throw new IllegalStateException(TimeSeriesProperties.PREFIX
-            + ".enabled=true，但 IoTDB JDBC 写入器尚未实现（见 docs/IOT-PLATFORM-DESIGN.md §5.2.1 与 ROADMAP 四点二十）："
-            + "请保持 false，或等实现与容器 IT 就位后再开启");
+        if (!properties.getTableName().matches(TABLE_NAME_PATTERN)) {
+            // 表名会被拼进 SQL：只允许普通标识符（配置注入防护）
+            throw new IllegalStateException(TimeSeriesProperties.PREFIX + ".table-name 只允许字母/数字/下划线");
+        }
+        // 驱动 jar 不含 META-INF/services/java.sql.Driver ⇒ DriverManager 不会自动发现它，
+        // 必须显式加载后再自检，否则这里恒抛「驱动不可用」（CI 实测：No suitable driver found）
+        IotDbDriverRegistrar.ensureRegistered();
+        try {
+            if (DriverManager.getDriver(properties.getUrl()) == null) {
+                throw new IllegalStateException("未注册任何 JDBC 驱动");
+            }
+        } catch (SQLException ex) {
+            throw new IllegalStateException(TimeSeriesProperties.PREFIX
+                + ".enabled=true，但 IoTDB JDBC 驱动不可用（请确认 org.apache.iotdb:iotdb-jdbc 在运行时类路径）：url="
+                + properties.getUrl(), ex);
+        }
+        // JDBC 的登录超时是全局设置（驱动层面无逐连接参数）：启动时设一次并记录
+        DriverManager.setLoginTimeout(Math.max(1, properties.getConnectTimeoutMs() / 1000));
+        log.info("[iot] 时序写入已启用：url={} 表={} 批量={}", properties.getUrl(),
+            properties.getTableName(), properties.getBatchSize());
     }
 
     /**
@@ -67,7 +89,26 @@ public class IotTimeSeriesConfiguration implements InitializingBean {
      * @return 写入器
      */
     @Bean
-    public TimeSeriesWriter timeSeriesWriter() {
-        return new LoggingTimeSeriesWriter(properties.isEnabled() ? "JDBC 写入器未实现" : "未启用");
+    public TimeSeriesWriter timeSeriesWriter(MeterRegistry meterRegistry) {
+        if (!properties.isEnabled()) {
+            return new LoggingTimeSeriesWriter("未启用");
+        }
+        return new IotDbTimeSeriesWriter(properties, meterRegistry);
+    }
+
+    /**
+     * 历史查询的存储实现：IoTDB 未接入时用「不可用」实现（查询端点据此明确报错，而不是返回空列表）。
+     *
+     * <p>IoTDB JDBC 实现落地时替换本 bean；替换时**必须**加条件或 `@Primary`，
+     * 否则两个 {@code TimeSeriesStore} bean 会 `NoUniqueBeanDefinitionException`。</p>
+     *
+     * @return 存储实现
+     */
+    @Bean
+    public TimeSeriesStore timeSeriesStore() {
+        if (!properties.isEnabled()) {
+            return new UnavailableTimeSeriesStore();
+        }
+        return new IotDbTimeSeriesStore(properties);
     }
 }

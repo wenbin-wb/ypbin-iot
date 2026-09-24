@@ -63,3 +63,43 @@ ypbin:
     scan-batch-size: 200
     # 查询未给 from 时的默认窗口时长
     default-window-hours: 24
+
+  # 时序库（Apache IoTDB 表模型，D0.7/§5.2.1）：部署、初始化与排障见 docs/DEPLOY-TIMESERIES.md。
+  # enabled=true 时服务启动做**驱动自检**：url 为空、batch-size/connect-timeout-ms 非正、表名非法
+  # → **启动即拒绝**（fail-fast，不静默降级）；表名会被拼进 SQL，故只允许字母/数字/下划线。
+  # ⚠️ 部署前置（已核实，阻塞级）：**驱动必须真的被注册，光在类路径上不够**——
+  #   org.apache.iotdb:iotdb-jdbc:2.0.1-beta 的 jar **没有** META-INF/services/java.sql.Driver
+  #   （Central 制品核验：META-INF/services 条目 0 个）⇒ JDBC 4 的 SPI 自动注册不会发生，必须由代码显式
+  #   Class.forName("org.apache.iotdb.jdbc.IoTDBDriver")（IotDbDriverRegistrar.ensureRegistered()）。
+  #   缺这段注册代码时，enabled=true 会让 ypbin-iot **启动即失败**（DriverManager.getDriver 抛 SQLException
+  #   → IotTimeSeriesConfiguration 抛 IllegalStateException）⇒ 部署前请确认注册代码在你部署的提交里，
+  #   否则先把 enabled 改回 false。详见 docs/DEPLOY-TIMESERIES.md §0.6。
+  timeseries:
+    enabled: true
+    # ⚠️ URL 必须带库名 /iot：写入器与查询用的是**非限定表名**（INSERT INTO reading（…） / FROM reading），
+    # 而 IoTDB 对「未指定数据库」时的这类语句直接报 701: database is not specified（官方文档给出的错误输出）；
+    # 表模型还**必须**带 sql_dialect=table（官方 JDBC 文档）。带库名的 URL 形式同官方示例
+    # jdbc:iotdb://127.0.0.1:6667/test1?sql_dialect=table。
+    url: jdbc:iotdb://ypbin-iotdb:6667/iot?sql_dialect=table
+    # 下面是 IoTDB 官方**默认**用户/口令（官方 Authority Management：默认用户 root、默认口令 root）。
+    # 它不是本平台的部署密钥，所以和 ypbin-common.yaml 的 datasource.username: root 一样直写；
+    # ⚠️ 但默认口令是公开的 ⇒ 生产必须改，且改口令是**三处联动**（漏一处就会以 801 失败）：
+    #   1) IoTDB 侧（官方语法 ALTER USER，需 root 身份，见 docs/DEPLOY-TIMESERIES.md §6）：
+    #      docker exec -it ypbin-iotdb start-cli.sh -h ypbin-iotdb -sql_dialect table -e "ALTER USER root SET PASSWORD '新口令'"
+    #      （⚠️ 必须带 -h ypbin-iotdb：dn_rpc_address 是绑定地址、服务端只绑容器 eth0，用 CLI 默认的
+    #        127.0.0.1 连不上；本机实测见 docs/DEPLOY-TIMESERIES.md §5/§7）
+    #   2) 本文件 password 改成同一个值，重导 Nacos（或直接在 Nacos 控制台改），再重启 ypbin-iot
+    #   3) deploy/docker-compose.yml 的 iotdb-init 服务（IOTDB_USER/IOTDB_PASSWORD）——它用同一镜像的
+    #      CLI 建库建表，不改就会在下次 `docker compose up -d` 时连续 801 后 exit 1
+    # 注意：本文件**也过** install.sh 那段 sed（7 个 nacos 配置一起处理），但可替换键固定为
+    #   MYSQL_ROOT_PASSWORD / REDIS_PASSWORD / INTERNAL_TOKEN / GATEWAY_SIGN_TOKEN 四个
+    #   （本文件里的 ${GATEWAY_SIGN_TOKEN} 正是其中之一）；所以别在 password 上写 ${IOTDB_PASSWORD} 之类的新占位符：
+    #   那样既不会被替换、也不会被自动生成，只会多一层"以为配了、其实没配"的错觉。
+    username: root
+    password: root
+    # 表名，必须与 deploy/iotdb-init.sql 建的表一致
+    table-name: reading
+    # 一次 addBatch/executeBatch 的行数上限
+    batch-size: 500
+    # 连接超时（毫秒）。JDBC 只有全局登录超时，启动自检会用本值调用 DriverManager.setLoginTimeout
+    connect-timeout-ms: 3000

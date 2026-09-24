@@ -15,6 +15,14 @@
     <description>IoT 业务服务（独立部署单元）：设备台账与租约维护</description>
 
     <dependencies>
+        <!-- 时序库（IoTDB 表模型）JDBC 驱动：运行时提供，编译期不耦合（代码只用 java.sql.*） -->
+        <dependency>
+            <groupId>org.apache.iotdb</groupId>
+            <artifactId>iotdb-jdbc</artifactId>
+            <version>2.0.1-beta</version>
+            <scope>runtime</scope>
+        </dependency>
+
         <!-- 注册发现/配置/容错/可观测：与其它业务域一致 -->
         <dependency>
             <groupId>cn.ypbin</groupId>
