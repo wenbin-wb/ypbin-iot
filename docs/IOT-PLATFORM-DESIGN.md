@@ -481,26 +481,35 @@ business 变更台账（产品/设备/点位映射/凭据）
 > 选型见 §0 D0.7：**表模型为主**（`sql_dialect=table`），必要时用 tree-to-table view 兼容树路径。
 > 本节把「怎么建表、怎么写、怎么查、怎么保留」定死，避免实现时再发明。
 
-**① 库与表（一个库 + 一张测量表；多租户用 TAG 而不是分库分表）**
+**① 库与表（一个库 + 一张表；多租户用 TAG 而不是分库分表）—— 语法已按官方一手文档核实（2026-09-24）**
 
 ```sql
--- 建库时设定保留期（表模型**不支持改库级 TTL**：调整保留期要重建库或逐表改，见 §5.2 已核实项）
-CREATE DATABASE iot WITH TTL '90d';           -- D0.8：原始时序保留 90 天
-USE iot;
+CREATE DATABASE iot;                                  -- 库级 TTL 非必需：保留期放在表上
 CREATE TABLE reading (
-    tenant_id   STRING TAG,                    -- 租户（与平台租户同源，便于按租户清理/限流）
-    device_id   STRING TAG,                    -- 设备（文本形态，避免跨系统大整数语义差异）
-    property_id STRING TAG,                    -- 点位（物模型属性/事件字段）
-    ts          TIMESTAMP TIME,                -- 读数时刻（协议侧 epoch 毫秒 → IoTDB TIMESTAMP）
-    value_double DOUBLE FIELD,                 -- 数值型读数
-    value_text   STRING FIELD,                 -- 文本/布尔/JSON 型读数（布尔写 'true'/'false'）
-    quality      STRING FIELD                  -- 质量码（与断档口径同一套：GOOD/…）
-);
+    tenant_id   STRING TAG,                            -- 租户（与平台租户同源）
+    device_id   STRING TAG,                            -- 设备（文本形态，避免跨系统大整数语义差异）
+    property_id STRING TAG,                            -- 点位
+    time        TIMESTAMP TIME,                        -- 读数时刻（列名沿用官方示例 time；类别必须是 TIME）
+    value_double DOUBLE FIELD,                         -- 数值型读数
+    value_text   STRING FIELD,                         -- 文本/布尔/JSON 型读数
+    quality      STRING FIELD                          -- 质量码
+) WITH (TTL=7776000000);                               -- 90 天（毫秒）= D0.8 的原始时序保留
 ```
 
-**类型映射（先按值的词法形态判定，物模型类型覆盖为后续增量）**：数值（INT/LONG/FLOAT/DOUBLE）→ `value_double`
-（LONG 超 2^53 会丢精度 ⇒ 文档标注：此类点位改用 `value_text`，由物模型类型决定，服务端不猜）；
-布尔/字符串/枚举/JSON/字节数组（hex）→ `value_text`。**永不双写两列**（查询侧按列是否非空取值，避免"哪个才是真值"）。
+- 建表语法与列类别（`STRING TAG` / `DOUBLE FIELD` / `TIMESTAMP TIME`）来自官方一手文档
+  [JDBC 示例](https://iotdb.incubator.apache.org/UserGuide/latest-Table/API/Programming-JDBC_apache.html)（访问 2026-09-24）；
+  **表级 TTL** 用 `WITH (TTL=<毫秒>)`（同一示例），因此「90 天」在**建表时**确定。
+- 连接：`jdbc:iotdb://<host>:6667?sql_dialect=table`（表模型**必须**带 `sql_dialect=table`），
+  驱动类 `org.apache.iotdb.jdbc.IoTDBDriver`，依赖 `org.apache.iotdb:iotdb-jdbc:2.0.1-beta`
+  （同一文档页给出；⚠️ 官方提示 **不要用更新的客户端连更旧的服务端**）。
+- ⚠️ **性能取向（官方提示）**：JDBC 插入「可能达不到高性能写入」，Java 应用推荐用 **Native API 的
+  `TableSession` + `Tablet` 批量写**（[Write & Update Data](https://iotdb.incubator.apache.org/UserGuide/latest-Table/Basic-Concept/Write-Updata-Data_apache.html)，
+  访问 2026-09-24）。本平台当前量级用 JDBC 可接受；**写入成为瓶颈时应切 Tablet 批量通道**（登记为后续优化项）。
+
+**同刻重复写的语义（已核实，不再是"未能核实"）**：官方文档明确「**写重复时间戳会更新原时间戳对应列的值**」
+（Write & Update Data §1.1 约束第 6 条）⇒ 我们的写入器「不做批内去重」是**安全**的：同刻重写等价于更新，
+不会产生重复行。⚠️ 但要注意**乱序到达会更新的方向**：若同刻的两条上报值不同，后到者覆盖先到者——
+消费方以最后一次写入为准（与最新值写入器的跨批次语义一致）。
 
 **② 写入路径**：与最新值同一时机——`ingest` **事务提交后**（`afterCommit`）批量写；一批一次
 PreparedStatement 批量提交（`addBatch/executeBatch`，单次外部调用、不在循环里做 IO）；失败**计数 + error 日志**
@@ -521,9 +530,9 @@ PreparedStatement 批量提交（`addBatch/executeBatch`，单次外部调用、
 ② **物模型类型覆盖**（类型判定与词法形态冲突时以物模型为准）仍待后续增量——届时需先解决"写入热路径不逐批查库"
 （例如按产品维度缓存物模型类型）。
 
-**未能核实（不得当既定事实）**：IoTDB 表模型对「同一 (设备,点位,时间戳) 重复写入」的确切语义
-（覆盖/拒绝/保留先到）**未取得一手来源**（官方站点在本环境不可达）。写入器因此**不做**批内去重，
-由容器 IT 落地时用真库确认并回填本节；在上述语义确认前，`enabled` 保持 false。
+**写入语句（已核实）**：`INSERT INTO <表> [(列...)] VALUES (值...)`，支持**多行 VALUES**（官方同一文档 §1.4）；
+未指定的列自动填 `null`；不存在的列会报 `COLUMN_NOT_EXIST(616)`，类型不匹配报 `DATA_TYPE_MISMATCH(614)`。
+⇒ 写入器用 `PreparedStatement` + `addBatch/executeBatch` 组装多行 INSERT（列顺序固定，与建表一致）。
 
 **⑤ 验证计划（本机无法跑 IoTDB，必须如实分层）**
 - **本机可验证**：SQL 与参数绑定（mock `Connection/PreparedStatement` 捕获语句与绑定值）、类型映射规则、

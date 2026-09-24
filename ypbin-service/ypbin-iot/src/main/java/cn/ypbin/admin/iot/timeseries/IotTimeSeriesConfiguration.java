@@ -70,4 +70,17 @@ public class IotTimeSeriesConfiguration implements InitializingBean {
     public TimeSeriesWriter timeSeriesWriter() {
         return new LoggingTimeSeriesWriter(properties.isEnabled() ? "JDBC 写入器未实现" : "未启用");
     }
+
+    /**
+     * 历史查询的存储实现：IoTDB 未接入时用「不可用」实现（查询端点据此明确报错，而不是返回空列表）。
+     *
+     * <p>IoTDB JDBC 实现落地时替换本 bean；替换时**必须**加条件或 `@Primary`，
+     * 否则两个 {@code TimeSeriesStore} bean 会 `NoUniqueBeanDefinitionException`。</p>
+     *
+     * @return 存储实现
+     */
+    @Bean
+    public TimeSeriesStore timeSeriesStore() {
+        return new UnavailableTimeSeriesStore();
+    }
 }
