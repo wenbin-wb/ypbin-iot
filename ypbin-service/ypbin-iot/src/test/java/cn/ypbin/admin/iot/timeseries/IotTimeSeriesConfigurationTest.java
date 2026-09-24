@@ -13,6 +13,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.assertThatCode;
 
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.List;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -40,15 +41,22 @@ class IotTimeSeriesConfigurationTest {
 
         IotTimeSeriesConfiguration configuration = new IotTimeSeriesConfiguration(properties);
         assertThatCode(configuration::afterPropertiesSet).doesNotThrowAnyException();
-        assertThat(configuration.timeSeriesWriter()).isInstanceOf(LoggingTimeSeriesWriter.class);
+        assertThat(configuration.timeSeriesWriter(new SimpleMeterRegistry()))
+            .isInstanceOf(LoggingTimeSeriesWriter.class);
+        assertThat(configuration.timeSeriesStore()).isInstanceOf(UnavailableTimeSeriesStore.class);
     }
 
+    // 说明：「启用 ⇒ 装配 IoTDB 实现」的断言**不放这里**：单测环境没有 IoTDB 驱动（runtime 依赖由部署决定），
+    // 断言它会依赖环境。该断言交给容器 IT（有真驱动与真库），单元测试只覆盖「默认关闭 / 配置校验 / 降级」这些确定性行为。
+
     @Test
-    @DisplayName("★ 启用但实现未就位：启动**拒绝**（绝不假装在写）")
-    void mustRefuseWhenEnabledBeforeImplementation() {
-        assertThatThrownBy(() -> new IotTimeSeriesConfiguration(enabled()).afterPropertiesSet())
+    @DisplayName("★ 表名必须是指纹安全的标识符（它会被拼进 SQL）")
+    void mustValidateTableName() {
+        TimeSeriesProperties bad = enabled();
+        bad.setTableName("reading; drop table x");
+        assertThatThrownBy(() -> new IotTimeSeriesConfiguration(bad).afterPropertiesSet())
             .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("JDBC 写入器尚未实现");
+            .hasMessageContaining("table-name");
     }
 
     @Test
