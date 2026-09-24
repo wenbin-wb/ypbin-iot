@@ -12,6 +12,7 @@ package cn.ypbin.admin.iot.it;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 
+import cn.ypbin.admin.iot.timeseries.IotDbDriverRegistrar;
 import cn.ypbin.admin.iot.timeseries.IotDbTimeSeriesStore;
 import cn.ypbin.admin.iot.timeseries.IotDbTimeSeriesWriter;
 import cn.ypbin.admin.iot.timeseries.IotTimeSeriesConfiguration;
@@ -115,6 +116,9 @@ class IotDbTimeSeriesIT {
 
     @BeforeAll
     static void setUpSchemaAndClient() throws InterruptedException {
+        // 驱动 jar 不含 META-INF/services/java.sql.Driver：与生产装配走同一入口显式加载，
+        // 否则下面的 DriverManager.getConnection 恒报 No suitable driver found（本 IT 第一版即栽在这里）
+        IotDbDriverRegistrar.ensureRegistered();
         database = "ypbin_it_" + System.currentTimeMillis();
         createSchemaWithRetry();
 

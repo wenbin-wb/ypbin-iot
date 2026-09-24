@@ -42,6 +42,8 @@ public class IotDbTimeSeriesStore implements TimeSeriesStore {
     private final TimeSeriesProperties properties;
 
     public IotDbTimeSeriesStore(TimeSeriesProperties properties) {
+        // 同写入器：本类可被直接构造，查询前必须先确保驱动已注册（幂等，无副作用）
+        IotDbDriverRegistrar.ensureRegistered();
         this.properties = properties;
     }
 

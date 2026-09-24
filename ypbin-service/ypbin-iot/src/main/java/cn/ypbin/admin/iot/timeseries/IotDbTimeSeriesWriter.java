@@ -53,6 +53,9 @@ public class IotDbTimeSeriesWriter implements TimeSeriesWriter {
     private final Counter failedCounter;
 
     public IotDbTimeSeriesWriter(TimeSeriesProperties properties, MeterRegistry meterRegistry) {
+        // 连接前先确保驱动已注册：本类可被直接构造（绕过 IotTimeSeriesConfiguration），
+        // 漏注册就会重现 CI 上的 No suitable driver found
+        IotDbDriverRegistrar.ensureRegistered();
         this.properties = properties;
         this.failedCounter = Counter.builder(METRIC_FAILED)
             .description("时序写入失败的批次数").register(meterRegistry);

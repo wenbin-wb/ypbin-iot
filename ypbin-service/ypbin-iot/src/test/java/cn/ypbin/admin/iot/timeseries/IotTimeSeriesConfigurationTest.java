@@ -46,8 +46,9 @@ class IotTimeSeriesConfigurationTest {
         assertThat(configuration.timeSeriesStore()).isInstanceOf(UnavailableTimeSeriesStore.class);
     }
 
-    // 说明：「启用 ⇒ 装配 IoTDB 实现」的断言**不放这里**：单测环境没有 IoTDB 驱动（runtime 依赖由部署决定），
-    // 断言它会依赖环境。该断言交给容器 IT（有真驱动与真库），单元测试只覆盖「默认关闭 / 配置校验 / 降级」这些确定性行为。
+    // 说明：「启用 ⇒ 装配 IoTDB 实现」的断言**不放这里**：它要用真库验证往返语义，
+    // 单测只覆盖「默认关闭 / 配置校验 / 降级」这些确定性行为。「驱动是否真的注册上」由
+    // IotDbDriverRegistrarTest 在单测层把关（runtime 依赖属于测试类路径），真库往返交给容器 IT。
 
     @Test
     @DisplayName("★ 表名必须是指纹安全的标识符（它会被拼进 SQL）")

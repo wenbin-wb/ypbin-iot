@@ -65,6 +65,9 @@ public class IotTimeSeriesConfiguration implements InitializingBean {
             // 表名会被拼进 SQL：只允许普通标识符（配置注入防护）
             throw new IllegalStateException(TimeSeriesProperties.PREFIX + ".table-name 只允许字母/数字/下划线");
         }
+        // 驱动 jar 不含 META-INF/services/java.sql.Driver ⇒ DriverManager 不会自动发现它，
+        // 必须显式加载后再自检，否则这里恒抛「驱动不可用」（CI 实测：No suitable driver found）
+        IotDbDriverRegistrar.ensureRegistered();
         try {
             if (DriverManager.getDriver(properties.getUrl()) == null) {
                 throw new IllegalStateException("未注册任何 JDBC 驱动");
