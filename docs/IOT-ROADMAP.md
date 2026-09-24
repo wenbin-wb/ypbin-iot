@@ -661,6 +661,43 @@ value=紧凑 JSON `{v,q,ts}`），写入时机是**上报事务提交后**（Red
 > 关闭约定：starter 侧落地后，在本表与 [`STARTER-FEEDBACK.md`](STARTER-FEEDBACK.md) 对应条目注明
 > 「starter 已支持（版本/PR）」，并删除 ypbin-iot 的临时实现（SF-1 对应 `IotPermissionGuard`）。
 
+### 四点十九、数据保留清理（D0.8 落地片）
+
+**已落地**：MySQL 侧两张事件表按 **13 个月（396 天）** 清理 —— `outage_event`（断档）与 `maintenance_window`
+（维护窗口，可用率报表要同时看它们）；配置前缀 `ypbin.retention.*`（`enabled` / `outage-event-days` /
+`maintenance-window-days` / `cleanup-interval-ms` 默认 24h / `initial-delay-ms` 默认 5min）。
+
+**实现要点**：用**数据库时钟**算截止（与应用时钟解耦）；清理**跨租户** ⇒ `TenantContext.executeIgnore`
+（租户表在无上下文时会被插件 fail-closed 拒绝）；一轮两张表**各一条 DELETE**（不在循环里做数据库调用）；
+删除行数分别计数（`iot.retention.deleted` 带 `table` tag）+ 日志。
+
+**不可逆动作的护栏**：天数为 0/负数（等价于"全部过期"）时**拒绝执行**并 error 日志；
+`IotRetentionConfiguration` 在**启动时**对非法天数/间隔直接 fail-fast（不允许带着错误配置跑起来）。
+变异验证：去掉护栏 ⇒ `mustRefuseWhenRetentionNotPositive` 转红；把 DB 时钟换成本机时钟 ⇒
+`mustDeleteWithDatabaseClockCutoff` 转红。
+
+**只删已闭合的行（外委复核抓出的硬阻断）**：谓词是 `start_ts < cutoff **AND end_ts IS NOT NULL**`。
+原因：可用率报表**只**从 `outage_event` 取当前断档并把 `end_ts IS NULL` 结算到 now ⇒ 一条 `start_ts` 早已越过
+保留期、但**至今未闭合**的断档（设备长期离线/已废弃）若被删掉，该设备窗口内断档时长归零、
+**可用率显示 100% 且判达标（fail-open）**。进行中的行每设备至多一条，留着不影响保留目标；
+维护窗口同理：进行中的窗口被删等价于「悄悄结束维护」，之后 `close(id)` 只会返回 0。
+SQL 文本门禁 + `executeIgnore` 源码门禁都钉住了这两条约束（`AvailabilityMapperContractTest`）。
+
+**已知边界（登记）**：
+1. 两张表的索引以 `tenant_id` 打头（`idx_*_tenant_start`），跨租户按 `start_ts` 清理**用不上索引**（走扫描）；
+   规模上来后应补 `start_ts` 单列索引（或改为按租户分批清理）；
+2. **单条 DELETE 无界**（无 LIMIT/分批）：数据量大时是长事务（undo 膨胀、可能阻塞断档写入）——
+   当前量级可接受，随年份增长需改为有界分批（每批判空短路的批量删除，符合本仓「不在循环里做数据库调用」的口径）；
+3. **无真库行为级证据**：单测证明「传了正确截止 + 只删已闭合」（SQL 文本门禁），但「截止两侧哪些行真的被删」
+   需真库 IT 才能证明——CI 已有 MySQL 容器脚手架，留给后续增量补（本轮如实登记）。
+4. **口径选择（外委复核提出，当前保留 `start_ts` 谓词）**：按 `start_ts` 删 ⇒ 一条**已闭合**但横跨截止的
+   「超长事件」（单次 >13 个月）会连落在保留期内的尾段一起消失。若口径改为「结束时刻在保留期内的都保留」，
+   把谓词换成 `end_ts < cutoff` 即可（对超长事件更保守）。当前影响面极小（需单次事件 >13 个月），
+   故保留现谓词并在此登记；改动时同步改 SQL 文本门禁与本节。
+
+**未做**：IoTDB 原始时序的保留（表模型 TTL，需 IoTDB 实例）；保留策略的运维开关（手工触发端点）与
+「清理前置快照/审计」——都留给数据面后续增量。
+
 ### 五、替换缝（3a 已备好，3b-2 只需新增自动配置）
 3a 的 `LoggingTenantLinkManager` 已去掉 `@Component`，由 `AccessLeaseConfiguration`（`@AutoConfiguration`
 + `@Bean @ConditionalOnMissingBean`）装配，并有源码门禁守着（四处变异全咬）。⇒ 3b-2 提供真实现时

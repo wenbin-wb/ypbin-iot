@@ -31,6 +31,15 @@ ypbin:
   security:
     interceptor: false
 
+  # 数据保留（D0.8）：断档事件与维护窗口按 13 个月清理（**不可逆**，天数必须为正，启动自检会拒绝非法值）。
+  # 只删**已闭合**的行：进行中的断档/维护窗口是活数据，删掉会让可用率 fail-open。
+  retention:
+    enabled: true
+    outage-event-days: 396
+    maintenance-window-days: 396
+    cleanup-interval-ms: 86400000
+    initial-delay-ms: 300000
+
   # 租约维护（增量 2）：契约与语义见 docs/LEASE.md。
   # ttl 必须大于 expected-renew-interval + 4s（一次内部调用最坏耗时），启动自检会拒绝不合法组合。
   lease:

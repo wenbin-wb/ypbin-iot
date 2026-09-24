@@ -170,6 +170,40 @@ class AvailabilityMapperContractTest {
         }
     }
 
+    @Test
+    @DisplayName("★ D0.8：保留清理的 DELETE 只能删**已闭合**的行（删进行中的断档会让可用率 fail-open）")
+    void retentionDeleteMustOnlyRemoveClosedRows() throws IOException {
+        String outage = methodSql(REPO_ROOT.resolve(
+            "ypbin-service/ypbin-iot/src/main/java/cn/ypbin/admin/iot/mapper/OutageEventMapper.java"),
+            "deleteStartedBefore", "@Delete");
+        String window = methodSql(REPO_ROOT.resolve(
+            "ypbin-service/ypbin-iot/src/main/java/cn/ypbin/admin/iot/mapper/MaintenanceWindowMapper.java"),
+            "deleteStartedBefore", "@Delete");
+        for (String sql : List.of(outage, window)) {
+            // 注意：@Delete（非 <script>）里是裸 `<`，不是 XML 转义后的 `&lt;` ⇒ 断言别绑死转义形态
+            assertThat(sql).as("清理 SQL 必须带 end_ts IS NOT NULL，且按 start_ts 截止")
+                .contains("end_ts IS NOT NULL").contains("start_ts").contains("cutoff");
+        }
+    }
+
+    @Test
+    @DisplayName("★ D0.8：保留清理的跨租户调用必须包在 executeIgnore 里（无租户上下文的定时任务）")
+    void retentionCallsMustBeWrappedInExecuteIgnore() throws IOException {
+        // 依据（复核实测）：去掉包裹后 5 例单测仍全绿 ⇒ 需要源码级门禁兜住这个关键安全属性
+        String source = stripComments(Files.readString(REPO_ROOT.resolve(
+            "ypbin-service/ypbin-iot/src/main/java/cn/ypbin/admin/iot/retention"
+                + "/RetentionCleanupServiceImpl.java"), StandardCharsets.UTF_8));
+        for (String call : List.of("outageEventMapper.deleteStartedBefore",
+                "maintenanceWindowMapper.deleteStartedBefore")) {
+            int index = source.indexOf(call);
+            assertThat(index).as("RetentionCleanupServiceImpl 里应存在对 %s 的调用", call).isPositive();
+            int windowStart = Math.max(0, index - 300);
+            assertThat(source.substring(windowStart, index)).as(
+                "%s 必须包在 TenantContext.executeIgnore(...) 里（清理没有租户身份，插件会 fail-closed）", call)
+                .contains("executeIgnore");
+        }
+    }
+
     /** 剥离行注释与块注释（文本门禁必须作用在代码上，否则注释里的示例会制造假绿）。 */
     private static String stripComments(String source) {
         return source.replaceAll("(?s)/\\*.*?\\*/", " ").replaceAll("//[^\\n]*", " ");
