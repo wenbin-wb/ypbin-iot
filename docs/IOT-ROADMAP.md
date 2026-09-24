@@ -646,6 +646,26 @@ value=紧凑 JSON `{v,q,ts}`），写入时机是**上报事务提交后**（Red
 **为什么先落最新值**：它是「设备详情/影子 reported」的直接数据源，也是 EMQX 入站后最容易被复用的写入口；
 时序库要等 IoTDB 实例与 CI 容器能力，先做它会让整片卡住。
 
+### 四点十九、数据保留清理（D0.8 落地片）
+
+**已落地**：MySQL 侧两张事件表按 **13 个月（396 天）** 清理 —— `outage_event`（断档）与 `maintenance_window`
+（维护窗口，可用率报表要同时看它们）；配置前缀 `ypbin.retention.*`（`enabled` / `outage-event-days` /
+`maintenance-window-days` / `cleanup-interval-ms` 默认 24h / `initial-delay-ms` 默认 5min）。
+
+**实现要点**：用**数据库时钟**算截止（与应用时钟解耦）；清理**跨租户** ⇒ `TenantContext.executeIgnore`
+（租户表在无上下文时会被插件 fail-closed 拒绝）；一轮两张表**各一条 DELETE**（不在循环里做数据库调用）；
+删除行数分别计数（`iot.retention.deleted` 带 `table` tag）+ 日志。
+
+**不可逆动作的护栏**：天数为 0/负数（等价于"全部过期"）时**拒绝执行**并 error 日志；
+`IotRetentionConfiguration` 在**启动时**对非法天数/间隔直接 fail-fast（不允许带着错误配置跑起来）。
+变异验证：去掉护栏 ⇒ `mustRefuseWhenRetentionNotPositive` 转红；把 DB 时钟换成本机时钟 ⇒
+`mustDeleteWithDatabaseClockCutoff` 转红。
+
+**已知边界（登记）**：两张表的索引以 `tenant_id` 打头（`idx_*_tenant_start`），跨租户按 `start_ts` 清理
+**用不上索引**（走扫描）。当前数据量可接受；规模上来后应补 `start_ts` 单列索引（或改为按租户分批清理）。
+**未做**：IoTDB 原始时序的保留（表模型 TTL，需 IoTDB 实例）；保留策略的运维开关（手工触发端点）与
+「清理前置快照/审计」——都留给数据面后续增量。
+
 ### 五、替换缝（3a 已备好，3b-2 只需新增自动配置）
 3a 的 `LoggingTenantLinkManager` 已去掉 `@Component`，由 `AccessLeaseConfiguration`（`@AutoConfiguration`
 + `@Bean @ConditionalOnMissingBean`）装配，并有源码门禁守着（四处变异全咬）。⇒ 3b-2 提供真实现时
