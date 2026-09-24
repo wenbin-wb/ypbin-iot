@@ -452,14 +452,14 @@ ERROR The build could not read 1 project
 
 | # | 事项 | 现状 |
 |---|---|---|
-| **A1** | ~~access 侧上报接线~~ **已落地**（`HttpAccessReadingSink`）：有界队列 → 微批 → `/internal/readings`，含丢弃/失败/非法计数与超时；EMQX 传输**待 Q4** | 已收口；仍有限制见 A9/A10 |
-| **A9** | **上报失败不重试**（本批丢弃） | 刻意为之：重试会占住 flush 线程并放大远端压力；代价是读数丢失会让断档缺口被算长一些 ⇒ 以 `iot.access.egress.failed`/`dropped` 暴露。彻底解决要等 EMQX/MQ 的持久化通道（Q4）与「断档判定对丢失不敏感」的补偿口径 |
+| **A1** | ~~access 侧上报接线~~ **已落地**（`HttpAccessReadingSink`）：有界队列 → 微批 → `/internal/readings`，含丢弃/失败/非法计数与超时；EMQX 传输**待实施**（Q4 已代决 = 设计文档 D0.6：内置库认证 + REST，username 稳定只换口令） | 已收口；仍有限制见 A9/A10 |
+| **A9** | **上报失败不重试**（本批丢弃） | 刻意为之：重试会占住 flush 线程并放大远端压力；代价是读数丢失会让断档缺口被算长一些 ⇒ 以 `iot.access.egress.failed`/`dropped` 暴露。彻底解决要等 **EMQX/MQ 的持久化通道（Q4 已代决 = D0.6，通道本身尚未实施）** 与「断档判定对丢失不敏感」的补偿口径 |
 | **A10** | ~~**扫描无租约/归属联动**~~（= A6 的另一面）✅ **已落地**（2026-09-23） | 同 A6：租约释放/过期→开交接窗口、接管成功→关窗，真库 IT 覆盖（起点=失效时刻、接管后 `end_ts` 非空） |
 | **A12** | 指标**未接大盘/告警** | `iot.access.egress.*`（accepted/dropped/sent/failed/invalid/pending）与可用率侧无 Prometheus 抓取/告警/大盘定义，仅文档提及名字（复核 R8 未核实项） |
 | **A15** | `poll_interval_ms` 可被**过期但为正**的旧快照回退 | 该列是**配置**不是时间戳（1s→10s 是合法变更），故刻意不做单调；代价是另一副本的旧周期写回后阈值 `K×周期` 偏大 ⇒ 检测略滞后、可用率略偏高。若要收口需引入「配置版本号」判新旧（与 `config_epoch` 同类机制） |
 | **A16** | `outageCount` 口径含「裁剪后重叠 0 秒」的行 | 聚合用 `COUNT(*)`（满足窗口重叠条件的行都计），而旧的 Java 求和会跳过重叠 ≤0 的行 ⇒ 次数可能比旧实现大（只影响展示的次数，不影响秒数与可用率）。已在 Mapper Javadoc 写明 |
 | **A13** | 多副本相关用例的成本面 | 谓词与饥饿两条用例是**真库 IT**（CI 才跑）；本地由源码级门禁 `AvailabilityMapperContractTest` 兜底（它只断言 SQL 文本，不执行 SQL） |
-| **A2** | 读数**值**不落库、Redis 最新值未做 | 依赖 Q8（IoTDB 树/表模型）；本轮刻意只上报「质量+时刻」，不发明取值契约 |
+| **A2** | 读数**值**不落库、Redis 最新值未做 | **已代决**（2026-09-23，见设计文档 D0.7）：**IoTDB 2.x 表模型 + Redis 7 最新值**。**本 PR #27 交付（待合并）**：读数契约补 `propertyId`/`value` + `LatestValueWriter`/Redis 实现（Hash `iot:latest:{tenant}:{device}`）+ **事务提交后**写入 —— 见 **PR #27**（`feat/iot-values-d1`，本机 iot 152/0、access 93/0）；边界见**四点十七**。IoTDB 写入与 EMQX 入站待后续增量 |
 | **A3** | ~~维护窗口排除未做~~ ✅ **已落地**（2026-09-23，见「四点十五」） | 新增 `maintenance_window` 表（人工 + 预留租约交接两类来源）：统计总时长 = 窗口 − 维护，且**断档落在维护内的部分也从分子里剔除**（只缩分母会让计划停机仍拉低可用率，与 spec 意图相反）；聚合用一次 SQL（含每行与维护求交后上限封顶）保证明细截断不影响精度；内部端点 `POST/GET /internal/maintenance/windows` 可声明/关闭/查询；响应回显 `maintenanceSeconds`/`effectiveWindowSeconds`/`outageInMaintenanceSeconds`/窗口列表 |
 | **A4** | 阈值/目标全局常量 | 按设备覆盖目标可用率/最长断档属后续增量 |
 | **A5** | 只有 `NO_GOOD_DATA` 一个原因码 | 链路级原因（断链/设备离线/未接管）与租约联动未做 |
@@ -626,6 +626,25 @@ starter 源码注释也明确「微服务下游走 `IdentityContext`、单体走
 **同批复核的另一个系统性问题（登记）**：`@Idempotent` 的默认键是「类名#方法名 + `Arrays.deepHashCode(args)`」，
 而本仓 Req DTO 均无 `equals/hashCode` ⇒ **带 Req 的写端点幂等形同虚设**（`close(Long)` 这类按值的正常）。
 本仓既有全部 IoT 写端点同此形态；本片未擅自改全局语义，登记待统一处置（`@Idempotent(key=SpEL)` 或给 Req 加值语义 equals）。
+
+### 四点十七、读数「值」与最新值（Q8/D0.7 第一片，PR #27）
+
+**本 PR #27 交付（待合并）**：读数契约补 `propertyId`/`value`（值字符串化，类型由物模型定义）；access 侧透传；
+iot 侧 `LatestValueWriter` + Redis 实现（Hash `iot:latest:{tenant}:{device}`，field=点位，
+value=紧凑 JSON `{v,q,ts}`），写入时机是**上报事务提交后**（Redis 不参与数据库事务，写在事务里会出现
+「库回滚了、最新值却已生效」的不一致）；无 Redis 时用 `LoggingLatestValueWriter`（WARN 一次并丢弃，不静默）。
+
+**如实登记的边界（外委复核要求写清，不许承诺做不到的事）**：
+1. **顺序保证是「批次作用域」**：同一次 `writeAll` 内按 `ts` 取新；**跨批次乱序会覆盖**已存的较新值。
+   原因：本机与 CI 都**没有真 Redis**，Lua/CAS 的原子「读 ts 比较再写」无法在本仓被验证（宁可少承诺）。
+   **消费方义务**：value 里带 `ts`，按它判新旧。**升级条件**：一旦有一个可真实验证 Redis 的环境
+   （部署机或容器化 CI），改为 Lua 比较写入或读改写，并把该限制从这里删除。
+2. **最新值不是可用率的数据源**：可用率/断档只看 `quality`+`ts`（§12.5），因此 Redis 故障或本限制
+   的爆炸半径是「最新值展示/未来 shadow reported」，**不影响可用率口径**——这也是本片敢先落它的原因。
+3. **IoTDB 写入未做**：表模型 DDL、写入器、保留策略（D0.8）都是后续增量；本片只落最新值那一半。
+
+**为什么先落最新值**：它是「设备详情/影子 reported」的直接数据源，也是 EMQX 入站后最容易被复用的写入口；
+时序库要等 IoTDB 实例与 CI 容器能力，先做它会让整片卡住。
 
 ### 五、替换缝（3a 已备好，3b-2 只需新增自动配置）
 3a 的 `LoggingTenantLinkManager` 已去掉 `@Component`，由 `AccessLeaseConfiguration`（`@AutoConfiguration`
