@@ -33,6 +33,8 @@ import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
 import cn.ypbin.admin.iot.mapper.OutageEventMapper;
 import cn.ypbin.admin.iot.service.AvailabilityService;
+import cn.ypbin.admin.iot.shadow.ShadowReportedUpdate;
+import cn.ypbin.admin.iot.shadow.ShadowReportedWriter;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.core.exception.GlobalErrorCode;
 import cn.ypbin.starter.core.util.LogSanitizer;
@@ -99,11 +101,18 @@ public class AvailabilityServiceImpl implements AvailabilityService {
     private final IotDeviceMapper deviceMapper;
     private final AvailabilityProperties properties;
 
+    /**
+     * 影子 reported 写入器（G2）：读数上报驱动「设备当前状态」，与 desired 合成真正的 merged。
+     * 与最新值同一时机（事务提交后）写，失败只计数 + 日志，绝不让上报事务回滚。
+     */
+    private final ShadowReportedWriter shadowReportedWriter;
+
     public AvailabilityServiceImpl(DeviceLivenessMapper livenessMapper, OutageEventMapper outageMapper,
                                    MaintenanceWindowMapper maintenanceWindowMapper,
                                    IotDeviceMapper deviceMapper, AvailabilityProperties properties,
                                    TenantProvider tenantProvider, LatestValueWriter latestValueWriter,
-                                   TimeSeriesWriter timeSeriesWriter, TimeSeriesProperties timeSeriesProperties) {
+                                   TimeSeriesWriter timeSeriesWriter, TimeSeriesProperties timeSeriesProperties,
+                                   ShadowReportedWriter shadowReportedWriter) {
         this.livenessMapper = livenessMapper;
         this.outageMapper = outageMapper;
         this.maintenanceWindowMapper = maintenanceWindowMapper;
@@ -113,6 +122,7 @@ public class AvailabilityServiceImpl implements AvailabilityService {
         this.latestValueWriter = latestValueWriter;
         this.timeSeriesWriter = timeSeriesWriter;
         this.timeSeriesProperties = timeSeriesProperties;
+        this.shadowReportedWriter = shadowReportedWriter;
     }
 
     @Override
@@ -127,6 +137,9 @@ public class AvailabilityServiceImpl implements AvailabilityService {
         // 最新值（点位级）与可用率（设备级）是两条独立的关注点：这里只挑「带了点位与值」的读数，
         // 且在**事务提交后**才写（见 writeLatestAfterCommit 的注释）
         List<LatestValue> latestValues = collectLatestValues(items, tenantByDevice);
+        // 影子 reported（设备级）：与最新值同一判据（带点位与值的读数），也在提交后写。
+        // 它让 merged 真正反映「期望 vs 实际」——此前只有 desired 被写过，merged ≡ desired（G2 缺口）。
+        List<ShadowReportedUpdate> shadowUpdates = collectShadowReported(items, tenantByDevice);
         int processed = 0;
         for (Map.Entry<Long, DeviceReadingBatch> entry : batches.entrySet()) {
             Long tenantId = tenantByDevice.get(entry.getKey());
@@ -143,7 +156,7 @@ public class AvailabilityServiceImpl implements AvailabilityService {
         // 时序（历史曲线）与最新值同一时机写：只有启用时才收集，避免默认关闭时的无谓分配
         List<TimeSeriesPoint> seriesPoints = timeSeriesProperties.isEnabled()
             ? collectSeriesPoints(items, tenantByDevice) : List.of();
-        writeDerivedAfterCommit(latestValues, seriesPoints);
+        writeDerivedAfterCommit(latestValues, seriesPoints, shadowUpdates);
         return processed;
     }
 
@@ -208,7 +221,65 @@ public class AvailabilityServiceImpl implements AvailabilityService {
     }
 
     /**
-     * 事务**提交后**再写「派生数据」（最新值 + 时序）。
+     * 挑选「可合并进影子 reported」的读数（纯计算，无外部调用，G2）。
+     *
+     * <p>判据与最新值一致（必须带点位与值 + 设备已解析出租户）：影子 reported 的语义就是
+     * 「上报链路上点位的最新值」，判据若不同会出现「最新值里有、影子里没有」的割裂。</p>
+     *
+     * <p><b>按设备收敛成增量</b>：同一批里同一设备的多个点位合并进**一条**增量（一台设备一条语句，
+     * 而不是每个点位一条）；同一点位重复出现时按读数时刻取最新（与 {@code LatestValueWriter} 的批内规则一致）。</p>
+     *
+     * @param items          原始上报项
+     * @param tenantByDevice 设备 → 租户
+     * @return 待合并增量（每个设备至多一条；可能为空）
+     */
+    private static List<ShadowReportedUpdate> collectShadowReported(List<ReadingObservationDto> items,
+                                                                    Map<Long, Long> tenantByDevice) {
+        Map<Long, Map<String, String>> patchByDevice = new LinkedHashMap<>();
+        Map<Long, Long> tsByDevice = new LinkedHashMap<>();
+        Map<DevicePropertyKey, Long> tsByProperty = new LinkedHashMap<>();
+        for (ReadingObservationDto item : items) {
+            if (item == null || item.getDeviceId() == null || item.getTs() == null) {
+                continue;
+            }
+            String propertyId = item.getPropertyId();
+            String value = item.getValue();
+            if (propertyId == null || propertyId.isBlank() || value == null) {
+                continue;
+            }
+            Long deviceId = item.getDeviceId();
+            if (tenantByDevice.get(deviceId) == null) {
+                // 设备不存在：本批不会写它的任何派生数据（上面循环已 warn 并丢弃）
+                continue;
+            }
+            DevicePropertyKey key = new DevicePropertyKey(deviceId, propertyId);
+            Long known = tsByProperty.get(key);
+            if (known != null && known >= item.getTs()) {
+                // 同一批里同一点位多次上报：只保留读数时刻最新的那条
+                continue;
+            }
+            tsByProperty.put(key, item.getTs());
+            patchByDevice.computeIfAbsent(deviceId, ignored -> new LinkedHashMap<>()).put(propertyId, value);
+            Long knownTs = tsByDevice.get(deviceId);
+            if (knownTs == null || item.getTs() > knownTs) {
+                tsByDevice.put(deviceId, item.getTs());
+            }
+        }
+        List<ShadowReportedUpdate> updates = new ArrayList<>(patchByDevice.size());
+        for (Map.Entry<Long, Map<String, String>> entry : patchByDevice.entrySet()) {
+            Long tenantId = tenantByDevice.get(entry.getKey());
+            LocalDateTime reportTs = AvailabilityRules.toLocalDateTime(tsByDevice.get(entry.getKey()));
+            if (tenantId == null || reportTs == null) {
+                continue;
+            }
+            updates.add(new ShadowReportedUpdate(tenantId, entry.getKey(), Map.copyOf(entry.getValue()),
+                reportTs));
+        }
+        return updates;
+    }
+
+    /**
+     * 事务**提交后**再写「派生数据」（最新值 + 时序 + 影子 reported）。
      *
      * <p>为什么不能直接写在事务里：Redis 不参与数据库事务，若本批因任何原因回滚，写在事务里的最新值
      * 却已经生效 ⇒ 出现"库里有断档记录、最新值却说设备正常"的不一致。注册 afterCommit 回调可以保证
@@ -216,31 +287,36 @@ public class AvailabilityServiceImpl implements AvailabilityService {
      *
      * @param values       待写最新值
      * @param seriesPoints 待写时序点
+     * @param shadows      待合并的影子上报增量
      */
-    private void writeDerivedAfterCommit(List<LatestValue> values, List<TimeSeriesPoint> seriesPoints) {
-        if (values.isEmpty() && seriesPoints.isEmpty()) {
+    private void writeDerivedAfterCommit(List<LatestValue> values, List<TimeSeriesPoint> seriesPoints,
+                                         List<ShadowReportedUpdate> shadows) {
+        if (values.isEmpty() && seriesPoints.isEmpty() && shadows.isEmpty()) {
             return;
         }
         if (!TransactionSynchronizationManager.isSynchronizationActive()) {
-            writeDerived(values, seriesPoints);
+            writeDerived(values, seriesPoints, shadows);
             return;
         }
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
             public void afterCommit() {
-                writeDerived(values, seriesPoints);
+                writeDerived(values, seriesPoints, shadows);
             }
         });
     }
 
     /**
-     * 写派生数据（最新值 + 时序）：**各自兜底**——在 afterCommit 里抛异常会逃逸到调用方（库已提交、
-     * 接口却报错，调用方会误判整批失败），因此任一路失败都只记录，不改变「上报已成功落库」的事实。
+     * 写派生数据（最新值 + 时序 + 影子 reported）：**各自兜底**——在 afterCommit 里抛异常会逃逸到
+     * 调用方（库已提交、接口却报错，调用方会误判整批失败），因此任一路失败都只记录，
+     * 不改变「上报已成功落库」的事实。
      *
      * @param values       最新值
      * @param seriesPoints 时序点
+     * @param shadows      影子上报增量
      */
-    private void writeDerived(List<LatestValue> values, List<TimeSeriesPoint> seriesPoints) {
+    private void writeDerived(List<LatestValue> values, List<TimeSeriesPoint> seriesPoints,
+                              List<ShadowReportedUpdate> shadows) {
         if (!values.isEmpty()) {
             try {
                 latestValueWriter.writeAll(values);
@@ -255,6 +331,15 @@ public class AvailabilityServiceImpl implements AvailabilityService {
             } catch (RuntimeException ex) {
                 log.error("[iot] 时序写入器抛出异常（已忽略，历史曲线缺失但上报已落库）：条数={}",
                     LogSanitizer.sanitize(seriesPoints.size()), ex);
+            }
+        }
+        if (!shadows.isEmpty()) {
+            try {
+                shadowReportedWriter.writeAll(shadows);
+            } catch (RuntimeException ex) {
+                // 写入器实现本身已是「计数 + 日志」，这里是第二道防线：任何实现都不得把上报拖崩
+                log.error("[iot] 影子上报值写入器抛出异常（已忽略，merged 缺失但上报已落库）：设备数={}",
+                    LogSanitizer.sanitize(shadows.size()), ex);
             }
         }
     }
@@ -677,5 +762,17 @@ public class AvailabilityServiceImpl implements AvailabilityService {
      */
     private record DeviceReadingBatch(Long deviceId, Integer pollIntervalMs, LocalDateTime firstObservedAt,
                                       LocalDateTime lastObservedAt, LocalDateTime lastGoodAt, int count) {
+    }
+
+    /**
+     * 「设备 + 点位」复合键（影子增量批内去重用）。
+     *
+     * <p>用记录而不是拼字符串做键：拼串需要一个人造分隔符（魔法值），且点位标识里若恰好含该分隔符
+     * 就会把两条不同的点位判成同一条（合并出一个不存在的点位）。</p>
+     *
+     * @param deviceId   设备 ID
+     * @param propertyId 点位标识
+     */
+    private record DevicePropertyKey(Long deviceId, String propertyId) {
     }
 }

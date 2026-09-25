@@ -12,6 +12,7 @@ package cn.ypbin.admin.iot.service.impl;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -44,6 +45,8 @@ import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import cn.ypbin.admin.iot.shadow.ShadowReportedUpdate;
+import cn.ypbin.admin.iot.shadow.ShadowReportedWriter;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesPoint;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesProperties;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesWriter;
@@ -89,6 +92,9 @@ class AvailabilityServiceImplTest {
     /** 时序写入器（§5.2.1）：默认关闭时不应被调用 */
     private TimeSeriesWriter timeSeriesWriter;
 
+    /** 影子 reported 写入器（G2）：断言「带点位与值的读数才合并进影子」与失败不回滚 */
+    private ShadowReportedWriter shadowReportedWriter;
+
     private TimeSeriesProperties timeSeriesProperties;
     private IotDeviceMapper deviceMapper;
     private AvailabilityProperties properties;
@@ -117,6 +123,7 @@ class AvailabilityServiceImplTest {
         tenantProvider = mock(TenantProvider.class);
         latestValueWriter = mock(LatestValueWriter.class);
         timeSeriesWriter = mock(TimeSeriesWriter.class);
+        shadowReportedWriter = mock(ShadowReportedWriter.class);
         timeSeriesProperties = new TimeSeriesProperties();
         lenient().when(tenantProvider.getCurrentTenantId()).thenReturn(java.util.Optional.empty());
         // 默认无维护窗口（既有用例的口径不受影响）
@@ -129,7 +136,8 @@ class AvailabilityServiceImplTest {
         deviceMapper = mock(IotDeviceMapper.class);
         properties = new AvailabilityProperties();
         service = new AvailabilityServiceImpl(livenessMapper, outageMapper, maintenanceWindowMapper, deviceMapper,
-            properties, tenantProvider, latestValueWriter, timeSeriesWriter, timeSeriesProperties);
+            properties, tenantProvider, latestValueWriter, timeSeriesWriter, timeSeriesProperties,
+            shadowReportedWriter);
         when(livenessMapper.selectNow()).thenReturn(T0.plusHours(10));
         when(deviceMapper.selectBatchIds(any())).thenReturn(List.of(device()));
     }
@@ -245,6 +253,70 @@ class AvailabilityServiceImplTest {
         service.ingest(req(onlyQuality));
 
         verify(latestValueWriter, never()).writeAll(any());
+        verify(shadowReportedWriter, never()).writeAll(any());
+    }
+
+    @Test
+    @DisplayName("★ G2：上报读数必须驱动影子 reported —— 一批里同一设备的多个点位合并成一条增量（不是整体覆盖）")
+    void ingestMustMergeReportedByPropertyId() {
+        when(deviceMapper.selectBatchIds(any())).thenReturn(List.of(device()));
+        when(livenessMapper.selectList(any())).thenReturn(List.of());
+
+        ReadingObservationDto temperature = point(DEVICE, "temperature", "23.5", 1_700_000_000_000L);
+        ReadingObservationDto humidity = point(DEVICE, "humidity", "61", 1_700_000_000_100L);
+        // 同一点位在一批里重复上报：读数时刻更晚的那条必须赢（批内取最新）
+        ReadingObservationDto temperatureNewer = point(DEVICE, "temperature", "24.1", 1_700_000_000_200L);
+
+        service.ingest(req(temperature, humidity, temperatureNewer));
+
+        ArgumentCaptor<List<ShadowReportedUpdate>> captor = ArgumentCaptor.forClass(List.class);
+        verify(shadowReportedWriter).writeAll(captor.capture());
+        assertThat(captor.getValue()).as("一台设备只发一条增量（不是每个点位一条，避免 N+1 写入）")
+            .singleElement()
+            .satisfies(update -> {
+                assertThat(update.tenantId()).as("租户必须来自设备台账（上报路径没有租户上下文）")
+                    .isEqualTo(TENANT);
+                assertThat(update.deviceId()).isEqualTo(DEVICE);
+                assertThat(update.reported()).containsOnlyKeys("temperature", "humidity");
+                assertThat(update.reported()).containsEntry("temperature", "24.1");
+                assertThat(update.reported()).containsEntry("humidity", "61");
+                assertThat(update.reportTs())
+                    .isEqualTo(AvailabilityRules.toLocalDateTime(1_700_000_000_200L));
+            });
+    }
+
+    @Test
+    @DisplayName("★ G2：影子 reported 必须在**事务提交后**才写（与最新值同一时机）")
+    void shadowReportedMustBeWrittenAfterCommitOnly() {
+        when(deviceMapper.selectBatchIds(any())).thenReturn(List.of(device()));
+        when(livenessMapper.selectList(any())).thenReturn(List.of());
+
+        TransactionSynchronizationManager.initSynchronization();
+        try {
+            service.ingest(req(point(DEVICE, "temperature", "23.5", 1_700_000_000_000L)));
+            verify(shadowReportedWriter, never()).writeAll(any());
+        } finally {
+            TransactionSynchronizationManager.getSynchronizations()
+                .forEach(TransactionSynchronization::afterCommit);
+            TransactionSynchronizationManager.clearSynchronization();
+        }
+        verify(shadowReportedWriter).writeAll(any());
+    }
+
+    @Test
+    @DisplayName("★ G2：影子写入器抛异常不得中断上报（上报已落库，接口不得报错）")
+    void shadowWriterFailureMustNotBreakIngest() {
+        when(livenessMapper.selectByDeviceIncludingDeleted(TENANT, DEVICE)).thenReturn(null);
+        when(deviceMapper.selectBatchIds(any())).thenReturn(List.of(device()));
+        when(livenessMapper.selectList(any())).thenReturn(List.of());
+        doThrow(new IllegalStateException("影子写入失败（模拟）")).when(shadowReportedWriter).writeAll(any());
+
+        int processed = service.ingest(req(point(DEVICE, "temperature", "23.5", 1_700_000_000_000L)));
+
+        assertThat(processed).as("上报处理条数不受影子写入失败影响").isEqualTo(1);
+        verify(shadowReportedWriter).writeAll(any());
+        // 影子的失败不得牵连同一批的其它派生写入
+        verify(latestValueWriter).writeAll(any());
     }
 
     @Test
@@ -616,6 +688,17 @@ class AvailabilityServiceImplTest {
         observation.setPollIntervalMs(pollIntervalMs);
         observation.setQuality(quality);
         observation.setTs(ts.atZone(AvailabilityRules.PLATFORM_ZONE).toInstant().toEpochMilli());
+        return observation;
+    }
+
+    /** 带点位与值的读数（影子/最新值都只认这种形态）。 */
+    private static ReadingObservationDto point(Long deviceId, String propertyId, String value, long ts) {
+        ReadingObservationDto observation = new ReadingObservationDto();
+        observation.setDeviceId(deviceId);
+        observation.setPropertyId(propertyId);
+        observation.setValue(value);
+        observation.setQuality(AvailabilityRules.QUALITY_GOOD);
+        observation.setTs(ts);
         return observation;
     }
 
