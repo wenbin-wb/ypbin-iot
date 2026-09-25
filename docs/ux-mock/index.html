@@ -1,0 +1,1882 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<!--
+  ============================================================================
+  ⚠️  这是「IoT 平台 UX/IA 方案」的**设计原型（Design Mock）**，不是生产代码。
+  ----------------------------------------------------------------------------
+  · 目的：让评审者能离线点开、直观体验 `docs/IOT-UX-PROPOSAL.md` 里的新导航、
+    设备详情页、产品物模型编辑器与新手引导，用来对齐交互，**不参与任何构建**。
+  · 数据：全部为**前端硬编码假数据**（本文件内 `DB` 常量），不请求任何接口。
+  · 依赖：**零依赖、零外链**（无 CDN、无外部字体、无外部图片），双击即可离线打开。
+  · 与真实前端的关系：真实实现落在 `ypbin-iot-ui`（vben5 + antd），本原型只表达
+    信息架构与交互意图；组件外观与生产实现不保证一致。
+  · 每个页面顶部有一条「设计标注」说明：用户从哪进入 / 点哪个按钮 / 下一步是什么。
+  ============================================================================
+-->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IoT 平台 UX 原型 · ypbin-iot（设计稿，非生产代码）</title>
+<style>
+  :root{
+    --blue:#1677ff; --blue-1:#e6f4ff; --blue-2:#bae0ff;
+    --green:#52c41a; --green-1:#f6ffed; --green-2:#b7eb8f;
+    --red:#ff4d4f; --red-1:#fff2f0; --red-2:#ffccc7;
+    --orange:#fa8c16; --orange-1:#fff7e6; --orange-2:#ffd591;
+    --purple:#722ed1; --purple-1:#f9f0ff; --purple-2:#d3adf7;
+    --text:#1f2329; --text-2:#5a6270; --text-3:#8f96a3;
+    --bg:#f5f6f8; --line:#e5e7eb; --card:#fff;
+    --sidebar:#1d2433; --sidebar-2:#252f42; --sidebar-text:#c3cad9;
+    --radius:8px; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;height:100%}
+  body{
+    font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    color:var(--text); background:var(--bg);
+  }
+  a{color:var(--blue);text-decoration:none}
+  button{font:inherit;cursor:pointer}
+  table{border-collapse:collapse;width:100%}
+  code,.mono{font-family:var(--mono);font-size:12.5px}
+
+  /* ---------- 骨架 ---------- */
+  .app{display:flex;min-height:100vh}
+  .sidebar{width:232px;flex:0 0 232px;background:var(--sidebar);color:var(--sidebar-text);
+    display:flex;flex-direction:column;position:sticky;top:0;height:100vh;overflow-y:auto}
+  .brand{padding:16px 18px;border-bottom:1px solid #2b3purple;border-bottom:1px solid #2b3446}
+  .brand b{color:#fff;font-size:15px;letter-spacing:.3px;display:block}
+  .brand span{font-size:11px;color:#7d8798}
+  .nav{padding:8px 0 24px}
+  .nav-group{padding:14px 18px 6px;font-size:11px;letter-spacing:.8px;color:#6d7789;text-transform:uppercase}
+  .nav a{display:flex;align-items:center;gap:9px;padding:8px 18px;color:var(--sidebar-text);font-size:13.5px;border-left:3px solid transparent}
+  .nav a:hover{background:var(--sidebar-2);color:#fff}
+  .nav a.on{background:var(--sidebar-2);color:#fff;border-left-color:var(--blue);font-weight:600}
+  .nav .ico{width:16px;text-align:center;opacity:.9;font-size:13px}
+  .nav .tag-new{margin-left:auto;font-size:10px;background:#2f4a7a;color:#9dc4ff;border-radius:3px;padding:0 5px}
+  .nav .tag-reuse{margin-left:auto;font-size:10px;background:#2c4a34;color:#9be3b4;border-radius:3px;padding:0 5px}
+  .nav .tag-gap{margin-left:auto;font-size:10px;background:#5a3630;color:#ffb3a7;border-radius:3px;padding:0 5px}
+
+  .main{flex:1;min-width:0;display:flex;flex-direction:column}
+  .topbar{background:var(--card);border-bottom:1px solid var(--line);padding:10px 22px;
+    display:flex;align-items:center;gap:14px;position:sticky;top:0;z-index:20}
+  .crumb{font-size:13px;color:var(--text-3)}
+  .crumb b{color:var(--text);font-weight:600}
+  .topbar .spacer{flex:1}
+  .mock-flag{font-size:11px;background:var(--orange-1);color:#ad4e00;border:1px solid var(--orange-2);border-radius:99px;padding:2px 10px}
+  .content{padding:18px 22px 60px;max-width:1500px}
+
+  /* ---------- 设计标注条 ---------- */
+  .anno{background:#fffbe6;border:1px dashed #ffd666;border-radius:var(--radius);
+    padding:9px 13px;font-size:12.5px;color:#7a5c00;margin-bottom:14px;display:flex;gap:9px;align-items:flex-start}
+  .anno b{color:#ad6800}
+  .anno .k{background:#fff1b8;border-radius:3px;padding:0 5px;font-family:var(--mono);font-size:11.5px}
+
+  /* ---------- 通用卡片/排版 ---------- */
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:16px;margin-bottom:14px}
+  .card>h3{margin:0 0 12px;font-size:15px;display:flex;align-items:center;gap:8px}
+  .card>h3 .sub{font-size:12px;color:var(--text-3);font-weight:400}
+  h1.page{font-size:19px;margin:0 0 4px}
+  .page-sub{color:var(--text-3);font-size:13px;margin-bottom:14px}
+  .row{display:flex;gap:14px;flex-wrap:wrap}
+  .col{flex:1;min-width:260px}
+  .muted{color:var(--text-3)}
+  .small{font-size:12.5px}
+  .mt{margin-top:12px}
+
+  /* ---------- 按钮 ---------- */
+  .btn{border:1px solid var(--line);background:#fff;border-radius:6px;padding:5px 13px;font-size:13px;color:var(--text);display:inline-flex;align-items:center;gap:6px}
+  .btn:hover{border-color:var(--blue);color:var(--blue)}
+  .btn.primary{background:var(--blue);border-color:var(--blue);color:#fff}
+  .btn.primary:hover{background:#4096ff;border-color:#4096ff;color:#fff}
+  .btn.ghost{background:transparent;border-color:transparent;color:var(--blue);padding:3px 6px}
+  .btn.ghost:hover{background:var(--blue-1)}
+  .btn.sm{padding:2px 9px;font-size:12px}
+  .btn[disabled]{opacity:.5;cursor:not-allowed}
+  .btnbar{display:flex;gap:9px;align-items:center;flex-wrap:wrap}
+  .btnbar .spacer{flex:1}
+
+  /* ---------- 标签 ---------- */
+  .tag{display:inline-block;border-radius:4px;padding:0 7px;font-size:12px;line-height:19px;border:1px solid transparent;white-space:nowrap}
+  .tag.blue{background:var(--blue-1);color:#0958d9;border-color:var(--blue-2)}
+  .tag.green{background:var(--green-1);color:#389e0d;border-color:var(--green-2)}
+  .tag.red{background:var(--red-1);color:#cf1322;border-color:var(--red-2)}
+  .tag.orange{background:var(--orange-1);color:#d46b08;border-color:var(--orange-2)}
+  .tag.purple{background:var(--purple-1);color:#531dab;border-color:var(--purple-2)}
+  .tag.grey{background:#f2f3f5;color:#5a6270;border-color:#e5e7eb}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;vertical-align:1px}
+
+  /* ---------- 表格 ---------- */
+  .tbl{background:#fff;border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
+  .tbl table{font-size:13px}
+  .tbl th{background:#fafbfc;text-align:left;font-weight:600;color:var(--text-2);padding:9px 12px;border-bottom:1px solid var(--line);white-space:nowrap;font-size:12.5px}
+  .tbl td{padding:9px 12px;border-bottom:1px solid #f0f1f3;vertical-align:middle}
+  .tbl tr:last-child td{border-bottom:none}
+  .tbl tbody tr:hover{background:#fafcff}
+  .tbl .link{color:var(--blue);cursor:pointer}
+  .tbl .link:hover{text-decoration:underline}
+  .tbl .acts{white-space:nowrap}
+  .empty{padding:34px;text-align:center;color:var(--text-3)}
+
+  /* ---------- tab ---------- */
+  .tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);margin-bottom:16px;flex-wrap:wrap}
+  .tabs button{background:none;border:none;border-bottom:2px solid transparent;padding:9px 14px;font-size:13.5px;color:var(--text-2)}
+  .tabs button:hover{color:var(--blue)}
+  .tabs button.on{color:var(--blue);border-bottom-color:var(--blue);font-weight:600}
+
+  /* ---------- 统计卡 ---------- */
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(168px,1fr));gap:12px;margin-bottom:14px}
+  .stat{background:#fff;border:1px solid var(--line);border-radius:var(--radius);padding:13px 15px}
+  .stat .lab{font-size:12.5px;color:var(--text-3)}
+  .stat .val{font-size:24px;font-weight:600;margin-top:3px;letter-spacing:.5px}
+  .stat .foot{font-size:11.5px;color:var(--text-3);margin-top:2px}
+
+  /* ---------- 键值列表 ---------- */
+  .kv{display:grid;grid-template-columns:132px 1fr;gap:7px 12px;font-size:13px}
+  .kv dt{color:var(--text-3)}
+  .kv dd{margin:0}
+
+  /* ---------- 引导空态 ---------- */
+  .onboard{max-width:940px;margin:0 auto}
+  .steps{display:flex;gap:0;margin:8px 0 20px}
+  .step{flex:1;text-align:center;position:relative;padding:0 8px}
+  .step .num{width:38px;height:38px;line-height:36px;border-radius:50%;border:2px solid var(--line);
+    background:#fff;margin:0 auto 8px;font-weight:700;color:var(--text-3)}
+  .step.on .num{border-color:var(--blue);background:var(--blue);color:#fff}
+  .step.done .num{border-color:var(--green);background:var(--green-1);color:var(--green)}
+  .step .t{font-weight:600;font-size:13.5px}
+  .step .d{font-size:12px;color:var(--text-3)}
+  .step:not(:last-child):after{content:"";position:absolute;top:19px;right:-1px;width:calc(100% - 38px);
+    left:calc(50% + 22px);height:2px;background:var(--line)}
+  .step.done:not(:last-child):after{background:var(--green-2)}
+  .panel{border:1px solid var(--line);border-radius:var(--radius);background:#fff;padding:18px}
+
+  /* ---------- 模板卡 ---------- */
+  .tpls{display:grid;grid-template-columns:repeat(auto-fill,minmax(258px,1fr));gap:12px}
+  .tpl{border:1px solid var(--line);border-radius:var(--radius);padding:14px;background:#fff;cursor:pointer}
+  .tpl:hover{border-color:var(--blue);box-shadow:0 2px 10px rgba(22,119,255,.10)}
+  .tpl h4{margin:0 0 4px;font-size:14px}
+  .tpl .meta{font-size:12px;color:var(--text-3);margin-bottom:7px}
+  .tpl .feats{font-size:12px;color:var(--text-2);font-family:var(--mono);line-height:1.7}
+
+  /* ---------- 关系图（纯 CSS/HTML） ---------- */
+  .map{overflow-x:auto;padding:6px 2px}
+  .mapline{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:nowrap}
+  .mbox{border:1px solid var(--line);border-radius:var(--radius);background:#fff;padding:9px 12px;min-width:132px;text-align:center;font-size:13px}
+  .mbox b{display:block;font-size:13px}
+  .mbox span{font-size:11.5px;color:var(--text-3)}
+  .mbox.p{border-color:var(--blue-2);background:var(--blue-1)}
+  .mbox.s{border-color:var(--purple-2);background:var(--purple-1)}
+  .mbox.f{border-color:var(--green-2);background:var(--green-1)}
+  .mbox.d{border-color:var(--orange-2);background:var(--orange-1)}
+  .arrow{color:var(--text-3);font-size:17px;flex:0 0 auto}
+  .mapnote{font-size:12.5px;color:var(--text-3);margin:-4px 0 14px}
+
+  /* ---------- 图 ---------- */
+  .chart{background:#fff;border:1px solid var(--line);border-radius:var(--radius);padding:10px 6px 4px}
+  .legend{display:flex;gap:16px;font-size:12px;color:var(--text-3);padding:0 12px 8px}
+
+  /* ---------- 抽屉（原型内联展示，不做浮层） ---------- */
+  .inline-drawer{border:1px solid var(--blue-2);background:var(--blue-1);border-radius:var(--radius);padding:14px;margin-top:12px}
+  .inline-drawer h4{margin:0 0 10px;font-size:13.5px;color:#0958d9}
+
+  /* ---------- 缺口提示 ---------- */
+  .gapbox{border-left:3px solid var(--red);background:var(--red-1);border-radius:0 var(--radius) var(--radius) 0;padding:9px 13px;font-size:12.5px;color:#a8071a;margin-top:10px}
+  .gapbox b{color:#820014}
+  .okbox{border-left:3px solid var(--green);background:var(--green-1);border-radius:0 var(--radius) var(--radius) 0;padding:9px 13px;font-size:12.5px;color:#237804;margin-top:10px}
+
+  /* ---------- 表单 ---------- */
+  .field{margin-bottom:13px}
+  .field label{display:block;font-size:13px;margin-bottom:4px;color:var(--text-2)}
+  .field label .req{color:var(--red)}
+  .field input,.field select,.field textarea{width:100%;border:1px solid #d9d9d9;border-radius:6px;padding:5px 10px;font:inherit;font-size:13px;background:#fff}
+  .field .help{font-size:11.5px;color:var(--text-3);margin-top:3px}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 14px}
+  .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:0 14px}
+
+  /* ---------- 时间线 ---------- */
+  .tl{list-style:none;margin:0;padding:0}
+  .tl li{position:relative;padding:0 0 15px 20px;border-left:2px solid var(--line)}
+  .tl li:last-child{border-left-color:transparent;padding-bottom:0}
+  .tl li:before{content:"";position:absolute;left:-6px;top:4px;width:10px;height:10px;border-radius:50%;background:#fff;border:2px solid var(--text-3)}
+  .tl li.red:before{border-color:var(--red);background:var(--red-1)}
+  .tl li.green:before{border-color:var(--green);background:var(--green-1)}
+  .tl .tt{font-size:12px;color:var(--text-3)}
+  .tl .tb{font-size:13px}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ================= 左侧导航（新 IA） ================= -->
+  <aside class="sidebar">
+    <div class="brand">
+      <b>IoT 平台</b>
+      <span>ypbin-iot · UX 设计原型</span>
+    </div>
+    <nav class="nav" id="nav"></nav>
+  </aside>
+
+  <div class="main">
+    <div class="topbar">
+      <div class="crumb" id="crumb"></div>
+      <div class="spacer"></div>
+      <span class="mock-flag">设计原型 · 非生产代码</span>
+    </div>
+    <div class="content" id="view"></div>
+  </div>
+</div>
+
+<script>
+"use strict";
+/* =========================================================================
+   1. 假数据（全部硬编码，不发任何请求）
+   ========================================================================= */
+const DB = {
+  products: [
+    {
+      id:'p1', code:'demo-th-sensor', name:'温湿度传感器 TH-100', protocol:'modbus',
+      dataFormat:'JSON', deviceType:'传感器', manufacturerName:'示例厂商',
+      modelStatus:'published', currentVersion:'v1.2', deviceCount:6, pointTemplateCount:3,
+      remark:'车间环境温湿度采集',
+      services:[
+        { id:'s1', serviceId:'basic', serviceName:'基础测量', serviceOption:'master',
+          description:'温度与湿度测量能力',
+          properties:[
+            { identifier:'temperature', propertyName:'温度', dataType:'decimal', accessMode:'RW', unit:'℃', minValue:-20, maxValue:60, step:0.1, required:true, description:'环境温度' },
+            { identifier:'humidity',    propertyName:'湿度', dataType:'int',     accessMode:'R',  unit:'%',  minValue:0,   maxValue:100, step:1,   required:true, description:'相对湿度' },
+            { identifier:'battery',     propertyName:'电池电量', dataType:'int', accessMode:'R',  unit:'%',  minValue:0,   maxValue:100, step:1,   required:false, description:'电池剩余电量' }
+          ],
+          commands:[
+            { identifier:'setReportInterval', commandName:'设置上报周期', inputParams:'interval : int（秒，10~3600）', outputParams:'accepted : bool', timeoutMs:5000 }
+          ],
+          events:[
+            { identifier:'overTemp',   eventName:'超温告警', dataType:'decimal', unit:'℃', eventType:'alert', description:'温度超过上限' },
+            { identifier:'lowBattery', eventName:'低电量',   dataType:'int',     unit:'%',  eventType:'warn',  description:'电量低于 15%' }
+          ]}
+      ],
+      versions:[
+        { versionNo:'v1.2', modelStatus:'published', publishedAt:'2026-09-21 10:12:00', remark:'新增电池电量属性 + 低电量事件' },
+        { versionNo:'v1.1', modelStatus:'published', publishedAt:'2026-09-19 16:40:00', remark:'湿度步长改为 1' },
+        { versionNo:'v1.0', modelStatus:'published', publishedAt:'2026-09-19 09:05:00', remark:'首个发布版本' },
+        { versionNo:'—',    modelStatus:'draft',     publishedAt:'',                    remark:'当前草稿：温度 min 调整为 -30' }
+      ]
+    },
+    {
+      id:'p2', code:'demo-power-meter', name:'三相电表 PM-300', protocol:'modbus',
+      dataFormat:'JSON', deviceType:'电表', manufacturerName:'示例厂商',
+      modelStatus:'published', currentVersion:'v1.0', deviceCount:4, pointTemplateCount:4,
+      remark:'配电柜三相电能计量',
+      services:[
+        { id:'s2', serviceId:'metering', serviceName:'电能计量', serviceOption:'master',
+          description:'三相电压/电流/有功功率',
+          properties:[
+            { identifier:'voltageA', propertyName:'A 相电压', dataType:'decimal', accessMode:'R', unit:'V', minValue:0, maxValue:300, required:true },
+            { identifier:'currentA', propertyName:'A 相电流', dataType:'decimal', accessMode:'R', unit:'A', minValue:0, maxValue:100, required:true },
+            { identifier:'powerKw',  propertyName:'有功功率', dataType:'decimal', accessMode:'R', unit:'kW', minValue:0, maxValue:200, required:true }
+          ],
+          commands:[
+            { identifier:'resetEnergy', commandName:'电能清零', inputParams:'—', outputParams:'accepted : bool', timeoutMs:8000 }
+          ],
+          events:[
+            { identifier:'overCurrent', eventName:'过流告警', dataType:'decimal', unit:'A', eventType:'alert', description:'任一相电流超阈值' }
+          ]}
+      ],
+      versions:[
+        { versionNo:'v1.0', modelStatus:'published', publishedAt:'2026-09-20 11:00:00', remark:'首个发布版本' },
+        { versionNo:'—',    modelStatus:'draft',     publishedAt:'',                    remark:'当前草稿：待补 B/C 相属性' }
+      ]
+    }
+  ],
+
+  groups:[
+    { id:'g1', groupName:'一号车间', parentId:'', sort:1, memberCount:4, remark:'产线 A/B' },
+    { id:'g2', groupName:'二号车间', parentId:'', sort:2, memberCount:2, remark:'产线 C' },
+    { id:'g3', groupName:'备用设备', parentId:'', sort:3, memberCount:0, remark:'未投运' }
+  ],
+
+  devices:[
+    { id:'d1',  deviceCode:'demo-dev-online',   deviceName:'一号车间温湿度-01', protocol:'modbus', endpoint:'modbus://10.0.0.11:502', productId:'p1', productVersion:'v1.2', groupId:'g1', onlineStatus:'online',  lastSeenAt:'2026-09-25 13:22:41', status:1, credentialRef:'cred-ref-001' },
+    { id:'d2',  deviceCode:'demo-dev-offline',  deviceName:'一号车间温湿度-02', protocol:'modbus', endpoint:'modbus://10.0.0.12:502', productId:'p1', productVersion:'v1.2', groupId:'g1', onlineStatus:'offline', lastSeenAt:'2026-09-25 10:05:03', status:1, credentialRef:'cred-ref-002' },
+    { id:'d3',  deviceCode:'demo-dev-ok100',    deviceName:'一号车间温湿度-03', protocol:'mqtt',   endpoint:'mqtt://10.0.0.13:1883',  productId:'p1', productVersion:'v1.1', groupId:'g1', onlineStatus:'online',  lastSeenAt:'2026-09-25 13:23:10', status:1, credentialRef:'cred-ref-003' },
+    { id:'d4',  deviceCode:'demo-dev-ungrouped',deviceName:'临时接入温湿度',     protocol:'tcp',    endpoint:'tcp://10.0.0.14:15002', productId:'p1', productVersion:'v1.0', groupId:'',   onlineStatus:'online',  lastSeenAt:'2026-09-25 13:19:55', status:1, credentialRef:'' },
+    { id:'d5',  deviceCode:'demo-dev-never',    deviceName:'新装未上报温湿度',   protocol:'modbus', endpoint:'modbus://10.0.0.15:502', productId:'p1', productVersion:'v1.2', groupId:'',   onlineStatus:'unknown', lastSeenAt:'',                    status:1, credentialRef:'' },
+    { id:'d6',  deviceCode:'demo-dev-disabled', deviceName:'已停用温湿度',       protocol:'modbus', endpoint:'modbus://10.0.0.16:502', productId:'p1', productVersion:'v1.1', groupId:'g2', onlineStatus:'offline', lastSeenAt:'2026-09-22 08:00:00', status:0, credentialRef:'cred-ref-006' },
+    { id:'d7',  deviceCode:'demo-meter-01',     deviceName:'配电柜电表-01',     protocol:'modbus', endpoint:'modbus://10.0.1.21:502', productId:'p2', productVersion:'v1.0', groupId:'g1', onlineStatus:'online',  lastSeenAt:'2026-09-25 13:23:02', status:1, credentialRef:'cred-ref-007' },
+    { id:'d8',  deviceCode:'demo-meter-02',     deviceName:'配电柜电表-02',     protocol:'modbus', endpoint:'modbus://10.0.1.22:502', productId:'p2', productVersion:'v1.0', groupId:'g2', onlineStatus:'online',  lastSeenAt:'2026-09-25 13:22:58', status:1, credentialRef:'cred-ref-008' }
+  ],
+
+  /* 点位映射：设备级（后端 iot_point_mapping.device_id + property_id） */
+  points:{
+    d1:[
+      { id:'pt1', propertyId:'temperature', identifier:'temperature', refType:'property', addressType:'holding', rawAddress:'0x0000', pollIntervalMs:15000, scaleFactor:0.1,  offsetValue:0,    byteOrder:'big', rw:'R', enabled:true },
+      { id:'pt2', propertyId:'humidity',    identifier:'humidity',    refType:'property', addressType:'holding', rawAddress:'0x0001', pollIntervalMs:15000, scaleFactor:1,    offsetValue:0,    byteOrder:'big', rw:'R', enabled:true },
+      { id:'pt3', propertyId:'battery',     identifier:'battery',     refType:'property', addressType:'input',   rawAddress:'0x0008', pollIntervalMs:60000, scaleFactor:1,    offsetValue:0,    byteOrder:'big', rw:'R', enabled:true }
+    ],
+    d7:[
+      { id:'pt4', propertyId:'voltageA', identifier:'voltageA', refType:'property', addressType:'holding', rawAddress:'0x0010', pollIntervalMs:5000, scaleFactor:0.1, offsetValue:0, byteOrder:'big', rw:'R', enabled:true },
+      { id:'pt5', propertyId:'currentA', identifier:'currentA', refType:'property', addressType:'holding', rawAddress:'0x0012', pollIntervalMs:5000, scaleFactor:0.01, offsetValue:0, byteOrder:'big', rw:'R', enabled:true },
+      { id:'pt6', propertyId:'powerKw',  identifier:'powerKw',  refType:'property', addressType:'holding', rawAddress:'0x0018', pollIntervalMs:5000, scaleFactor:0.001, offsetValue:0, byteOrder:'big', rw:'R', enabled:true }
+    ]
+  },
+
+  /* 最新值：真实后端只有 Redis 写路径、**没有读接口** —— 原型用假数据表达目标形态 */
+  latest:{
+    d1:{ temperature:{v:'23.4',q:'good',ts:'2026-09-25 13:22:41'}, humidity:{v:'58',q:'good',ts:'2026-09-25 13:22:41'}, battery:{v:'86',q:'good',ts:'2026-09-25 13:10:00'} },
+    d2:{ temperature:{v:'21.0',q:'stale',ts:'2026-09-25 10:05:03'}, humidity:{v:'61',q:'stale',ts:'2026-09-25 10:05:03'} },
+    d3:{ temperature:{v:'24.1',q:'good',ts:'2026-09-25 13:23:10'}, humidity:{v:'55',q:'good',ts:'2026-09-25 13:23:10'} },
+    d4:{ temperature:{v:'19.8',q:'good',ts:'2026-09-25 13:19:55'} },
+    d5:{},
+    d6:{},
+    d7:{ voltageA:{v:'228.6',q:'good',ts:'2026-09-25 13:23:02'}, currentA:{v:'12.35',q:'good',ts:'2026-09-25 13:23:02'}, powerKw:{v:'8.42',q:'good',ts:'2026-09-25 13:23:02'} },
+    d8:{ voltageA:{v:'230.1',q:'good',ts:'2026-09-25 13:22:58'}, currentA:{v:'9.80',q:'good',ts:'2026-09-25 13:22:58'}, powerKw:{v:'6.71',q:'good',ts:'2026-09-25 13:22:58'} }
+  },
+
+  /* 设备影子：真实后端只有 desired 写得进、reported 全仓无写入路径 ⇒ 原型里也如实画成空 */
+  shadow:{
+    d1:{ desired:{ temperature:25.0, reportInterval:30 }, reported:{}, desiredTs:'2026-09-25 09:12:00', reportTs:'' },
+    d7:{ desired:{}, reported:{}, desiredTs:'', reportTs:'' }
+  },
+
+  outages:{
+    d1:[],
+    d2:[ { startTs:'2026-09-25 10:05:03', endTs:'', durationSec:11860, reason:'NO_DATA', ongoing:true } ],
+    d6:[ { startTs:'2026-09-22 08:00:00', endTs:'2026-09-22 09:00:00', durationSec:3600, reason:'NO_DATA', ongoing:false } ]
+  },
+  availability:{
+    d1:{ window:'24h', availability:'1.000000', meetsTarget:true,  outageCount:0, outageSeconds:'0',     longestOutageSeconds:'0',    maintenanceSeconds:'0',     effectiveWindowSeconds:'86400' },
+    d2:{ window:'24h', availability:'0.862731', meetsTarget:false, outageCount:1, outageSeconds:'11860', longestOutageSeconds:'11860',maintenanceSeconds:'0',     effectiveWindowSeconds:'86400' },
+    d3:{ window:'24h', availability:'1.000000', meetsTarget:true,  outageCount:0, outageSeconds:'0',     longestOutageSeconds:'0',    maintenanceSeconds:'3600',  effectiveWindowSeconds:'82800' },
+    d6:{ window:'24h', availability:'1.000000', meetsTarget:true,  outageCount:0, outageSeconds:'0',     longestOutageSeconds:'0',    maintenanceSeconds:'0',     effectiveWindowSeconds:'86400' },
+    d7:{ window:'24h', availability:'0.998500', meetsTarget:true,  outageCount:1, outageSeconds:'129',   longestOutageSeconds:'129',  maintenanceSeconds:'0',     effectiveWindowSeconds:'86400' }
+  },
+
+  maintenance:[
+    { id:'m1', deviceId:'d3',  groupId:'',   startTs:'2026-09-25 12:00:00', endTs:'2026-09-25 13:00:00', source:'MANUAL', reason:'固件升级（按设备）' },
+    { id:'m2', deviceId:'',    groupId:'g2', startTs:'2026-09-26 01:00:00', endTs:'2026-09-26 03:00:00', source:'MANUAL', reason:'二号车间停电检修（按分组）' },
+    { id:'m3', deviceId:'',    groupId:'',   startTs:'2026-09-20 00:00:00', endTs:'2026-09-20 02:00:00', source:'LEASE_HANDOVER', reason:'租户级历史区间' }
+  ],
+
+  /* 运行期事件：**真实后端没有事件实例表/接口** —— 目标形态 */
+  events:[
+    { id:'e1', deviceId:'d2', identifier:'overTemp',  eventName:'超温告警', level:'alert', ts:'2026-09-25 11:48:12', detail:'temperature=41.2℃ 超上限 40℃' },
+    { id:'e2', deviceId:'d2', identifier:'overTemp',  eventName:'超温告警', level:'alert', ts:'2026-09-25 11:52:40', detail:'temperature=42.8℃ 超上限 40℃' },
+    { id:'e3', deviceId:'d1', identifier:'lowBattery',eventName:'低电量',   level:'warn',  ts:'2026-09-25 13:10:00', detail:'battery=12% 低于阈值 15%' },
+    { id:'e4', deviceId:'d7', identifier:'overCurrent',eventName:'过流告警',level:'alert', ts:'2026-09-25 08:31:05', detail:'currentA=88.4A 超阈值 80A' }
+  ],
+
+  /* 时序：24 点假曲线 */
+  series:{
+    'd1:temperature':[22.1,22.0,21.9,21.8,21.9,22.3,22.8,23.1,23.4,23.6,23.9,24.2,24.0,23.8,23.5,23.2,23.0,22.8,22.6,22.9,23.1,23.3,23.4,23.4],
+    'd1:humidity':[60,60,61,61,62,62,61,60,59,58,57,56,55,56,57,58,58,59,59,58,58,58,58,58],
+    'd7:currentA':[11.2,11.0,10.8,10.9,11.5,12.4,13.1,12.8,12.2,11.9,12.1,12.6,13.0,12.7,12.3,12.0,12.4,12.9,12.5,12.2,12.0,12.1,12.4,12.35],
+    'd2:temperature':[21.0,21.1,22.0,23.4,25.6,28.9,33.2,36.8,39.5,41.2,42.8,40.1,35.0,30.2,27.8,25.1,23.0,21.5,21.0,20.9,21.0,21.0,21.0,21.0]
+  },
+
+  /* 健康总览口径（目标形态；真实后端需新增聚合接口） */
+  health:{ total:8, online:5, offline:2, unknown:1, disabled:1, ungrouped:2, outageOngoing:1,
+           products:2, publishedProducts:2, draftProducts:0, points:6, seriesRows:1392, alerts24h:4 }
+};
+
+/* =========================================================================
+   2. 导航树（新 IA：配置 → 设备 → 数据 → 运维 → 系统）
+   ========================================================================= */
+const NAV = [
+  { group:'起步', items:[
+    { id:'onboarding', icon:'🚀', label:'接入向导', tag:'new' }
+  ]},
+  { group:'① 接入配置', items:[
+    { id:'templates', icon:'📦', label:'产品模板中心', tag:'new' },
+    { id:'products',  icon:'🧱', label:'产品与物模型', tag:'reuse' }
+  ]},
+  { group:'② 设备管理', items:[
+    { id:'devices', icon:'📟', label:'设备台账', tag:'reuse' },
+    { id:'groups',  icon:'🗂️', label:'设备分组', tag:'reuse' }
+  ]},
+  { group:'③ 运维中心', items:[
+    { id:'overview',     icon:'📊', label:'健康总览', tag:'new' },
+    { id:'availability', icon:'📉', label:'断档与可用率', tag:'reuse' },
+    { id:'maintenance',  icon:'🔧', label:'维护窗口', tag:'reuse' },
+    { id:'alerts',       icon:'🔔', label:'事件与告警', tag:'gap' }
+  ]},
+  { group:'④ 数据与调试', items:[
+    { id:'series', icon:'📈', label:'时序查询', tag:'reuse' },
+    { id:'debug',  icon:'🎛️', label:'在线调试', tag:'gap' },
+    { id:'shadow', icon:'🌓', label:'设备影子', tag:'reuse' }
+  ]},
+  { group:'⑤ 系统', items:[
+    { id:'retention', icon:'🧹', label:'数据保留与清理', tag:'gap' },
+    { id:'ledger',    icon:'🏢', label:'租户接入台账', tag:'reuse' }
+  ]},
+  { group:'参考', items:[
+    { id:'modelmap', icon:'🗺️', label:'关系图与口径', tag:'' }
+  ]}
+];
+
+/* =========================================================================
+   3. 工具
+   ========================================================================= */
+const $ = (s, r) => (r || document).querySelector(s);
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const dev = id => DB.devices.find(d => d.id === id) || {};
+const prod = id => DB.products.find(p => p.id === id) || {};
+const grp = id => DB.groups.find(g => g.id === id) || {};
+const prodName = id => (prod(id).name || '—');
+const grpName = id => id ? (grp(id).groupName || '—') : '未分组';
+
+function onlineTag(s){
+  if (s === 'online')  return '<span class="tag green"><span class="dot" style="background:#52c41a"></span>在线</span>';
+  if (s === 'offline') return '<span class="tag red"><span class="dot" style="background:#ff4d4f"></span>离线</span>';
+  return '<span class="tag grey"><span class="dot" style="background:#bfbfbf"></span>未激活</span>';
+}
+function statusTag(st){ return st === 0 ? '<span class="tag grey">已停用</span>' : '<span class="tag blue">启用</span>'; }
+function modelTag(s){ return s === 'published' ? '<span class="tag green">已发布</span>' : '<span class="tag orange">草稿</span>'; }
+function accessTag(m){
+  const map = { R:'<span class="tag grey">只读 R</span>', W:'<span class="tag orange">只写 W</span>', RW:'<span class="tag blue">读写 RW</span>' };
+  return map[m] || esc(m);
+}
+function eventTag(t){
+  const map = { alert:'<span class="tag red">告警 alert</span>', warn:'<span class="tag orange">警告 warn</span>', info:'<span class="tag blue">信息 info</span>' };
+  return map[t] || `<span class="tag grey">${esc(t)}</span>`;
+}
+function anno(enter, click, next){
+  return `<div class="anno"><span>🧭</span><div>
+    <b>进入：</b>${enter}　<b>点：</b>${click}　<b>下一步：</b>${next}</div></div>`;
+}
+function bar(pct, color){
+  return `<div style="background:#f0f1f3;border-radius:3px;height:6px;min-width:70px"><div style="width:${pct}%;height:6px;border-radius:3px;background:${color||'var(--blue)'}"></div></div>`;
+}
+
+/* 简易 SVG 折线图（零依赖） */
+function lineChart(values, opts){
+  opts = opts || {};
+  const w = opts.w || 760, h = opts.h || 190, pad = 34;
+  if (!values.length) return '<div class="empty">该时间范围内无数据</div>';
+  const nums = values.map(Number).filter(v => !isNaN(v));
+  if (!nums.length) return '<div class="empty">该点位读数为文本，无法绘制曲线</div>';
+  let min = Math.min.apply(null, nums), max = Math.max.apply(null, nums);
+  if (min === max){ min -= 1; max += 1; }
+  const span = max - min;
+  const x = i => pad + i * (w - pad * 2) / Math.max(values.length - 1, 1);
+  const y = v => h - pad - (Number(v) - min) * (h - pad * 2) / span;
+  const pts = values.map((v, i) => x(i).toFixed(1) + ',' + y(v).toFixed(1)).join(' ');
+  const grid = [0,1,2,3,4].map(i => {
+    const yy = pad + i * (h - pad * 2) / 4;
+    const val = (max - i * span / 4).toFixed(1);
+    return `<line x1="${pad}" y1="${yy}" x2="${w-pad}" y2="${yy}" stroke="#f0f1f3"/>
+            <text x="${pad-6}" y="${yy+4}" text-anchor="end" font-size="10" fill="#8f96a3">${val}</text>`;
+  }).join('');
+  return `<svg viewBox="0 0 ${w} ${h}" width="100%" height="${h}" preserveAspectRatio="none" role="img">
+    ${grid}
+    <polyline points="${pts}" fill="none" stroke="${opts.color || '#1677ff'}" stroke-width="2"/>
+    ${values.map((v,i)=>`<circle cx="${x(i).toFixed(1)}" cy="${y(v).toFixed(1)}" r="2.6" fill="${opts.color || '#1677ff'}"/>`).join('')}
+  </svg>`;
+}
+
+/* =========================================================================
+   4. 路由
+   ========================================================================= */
+const state = { route:'onboarding', id:null, tab:null, wizardStep:1, wizardTpl:null,
+                filter:{ kw:'', productId:'', groupId:'', status:'' }, devTab:'overview', prodTab:'model' };
+
+function parseHash(){
+  const raw = (location.hash || '#/onboarding').replace(/^#\/?/, '');
+  const parts = raw.split('/').filter(Boolean);
+  state.route = parts[0] || 'onboarding';
+  state.id = parts[1] || null;
+}
+window.addEventListener('hashchange', () => { parseHash(); state.tab = null; window.scrollTo(0,0); render(); });
+const go = h => { location.hash = h; };
+
+/* =========================================================================
+   5. 视图
+   ========================================================================= */
+
+/* ---------- 5.1 接入向导 / 引导空态 ---------- */
+function viewOnboarding(){
+  const s = state.wizardStep;
+  const steps = [
+    { t:'① 新建产品', d:'选模板或自定义' },
+    { t:'② 定义物模型', d:'属性 / 命令 / 事件' },
+    { t:'③ 添加设备并调试', d:'绑产品 → 配点位 → 看数据' }
+  ];
+  const stepsHtml = steps.map((x, i) => {
+    const n = i + 1;
+    const cls = n === s ? 'on' : (n < s ? 'done' : '');
+    return `<div class="step ${cls}"><div class="num">${n < s ? '✓' : n}</div>
+      <div class="t">${x.t}</div><div class="d">${x.d}</div></div>`;
+  }).join('');
+
+  let panel = '';
+  if (s === 1){
+    panel = `
+      <div class="panel">
+        <h3 style="margin:0 0 4px;font-size:15px">第一步：新建产品（或选一个模板）</h3>
+        <p class="muted small" style="margin:0 0 14px">
+          「产品」是同一型号设备的集合。物模型定义在**产品**上，设备从产品继承。
+          没有模板时选「自定义产品」，有模板时一键生成产品 + 物模型 + 点位模板。</p>
+        <div class="btnbar" style="margin-bottom:16px">
+          <button class="btn primary" data-act="tpl" data-id="th">📦 温湿度传感器模板（推荐）</button>
+          <button class="btn" data-act="tpl" data-id="meter">📦 三相电表模板</button>
+          <button class="btn" data-act="go" data-to="#/products">✎ 自定义产品</button>
+        </div>
+        <div class="tpls">
+          <div class="tpl" data-act="tpl" data-id="th">
+            <h4>温湿度传感器</h4><div class="meta">Modbus · JSON · 传感器</div>
+            <div class="feats">属性 3：temperature / humidity / battery<br>命令 1：setReportInterval<br>事件 2：overTemp / lowBattery<br>点位模板 3：holding 0x0000/0x0001、input 0x0008</div>
+            <div class="mt"><span class="tag green">含点位模板</span> <span class="tag blue">含事件</span></div>
+          </div>
+          <div class="tpl" data-act="tpl" data-id="meter">
+            <h4>三相电表</h4><div class="meta">Modbus · JSON · 电表</div>
+            <div class="feats">属性 3：voltageA / currentA / powerKw<br>命令 1：resetEnergy<br>事件 1：overCurrent<br>点位模板 3：holding 0x0010/0x0012/0x0018</div>
+            <div class="mt"><span class="tag green">含点位模板</span></div>
+          </div>
+        </div>
+        <div class="gapbox">⚠️ <b>模板能力当前不存在</b>：后端无模板表/接口（全仓无 <span class="mono">template</span> 相关实体与端点），
+          「从模板新建」需要新增 <span class="mono">GET /iot/product-templates</span> 与
+          <span class="mono">POST /iot/products?templateCode=</span>（或前端内置静态模板 + 逐条调用现有物模型接口）。</div>
+      </div>`;
+  } else if (s === 2){
+    const p = DB.products[0];
+    panel = `
+      <div class="panel">
+        <h3 style="margin:0 0 4px;font-size:15px">第二步：定义物模型</h3>
+        <p class="muted small" style="margin:0 0 14px">
+          物模型三层结构：<b>产品 → 服务 → 属性 / 命令 / 事件</b>。录入后点「发布物模型」生成版本，设备才能绑定。</p>
+        <div class="kv" style="margin-bottom:14px">
+          <dt>产品</dt><dd><b>${esc(p.name)}</b> <span class="mono muted">${esc(p.code)}</span></dd>
+          <dt>协议 / 数据格式</dt><dd>${esc(p.protocol)} / ${esc(p.dataFormat)}</dd>
+        </div>
+        <table class="tbl"><thead><tr><th>服务</th><th>属性</th><th>命令</th><th>事件</th></tr></thead><tbody>
+          ${p.services.map(sv => `<tr>
+            <td><b>${esc(sv.serviceName)}</b> <span class="mono muted">${esc(sv.serviceId)}</span></td>
+            <td>${sv.properties.map(x => `<span class="tag blue">${esc(x.identifier)}</span>`).join(' ')}</td>
+            <td>${sv.commands.map(x => `<span class="tag purple">${esc(x.identifier)}</span>`).join(' ')}</td>
+            <td>${sv.events.map(x => `<span class="tag orange">${esc(x.identifier)}</span>`).join(' ')}</td>
+          </tr>`).join('')}
+        </tbody></table>
+        <div class="btnbar mt">
+          <button class="btn primary" data-act="wiz" data-step="3">下一步：添加设备并调试</button>
+          <button class="btn" data-act="go" data-to="#/products/p1">打开物模型编辑器</button>
+        </div>
+        <div class="okbox">✅ 这一步<b>全部复用现有接口</b>：<span class="mono">POST /iot/products</span>、
+          <span class="mono">POST /iot/products/{{productId}}/services</span>、
+          <span class="mono">.../services/{{serviceId}}/properties|commands|events</span>、
+          <span class="mono">POST /iot/products/{{id}}/publish</span>。前端目前<b>没有</b>这些页面，需新建。</div>
+      </div>`;
+  } else {
+    panel = `
+      <div class="panel">
+        <h3 style="margin:0 0 4px;font-size:15px">第三步：添加设备并调试</h3>
+        <p class="muted small" style="margin:0 0 14px">
+          设备台账里新增设备 → 选**已发布**的产品（自动继承物模型版本）→ 进设备详情配点位映射 → 看最新值与历史曲线。</p>
+        <div class="grid3">
+          <div class="field"><label>设备编码 <span class="req">*</span></label><input value="th-100-001"></div>
+          <div class="field"><label>设备名称 <span class="req">*</span></label><input value="一号车间温湿度-01"></div>
+          <div class="field"><label>接入协议 <span class="req">*</span></label>
+            <select><option>Modbus TCP</option><option>TCP 透传</option><option>MQTT</option><option>OPC UA</option></select></div>
+        </div>
+        <div class="grid2">
+          <div class="field"><label>所属产品 <span class="req">*</span></label>
+            <select><option>温湿度传感器 TH-100（v1.2 已发布）</option></select>
+            <div class="help">只列出「已发布」物模型的产品；设备继承该产品的属性/命令/事件定义</div></div>
+          <div class="field"><label>端点 URI <span class="req">*</span></label>
+            <input value="modbus://10.0.0.11:502"><div class="help">必须带协议头</div></div>
+        </div>
+        <div class="field"><label>所属分组</label>
+          <select><option>一号车间</option><option>二号车间</option><option>（不分组）</option></select></div>
+        <div class="btnbar mt">
+          <button class="btn primary" data-act="go" data-to="#/devices/d1">创建并进入设备详情</button>
+          <button class="btn" data-act="go" data-to="#/devices">稍后再说，先去设备台账</button>
+        </div>
+        <div class="gapbox">⚠️ <b>当前设备表单选不了产品</b>：<span class="mono">views/iot/devices/data.ts</span> 的
+          <span class="mono">useFormSchema()</span> 里<b>没有</b> <span class="mono">productId</span> 字段
+          （<span class="mono">productId</span> 在前端仅出现在 <span class="mono">api/iot/device.ts</span> 的类型声明里，全仓无任何视图使用）。
+          后端 <span class="mono">IotDeviceServiceImpl.requirePublishedProduct()</span> 会校验「产品必须已发布」，
+          所以没有产品选择器时该分支永远走不到。</div>
+      </div>`;
+  }
+
+  return `
+    <div class="onboard">
+      ${anno('左侧「起步 → 接入向导」', '按 ① → ② → ③ 依次点主按钮',
+        '完成后落到「设备台账」，或直接进「设备详情」看数据')}
+      <h1 class="page">三步把第一台设备接上云</h1>
+      <div class="page-sub">这是**空态引导**：新租户没有任何产品/设备时，「健康总览」与「设备台账」都显示同一入口，避免用户不知道从哪下手。</div>
+      <div class="steps">${stepsHtml}</div>
+      ${panel}
+    </div>`;
+}
+
+/* ---------- 5.2 健康总览 ---------- */
+function viewOverview(){
+  const h = DB.health;
+  const rows = DB.devices.map(d => {
+    const a = DB.availability[d.id];
+    return `<tr>
+      <td><span class="link" data-act="go" data-to="#/devices/${d.id}">${esc(d.deviceName)}</span>
+          <div class="mono muted small">${esc(d.deviceCode)}</div></td>
+      <td><span class="link" data-act="go" data-to="#/products/${d.productId}">${esc(prodName(d.productId))}</span></td>
+      <td>${esc(grpName(d.groupId))}</td>
+      <td>${onlineTag(d.onlineStatus)}${d.status===0?' '+statusTag(0):''}</td>
+      <td>${a ? `<b style="color:${a.meetsTarget?'#389e0d':'#cf1322'}">${Number(a.availability).toFixed(4)}</b>` : '<span class="muted">—</span>'}</td>
+      <td>${(()=>{const o=(DB.outages[d.id]||[]).filter(x=>x.ongoing);return o.length?'<span class="tag red">进行中</span>':'<span class="tag green">无</span>';})()}</td>
+    </tr>`;
+  }).join('');
+
+  return `
+    ${anno('左侧「③ 运维中心 → 健康总览」', '点统计卡下方的设备名进入「设备详情」；点「进行中断档」进断档页',
+      '从异常项直接跳到处理动作，不用先翻设备台账')}
+    <h1 class="page">健康总览</h1>
+    <div class="page-sub">一句话回答「现在有没有事、事在哪台设备、点哪里处理」。</div>
+
+    <div class="stats">
+      <div class="stat"><div class="lab">设备总数</div><div class="val">${h.total}</div>
+        <div class="foot">在线 ${h.online} · 离线 ${h.offline} · 未激活 ${h.unknown} · 停用 ${h.disabled}</div></div>
+      <div class="stat"><div class="lab">进行中断档</div><div class="val" style="color:#cf1322">${h.outageOngoing}</div>
+        <div class="foot"><span class="link" data-act="go" data-to="#/availability">查看断档明细 →</span></div></div>
+      <div class="stat"><div class="lab">24h 事件/告警</div><div class="val" style="color:#d46b08">${h.alerts24h}</div>
+        <div class="foot"><span class="link" data-act="go" data-to="#/alerts">查看告警 →</span></div></div>
+      <div class="stat"><div class="lab">产品 / 已发布</div><div class="val">${h.products}<span class="muted" style="font-size:14px"> / ${h.publishedProducts}</span></div>
+        <div class="foot"><span class="link" data-act="go" data-to="#/products">产品与物模型 →</span></div></div>
+      <div class="stat"><div class="lab">点位映射</div><div class="val">${h.points}</div>
+        <div class="foot">物模型属性 ${DB.products.reduce((n,p)=>n+p.services.reduce((m,s)=>m+s.properties.length,0),0)} 个</div></div>
+      <div class="stat"><div class="lab">未分组设备</div><div class="val">${h.ungrouped}</div>
+        <div class="foot"><span class="link" data-act="go" data-to="#/groups">去分组 →</span></div></div>
+    </div>
+
+    <div class="card">
+      <h3>设备健康明细 <span class="sub">按「有问题优先」排序</span></h3>
+      <div class="tbl"><table>
+        <thead><tr><th>设备</th><th>产品</th><th>分组</th><th>状态</th><th>24h 可用率</th><th>进行中断档</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table></div>
+      <div class="gapbox">⚠️ <b>健康总览需要新增聚合接口</b>：现有 <span class="mono">GET /iot/devices</span> 只返回设备台账分页，
+        不含可用率、断档、事件；逐台调 <span class="mono">/devices/{id}/availability</span> 会 N+1。
+        建议新增 <span class="mono">GET /iot/overview/summary</span> 与 <span class="mono">GET /iot/overview/devices</span>（一次带上可用率与进行中断档）。</div>
+    </div>`;
+}
+
+/* ---------- 5.3 产品列表 ---------- */
+function viewProducts(){
+  const rows = DB.products.map(p => `<tr>
+    <td><span class="link" data-act="go" data-to="#/products/${p.id}">${esc(p.productName||p.name)}</span></td>
+    <td class="mono">${esc(p.code)}</td>
+    <td>${esc(p.protocol)}</td>
+    <td>${esc(p.deviceType)}</td>
+    <td>${modelTag(p.modelStatus)}</td>
+    <td class="mono">${esc(p.currentVersion)}</td>
+    <td>${(()=>{const n=DB.devices.filter(d=>d.productId===p.id).length;
+         return n ? `<span class="link" data-act="go" data-to="#/products/${p.id}">${n} 台</span>` : '<span class="muted">0 台</span>';})()}</td>
+    <td>${p.services.reduce((n,s)=>n+s.properties.length,0)} / ${p.services.reduce((n,s)=>n+s.commands.length,0)} / ${p.services.reduce((n,s)=>n+s.events.length,0)}</td>
+    <td class="acts">
+      <button class="btn ghost" data-act="go" data-to="#/products/${p.id}">物模型</button>
+      <button class="btn ghost" data-act="adddev" data-id="${p.id}">添加设备</button>
+      <button class="btn ghost" data-act="pub" data-id="${p.id}">发布</button>
+    </td>
+  </tr>`).join('');
+
+  return `
+    ${anno('左侧「① 接入配置 → 产品与物模型」', '点产品名进「产品详情」；行内「添加设备」带着产品跳设备表单',
+      '产品详情里编物模型 → 发布 → 回来看「设备」页签')}
+    <h1 class="page">产品与物模型</h1>
+    <div class="page-sub">每个产品一行，直接给出「物模型有多少、挂了多少台设备、下一步能做什么」。</div>
+
+    <div class="tbl"><table>
+      <thead><tr><th>产品名称</th><th>产品编码</th><th>协议</th><th>设备类型</th><th>物模型状态</th><th>当前版本</th>
+        <th>设备数</th><th>属性/命令/事件</th><th>操作</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+
+    <div class="gapbox">⚠️ <b>当前产品页缺的三件事</b>（对照 <span class="mono">views/iot/products/data.ts</span>）：
+      ① <b>没有设备数列</b>，看不出「这个产品挂了几台设备」→ <span class="mono">ProductResp</span> 无 <span class="mono">deviceCount</span>，需新增；
+      ② <b>没有「物模型」入口</b>，属性/命令/事件的界面完全不存在（后端 <span class="mono">IotThingModelController</span> 已就绪）；
+      ③ <b>没有「添加设备」入口</b>，产品页与设备页之间没有任何跳转。</div>`;
+}
+
+/* ---------- 5.4 产品详情（含物模型编辑器） ---------- */
+function viewProductDetail(){
+  /* 同 viewDeviceDetail：显式 find 兜底，避免无效 id 渲染空白页 */
+  const p = DB.products.find(x => x.id === state.id) || DB.products[0];
+  const tab = state.prodTab || 'model';
+  const devs = DB.devices.filter(d => d.productId === p.id);
+  const allProps = p.services.reduce((a,s)=>a.concat(s.properties),[]);
+
+  let body = '';
+  if (tab === 'model'){
+    body = p.services.map(sv => `
+      <div class="card">
+        <h3>服务：${esc(sv.serviceName)} <span class="mono muted">${esc(sv.serviceId)}</span>
+          <span class="tag purple">${esc(sv.serviceOption)}</span>
+          <span class="sub">${esc(sv.description||'')}</span></h3>
+
+        <div class="small muted" style="margin-bottom:6px">属性 Properties（${sv.properties.length}）</div>
+        <div class="tbl"><table>
+          <thead><tr><th>标识符</th><th>名称</th><th>数据类型</th><th>读写</th><th>范围/步长</th><th>单位</th><th>必选</th><th>说明</th><th></th></tr></thead>
+          <tbody>${sv.properties.map(x=>`<tr>
+            <td class="mono">${esc(x.identifier)}</td><td>${esc(x.propertyName)}</td><td class="mono">${esc(x.dataType)}</td>
+            <td>${accessTag(x.accessMode)}</td>
+            <td class="mono">${x.minValue!=null?esc(x.minValue)+' ~ '+esc(x.maxValue):'—'}${x.step?(' / '+esc(x.step)):''}</td>
+            <td>${esc(x.unit||'—')}</td>
+            <td>${x.required?'<span class="tag red">必选</span>':'<span class="tag grey">可选</span>'}</td>
+            <td class="small muted">${esc(x.description||'—')}</td>
+            <td><button class="btn ghost" data-act="noop">编辑</button></td></tr>`).join('')}
+          </tbody></table></div>
+
+        <div class="small muted mt" style="margin-bottom:6px">命令 Commands（${sv.commands.length}）</div>
+        <div class="tbl"><table>
+          <thead><tr><th>标识符</th><th>名称</th><th>入参</th><th>出参</th><th>超时</th><th></th></tr></thead>
+          <tbody>${sv.commands.map(x=>`<tr>
+            <td class="mono">${esc(x.identifier)}</td><td>${esc(x.commandName)}</td>
+            <td class="mono small">${esc(x.inputParams)}</td><td class="mono small">${esc(x.outputParams)}</td>
+            <td class="mono">${esc(x.timeoutMs)} ms</td>
+            <td><button class="btn ghost" data-act="noop">编辑</button></td></tr>`).join('')
+            || '<tr><td colspan="6" class="muted">无可下发的命令</td></tr>'}
+          </tbody></table></div>
+
+        <div class="small muted mt" style="margin-bottom:6px">事件 Events（${sv.events.length}）</div>
+        <div class="tbl"><table>
+          <thead><tr><th>标识符</th><th>名称</th><th>事件类型</th><th>数据类型</th><th>单位</th><th>说明</th><th></th></tr></thead>
+          <tbody>${sv.events.map(x=>`<tr>
+            <td class="mono">${esc(x.identifier)}</td><td>${esc(x.eventName)}</td>
+            <td>${eventTag(x.eventType)}</td><td class="mono">${esc(x.dataType)}</td><td>${esc(x.unit||'—')}</td>
+            <td class="small muted">${esc(x.description||'—')}</td>
+            <td><button class="btn ghost" data-act="noop">编辑</button></td></tr>`).join('')
+            || '<tr><td colspan="7" class="muted">未定义事件</td></tr>'}
+          </tbody></table></div>
+
+        <div class="btnbar mt">
+          <button class="btn" data-act="noop">+ 添加属性</button>
+          <button class="btn" data-act="noop">+ 添加命令</button>
+          <button class="btn" data-act="noop">+ 添加事件</button>
+        </div>
+      </div>`).join('');
+
+    body += `
+      <div class="gapbox">⚠️ <b>物模型接口全部已存在、前端全部未实现</b>：后端
+        <span class="mono">IotThingModelController</span> 提供
+        <span class="mono">GET|POST /iot/products/{productId}/services</span>、
+        <span class="mono">.../services/{serviceId}/properties|commands|events</span>（各含 GET/POST/PUT/DELETE）、
+        <span class="mono">GET|POST /iot/products/{productId}/tsl</span>（TSL 导入导出）；
+        <span class="mono">apps/web-antd/src/api/iot/</span> 下<b>没有 thingmodel.ts</b>，视图里也<b>0 处</b>出现
+        <span class="mono">tslImport</span>/<span class="mono">tslExport</span>/<span class="mono">iot:point</span>/<span class="mono">iot:shadow</span>。
+        权限码与菜单按钮 <b>已在 SQL 里备好</b>（<span class="mono">320003-320017</span> 等），只差页面。</div>
+      <div class="gapbox">⚠️ <b>事件字段缺「事件类型」</b>：原型的 <span class="mono">alert/warn/info</span> 在
+        <span class="mono">IotEvent</span> 实体里<b>不存在</b>（字段只有 <span class="mono">identifier/eventName/dataType/maxLength/unit/enumList</span>）；
+        阿里云 TSL 事件有 <span class="mono">type: info|alert|error</span>，需新增列 + 接口字段。
+        另外 <span class="mono">IotProperty</span>/<span class="mono">IotEvent</span>/<span class="mono">IotCommand</span>
+        三个<b>实体都没有 description</b>（只有 <span class="mono">IotService</span> 有），需补齐。
+        ⚠️ 注意<b>实体与 TSL DTO 不一致</b>：<span class="mono">TslCommand</span>/<span class="mono">TslEvent</span>/<span class="mono">TslService</span>
+        都有 description，所以<b>导入 TSL 时命令/事件的 description 会被静默丢弃</b>。</div>`;
+  }
+
+  if (tab === 'overview'){
+    body = `
+      <div class="card"><h3>产品信息</h3>
+        <div class="kv">
+          <dt>产品编码</dt><dd class="mono">${esc(p.code)}</dd>
+          <dt>产品名称</dt><dd>${esc(p.name)}</dd>
+          <dt>接入协议</dt><dd>${esc(p.protocol)}</dd>
+          <dt>数据格式</dt><dd>${esc(p.dataFormat)}</dd>
+          <dt>设备类型</dt><dd>${esc(p.deviceType)}</dd>
+          <dt>厂商</dt><dd>${esc(p.manufacturerName||'—')}</dd>
+          <dt>物模型状态</dt><dd>${modelTag(p.modelStatus)} <span class="mono">${esc(p.currentVersion)}</span></dd>
+          <dt>关联设备</dt><dd>${devs.length} 台（<span class="link" data-act="ptab" data-tab="devices">查看</span>）</dd>
+          <dt>点位模板</dt><dd>${p.pointTemplateCount} 条（<span class="link" data-act="ptab" data-tab="points">查看</span>）</dd>
+        </div>
+      </div>
+      <div class="gapbox">⚠️ <b>产品级「点位模板」是新增概念</b>：现有点位映射表 <span class="mono">iot_point_mapping</span> 的主键维度是
+        <span class="mono">device_id + property_id</span>（<b>设备级</b>）。同型号 100 台设备要逐台配同样的寄存器地址，
+        且后端<b>没有</b>「复制点位」「按产品套用」的接口。建议新增产品级点位模板 + 设备级覆盖。</div>`;
+  }
+
+  if (tab === 'points'){
+    const firstDev = devs[0];
+    const pts = firstDev ? (DB.points[firstDev.id]||[]) : [];
+    body = `
+      <div class="card"><h3>产品级点位模板 <span class="sub">新增概念：把同型号设备的点位配置沉淀到产品上</span></h3>
+        <p class="small muted">模板只描述「属性 → 原始地址」的<b>默认映射</b>；设备创建时自动套用，单台设备可覆盖（如现场地址不同）。</p>
+        <div class="tbl"><table>
+          <thead><tr><th>属性标识符</th><th>引用类型</th><th>地址类型</th><th>原始地址</th><th>采集周期</th><th>缩放</th><th>字节序</th><th>读写</th></tr></thead>
+          <tbody>${allProps.map((x,i)=>`<tr>
+            <td class="mono">${esc(x.identifier)}</td><td>property</td>
+            <td>${pts[i]?esc(pts[i].addressType):'<span class="muted">未映射</span>'}</td>
+            <td class="mono">${pts[i]?esc(pts[i].rawAddress):'—'}</td>
+            <td class="mono">${pts[i]?esc(pts[i].pollIntervalMs)+' ms':'—'}</td>
+            <td class="mono">${pts[i]?esc(pts[i].scaleFactor):'—'}</td>
+            <td class="mono">${pts[i]?esc(pts[i].byteOrder):'—'}</td>
+            <td>${accessTag(x.accessMode)}</td></tr>`).join('')}
+          </tbody></table></div>
+        <div class="gapbox">⚠️ <b>后端缺口</b>：需新增产品级点位模板表 + <span class="mono">GET|PUT /iot/products/{id}/point-template</span>，
+          并在设备创建时支持 <span class="mono">applyTemplate=true</span> 自动落 <span class="mono">iot_point_mapping</span>。</div>
+      </div>`;
+  }
+
+  if (tab === 'devices'){
+    body = `
+      <div class="card"><h3>该产品下的设备（${devs.length}）</h3>
+        <div class="tbl"><table>
+          <thead><tr><th>设备编码</th><th>设备名称</th><th>分组</th><th>绑定版本</th><th>状态</th><th>最近在线</th><th></th></tr></thead>
+          <tbody>${devs.map(d=>`<tr>
+            <td class="mono">${esc(d.deviceCode)}</td>
+            <td><span class="link" data-act="go" data-to="#/devices/${d.id}">${esc(d.deviceName)}</span></td>
+            <td>${esc(grpName(d.groupId))}</td><td class="mono">${esc(d.productVersion)}</td>
+            <td>${onlineTag(d.onlineStatus)}</td><td class="mono small">${esc(d.lastSeenAt||'—')}</td>
+            <td><button class="btn ghost" data-act="adddev" data-id="${p.id}">+ 添加设备</button></td></tr>`).join('')}
+          </tbody></table></div>
+        <div class="gapbox">⚠️ <b>「按产品查设备」当前做不到</b>：<span class="mono">IotDeviceQuery</span> 只有
+          <span class="mono">keyword</span> 与 <span class="mono">protocol</span>，<b>没有 productId 过滤</b>；
+          <span class="mono">IotDeviceResp</span> 也<b>不返回 productName</b>。需扩展查询与响应字段。</div>
+      </div>`;
+  }
+
+  if (tab === 'versions'){
+    body = `
+      <div class="card"><h3>物模型版本 <span class="sub">draft → published</span></h3>
+        <div class="tbl"><table>
+          <thead><tr><th>版本号</th><th>状态</th><th>发布时间</th><th>说明</th><th></th></tr></thead>
+          <tbody>${p.versions.map(v=>`<tr>
+            <td class="mono">${esc(v.versionNo)}</td><td>${modelTag(v.modelStatus)}</td>
+            <td class="mono small">${esc(v.publishedAt||'—')}</td><td class="small">${esc(v.remark)}</td>
+            <td>${v.modelStatus==='published'?'<button class="btn ghost" data-act="noop">对比差异</button><button class="btn ghost" data-act="noop">回滚为新草稿</button>':'<button class="btn ghost" data-act="noop">继续编辑</button>'}</td>
+          </tr>`).join('')}
+          </tbody></table></div>
+        <div class="gapbox">⚠️ <b>版本差异对比缺接口</b>：后端有
+          <span class="mono">POST /iot/products/{id}/draft</span>、<span class="mono">POST /iot/products/{id}/publish</span>、
+          <span class="mono">GET /iot/products/{id}/versions</span>，但<b>没有</b> diff 接口。
+          阿里云 TSL 发布前有官方「查看差异 / View Differences」步骤，建议补
+          <span class="mono">GET /iot/products/{id}/versions/{a}/diff/{b}</span>。</div>
+      </div>`;
+  }
+
+  return `
+    ${anno(`左侧「产品与物模型」→ 点「${esc(p.name)}」`, '切页签：概览 / 物模型 / 点位模板 / 设备 / 版本；物模型页里点「+ 添加属性」',
+      '录完点右上「发布物模型」生成版本 → 再点「设备」页签里的「+ 添加设备」')}
+    <h1 class="page">${esc(p.name)} <span class="mono muted" style="font-size:13px">${esc(p.code)}</span></h1>
+    <div class="page-sub">
+      ${esc(p.protocol)} · ${esc(p.dataFormat)} · ${esc(p.deviceType)} · ${modelTag(p.modelStatus)} <span class="mono">${esc(p.currentVersion)}</span>
+      · 关联设备 ${DB.devices.filter(d=>d.productId===p.id).length} 台
+      <span class="spacer"></span>
+    </div>
+    <div class="btnbar" style="margin-bottom:12px">
+      <button class="btn">导入 TSL</button>
+      <button class="btn">导出 TSL</button>
+      <div class="spacer"></div>
+      <button class="btn" data-act="adddev" data-id="${p.id}">+ 添加设备</button>
+      <button class="btn primary" data-act="pub" data-id="${p.id}">发布物模型</button>
+    </div>
+    <div class="tabs">
+      ${[['overview','概览'],['model','物模型'],['points','点位模板'],['devices','设备（'+DB.devices.filter(d=>d.productId===p.id).length+'）'],['versions','版本']]
+        .map(([k,l])=>`<button class="${tab===k?'on':''}" data-act="ptab" data-tab="${k}">${l}</button>`).join('')}
+    </div>
+    ${body}`;
+}
+
+/* ---------- 5.5 设备台账 ---------- */
+function viewDevices(){
+  const f = state.filter;
+  let list = DB.devices.slice();
+  if (f.kw) list = list.filter(d => (d.deviceCode+d.deviceName).toLowerCase().includes(f.kw.toLowerCase()));
+  if (f.productId) list = list.filter(d => d.productId === f.productId);
+  if (f.groupId) list = list.filter(d => (f.groupId==='__none' ? !d.groupId : d.groupId === f.groupId));
+  if (f.status) list = list.filter(d => (f.status==='1' ? d.status===1 : d.status===0));
+
+  const rows = list.map(d => {
+    const lv = DB.latest[d.id] || {};
+    const keys = Object.keys(lv).slice(0,2);
+    const latest = keys.length ? keys.map(k=>`<span class="mono small">${esc(k)}=${esc(lv[k].v)}</span>`).join(' ') : '<span class="muted small">无数据</span>';
+    const a = DB.availability[d.id];
+    const o = (DB.outages[d.id]||[]).filter(x=>x.ongoing);
+    return `<tr>
+      <td><span class="link" data-act="go" data-to="#/devices/${d.id}"><b>${esc(d.deviceName)}</b></span>
+          <div class="mono muted small">${esc(d.deviceCode)}</div></td>
+      <td><span class="link" data-act="go" data-to="#/products/${d.productId}">${esc(prodName(d.productId))}</span>
+          <div class="mono muted small">${esc(d.productVersion||'')}</div></td>
+      <td>${d.groupId?`<span class="link" data-act="go" data-to="#/groups">${esc(grpName(d.groupId))}</span>`:'<span class="tag grey">未分组</span>'}</td>
+      <td>${onlineTag(d.onlineStatus)}</td>
+      <td class="mono small">${esc(d.lastSeenAt||'—')}</td>
+      <td>${latest}</td>
+      <td>${a?`<b style="color:${a.meetsTarget?'#389e0d':'#cf1322'}">${Number(a.availability).toFixed(4)}</b>`:'<span class="muted">—</span>'}</td>
+      <td>${o.length?'<span class="tag red">进行中</span>':'<span class="tag green">正常</span>'}</td>
+      <td class="acts">
+        <button class="btn ghost" data-act="go" data-to="#/devices/${d.id}">详情</button>
+        <button class="btn ghost" data-act="go" data-to="#/devices/${d.id}">可用率</button>
+        <button class="btn ghost" data-act="go" data-to="#/devices/${d.id}">历史曲线</button>
+      </td>
+    </tr>`;
+  }).join('');
+
+  return `
+    ${anno('左侧「② 设备管理 → 设备台账」', '用顶部筛选（产品/分组/状态）缩小范围；点设备名进「设备详情」',
+      '详情页里配点位、看最新值、查历史、下发指令')}
+    <h1 class="page">设备台账</h1>
+    <div class="page-sub">每一行都能看出「属于哪个产品、在哪个分组、有没有数据、健不健康」，并直接进详情页。</div>
+
+    <div class="card" style="padding:12px 14px">
+      <div class="btnbar">
+        <input placeholder="搜索设备编码 / 名称" value="${esc(f.kw)}" data-filter="kw" style="width:200px;border:1px solid #d9d9d9;border-radius:6px;padding:5px 10px;font:inherit;font-size:13px">
+        <select data-filter="productId" style="border:1px solid #d9d9d9;border-radius:6px;padding:5px 10px;font:inherit;font-size:13px">
+          <option value="">全部产品</option>
+          ${DB.products.map(p=>`<option value="${p.id}" ${f.productId===p.id?'selected':''}>${esc(p.name)}</option>`).join('')}
+        </select>
+        <select data-filter="groupId" style="border:1px solid #d9d9d9;border-radius:6px;padding:5px 10px;font:inherit;font-size:13px">
+          <option value="">全部分组</option>
+          ${DB.groups.map(g=>`<option value="${g.id}" ${f.groupId===g.id?'selected':''}>${esc(g.groupName)}</option>`).join('')}
+          <option value="__none" ${f.groupId==='__none'?'selected':''}>未分组</option>
+        </select>
+        <select data-filter="status" style="border:1px solid #d9d9d9;border-radius:6px;padding:5px 10px;font:inherit;font-size:13px">
+          <option value="">全部状态</option>
+          <option value="1" ${f.status==='1'?'selected':''}>启用</option>
+          <option value="0" ${f.status==='0'?'selected':''}>已停用</option>
+        </select>
+        <div class="spacer"></div>
+        <button class="btn primary" data-act="newdev">+ 新增设备</button>
+      </div>
+    </div>
+
+    <div class="tbl"><table>
+      <thead><tr><th>设备</th><th>所属产品</th><th>分组</th><th>在线</th><th>最近在线</th><th>最新值</th><th>24h 可用率</th><th>断档</th><th>操作</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="9" class="empty">没有符合条件的设备</td></tr>'}</tbody>
+    </table></div>
+
+    <div class="gapbox">⚠️ <b>三处需要后端配合</b>：
+      ① <b>产品/分组关联列</b> — <span class="mono">IotDeviceResp</span> 只有 <span class="mono">productId</span>，<b>不返回</b> productName/groupName，前端要么自己再查（N+1）要么后端补字段；
+      ② <b>按产品/分组筛选</b> — <span class="mono">IotDeviceQuery</span> 无 productId/groupId/onlineStatus；
+      ③ <b>「最新值」列</b> — Redis 写了 <span class="mono">iot:latest:{tenantId}:{deviceId}</span>，但全仓<b>没有任何读取接口</b>（无 controller 读该 key），必须新增
+      <span class="mono">GET /iot/devices/{id}/latest</span> 或批量版 <span class="mono">GET /iot/devices/latest?ids=</span>。</div>`;
+}
+
+/* ---------- 5.6 设备详情 ---------- */
+function viewDeviceDetail(){
+  /* 注意：dev()/prod() 找不到时返回 {}（truthy），所以这里必须显式 find 再兜底，
+     否则 #/devices/<无效 id> 会渲染出一个空白详情页，而不是回落到第一台设备。 */
+  const d = DB.devices.find(x => x.id === state.id) || DB.devices[0];
+  const p = prod(d.productId);
+  const allProps = p.services ? p.services.reduce((a,s)=>a.concat(s.properties),[]) : [];
+  const tab = state.devTab || 'overview';
+  const lv = DB.latest[d.id] || {};
+  const pts = DB.points[d.id] || [];
+  const a = DB.availability[d.id];
+  const outs = DB.outages[d.id] || [];
+  const evs = DB.events.filter(e => e.deviceId === d.id);
+  const sh = DB.shadow[d.id] || { desired:{}, reported:{}, desiredTs:'', reportTs:'' };
+
+  const tabs = [['overview','概览'],['props','属性与点位'],['history','历史曲线'],['events','事件与断档'],
+                ['debug','在线调试'],['shadow','设备影子'],['logs','日志']];
+
+  let body = '';
+  if (tab === 'overview'){
+    body = `
+      <div class="stats">
+        <div class="stat"><div class="lab">在线状态</div><div class="val" style="font-size:19px">${onlineTag(d.onlineStatus)}</div>
+          <div class="foot">最近在线 ${esc(d.lastSeenAt||'—')}</div></div>
+        <div class="stat"><div class="lab">24h 可用率</div>
+          <div class="val" style="color:${a&&a.meetsTarget?'#389e0d':'#cf1322'}">${a?Number(a.availability).toFixed(4):'—'}</div>
+          <div class="foot">${a?`统计总时长 ${Number(a.effectiveWindowSeconds)/3600}h · 维护 ${Number(a.maintenanceSeconds)/60}min`:'—'}</div></div>
+        <div class="stat"><div class="lab">进行中断档</div><div class="val" style="color:${outs.some(o=>o.ongoing)?'#cf1322':'#389e0d'}">${outs.filter(o=>o.ongoing).length}</div>
+          <div class="foot">${outs.some(o=>o.ongoing)?'起始 '+esc(outs.find(o=>o.ongoing).startTs):'窗口内无断档'}</div></div>
+        <div class="stat"><div class="lab">24h 事件</div><div class="val">${evs.length}</div><div class="foot">最近 ${evs[0]?esc(evs[0].ts):'无'}</div></div>
+      </div>
+
+      <div class="row">
+        <div class="col card"><h3>最新值 <span class="sub">来自 Redis 最新值</span></h3>
+          ${Object.keys(lv).length ? `<div class="tbl"><table>
+            <thead><tr><th>属性</th><th>最新值</th><th>质量码</th><th>上报时刻</th></tr></thead>
+            <tbody>${Object.keys(lv).map(k=>`<tr>
+              <td class="mono">${esc(k)}</td><td><b>${esc(lv[k].v)}</b> ${esc((allProps.find(x=>x.identifier===k)||{}).unit||'')}</td>
+              <td>${lv[k].q==='good'?'<span class="tag green">good</span>':'<span class="tag orange">'+esc(lv[k].q)+'</span>'}</td>
+              <td class="mono small">${esc(lv[k].ts)}</td></tr>`).join('')}
+            </tbody></table></div>` : '<div class="empty">该设备暂无最新值</div>'}
+          <div class="gapbox">⚠️ <b>需新增接口</b>：<span class="mono">GET /iot/devices/{id}/latest</span>（读 Redis 哈希，返回属性→{value,quality,ts}）。当前只有写路径 <span class="mono">RedisLatestValueWriter</span>。</div>
+        </div>
+
+        <div class="col card"><h3>设备信息</h3>
+          <div class="kv">
+            <dt>设备编码</dt><dd class="mono">${esc(d.deviceCode)}</dd>
+            <dt>所属产品</dt><dd><span class="link" data-act="go" data-to="#/products/${d.productId}">${esc(prodName(d.productId))}</span></dd>
+            <dt>绑定版本</dt><dd class="mono">${esc(d.productVersion||'—')}</dd>
+            <dt>所属分组</dt><dd>${esc(grpName(d.groupId))}</dd>
+            <dt>接入协议</dt><dd>${esc(d.protocol)}</dd>
+            <dt>端点</dt><dd class="mono">${esc(d.endpoint)}</dd>
+            <dt>状态</dt><dd>${statusTag(d.status)}</dd>
+            <dt>凭据引用</dt><dd>${d.credentialRef?`<span class="mono">${esc(d.credentialRef)}</span>`:'<span class="tag red">未签发</span>'}</dd>
+          </div>
+          <div class="btnbar mt"><button class="btn" data-act="noop">编辑</button>
+            <button class="btn" data-act="noop">停用</button>
+            <button class="btn">重置凭据</button></div>
+          <div class="gapbox">⚠️ <b>设备凭据不可见/不可签发</b>：<span class="mono">credential_ref</span> 是不透明引用
+            （<span class="mono">access</span> 节点本地解析），后端<b>没有</b>任何签发/查看/重置凭据的接口；
+            阿里云/华为云都会在设备详情给出证书或密钥。若要对齐，需新增凭据管理接口（注意凭据不得进日志/前端明文）。</div>
+        </div>
+      </div>
+
+      <div class="card"><h3>最近 24h 温度 <span class="sub">默认展示第一个数值型属性</span></h3>
+        <div class="chart">${lineChart(DB.series[d.id+':temperature']||[])}</div>
+        <div class="legend"><span>— temperature（℃）</span><span>采样 1 点/小时（示意）</span></div>
+      </div>`;
+  }
+
+  if (tab === 'props'){
+    body = `
+      <div class="card"><h3>属性与点位映射 <span class="sub">物模型属性（产品） ↔ 点位（设备）</span></h3>
+        <p class="small muted">属性来自产品物模型（只读）；点位是<b>设备级</b>配置，决定「从设备的哪个地址读这个属性」。</p>
+        <div class="tbl"><table>
+          <thead><tr><th>属性</th><th>数据类型</th><th>读写</th><th>单位</th><th>引用类型</th><th>地址类型</th><th>原始地址</th><th>周期</th><th>缩放</th><th>字节序</th><th>启用</th><th></th></tr></thead>
+          <tbody>${allProps.map(x=>{
+            const pt = pts.find(z=>z.identifier===x.identifier);
+            return `<tr>
+              <td class="mono">${esc(x.identifier)}<div class="muted small">${esc(x.propertyName)}</div></td>
+              <td class="mono">${esc(x.dataType)}</td><td>${accessTag(x.accessMode)}</td><td>${esc(x.unit||'—')}</td>
+              <td>${pt?esc(pt.refType):'<span class="muted">—</span>'}</td>
+              <td>${pt?esc(pt.addressType):'<span class="muted">—</span>'}</td>
+              <td class="mono">${pt?esc(pt.rawAddress):'<span class="tag orange">未映射</span>'}</td>
+              <td class="mono">${pt?esc(pt.pollIntervalMs)+'ms':'—'}</td>
+              <td class="mono">${pt?esc(pt.scaleFactor):'—'}</td>
+              <td class="mono">${pt?esc(pt.byteOrder):'—'}</td>
+              <td>${pt?(pt.enabled?'<span class="tag green">是</span>':'<span class="tag grey">否</span>'):'—'}</td>
+              <td><button class="btn ghost" data-act="noop">${pt?'编辑':'+ 配置'}</button></td></tr>`;
+          }).join('')}
+          </tbody></table></div>
+        <div class="btnbar mt">
+          <button class="btn primary" data-act="noop">+ 添加点位映射</button>
+          <button class="btn" data-act="noop">从产品模板套用</button>
+          <button class="btn" data-act="noop">批量复制到同产品其他设备</button>
+        </div>
+        <div class="okbox">✅ <b>可复用现有接口</b>：<span class="mono">GET|POST /iot/devices/{deviceId}/points</span>、
+          <span class="mono">PUT|DELETE /iot/devices/{deviceId}/points/{id}</span>（权限码 <span class="mono">iot:point:list|create|update|delete</span> 已在 SQL 备好）。</div>
+        <div class="gapbox">⚠️ 「从模板套用」「批量复制」<b>后端没有</b>；且点位与属性通过 <span class="mono">property_id</span>（雪花 ID）关联，
+          前端拿到的是属性 <span class="mono">identifier</span>，需要一个「属性 ID ↔ identifier」的映射来源（物模型属性列表接口里已含 id，可直接用）。</div>
+      </div>`;
+  }
+
+  if (tab === 'history'){
+    const key = d.id + ':temperature';
+    const vals = DB.series[key] || DB.series['d1:temperature'];
+    body = `
+      <div class="card"><h3>历史曲线</h3>
+        <div class="btnbar" style="margin-bottom:12px">
+          <select style="border:1px solid #d9d9d9;border-radius:6px;padding:5px 10px;font:inherit;font-size:13px">
+            ${allProps.map(x=>`<option>${esc(x.identifier)}（${esc(x.propertyName)}）</option>`).join('')}
+          </select>
+          <input value="2026-09-24 14:00" style="width:150px;border:1px solid #d9d9d9;border-radius:6px;padding:5px 10px;font:inherit;font-size:13px">
+          <span class="muted">→</span>
+          <input value="2026-09-25 14:00" style="width:150px;border:1px solid #d9d9d9;border-radius:6px;padding:5px 10px;font:inherit;font-size:13px">
+          <select style="border:1px solid #d9d9d9;border-radius:6px;padding:5px 10px;font:inherit;font-size:13px">
+            <option>1000 点</option><option>3000 点</option><option>5000 点</option></select>
+          <button class="btn primary">查询</button>
+          <button class="btn">导出 CSV</button>
+        </div>
+        <div class="chart">${lineChart(vals, {color:'#1677ff'})}</div>
+        <div class="legend"><span>— temperature（℃）</span><span>共 ${vals.length} 个点</span><span>质量码均为 good</span></div>
+        <div class="okbox">✅ <b>可复用现有接口</b>：<span class="mono">GET /iot/devices/{deviceId}/series?propertyId=&from=&to=&limit=</span>
+          （权限码 <span class="mono">iot:series:get</span>）。注意后端 Long 以字符串返回、<span class="mono">ts</span> 是 epoch 毫秒，且时序库未启用时返回的是<b>业务错误</b>而非空数组，UI 必须如实展示。</div>
+      </div>`;
+  }
+
+  if (tab === 'events'){
+    body = `
+      <div class="card"><h3>事件与告警（运行期） <span class="sub">来自设备上报的事件实例</span></h3>
+        <div class="tbl"><table>
+          <thead><tr><th>时刻</th><th>事件</th><th>级别</th><th>详情</th><th>处理</th></tr></thead>
+          <tbody>${evs.length?evs.map(e=>`<tr>
+            <td class="mono small">${esc(e.ts)}</td>
+            <td class="mono">${esc(e.identifier)}<div class="muted small">${esc(e.eventName)}</div></td>
+            <td>${eventTag(e.level)}</td><td class="small">${esc(e.detail)}</td>
+            <td><button class="btn ghost" data-act="maintain" data-id="${d.id}">声明维护窗口</button>
+                <button class="btn ghost" data-act="noop">确认</button></td></tr>`).join('')
+            : '<tr><td colspan="5" class="empty">该设备近期无事件</td></tr>'}
+          </tbody></table></div>
+        <div class="gapbox">⚠️ <b>运行期事件整个链路都不存在</b>：<span class="mono">IotEvent</span> 实体是<b>物模型事件定义</b>
+          （挂在 <span class="mono">service_id</span> 下），<b>没有</b>设备事件实例表、<b>没有</b>事件上报端点、<b>没有</b>事件查询接口。
+          需要新增：事件实例表 + 上报写入路径 + <span class="mono">GET /iot/devices/{id}/events</span> + 全局 <span class="mono">GET /iot/events</span>。</div>
+      </div>
+
+      <div class="card"><h3>断档记录 <span class="sub">已有能力，口径含维护窗口</span></h3>
+        <div class="tbl"><table>
+          <thead><tr><th>开始</th><th>结束</th><th>时长</th><th>原因码</th></tr></thead>
+          <tbody>${outs.length?outs.map(o=>`<tr>
+            <td class="mono small">${esc(o.startTs)}</td>
+            <td class="mono small">${o.endTs?esc(o.endTs):'<span class="tag red">进行中</span>'}</td>
+            <td class="mono">${Math.round(o.durationSec/60)} 分钟</td>
+            <td><span class="tag grey">${esc(o.reason)}</span></td></tr>`).join('')
+            : '<tr><td colspan="4" class="empty">窗口内无断档</td></tr>'}
+          </tbody></table></div>
+        <div class="okbox">✅ <b>可复用</b>：<span class="mono">GET /iot/devices/{deviceId}/availability?from=&to=</span>
+          已在响应里带回 <span class="mono">outages[]</span> 与 <span class="mono">maintenanceWindows[]</span>。</div>
+      </div>`;
+  }
+
+  if (tab === 'debug'){
+    body = `
+      <div class="card"><h3>在线调试（下发）</h3>
+        <p class="small muted">模拟云端下发：读属性（GET）/ 写属性（SET）/ 调用服务（命令）。需要有下行通道。</p>
+        <div class="grid2">
+          <div class="field"><label>调试类型</label>
+            <select><option>读属性（GET）</option><option>写属性（SET）</option><option>调用命令（服务）</option></select></div>
+          <div class="field"><label>目标属性 / 命令</label>
+            <select>${allProps.map(x=>`<option>${esc(x.identifier)}</option>`).join('')}
+              ${p.services?p.services.reduce((a,s)=>a.concat(s.commands),[]).map(c=>`<option>${esc(c.identifier)}</option>`).join(''):''}</select></div>
+        </div>
+        <div class="field"><label>参数（JSON）</label>
+          <textarea rows="4" class="mono">{
+  "temperature": 25.0
+}</textarea></div>
+        <div class="btnbar"><button class="btn primary" data-act="noop">发送指令</button>
+          <button class="btn" data-act="noop">以设备模拟器上报一次</button></div>
+
+        <div class="inline-drawer">
+          <h4>下发记录（示意）</h4>
+          <div class="tbl" style="border-color:var(--blue-2)"><table>
+            <thead><tr><th>时刻</th><th>方向</th><th>报文</th><th>结果</th></tr></thead>
+            <tbody>
+              <tr><td class="mono small">13:24:02</td><td><span class="tag blue">下行</span></td>
+                  <td class="mono small">thing.service.property.set {"temperature":25.0}</td>
+                  <td><span class="tag orange">超时（设备未在线）</span></td></tr>
+              <tr><td class="mono small">13:23:41</td><td><span class="tag green">上行</span></td>
+                  <td class="mono small">thing.event.property.post temperature=23.4</td>
+                  <td><span class="tag green">code=200</span></td></tr>
+            </tbody></table></div>
+        </div>
+
+        <div class="gapbox">⚠️ <b>在线调试完全没有后端能力</b>：全仓检索 <span class="mono">downlink</span>/<span class="mono">下发</span>/<span class="mono">dispatch</span>
+          在 iot 服务与 iot-api 中<b>只命中一条注释</b>；<span class="mono">IotCommand</span> 是物模型里的命令<b>定义</b>（挂 <span class="mono">service_id</span>），
+          不是命令<b>实例</b>；也没有 <span class="mono">iot_command</span> 的运行时记录。
+          要实现本页需新增：下行通道（经 access 到设备）+ 命令实例表（含 request_id / 状态 / 超时）+ 下发与回执接口 + 权限码。</div>
+      </div>`;
+  }
+
+  if (tab === 'shadow'){
+    const rk = Object.keys(sh.reported), dk = Object.keys(sh.desired);
+    body = `
+      <div class="card"><h3>设备影子 <span class="sub">desired（云端期望）/ reported（设备上报）</span></h3>
+        <div class="row">
+          <div class="col"><div class="small muted" style="margin-bottom:6px">reported（设备上报）</div>
+            ${rk.length?`<div class="tbl"><table><thead><tr><th>键</th><th>值</th></tr></thead><tbody>
+              ${rk.map(k=>`<tr><td class="mono">${esc(k)}</td><td class="mono">${esc(sh.reported[k])}</td></tr>`).join('')}
+            </tbody></table></div>`:'<div class="empty">reported 区为空</div>'}
+            <div class="small muted mt">上报时刻：${sh.reportTs?esc(sh.reportTs):'—'}</div></div>
+          <div class="col"><div class="small muted" style="margin-bottom:6px">desired（云端期望）</div>
+            ${dk.length?`<div class="tbl"><table><thead><tr><th>键</th><th>值</th></tr></thead><tbody>
+              ${dk.map(k=>`<tr><td class="mono">${esc(k)}</td><td class="mono">${esc(sh.desired[k])}</td></tr>`).join('')}
+            </tbody></table></div>`:'<div class="empty">desired 区为空</div>'}
+            <div class="small muted mt">写入时刻：${sh.desiredTs?esc(sh.desiredTs):'—'}</div>
+            <div class="btnbar mt"><button class="btn primary" data-act="noop">编辑 desired</button></div></div>
+        </div>
+        <div class="okbox">✅ <b>可复用现有接口</b>：<span class="mono">GET /iot/devices/{deviceId}/shadow</span>、
+          <span class="mono">PUT /iot/devices/{deviceId}/shadow</span>（权限码 <span class="mono">iot:shadow:get|update</span>），
+          响应含 <span class="mono">reported</span>/<span class="mono">desired</span>/<span class="mono">merged</span> 与两个时间戳。</div>
+        <div class="gapbox">⚠️ <b>影子只有一半是活的</b>：生产代码里 <b>只有</b> desired 会被写入
+          （<span class="mono">IotShadowServiceImpl.updateShadow()</span>）；
+          <span class="mono">setReported(...)</span> 全仓<b>只出现在单元测试</b>中 ⇒ <span class="mono">reported</span> 永远是空 Map，
+          <span class="mono">merged</span> 也就等于 desired。要做成真影子，需在读数上报路径
+          （<span class="mono">AvailabilityServiceImpl</span> / 内部读数端点）里同步刷新 reported。
+          另外 <span class="mono">iot_device.shadow_json</span> 列在 DDL 里存在但<b>无任何读写代码</b>（死列），与
+          <span class="mono">iot_shadow</span> 表重复，建议清理或明确取舍。</div>
+      </div>`;
+  }
+
+  if (tab === 'logs'){
+    body = `
+      <div class="card"><h3>设备日志</h3>
+        <div class="gapbox" style="margin-top:0">⚠️ <b>无日志能力</b>：后端没有设备/云端运行日志的采集、存储与查询（无日志表、无日志接口）；
+          阿里云有「云端运行日志（7 天）+ 设备本地日志 + 日志转储」，华为云有「消息跟踪」。
+          本页要落地需先决定日志落点（库表或时序/日志栈）与保留期，再补上报与查询接口。</div>
+        <div class="empty">（此处为方案占位；实现前不建议给出假日志界面）</div>
+      </div>`;
+  }
+
+  return `
+    ${anno('设备台账点设备名 / 健康总览点设备名 / 产品详情「设备」页签',
+      '切 7 个页签；「属性与点位」配点位，「在线调试」下发指令，「事件与断档」声明维护窗口',
+      '配完点位回「概览」看最新值，或去「历史曲线」验证数据')}
+    <div class="btnbar" style="margin-bottom:8px">
+      <button class="btn ghost" data-act="go" data-to="#/devices">← 返回设备台账</button>
+    </div>
+    <h1 class="page">${esc(d.deviceName)} <span class="mono muted" style="font-size:13px">${esc(d.deviceCode)}</span></h1>
+    <div class="page-sub">
+      ${onlineTag(d.onlineStatus)} · 产品 <span class="link" data-act="go" data-to="#/products/${d.productId}">${esc(prodName(d.productId))}</span>
+      <span class="mono">${esc(d.productVersion||'')}</span> · 分组 ${esc(grpName(d.groupId))} · ${esc(d.protocol)} · ${esc(d.endpoint)}
+      ${d.status===0?' '+statusTag(0):''}
+    </div>
+    <div class="tabs">${tabs.map(([k,l])=>`<button class="${tab===k?'on':''}" data-act="dtab" data-tab="${k}">${l}</button>`).join('')}</div>
+    ${body}`;
+}
+
+/* ---------- 5.7 设备分组 ---------- */
+function viewGroups(){
+  const rows = DB.groups.map(g => {
+    const members = DB.devices.filter(d => d.groupId === g.id);
+    return `<tr>
+      <td><b>${esc(g.groupName)}</b><div class="muted small">${esc(g.remark||'')}</div></td>
+      <td>${members.length} 台</td>
+      <td>${members.map(m=>`<span class="tag blue">${esc(m.deviceName)}</span>`).join(' ') || '<span class="muted">（空分组）</span>'}</td>
+      <td class="acts"><button class="btn ghost" data-act="noop">管理成员</button>
+        <button class="btn ghost" data-act="noop">编辑</button>
+        <button class="btn ghost" data-act="maintain" data-id="">按分组声明维护</button></td>
+    </tr>`;
+  }).join('');
+  const ungrouped = DB.devices.filter(d => !d.groupId);
+
+  return `
+    ${anno('左侧「② 设备管理 → 设备分组」', '点「管理成员」加设备；点「按分组声明维护」跳到维护窗口并预填分组',
+      '分组用于批量运维（维护窗口/后续批量下发）')}
+    <h1 class="page">设备分组</h1>
+    <div class="page-sub">分组是「批量运维的作用域」。当前只有成员关系，没有任何批量动作 —— 这是要补的。</div>
+
+    <div class="tbl"><table>
+      <thead><tr><th>分组</th><th>设备数</th><th>成员</th><th>操作</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+
+    <div class="card mt"><h3>未分组设备（${ungrouped.length}）</h3>
+      ${ungrouped.length?`<div>${ungrouped.map(d=>`<span class="tag orange">${esc(d.deviceName)}</span>`).join(' ')}</div>`
+        :'<div class="muted">全部设备都已分组</div>'}
+      <div class="gapbox">⚠️ <b>分组成员接口后端已有、前端没有</b>：后端
+        <span class="mono">GET /iot/groups/{id}/members</span>、<span class="mono">POST /iot/groups/{id}/members</span>、
+        <span class="mono">DELETE /iot/groups/{id}/members/{memberId}</span> 均已实现（表 <span class="mono">iot_device_group_member</span>），
+        但前端 <span class="mono">api/iot/group.ts</span> <b>只导出</b> list/create/update/delete，
+        视图里 <b>0 处</b>出现 <span class="mono">members</span> ⇒ 目前分组只能靠直接改库维护成员。</div>
+    </div>`;
+}
+
+/* ---------- 5.8 断档与可用率 ---------- */
+function viewAvailability(){
+  const rows = DB.devices.map(d => {
+    const a = DB.availability[d.id];
+    if (!a) return `<tr><td>${esc(d.deviceName)}</td><td colspan="7" class="muted">窗口内无统计数据</td></tr>`;
+    return `<tr>
+      <td><span class="link" data-act="go" data-to="#/devices/${d.id}">${esc(d.deviceName)}</span>
+        <div class="mono muted small">${esc(d.deviceCode)}</div></td>
+      <td>${esc(prodName(d.productId))}</td><td>${esc(grpName(d.groupId))}</td>
+      <td>${a.meetsTarget?'<span class="tag green">达标</span>':'<span class="tag red">未达标</span>'}</td>
+      <td><b style="color:${a.meetsTarget?'#389e0d':'#cf1322'}">${Number(a.availability).toFixed(4)}</b>
+        <div>${bar(Number(a.availability)*100, a.meetsTarget?'#52c41a':'#ff4d4f')}</div></td>
+      <td class="mono">${Math.round(Number(a.outageSeconds)/60)} min</td>
+      <td class="mono">${Math.round(Number(a.maintenanceSeconds)/60)} min</td>
+      <td><button class="btn ghost" data-act="go" data-to="#/devices/${d.id}">明细</button>
+          <button class="btn ghost" data-act="maintain" data-id="${d.id}">声明维护</button></td>
+    </tr>`;
+  }).join('');
+
+  return `
+    ${anno('左侧「③ 运维中心 → 断档与可用率」', '批量看全租户；点「声明维护」把计划停机从可用率分母里剔除',
+      '声明完回本页刷新，可用率自动变好（后端口径已支持）')}
+    <h1 class="page">断档与可用率</h1>
+    <div class="page-sub">从「逐台点开抽屉」升级为「一屏看完全部设备」，并就地处理。</div>
+
+    <div class="card" style="padding:12px 14px"><div class="btnbar">
+      <select style="border:1px solid #d9d9d9;border-radius:6px;padding:5px 10px;font:inherit;font-size:13px">
+        <option>最近 24 小时</option><option>最近 7 天</option><option>最近 30 天</option><option>自定义</option></select>
+      <select style="border:1px solid #d9d9d9;border-radius:6px;padding:5px 10px;font:inherit;font-size:13px">
+        <option>全部产品</option>${DB.products.map(p=>`<option>${esc(p.name)}</option>`).join('')}</select>
+      <select style="border:1px solid #d9d9d9;border-radius:6px;padding:5px 10px;font:inherit;font-size:13px">
+        <option>全部分组</option>${DB.groups.map(g=>`<option>${esc(g.groupName)}</option>`).join('')}</select>
+      <label class="small muted" style="display:flex;align-items:center;gap:5px"><input type="checkbox" checked>只看未达标</label>
+      <div class="spacer"></div>
+      <button class="btn">导出 CSV</button>
+    </div></div>
+
+    <div class="tbl"><table>
+      <thead><tr><th>设备</th><th>产品</th><th>分组</th><th>是否达标</th><th>可用率</th><th>断档合计</th><th>维护窗口</th><th>操作</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+
+    <div class="gapbox">⚠️ <b>现有接口是「单设备」的</b>：<span class="mono">GET /iot/devices/{deviceId}/availability</span> 每次只算一台。
+      本页要批量，前端串行调用会 N+1。建议新增
+      <span class="mono">GET /iot/availability?productId=&groupId=&from=&to=&page=</span> 批量端点（复用同一套 <span class="mono">AvailabilityCalculator</span> 口径，避免两套算法）。</div>`;
+}
+
+/* ---------- 5.9 维护窗口 ---------- */
+const MAINT = { scope:'device', deviceId:'d1', groupId:'g2' };
+function viewMaintenance(){
+  const rows = DB.maintenance.map(m => `<tr>
+    <td>${m.deviceId ? `<span class="link" data-act="go" data-to="#/devices/${m.deviceId}">${esc(dev(m.deviceId).deviceName||m.deviceId)}</span>`
+                     : (m.groupId ? `<span class="tag purple">分组：${esc(grpName(m.groupId))}</span>` : '<span class="tag grey">租户全部设备</span>')}</td>
+    <td class="mono small">${esc(m.startTs)}</td>
+    <td class="mono small">${m.endTs?esc(m.endTs):'<span class="tag red">进行中</span>'}</td>
+    <td>${m.source==='MANUAL'?'<span class="tag blue">人工维护</span>':'<span class="tag purple">租约交接</span>'}</td>
+    <td class="small">${esc(m.reason||'')}</td>
+    <td><button class="btn ghost" data-act="noop">关闭</button></td>
+  </tr>`).join('');
+
+  return `
+    ${anno('左侧「③ 运维中心 → 维护窗口」', '新建时先选「作用范围：单设备 / 设备分组 / 全部设备」',
+      '声明后回到「断档与可用率」看分母已剔除维护时长')}
+    <h1 class="page">维护窗口（计划停机）</h1>
+    <div class="page-sub">维护窗口内的断档不计入可用率分母 —— 现在只能按「单设备」或「全租户」声明，缺中间的「按分组」。</div>
+
+    <div class="row">
+      <div class="col card"><h3>声明维护窗口</h3>
+        <div class="field"><label>作用范围 <span class="req">*</span></label>
+          <select data-act="scope">
+            <option value="device" ${MAINT.scope==='device'?'selected':''}>单台设备</option>
+            <option value="group"  ${MAINT.scope==='group'?'selected':''}>设备分组（⚑ 需新增）</option>
+            <option value="tenant" ${MAINT.scope==='tenant'?'selected':''}>全部设备（租户级）</option>
+          </select>
+          <div class="help">后端 <span class="mono">MaintenanceWindowReq.deviceId</span> 留空 = 租户级；<b>没有 groupId 字段</b>。</div></div>
+        ${MAINT.scope==='device'?`<div class="field"><label>设备 <span class="req">*</span></label>
+          <select>${DB.devices.map(d=>`<option ${d.id===MAINT.deviceId?'selected':''}>${esc(d.deviceName)}（${esc(d.deviceCode)}）</option>`).join('')}</select></div>`:''}
+        ${MAINT.scope==='group'?`<div class="field"><label>设备分组 <span class="req">*</span></label>
+          <select>${DB.groups.map(g=>`<option ${g.id===MAINT.groupId?'selected':''}>${esc(g.groupName)}（${DB.devices.filter(d=>d.groupId===g.id).length} 台）</option>`).join('')}</select>
+          <div class="help">选中后展开为该分组的设备清单，写入时后端仍按设备逐条落库（或新增范围字段，二选一）</div></div>`:''}
+        <div class="grid2">
+          <div class="field"><label>开始 <span class="req">*</span></label><input value="2026-09-26 01:00"></div>
+          <div class="field"><label>结束</label><input placeholder="留空 = 进行中（手动关闭）"></div>
+        </div>
+        <div class="field"><label>说明</label><input placeholder="如：二号车间停电检修"></div>
+        <button class="btn primary" data-act="noop">声明维护窗口</button>
+        ${MAINT.scope==='group'?`<div class="gapbox">⚠️ <b>本方案的核心数据模型缺口之一</b>：<span class="mono">MaintenanceWindow</span> 实体字段为
+          <span class="mono">deviceId / startTs / endTs / source / reason</span>，<b>无 groupId / productId</b>。
+          可选实现：① 新增 <span class="mono">scope_type + scope_id</span> 两列（推荐，语义清晰）；
+          ② 前端展开为 N 条设备级窗口（不改表，但列表会膨胀、且新增设备不会自动纳入）。</div>`:''}
+      </div>
+
+      <div class="col card" style="flex:1.3"><h3>现有窗口（${DB.maintenance.length}）</h3>
+        <div class="tbl"><table>
+          <thead><tr><th>范围</th><th>开始</th><th>结束</th><th>来源</th><th>说明</th><th></th></tr></thead>
+          <tbody>${rows}</tbody></table></div>
+        <div class="gapbox">⚠️ <b>列表把设备显示成裸 ID</b>：<span class="mono">views/iot/maintenance/data.ts</span> 里
+          <span class="mono">deviceId</span> 列直接渲染后端返回的雪花 ID（<span class="mono">formatter</span> 只处理了空值），
+          用户看到的是 <span class="mono">1856…</span> 这样的数字而不是设备名。这是「看不出关联」最直观的一处，必须修。</div>
+      </div>
+    </div>`;
+}
+
+/* ---------- 5.10 事件与告警 ---------- */
+function viewAlerts(){
+  const rows = DB.events.map(e => `<tr>
+    <td class="mono small">${esc(e.ts)}</td>
+    <td><span class="link" data-act="go" data-to="#/devices/${e.deviceId}">${esc(dev(e.deviceId).deviceName||e.deviceId)}</span>
+        <div class="muted small">${esc(dev(e.deviceId).deviceCode||'')}</div></td>
+    <td>${esc(prodName(dev(e.deviceId).productId))}</td>
+    <td class="mono">${esc(e.identifier)}<div class="muted small">${esc(e.eventName)}</div></td>
+    <td>${eventTag(e.level)}</td><td class="small">${esc(e.detail)}</td>
+    <td><button class="btn ghost" data-act="maintain" data-id="${e.deviceId}">声明维护窗口</button>
+        <button class="btn ghost" data-act="noop">确认</button></td>
+  </tr>`).join('');
+
+  return `
+    ${anno('左侧「③ 运维中心 → 事件与告警」', '按设备/产品/级别筛选；点「声明维护窗口」把已知计划停机标注掉',
+      '确认后事件从待处理列表消失（需后端支持状态流转）')}
+    <h1 class="page">事件与告警</h1>
+    <div class="page-sub">运行期事件的全租户视图。⚠️ 这条链路目前<b>后端完全不存在</b>，本页是目标形态。</div>
+
+    <div class="stats">
+      <div class="stat"><div class="lab">24h 告警</div><div class="val" style="color:#cf1322">3</div><div class="foot">alert 级别</div></div>
+      <div class="stat"><div class="lab">24h 警告</div><div class="val" style="color:#d46b08">1</div><div class="foot">warn 级别</div></div>
+      <div class="stat"><div class="lab">涉及设备</div><div class="val">3</div><div class="foot">d1 / d2 / d7</div></div>
+      <div class="stat"><div class="lab">未确认</div><div class="val">4</div><div class="foot">需新增确认状态流转</div></div>
+    </div>
+
+    <div class="tbl"><table>
+      <thead><tr><th>时刻</th><th>设备</th><th>产品</th><th>事件</th><th>级别</th><th>详情</th><th>操作</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+
+    <div class="gapbox">⚠️ <b>缺口清单（本节 4 项全缺）</b>：
+      ① 无事件实例表（<span class="mono">IotEvent</span> 是物模型定义，挂 <span class="mono">service_id</span>）；
+      ② 无事件上报写入路径；③ 无事件查询接口；④ 无「确认/忽略/转工单」状态字段与流转。
+      参考：阿里云设备详情有「物模型数据 &gt; 事件管理」页签，华为云有 <span class="mono">$oc/devices/{id}/sys/events/up</span> 事件通道。</div>`;
+}
+
+/* ---------- 5.11 时序查询 ---------- */
+function viewSeries(){
+  const d = dev('d1');
+  const p = prod(d.productId);
+  const props = p.services.reduce((a,s)=>a.concat(s.properties),[]);
+  const vals = DB.series['d1:temperature'];
+
+  return `
+    ${anno('左侧「④ 数据与调试 → 时序查询」', '选设备 → 选点位 → 选时间范围 → 「查询」；「导出 CSV」下载',
+      '发现异常点后跳「设备详情 → 事件与断档」看是否有断档')}
+    <h1 class="page">时序查询</h1>
+    <div class="page-sub">与设备详情里的「历史曲线」同一能力，但这里面向「跨设备对比 / 追查」，不用先进设备详情。</div>
+
+    <div class="card" style="padding:12px 14px"><div class="btnbar">
+      <select style="border:1px solid #d9d9d9;border-radius:6px;padding:5px 10px;font:inherit;font-size:13px">
+        ${DB.devices.map(x=>`<option ${x.id===d.id?'selected':''}>${esc(x.deviceName)}（${esc(x.deviceCode)}）</option>`).join('')}</select>
+      <select style="border:1px solid #d9d9d9;border-radius:6px;padding:5px 10px;font:inherit;font-size:13px">
+        ${props.map(x=>`<option>${esc(x.identifier)}</option>`).join('')}</select>
+      <input value="2026-09-24 14:00" style="width:150px;border:1px solid #d9d9d9;border-radius:6px;padding:5px 10px;font:inherit;font-size:13px">
+      <span class="muted">→</span>
+      <input value="2026-09-25 14:00" style="width:150px;border:1px solid #d9d9d9;border-radius:6px;padding:5px 10px;font:inherit;font-size:13px">
+      <select style="border:1px solid #d9d9d9;border-radius:6px;padding:5px 10px;font:inherit;font-size:13px">
+        <option>1000 点</option><option>3000 点</option><option>5000 点</option></select>
+      <button class="btn primary">查询</button><button class="btn">导出 CSV</button>
+    </div></div>
+
+    <div class="card"><h3>temperature <span class="sub">${esc(d.deviceName)} · ℃</span></h3>
+      <div class="chart">${lineChart(vals, {color:'#722ed1'})}</div>
+      <div class="legend"><span>— temperature</span><span>共 ${vals.length} 点</span><span>limit 1000（后端默认）</span></div>
+      <div class="tbl mt"><table>
+        <thead><tr><th>时间</th><th>数值</th><th>质量码</th></tr></thead>
+        <tbody>${vals.slice(-6).map((v,i)=>`<tr><td class="mono small">2026-09-25 0${8+i}:00:00</td>
+          <td class="mono">${v}</td><td><span class="tag green">good</span></td></tr>`).join('')}
+        </tbody></table></div>
+    </div>
+
+    <div class="okbox">✅ <b>完全复用现有接口</b>：<span class="mono">GET /iot/devices/{deviceId}/series</span>
+      （<span class="mono">propertyId</span> 必填，<span class="mono">from</span>/<span class="mono">to</span> 为 epoch 毫秒，
+      <span class="mono">limit</span> 默认 1000、最大 5000）。<span class="mono">ts</span> 是 epoch 毫秒且后端 Long 以字符串返回，
+      时序库未启用时后端返回的是<b>业务错误</b>而非空数组 —— UI 必须如实展示错误 message，不得显示成「没有数据」。</div>
+  </div>`;
+}
+
+/* ---------- 5.12 在线调试（独立入口） ---------- */
+function viewDebug(){
+  const d = dev('d1');
+  const p = prod(d.productId);
+  const props = p.services.reduce((a,s)=>a.concat(s.properties),[]);
+  const cmds = p.services.reduce((a,s)=>a.concat(s.commands),[]);
+
+  return `
+    ${anno('左侧「④ 数据与调试 → 在线调试」', '选设备 → 选调试类型（读属性/写属性/调命令）→ 填 JSON → 「发送指令」',
+      '下发结果落到下方记录表；设备未在线会超时——这一步依赖尚不存在的下行通道')}
+    <h1 class="page">在线调试</h1>
+    <div class="page-sub">按「用户想验证什么」组织，而不是按后端接口组织：读到一个值 / 写一个值 / 调一次命令。</div>
+
+    <div class="card" style="padding:12px 14px"><div class="btnbar">
+      <select style="border:1px solid #d9d9d9;border-radius:6px;padding:5px 10px;font:inherit;font-size:13px">
+        ${DB.devices.map(x=>`<option ${x.id===d.id?'selected':''}>${esc(x.deviceName)}（${esc(x.deviceCode)}）· ${x.onlineStatus==='online'?'在线':'离线'}</option>`).join('')}</select>
+      <span class="muted small">仅在线设备能收到下行指令</span>
+    </div></div>
+
+    <div class="row">
+      <div class="col card"><h3>下发</h3>
+        <div class="field"><label>调试类型</label>
+          <select><option>① 读属性 GET（读回当前值）</option><option>② 写属性 SET（改设备设置）</option><option>③ 调用命令（执行一次动作）</option></select></div>
+        <div class="field"><label>目标</label>
+          <select>${props.map(x=>`<option>${esc(x.identifier)} · ${esc(x.propertyName)}（${esc(x.dataType)}）</option>`).join('')}
+            ${cmds.map(c=>`<option>${esc(c.identifier)} · ${esc(c.commandName)}（命令）</option>`).join('')}</select></div>
+        <div class="field"><label>参数（JSON）</label>
+          <textarea rows="5" class="mono">{
+  "temperature": 25.0,
+  "reportInterval": 30
+}</textarea>
+          <div class="help">写属性/调命令才需要参数；读属性可留空</div></div>
+        <div class="btnbar">
+          <button class="btn primary" data-act="noop">发送指令</button>
+          <button class="btn" data-act="noop">用设备模拟器上报一次</button>
+        </div>
+        <div class="okbox">✅ <b>物模型定义侧可复用</b>：属性/命令清单来自
+          <span class="mono">GET /iot/products/{productId}/services/{serviceId}/properties|commands</span>，
+          不需要新接口；「哪些属性可写」用 <span class="mono">accessMode=W|RW</span> 过滤（<span class="mono">AccessMode</span> 枚举已存在）。</div>
+      </div>
+
+      <div class="col card" style="flex:1.2"><h3>下发 / 上报记录 <span class="sub">需要新增命令实例表与接口</span></h3>
+        <div class="tbl"><table>
+          <thead><tr><th>时刻</th><th>方向</th><th>报文</th><th>结果</th></tr></thead>
+          <tbody>
+            <tr><td class="mono small">13:24:02</td><td><span class="tag blue">下行</span></td>
+                <td class="mono small">thing.service.property.set {"temperature":25.0}</td>
+                <td><span class="tag orange">超时（设备未在线）</span></td></tr>
+            <tr><td class="mono small">13:23:41</td><td><span class="tag green">上行</span></td>
+                <td class="mono small">thing.event.property.post temperature=23.4</td>
+                <td><span class="tag green">code=200</span></td></tr>
+          </tbody></table></div>
+        <div class="gapbox">⚠️ <b>整条下行链路都不存在</b>（这是本方案里最大的缺口）：
+          ① 全仓检索 <span class="mono">downlink</span> / <span class="mono">下发</span> / <span class="mono">dispatch</span>
+          在 <span class="mono">ypbin-service/ypbin-iot</span> 与 <span class="mono">ypbin-iot-api</span> 中只命中一条注释；
+          ② <span class="mono">IotCommand</span> 实体是物模型里的命令<b>定义</b>（<span class="mono">service_id</span> 外键），没有运行时实例表
+          <span class="mono">iot_command</span>（<span class="mono">IotCommandMapper</span> 服务的是定义侧 CRUD）；
+          ③ 无 <span class="mono">request_id</span> / 状态 / 超时 / 回执字段；④ 无对应权限码（SQL 里只有 <span class="mono">iot:product:*</span> 与 <span class="mono">iot:point:*</span>）。
+          <b>要做本页必须先做下行通道 + 命令实例表 + 权限码。</b></div>
+      </div>
+    </div>`;
+}
+
+/* ---------- 5.13 设备影子（独立入口） ---------- */
+function viewShadow(){
+  const list = DB.devices.filter(d => DB.shadow[d.id]);
+  const d = list[0] || dev('d1');
+  const sh = DB.shadow[d.id] || { desired:{}, reported:{}, desiredTs:'', reportTs:'' };
+  const dk = Object.keys(sh.desired), rk = Object.keys(sh.reported);
+
+  return `
+    ${anno('左侧「④ 数据与调试 → 设备影子」', '选设备 → 看 desired / reported → 「编辑 desired」写期望值',
+      '写完后若设备在线应立即同步；reported 应由设备上报刷新（⚠️ 当前不会刷新）')}
+    <h1 class="page">设备影子</h1>
+    <div class="page-sub">影子 = 云端保存的「期望状态（desired）+ 上报状态（reported）」，用于设备离线时暂存配置。</div>
+
+    <div class="card" style="padding:12px 14px"><div class="btnbar">
+      <select style="border:1px solid #d9d9d9;border-radius:6px;padding:5px 10px;font:inherit;font-size:13px">
+        ${DB.devices.map(x=>`<option ${x.id===d.id?'selected':''}>${esc(x.deviceName)}（${esc(x.deviceCode)}）</option>`).join('')}</select>
+      <span class="muted small">当前 <span class="mono">GET /iot/devices/{deviceId}/shadow</span></span>
+    </div></div>
+
+    <div class="row">
+      <div class="col card"><h3>reported <span class="sub">设备上报状态</span></h3>
+        ${rk.length?`<div class="tbl"><table><thead><tr><th>键</th><th>值</th></tr></thead><tbody>
+          ${rk.map(k=>`<tr><td class="mono">${esc(k)}</td><td class="mono">${esc(sh.reported[k])}</td></tr>`).join('')}
+        </tbody></table></div>`:'<div class="empty">reported 区为空<br><span class="small">（这不是「设备没上报」，而是我们从不写 reported）</span></div>'}
+        <div class="small muted mt">上报时刻：${sh.reportTs?esc(sh.reportTs):'—'}</div>
+      </div>
+      <div class="col card"><h3>desired <span class="sub">云端期望状态</span></h3>
+        ${dk.length?`<div class="tbl"><table><thead><tr><th>键</th><th>值</th></tr></thead><tbody>
+          ${dk.map(k=>`<tr><td class="mono">${esc(k)}</td><td class="mono">${esc(sh.desired[k])}</td></tr>`).join('')}
+        </tbody></table></div>`:'<div class="empty">desired 区为空</div>'}
+        <div class="small muted mt">写入时刻：${sh.desiredTs?esc(sh.desiredTs):'—'}</div>
+        <div class="btnbar mt"><button class="btn primary" data-act="noop">编辑 desired</button>
+          <button class="btn" data-act="noop">清空 desired</button></div>
+      </div>
+    </div>
+
+    <div class="card"><h3>merged <span class="sub">后端返回的合并视图</span></h3>
+      <p class="small muted">后端 <span class="mono">IotShadowResp</span> 提供 <span class="mono">reported</span> / <span class="mono">desired</span> / <span class="mono">merged</span> 三个 Map。
+        因为 reported 恒为空，<b>merged ≡ desired</b>。</p>
+      <div class="okbox">✅ <b>可复用现有接口</b>：<span class="mono">GET /iot/devices/{deviceId}/shadow</span>（权限 <span class="mono">iot:shadow:get</span>）、
+        <span class="mono">PUT /iot/devices/{deviceId}/shadow</span>（权限 <span class="mono">iot:shadow:update</span>）。
+        权限码与菜单按钮 <span class="mono">320007/320008</span> 已在 <span class="mono">deploy/sql/007-iot-data.sql</span> 里备好。</div>
+      <div class="gapbox">⚠️ <b>影子只有一半是活的</b>：生产代码里 <b>只有</b> desired 会被写入
+        （<span class="mono">IotShadowServiceImpl.updateShadow()</span> 只 setDesired）；
+        <span class="mono">setReported(...)</span> 全仓<b>只出现在 <span class="mono">IotShadowServiceImplTest</span></b> 中。
+        要做成真影子，需在读数上报路径同步刷新 reported。
+        另外 <span class="mono">iot_device.shadow_json</span> 列在 DDL 中存在，但<b>除实体字段外无任何读写代码</b>（死列），
+        与 <span class="mono">iot_shadow</span> 表语义重复，建议清理或明确取舍。
+        对比：阿里云影子含 <span class="mono">metadata</span> / <span class="mono">timestamp</span> / <span class="mono">version</span>（乐观锁），我方三者皆无。</div>
+    </div>`;
+}
+
+/* ---------- 5.14 数据保留与清理 ---------- */
+function viewRetention(){
+  return `
+    ${anno('左侧「⑤ 系统 → 数据保留与清理」', '调保留天数 → 「保存」；点「立即清理一次」看删除量',
+      '清理结果里能看出每张表删了多少行（审计需要）')}
+    <h1 class="page">数据保留与清理</h1>
+    <div class="page-sub">现在这两个值是<b>配置文件里的常量</b>（改一次要重启服务），本页把它变成可运维数据。</div>
+
+    <div class="row">
+      <div class="col card"><h3>保留策略</h3>
+        <div class="grid2">
+          <div class="field"><label>断档事件保留天数</label><input value="396"><div class="help">默认 396 天（配置项 <span class="mono">ypbin.retention.outage-event-days</span>）</div></div>
+          <div class="field"><label>维护窗口保留天数</label><input value="396"><div class="help">默认 396 天（<span class="mono">maintenance-window-days</span>）</div></div>
+        </div>
+        <div class="grid2">
+          <div class="field"><label>清理周期（毫秒）</label><input value="86400000"><div class="help">默认 24h（<span class="mono">cleanup-interval-ms</span>）</div></div>
+          <div class="field"><label>启动后首次延迟（毫秒）</label><input value="300000"><div class="help">默认 5min（<span class="mono">initial-delay-ms</span>）</div></div>
+        </div>
+        <div class="field"><label>清理开关</label><select><option>启用</option><option>停用</option></select>
+          <div class="help">默认启用（<span class="mono">ypbin.retention.enabled</span>）</div></div>
+        <div class="btnbar"><button class="btn primary" data-act="noop">保存</button>
+          <button class="btn" data-act="noop">立即清理一次</button>
+          <button class="btn" data-act="noop">查看上次结果</button></div>
+      </div>
+
+      <div class="col card"><h3>最近一次清理结果 <span class="sub">按表统计删除行数</span></h3>
+        <div class="tbl"><table>
+          <thead><tr><th>表</th><th>删除行数</th><th>耗时</th><th>完成时刻</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">iot_outage_event</td><td>0</td><td class="mono">12 ms</td><td class="mono small">2026-09-25 05:00:00</td></tr>
+            <tr><td class="mono">iot_maintenance_window</td><td>0</td><td class="mono">8 ms</td><td class="mono small">2026-09-25 05:00:00</td></tr>
+          </tbody></table></div>
+        <div class="gapbox">⚠️ <b>完全缺接口</b>：后端 <span class="mono">RetentionProperties</span> 是
+          <span class="mono">@ConfigurationProperties</span> 只读绑定，<span class="mono">RetentionCleanupServiceImpl</span>
+          只挂了 <span class="mono">@Scheduled</span> 定时任务，<b>没有 Controller</b>。
+          本页需要新增：读/写保留策略（含校验）、手动触发清理、查询上次清理结果（<span class="mono">RetentionCleanupResult</span> 类已存在，可直接复用为响应体）。
+          注意：改配置若走 DB 需要新增配置表；若只改 Nacos 则属于「配置中心」职责，二选一需明确。</div>
+        <div class="gapbox">⚠️ <b>无法清理的数据</b>：设备读数落在 IoTDB（<span class="mono">iot.reading</span>），
+          本清理器只清 <b>MySQL 的断档事件与维护窗口</b>。IoTDB 侧的保留策略没被这套配置覆盖 —— 需要在方案里明确「时序数据保留」由谁负责，否则用户会以为设了就能清所有数据。</div>
+      </div>
+    </div>`;
+}
+
+/* ---------- 5.15 租户接入台账 ---------- */
+function viewLedger(){
+  const rows = [
+    { tenantId:'1', tenantName:'租户一（演示）', assignable:true,  devices:8 },
+    { tenantId:'2', tenantName:'租户二',         assignable:false, devices:0 },
+    { tenantId:'3', tenantName:'租户三',         assignable:true,  devices:0 }
+  ].map(r=>`<tr>
+    <td class="mono">${esc(r.tenantId)}</td><td>${esc(r.tenantName)}</td>
+    <td>${r.assignable?'<span class="tag green">可被采集</span>':'<span class="tag grey">不可采集</span>'}</td>
+    <td>${r.devices}</td>
+    <td><button class="btn ghost" data-act="noop">${r.assignable?'取消授权':'授权采集'}</button></td>
+  </tr>`).join('');
+
+  return `
+    ${anno('左侧「⑤ 系统 → 租户接入台账」', '把某租户切成「可被采集 / 不可被采集」',
+      '这是平台级开关（palatform_only），决定 access 节点会不会去采集该租户的设备')}
+    <h1 class="page">租户接入台账 <span class="tag red" style="vertical-align:3px">平台级</span></h1>
+    <div class="page-sub">决定「哪些租户可被 access 节点采集」。跨租户生效，因此只授平台管理员，<b>不进租户模板</b>。</div>
+
+    <div class="tbl"><table>
+      <thead><tr><th>租户 ID</th><th>租户名称</th><th>采集授权</th><th>设备数</th><th>操作</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+
+    <div class="okbox">✅ <b>完全复用现有接口</b>：<span class="mono">GET /iot/tenant-ledger</span>、
+      <span class="mono">PUT /iot/tenant-ledger/{tenantId}/assignable</span>
+      （权限码 <span class="mono">iot:ledger:list</span> / <span class="mono">iot:ledger:update</span>，
+      SQL 里已按 <span class="mono">platform_only=1</span> 只授角色 1，并<b>刻意不写进</b> <span class="mono">sys_template_menu</span>）。
+      前端目前<b>没有</b>任何页面用到它。</div>
+    <div class="gapbox">⚠️ <b>历史包袱要说清</b>：<span class="mono">deploy/sql/007-iot-data.sql</span> 的注释里写着
+      「本端点没有独立前端页面，故按影子/标签的既有做法挂为设备菜单 3200 下的按钮权限」——
+      即台账权限码 <b>被挂在设备菜单下</b>（<span class="mono">320014/320015</span>）。
+      本方案建议给它一个真实页面，并把菜单挂到「系统」分组下，避免权限树里出现「设备菜单里管租户」的错位。</div>`;
+}
+
+/* ---------- 5.16 关系图与口径 ---------- */
+function viewModelMap(){
+  return `
+    ${anno('左侧「参考 → 关系图与口径」', '这是给设计与后端对齐用的参考页，不是日常操作页',
+      '看完再回「产品与物模型」动手')}
+    <h1 class="page">关系图与口径</h1>
+    <div class="page-sub">一张图说清「产品 → 物模型 → 点位 → 设备 → 数据」以及我们和主流平台的差异。</div>
+
+    <div class="card"><h3>实体关系（本平台实际结构）</h3>
+      <div class="map">
+        <div class="mapline">
+          <div class="mbox p"><b>产品 IotProduct</b><span>code / protocol / dataFormat</span></div>
+          <div class="arrow">→</div>
+          <div class="mbox s"><b>服务 IotService</b><span>serviceId / option</span></div>
+          <div class="arrow">→</div>
+          <div class="mbox f"><b>属性 IotProperty</b><span>identifier / dataType / accessMode</span></div>
+        </div>
+        <div class="mapline">
+          <div class="mbox" style="visibility:hidden"><b>占位</b></div>
+          <div class="arrow" style="visibility:hidden">→</div>
+          <div class="mbox s" style="visibility:hidden"><b>占位</b></div>
+          <div class="arrow">→</div>
+          <div class="mbox f"><b>命令 IotCommand</b><span>identifier / inputParams / outputParams</span></div>
+        </div>
+        <div class="mapline">
+          <div class="mbox" style="visibility:hidden"><b>占位</b></div>
+          <div class="arrow" style="visibility:hidden">→</div>
+          <div class="mbox s" style="visibility:hidden"><b>占位</b></div>
+          <div class="arrow">→</div>
+          <div class="mbox f"><b>事件 IotEvent</b><span>identifier / dataType（⚠️ 无事件类型）</span></div>
+        </div>
+        <div class="mapline">
+          <div class="mbox p"><b>产品版本 IotProductVersion</b><span>versionNo / draft→published</span></div>
+          <div class="arrow">↓</div>
+          <div class="mbox d"><b>设备 IotDevice</b><span>productId + productVersion</span></div>
+          <div class="arrow">→</div>
+          <div class="mbox d"><b>点位映射 IotPointMapping</b><span>deviceId + propertyId + rawAddress</span></div>
+        </div>
+        <div class="mapline">
+          <div class="mbox d"><b>设备分组</b><span>iot_device_group(_member)</span></div>
+          <div class="arrow">→</div>
+          <div class="mbox d"><b>设备标签</b><span>iot_device_tag</span></div>
+          <div class="arrow">→</div>
+          <div class="mbox d"><b>维护窗口</b><span>deviceId 可空 = 租户级（⚠️ 无分组）</span></div>
+        </div>
+        <div class="mapline">
+          <div class="mbox d"><b>读数上报</b><span>POST /internal/readings</span></div>
+          <div class="arrow">→</div>
+          <div class="mbox f"><b>最新值 Redis</b><span>iot:latest:{tenant}:{device}（⚠️ 无读接口）</span></div>
+          <div class="arrow">→</div>
+          <div class="mbox f"><b>历史 IoTDB</b><span>GET /devices/{id}/series</span></div>
+        </div>
+      </div>
+      <div class="mapnote">实线为已有实现；带 ⚠️ 的是本方案指出的缺口。注意：<b>点位映射挂在「设备」而不是「产品」</b>，
+        这是与阿里云（点位在 TSL 特性的 Extended Information，产品级）最大的结构差异。</div>
+    </div>
+
+    <div class="card"><h3>「产品 → 设备」在 UI 上的四个表达</h3>
+      <div class="tbl"><table>
+        <thead><tr><th>交互</th><th>位置</th><th>解决什么</th><th>现状</th></tr></thead>
+        <tbody>
+          <tr><td>面包屑</td><td>IoT 平台 / 设备管理 / 设备台账 / 温湿度-01</td><td>我在哪、上一层是什么</td><td><span class="tag orange">需新增</span></td></tr>
+          <tr><td>关联列</td><td>设备台账「所属产品」「分组」列（可点）</td><td>一屏看出归属</td><td><span class="tag red">缺字段</span></td></tr>
+          <tr><td>详情页内嵌</td><td>设备详情「属性与点位」= 物模型属性 + 设备点位并排</td><td>继承关系可视化</td><td><span class="tag red">缺页面</span></td></tr>
+          <tr><td>反向跳转</td><td>产品详情「设备」页签 + 「+ 添加设备」（带 productId）</td><td>从型号看设备、从型号加设备</td><td><span class="tag red">缺页面</span></td></tr>
+        </tbody>
+      </table></div>
+    </div>
+
+    <div class="card"><h3>物模型等价性判断（如实）</h3>
+      <div class="tbl"><table>
+        <thead><tr><th>维度</th><th>阿里云 TSL</th><th>华为云 IoTDA</th><th>本平台</th><th>等价？</th></tr></thead>
+        <tbody>
+          <tr><td>顶层组织</td><td>产品 → <b>模块</b> → {属性/服务/事件}（平级三元）</td><td>产品 → <b>服务</b> → {属性/命令/事件}</td>
+              <td>产品 → <b>服务</b> → {属性/命令/事件}</td><td><span class="tag green">与 IoTDA 同构</span></td></tr>
+          <tr><td>属性字段</td><td>identifier / accessMode(r,rw) / specs</td><td>propertyName / method / maxLength / enumList</td>
+              <td class="mono small">identifier / accessMode(R,W,RW) / dataType / minValue…</td>
+              <td><span class="tag orange">命名自创，语义近似</span></td></tr>
+          <tr><td>点位映射</td><td>在 TSL 特性的 <b>Extended Information</b>（产品级，Modbus 寄存器等）</td><td>在编解码插件 / 产品模型</td>
+              <td><b>独立表，设备级</b>（deviceId + propertyId）</td><td><span class="tag red">不等价</span></td></tr>
+          <tr><td>事件类型</td><td>有 <span class="mono">type: info|alert|error</span></td><td>不支持下自定义事件（官方明示）</td>
+              <td><b>无</b>事件类型字段</td><td><span class="tag red">缺</span></td></tr>
+          <tr><td>服务调用方式</td><td>有 <span class="mono">callType: sync|async</span></td><td>命令有响应方式</td>
+              <td><b>无</b>调用方式字段</td><td><span class="tag red">缺</span></td></tr>
+          <tr><td>版本与发布</td><td>draft → 发布，10 个最近版本，<b>发布前看差异</b></td><td>导出/导入 zip 或 Excel</td>
+              <td>draft → published + versions，<b>无差异对比</b></td><td><span class="tag orange">部分</span></td></tr>
+          <tr><td>TSL 导入导出</td><td>官方 API 支持</td><td>zip / Excel</td>
+              <td><span class="mono">GET|POST /products/{id}/tsl</span> 已实现</td><td><span class="tag green">有</span></td></tr>
+          <tr><td>模板 / 品类</td><td>标准品类（"相当于产品模板"）</td><td>导入库模型 / Excel</td>
+              <td><b>无</b></td><td><span class="tag red">缺</span></td></tr>
+        </tbody>
+      </table></div>
+      <div class="gapbox">⚠️ <b>结论：不要把本平台的物模型称为「等价于阿里云 TSL」</b>。
+        结构上它更接近<b>华为云 IoTDA 的离线产品模型</b>（TSL DTO 的字段名 <span class="mono">propertyName</span>/<span class="mono">method</span>/<span class="mono">maxLength</span>/<span class="mono">enumList</span>、
+        <span class="mono">devices</span>/<span class="mono">services</span>/<span class="mono">serviceTypeCapabilities</span> 与 IoTDA 离线格式一致，
+        详见仓内 <span class="mono">iotda-product-model-report.md</span> 的字段逐项比对）；而阿里云 TSL 是「模块下的平级三元」。
+        差别最大的一条是<b>点位映射的归属层级</b>：阿里云在产品侧、我们在设备侧。</div>
+    </div>`;
+}
+
+/* =========================================================================
+   6. 渲染
+   ========================================================================= */
+const ROUTE_OF_DETAIL = { products:'products', devices:'devices' };
+
+function currentNavId(){
+  if (state.id && ROUTE_OF_DETAIL[state.route]) return state.route;
+  return state.route;
+}
+
+function renderNav(){
+  const cur = currentNavId();
+  $('#nav').innerHTML = NAV.map(g => `
+    <div class="nav-group">${esc(g.group)}</div>
+    ${g.items.map(it => {
+      const tag = it.tag === 'new' ? '<span class="tag-new">新增</span>'
+                : it.tag === 'reuse' ? '<span class="tag-reuse">复用</span>'
+                : it.tag === 'gap' ? '<span class="tag-gap">缺接口</span>' : '';
+      const href = it.id === 'products' ? '#/products' : it.id === 'devices' ? '#/devices' : '#/' + it.id;
+      return `<a href="${href}" class="${cur===it.id?'on':''}"><span class="ico">${it.icon}</span>${esc(it.label)}${tag}</a>`;
+    }).join('')}`).join('');
+}
+
+function renderCrumb(){
+  const map = {
+    onboarding:['起步','接入向导'], templates:['① 接入配置','产品模板中心'], products:['① 接入配置','产品与物模型'],
+    groups:['② 设备管理','设备分组'], devices:['② 设备管理','设备台账'],
+    overview:['③ 运维中心','健康总览'], availability:['③ 运维中心','断档与可用率'],
+    maintenance:['③ 运维中心','维护窗口'], alerts:['③ 运维中心','事件与告警'],
+    series:['④ 数据与调试','时序查询'], debug:['④ 数据与调试','在线调试'], shadow:['④ 数据与调试','设备影子'],
+    retention:['⑤ 系统','数据保留与清理'], ledger:['⑤ 系统','租户接入台账'], modelmap:['参考','关系图与口径']
+  };
+  const base = map[state.route] || ['IoT 平台',''];
+  let parts = ['IoT 平台'].concat(base);
+  if (state.id && state.route === 'products') parts.push(prod(state.id).name || state.id);
+  if (state.id && state.route === 'devices') parts.push(dev(state.id).deviceName || state.id);
+  $('#crumb').innerHTML = parts.map((p,i) => i === parts.length-1 ? `<b>${esc(p)}</b>` : esc(p)).join(' <span class="muted">/</span> ');
+}
+
+function render(){
+  renderNav();
+  renderCrumb();
+  let html;
+  switch (state.route){
+    case 'onboarding':   html = viewOnboarding(); break;
+    case 'overview':     html = viewOverview(); break;
+    case 'products':     html = state.id ? viewProductDetail() : viewProducts(); break;
+    case 'devices':      html = state.id ? viewDeviceDetail() : viewDevices(); break;
+    case 'groups':       html = viewGroups(); break;
+    case 'availability': html = viewAvailability(); break;
+    case 'maintenance':  html = viewMaintenance(); break;
+    case 'alerts':       html = viewAlerts(); break;
+    case 'series':       html = viewSeries(); break;
+    case 'debug':        html = viewDebug(); break;
+    case 'shadow':       html = viewShadow(); break;
+    case 'retention':    html = viewRetention(); break;
+    case 'ledger':       html = viewLedger(); break;
+    case 'modelmap':     html = viewModelMap(); break;
+    case 'templates':    html = viewTemplates(); break;
+    default:             html = '<div class="empty">未知页面</div>';
+  }
+  $('#view').innerHTML = html;
+}
+
+/* ---------- 模板中心 ---------- */
+function viewTemplates(){
+  const tpls = [
+    { id:'th', name:'温湿度传感器', proto:'Modbus', type:'传感器',
+      feats:'属性 3：temperature / humidity / battery\n命令 1：setReportInterval\n事件 2：overTemp / lowBattery\n点位 3：holding 0x0000/0x0001 · input 0x0008' },
+    { id:'meter', name:'三相电表', proto:'Modbus', type:'电表',
+      feats:'属性 3：voltageA / currentA / powerKw\n命令 1：resetEnergy\n事件 1：overCurrent\n点位 3：holding 0x0010/0x0012/0x0018' },
+    { id:'gw', name:'边缘网关', proto:'MQTT', type:'网关',
+      feats:'属性 4：cpu / mem / rssi / uptime\n命令 2：reboot / syncTime\n事件 1：linkDown\n点位 1：topic telemetry/#（MQTT 主题）' }
+  ];
+  return `
+    ${anno('左侧「① 接入配置 → 产品模板中心」', '挑一个模板 → 「用此模板新建产品」→ 落在新建产品向导第一步并预填',
+      '生成产品 + 物模型 + 点位模板后，直接去「添加设备」')}
+    <h1 class="page">产品模板中心</h1>
+    <div class="page-sub">把「常见型号的物模型 + 点位」沉淀成模板，让新用户不用从空白开始。</div>
+    <div class="tpls">
+      ${tpls.map(t=>`<div class="tpl">
+        <h4>${esc(t.name)}</h4>
+        <div class="meta">${esc(t.proto)} · ${esc(t.type)}</div>
+        <div class="feats">${esc(t.feats).replace(/\n/g,'<br>')}</div>
+        <div class="mt"><button class="btn primary" data-act="tpl" data-id="${t.id}">用此模板新建产品</button></div>
+      </div>`).join('')}
+    </div>
+    <div class="gapbox">⚠️ <b>模板是新增能力，且有一手对标依据</b>：后端<b>没有</b>模板表/接口（全仓无 template 实体与端点）。
+      阿里云的官方机制叫「<b>标准品类</b>」（官方文档原文标注"相当于产品模板"，功能分为必选/可选）；
+      华为云支持「导入库模型 / Excel 导入」；涂鸦有产品模板与 DP 模板。
+      <b>两种落地方式</b>：① <b>后端模板表 + API</b>（推荐，可维护、可租户化、可导入导出）；
+      ② <b>前端内置静态模板 JSON + 逐条调用现有物模型接口</b>（最快，无需后端改动，但模板无法运营）。
+      本原型只表达交互，不预设实现。</div>`;
+}
+
+/* =========================================================================
+   7. 事件绑定
+   ========================================================================= */
+function toast(msg){
+  let el = document.getElementById('__toast');
+  if (!el){
+    el = document.createElement('div');
+    el.id = '__toast';
+    el.style.cssText = 'position:fixed;left:50%;top:24px;transform:translateX(-50%);background:#1d2433;color:#fff;' +
+      'padding:9px 18px;border-radius:6px;font-size:13px;z-index:999;opacity:0;transition:opacity .18s;max-width:80vw';
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.style.opacity = '1';
+  clearTimeout(el.__t);
+  el.__t = setTimeout(() => { el.style.opacity = '0'; }, 1900);
+}
+
+document.addEventListener('click', (ev) => {
+  const el = ev.target.closest('[data-act]');
+  if (!el) return;
+  const act = el.dataset.act;
+  if (act === 'go'){ ev.preventDefault(); go(el.dataset.to); return; }
+  if (act === 'dtab'){ state.devTab = el.dataset.tab; render(); window.scrollTo(0,0); return; }
+  if (act === 'ptab'){ state.prodTab = el.dataset.tab; render(); window.scrollTo(0,0); return; }
+  if (act === 'wiz'){ state.wizardStep = Number(el.dataset.step); if (state.route !== 'onboarding') go('#/onboarding'); else render(); window.scrollTo(0,0); return; }
+  if (act === 'tpl'){
+    state.wizardStep = 2; state.wizardTpl = el.dataset.id;
+    if (state.route !== 'onboarding') go('#/onboarding'); else render();
+    toast('已按模板生成产品 + 物模型 + 点位模板（原型示意）');
+    return;
+  }
+  if (act === 'adddev'){
+    state.filter = { kw:'', productId: el.dataset.id, groupId:'', status:'' };
+    if (state.route !== 'devices' || state.id) go('#/devices'); else render();
+    toast('已带着产品跳转到设备台账 —— 点「+ 新增设备」即可（表单会预选该产品）');
+    return;
+  }
+  if (act === 'newdev'){ state.wizardStep = 3; go('#/onboarding'); return; }
+  if (act === 'maintain'){ go('#/maintenance'); toast('维护窗口表单已按来源预填作用范围（原型示意）'); return; }
+  if (act === 'pub'){ toast('发布后将生成新版本并供设备绑定（原型示意，接口已存在）'); return; }
+  if (act === 'noop'){ toast('设计原型：该动作在 IOT-UX-PROPOSAL.md 中描述，此处不实现'); return; }
+});
+
+document.addEventListener('input', (ev) => {
+  const el = ev.target.closest('[data-filter]');
+  if (!el) return;
+  state.filter[el.dataset.filter] = el.value;
+  const pos = el.selectionStart;
+  render();
+  const again = document.querySelector(`[data-filter="${el.dataset.filter}"]`);
+  if (again && again.focus){ again.focus(); try { again.setSelectionRange(pos, pos); } catch (e) {} }
+});
+
+document.addEventListener('change', (ev) => {
+  const el = ev.target.closest('[data-filter]');
+  if (el){ state.filter[el.dataset.filter] = el.value; render(); return; }
+  const sc = ev.target.closest('[data-act="scope"]');
+  if (sc){ MAINT.scope = sc.value; render(); return; }
+});
+
+/* =========================================================================
+   8. 启动
+   ========================================================================= */
+parseHash();
+if (!location.hash) location.hash = '#/onboarding';
+render();
+</script>
+</body>
+</html>
