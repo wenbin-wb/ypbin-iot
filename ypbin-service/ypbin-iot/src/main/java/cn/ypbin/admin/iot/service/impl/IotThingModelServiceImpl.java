@@ -60,8 +60,19 @@ import org.springframework.util.StringUtils;
 /**
  * IoT 物模型服务实现（§3.3–§3.7）。
  *
- * <p>写操作要求产品处于草稿状态（已发布同版本不可变，§3.8）；
- * TSL 导入为全量替换当前草稿结构，校验失败逐项报错且整体不落库（§3.7）。</p>
+ * <p><b>读 / 写不对称（刻意设计，2026-09-27 修正）</b>：
+ * <b>写</b>操作要求产品处于草稿状态（已发布版本不可变，§3.8）——{@code requireProductDraft}
+ * 原样保留在全部 create/update/remove 方法上；<b>读</b>操作（{@code listServices} /
+ * {@code listProperties} / {@code listCommands} / {@code listEvents}）**只校验产品/服务存在且属于当前租户**，
+ * 不再要求草稿态。</p>
+ *
+ * <p>为什么原来的「读也要草稿态」必须改掉：已发布产品的服务/属性清单此前**没有任何 API 可读**
+ * （{@code exportTsl} 是唯一旁路，且 TSL 里没有属性主键，无法与设备级点位映射关联）
+ * ⇒ 设备详情看不到属性、产品详情物模型页签直接报 409，而演示环境里绝大多数设备绑的正是已发布产品。
+ * 读路径的租户隔离不受影响：{@code requireProduct}/{@code requireService} 走的仍是受租户插件约束的
+ * {@code selectById}，查不到即抛业务错误（**不退化成空列表**，避免把越权/不存在伪装成「没有数据」）。</p>
+ *
+ * <p>TSL 导入为全量替换当前草稿结构（仍要求草稿态），校验失败逐项报错且整体不落库（§3.7）。</p>
  *
  * @author wenbin
  * @since 2026-09-20
@@ -105,9 +116,15 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
 
     // ---------- 服务 ----------
 
+    /**
+     * 查询产品下的服务列表（**读**：任何物模型状态都可读，见类注释的读/写不对称）。
+     *
+     * @param productId 产品主键
+     * @return 服务列表
+     */
     @Override
     public List<IotServiceResp> listServices(Long productId) {
-        requireProductDraft(productId);
+        requireProduct(productId);
         LambdaQueryWrapper<IotService> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(IotService::getProductId, productId)
             .orderByAsc(IotService::getSort)
@@ -157,9 +174,15 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
 
     // ---------- 属性 ----------
 
+    /**
+     * 查询服务下的属性列表（**读**：任何物模型状态都可读）。
+     *
+     * @param serviceId 服务主键
+     * @return 属性列表
+     */
     @Override
     public List<IotPropertyResp> listProperties(Long serviceId) {
-        requireDraftByServiceId(serviceId);
+        requireService(serviceId);
         LambdaQueryWrapper<IotProperty> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(IotProperty::getServiceId, serviceId)
             .orderByAsc(IotProperty::getSort)
@@ -196,9 +219,15 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
 
     // ---------- 命令 ----------
 
+    /**
+     * 查询服务下的命令列表（**读**：任何物模型状态都可读）。
+     *
+     * @param serviceId 服务主键
+     * @return 命令列表
+     */
     @Override
     public List<IotCommandResp> listCommands(Long serviceId) {
-        requireDraftByServiceId(serviceId);
+        requireService(serviceId);
         LambdaQueryWrapper<IotCommand> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(IotCommand::getServiceId, serviceId)
             .orderByAsc(IotCommand::getSort)
@@ -235,9 +264,15 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
 
     // ---------- 事件 ----------
 
+    /**
+     * 查询服务下的事件列表（**读**：任何物模型状态都可读）。
+     *
+     * @param serviceId 服务主键
+     * @return 事件列表
+     */
     @Override
     public List<IotEventResp> listEvents(Long serviceId) {
-        requireDraftByServiceId(serviceId);
+        requireService(serviceId);
         LambdaQueryWrapper<IotEvent> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(IotEvent::getServiceId, serviceId)
             .orderByAsc(IotEvent::getSort)
@@ -918,6 +953,7 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
         }
     }
 
+    /** 写操作前置：服务所属产品必须是草稿态（读路径**不要**用它，见类注释的读/写不对称）。 */
     private void requireDraftByServiceId(Long serviceId) {
         IotService service = requireService(serviceId);
         requireProductDraft(service.getProductId());

@@ -10,7 +10,7 @@
 package cn.ypbin.admin.iot.service.impl;
 
 import static org.assertj.core.api.Assertions.assertThat;
-
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.doAnswer;
@@ -29,6 +29,9 @@ import cn.ypbin.admin.iot.mapper.IotEventMapper;
 import cn.ypbin.admin.iot.mapper.IotProductMapper;
 import cn.ypbin.admin.iot.mapper.IotPropertyMapper;
 import cn.ypbin.admin.iot.mapper.IotServiceMapper;
+import cn.ypbin.admin.iot.model.req.IotPropertyReq;
+import cn.ypbin.admin.iot.model.req.IotServiceReq;
+import cn.ypbin.admin.iot.model.resp.IotPropertyResp;
 import cn.ypbin.admin.iot.model.resp.TslImportResult;
 import cn.ypbin.admin.iot.model.tsl.TslCommand;
 import cn.ypbin.admin.iot.model.tsl.TslDocument;
@@ -36,6 +39,7 @@ import cn.ypbin.admin.iot.model.tsl.TslEvent;
 import cn.ypbin.admin.iot.model.tsl.TslPara;
 import cn.ypbin.admin.iot.model.tsl.TslProperty;
 import cn.ypbin.admin.iot.model.tsl.TslService;
+import cn.ypbin.starter.core.exception.BusinessException;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import tools.jackson.databind.ObjectMapper;
@@ -209,6 +213,87 @@ class IotThingModelServiceImplTest {
         service.validateTsl(doc, errors);
 
         assertThat(errors).anyMatch(e -> e.contains("属性读写权限非法"));
+    }
+
+    @Test
+    @DisplayName("★ 已发布产品可读四类元素：读路径不再要求草稿态（1 服务 + 6 属性，形状对齐生产 9100001）")
+    void publishedProductMustBeReadable() {
+        // 生产实测的形状：demo 温湿度产品（已发布）1 个服务 + 6 个属性
+        when(productMapper.selectById(9L)).thenReturn(publishedProduct(9L));
+        IotService master = serviceEntity(1000L, "DemoThService", 0);
+        when(serviceMapper.selectById(1000L)).thenReturn(master);
+        when(serviceMapper.selectList(any())).thenReturn(List.of(master));
+        when(propertyMapper.selectList(any())).thenReturn(List.of(
+            propertyEntity(9130001L, 1000L, "temperature"),
+            propertyEntity(9130002L, 1000L, "humidity"),
+            propertyEntity(9130003L, 1000L, "switchState"),
+            propertyEntity(9130004L, 1000L, "serialNo"),
+            propertyEntity(9130005L, 1000L, "workMode"),
+            propertyEntity(9130006L, 1000L, "demoBoundary")));
+        when(commandMapper.selectList(any())).thenReturn(List.of());
+        when(eventMapper.selectList(any())).thenReturn(List.of());
+
+        assertThat(service.listServices(9L)).extracting(r -> r.getServiceId())
+            .containsExactly("DemoThService");
+        assertThat(service.listProperties(1000L)).hasSize(6)
+            .extracting(IotPropertyResp::getIdentifier)
+            .containsExactly("temperature", "humidity", "switchState", "serialNo", "workMode",
+                "demoBoundary");
+        assertThat(service.listCommands(1000L)).isEmpty();
+        assertThat(service.listEvents(1000L)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("★ 已发布产品的写操作仍被拦：只放开读，写必须继续要求草稿态")
+    void publishedProductMustRejectWrites() {
+        when(productMapper.selectById(9L)).thenReturn(publishedProduct(9L));
+        when(serviceMapper.selectById(1000L)).thenReturn(serviceEntity(1000L, "DemoThService", 0));
+
+        IotServiceReq createServiceReq = new IotServiceReq();
+        createServiceReq.setProductId(9L);
+        createServiceReq.setServiceId("NewService");
+        createServiceReq.setServiceName("新服务");
+        createServiceReq.setServiceOption("optional");
+        assertThatThrownBy(() -> service.createService(createServiceReq))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("仅草稿状态可编辑物模型");
+
+        // 属性写在服务下：走 requireDraftByServiceId，同样必须被拦
+        IotPropertyReq createPropertyReq = new IotPropertyReq();
+        createPropertyReq.setServiceId(1000L);
+        createPropertyReq.setIdentifier("newProp");
+        createPropertyReq.setPropertyName("新属性");
+        createPropertyReq.setDataType("int");
+        createPropertyReq.setAccessMode("R");
+        assertThatThrownBy(() -> service.createProperty(createPropertyReq))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("仅草稿状态可编辑物模型");
+
+        // 删除同理
+        assertThatThrownBy(() -> service.removeService(1000L))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("仅草稿状态可编辑物模型");
+    }
+
+    @Test
+    @DisplayName("★ 跨租户 / 不存在的读：抛业务错误而不是返回空列表（不把越权伪装成「没有数据」）")
+    void crossTenantReadMustFailInsteadOfEmptyList() {
+        // 租户插件会给 iot_product/iot_service 追加 tenant_id 条件 ⇒ 别的租户的行 selectById 查不到
+        when(productMapper.selectById(9L)).thenReturn(null);
+        when(serviceMapper.selectById(1000L)).thenReturn(null);
+
+        assertThatThrownBy(() -> service.listServices(9L))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("产品不存在");
+        assertThatThrownBy(() -> service.listProperties(1000L))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("服务不存在");
+        assertThatThrownBy(() -> service.listCommands(1000L))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("服务不存在");
+        assertThatThrownBy(() -> service.listEvents(1000L))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("服务不存在");
     }
 
     @Test
@@ -504,6 +589,14 @@ class IotThingModelServiceImplTest {
         IotProduct product = new IotProduct();
         product.setId(id);
         product.setModelStatus("draft");
+        return product;
+    }
+
+    /** 构造已发布产品（读路径用例：读不再要求草稿态，写仍要求）。 */
+    private static IotProduct publishedProduct(Long id) {
+        IotProduct product = new IotProduct();
+        product.setId(id);
+        product.setModelStatus("published");
         return product;
     }
 
