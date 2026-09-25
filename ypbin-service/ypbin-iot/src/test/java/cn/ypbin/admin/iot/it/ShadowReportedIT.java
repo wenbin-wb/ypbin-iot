@@ -313,6 +313,14 @@ class ShadowReportedIT {
         return OBJECT_MAPPER.readValue(raw, new TypeReference<Map<String, Object>>() { });
     }
 
+    /**
+     * 读库里的 {@code report_ts}。
+     *
+     * <p><b>必须用 {@code getObject(..., LocalDateTime.class)} 而不是 {@code getTimestamp().toLocalDateTime()}</b>：
+     * 后者会先把 DATETIME 按**连接时区**解释成一个瞬间、再换到 **JVM 默认时区**，在 CI（TZ=UTC）上
+     * 与写入侧（平台时区 GMT+8 的 LocalDateTime）相差 8 小时——这是测试读法的坑，不是存储值错
+     * （生产同款读路径走 MyBatis 的 LocalDateTimeTypeHandler，读写对称，不受影响；本轮 CI 实测校正）。</p>
+     */
     private static LocalDateTime reportTsOf(Long deviceId) {
         try (Connection connection = dataSource.getConnection();
                 PreparedStatement statement = connection.prepareStatement(
@@ -322,7 +330,7 @@ class ShadowReportedIT {
             if (!rs.next()) {
                 return null;
             }
-            return rs.getTimestamp(1) == null ? null : rs.getTimestamp(1).toLocalDateTime();
+            return rs.getObject(1, LocalDateTime.class);
         } catch (SQLException ex) {
             throw new IllegalStateException("读取 report_ts 失败", ex);
         }
