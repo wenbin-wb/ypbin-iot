@@ -226,13 +226,15 @@ class EventLogIngestIT {
         // 于是各自把这条算成自己的 accepted——这是**已声明的语义边界**（见 EventIngestResult 的说明），
         // 唯一可保证、也是真正要保证的不变量是上面那条「库里只有一行」。
         // 这里再钉一条**不依赖归属口径**的不变量：四个调用方合计必须把「同一条事件」各记一次
-        // （要么 accepted、要么 duplicated），既不能凭空多记、也不能有人整条丢掉。
+        // （要么 accepted、要么 duplicated），即**没有调用方把事件整条丢掉**。
+        // ⚠️ 它**不能**发现「重复计数」——每方只投 1 条时 accepted≤1、duplicated≤1、discarded≤1，
+        // Σ==4 在「四方各自 accepted=1」这种已声明边界下同样成立（复核指出，注释不许夸大能力）。
         assertThat(results.stream().mapToInt(EventIngestResult::getAccepted).sum())
             .as("至少有一方报告了新落库").isGreaterThanOrEqualTo(1);
         assertThat(results.stream()
             .mapToInt(r -> r.getAccepted() + r.getDuplicated() + r.getDiscarded()).sum())
-            .as("四个调用方合计记满 4 条（各自一条）：多记说明重复计数被藏进了别的计数里，"
-                + "少记说明有调用方把事件静默丢了")
+            .as("四个调用方合计记满 4 条（各自一条）：少记说明有调用方把事件整条丢了"
+                + "（注意：本断言对「重复计数」无鉴别力，见上方注释）")
             .isEqualTo(4);
     }
 

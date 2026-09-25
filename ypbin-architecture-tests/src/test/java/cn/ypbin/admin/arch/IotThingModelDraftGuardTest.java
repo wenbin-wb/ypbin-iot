@@ -42,8 +42,9 @@ import org.junit.jupiter.api.Test;
  *       自身或其（同类的）被调用方**直接/传递地**发生数据库写入的那些方法
  *       （写调用按动词识别，见 {@link #WRITE_CALL}）；</li>
  *   <li>这些方法的方法体里必须出现守卫调用（{@link #GUARD_CALLS}）；</li>
- *   <li>守卫本身也被钉住：{@code requireProductDraft} 必须在**同一条「非草稿」分支内**抛异常，
- *       且该分支的比较是 {@code ModelStatus.DRAFT}（{@link #guardThrowsOnNonDraft}）。</li>
+ *   <li>守卫本身也被钉住：{@code requireProductDraft} 必须比对 {@code ModelStatus.DRAFT}，且**非草稿
+ *       分支要真的以抛异常收口**（{@link #guardThrowsOnNonDraft} + {@link #thenBranchBlocksControlFlow}，
+ *       判定是**文本启发式**而非可达性分析）。</li>
  * </ol>
  *
  * <p><b>口径是复核“咬”出来的（2026-09-25 外委复核，本类因此改过三处）</b>：第一版规则自述是
@@ -55,6 +56,9 @@ import org.junit.jupiter.api.Test;
  *
  * <p><b>已知边界（如实声明，避免虚假安心）</b>：</p>
  * <ul>
+ *   <li>守卫判定是<b>文本启发式，不是可达性分析</b>：{@link #thenBranchBlocksControlFlow} 只检查
+ *       「非草稿分支内以 throw 收口，且没有嵌套 {@code if}/放过型日志」。「把 throw 放到真正不可达的
+ *       分支里但用更绕的方式伪装」理论上仍能骗过——这类刻意绕过（而非顺手漏写）由 review 兜。</li>
  *   <li>只查 public / 包级私有 方法与类内调用图。<b>private</b> 辅助方法（如 {@code replaceTsl}）
  *       允许不自己校验——编译器保证它无法从别的类调用，只能由本类的入口进来，而入口必须带守卫。
  *       这也是刻意要求的形态：守卫写在入口，review 时一眼可见。</li>
@@ -105,8 +109,9 @@ class IotThingModelDraftGuardTest {
      */
     private static final Pattern WRITE_CALL = Pattern.compile(
         "\\.?\\b(?:save|saveBatch|saveOrUpdate|saveOrUpdateBatch|update|updateById|updateBatchById"
-            + "|updateBy[A-Z]\\w*|remove|removeById|removeByIds|removeBatchByIds|insert|insertBatch"
-            + "|delete|deleteById|deleteBatchIds|deleteBy[A-Z]\\w*|physicalDelete\\w*)\\s*\\(");
+            + "|updateBy[A-Z]\\w*|remove|removeById|removeByIds|removeBatchByIds|removeBy[A-Z]\\w*"
+            + "|insert|insertBatch|insertSelective|insertOrUpdate|delete|deleteById|deleteBatchIds"
+            + "|deleteBy[A-Z]\\w*|batchUpdate|updateBatch|physicalDelete\\w*)\\s*\\(");
 
     /** Java 关键字/修饰符：出现在「类型」位置说明这条匹配不是方法声明（构造器、调用点、控制语句）。 */
     private static final Set<String> NOT_A_TYPE = Set.of(
@@ -179,8 +184,14 @@ class IotThingModelDraftGuardTest {
             if (draft < 0) {
                 return false;
             }
+            // 两种合法形态：`if (!DRAFT…) { … }`（if 在 DRAFT 之前）与
+            // `boolean isDraft = DRAFT…; if (!isDraft) { … }`（if 在 DRAFT 之后）。
+            // 只看 before 会把后者判成假红（复核 N3 实证）。
             int ifStart = guardBody.lastIndexOf("if", draft);
-            int open = guardBody.indexOf('{', draft);
+            if (ifStart < 0) {
+                ifStart = guardBody.indexOf("if", draft);
+            }
+            int open = guardBody.indexOf('{', Math.max(ifStart, draft));
             if (ifStart < 0 || open < 0) {
                 return false;
             }
@@ -189,14 +200,32 @@ class IotThingModelDraftGuardTest {
                 return false;
             }
             String condition = guardBody.substring(ifStart, open);
-            boolean negated = condition.contains("!");
-            boolean throwsInside = guardBody.substring(open, close + 1).contains("throw ");
-            if (negated && throwsInside) {
+            if (condition.contains("!") && thenBranchBlocksControlFlow(guardBody.substring(open, close + 1))) {
                 return true;
             }
             cursor = close;
         }
         return false;
+    }
+
+    /**
+     * 「then 分支确实拦下控制流」的**文本启发式**：分支内必须出现 {@code throw}（或名字以 {@code throw}
+     * 开头的自建抛异常方法），且**不得**出现嵌套 {@code if} 或 {@code log.warn/info/debug}
+     * ——后者是「实际放过、只留个装饰」的信号。
+     *
+     * <p>为什么需要它：复核 N2 把 {@code if (Boolean.FALSE) { throw … }} 塞进同一个非草稿分支、真实动作
+     * 仍是 {@code log.warn}，就能骗过「块内出现 throw」这种判定。本启发式仍**不是**可达性分析
+     * （见类注释的边界声明），但把「同分支内放装饰性 throw」这条最省事的绕过路径堵掉了。</p>
+     *
+     * @param thenBlock 含花括号的 then 分支文本
+     * @return 分支以抛异常收口返回 {@code true}
+     */
+    static boolean thenBranchBlocksControlFlow(String thenBlock) {
+        boolean throwsInside = thenBlock.contains("throw ")
+            || Pattern.compile("\\bthrow[A-Z]\\w*\\s*\\(").matcher(thenBlock).find();
+        boolean letsThrough = thenBlock.contains("if (")
+            || Pattern.compile("\\blog\\.(?:warn|info|debug)\\s*\\(").matcher(thenBlock).find();
+        return throwsInside && !letsThrough;
     }
 
     @Test
@@ -275,6 +304,32 @@ class IotThingModelDraftGuardTest {
         assertThat(guardThrowsOnNonDraft(methods(syntheticClass(decorativeGuard)).getFirst().body()))
             .as("只比对不抛（或 throw 在别的分支）= 不变量已被拆掉，门禁必须转红（复核变异 B3c）")
             .isFalse();
+
+        // 第二轮复核 N2：装饰性 throw 挪进同一个「非草稿」分支内，真实动作仍是 log.warn
+        String nestedDecoration = "    private void requireProductDraft(Long productId) {\n"
+            + "        Thing product = requireProduct(productId);\n"
+            + "        if (!ModelStatus.DRAFT.getCode().equals(product.getModelStatus())) {\n"
+            + "            if (Boolean.FALSE) {\n"
+            + "                throw new IllegalStateException(\"不可达装饰\");\n"
+            + "            }\n"
+            + "            log.warn(\"实际放过\");\n"
+            + "        }\n"
+            + "    }\n";
+        assertThat(guardThrowsOnNonDraft(methods(syntheticClass(nestedDecoration)).getFirst().body()))
+            .as("把装饰性 throw 塞进同一个非草稿分支、真实动作仍是放过 ⇒ 门禁必须转红（复核 N2）")
+            .isFalse();
+
+        // 第二轮复核 N3：把 DRAFT 比较提取成局部布尔变量是完全等价的合法重构，不得判成假红
+        String extracted = "    private void requireProductDraft(Long productId) {\n"
+            + "        Thing product = requireProduct(productId);\n"
+            + "        boolean isDraft = ModelStatus.DRAFT.getCode().equals(product.getModelStatus());\n"
+            + "        if (!isDraft) {\n"
+            + "            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, \"先新建草稿\");\n"
+            + "        }\n"
+            + "    }\n";
+        assertThat(guardThrowsOnNonDraft(methods(syntheticClass(extracted)).getFirst().body()))
+            .as("提取局部布尔变量的等价重构不得被拒（复核 N3：假红会把正常重构逼向削弱规则）")
+            .isTrue();
 
         // 漏放 ③：包级私有（无修饰符）写入口——同包其它 *ServiceImpl 可直接调用
         List<Method> packagePrivate = writeEntryMethods(methods(syntheticClass(

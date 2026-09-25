@@ -31,7 +31,9 @@ import org.apache.ibatis.annotations.Select;
  * <p><b>返回值口径的坑（如实登记）</b>：{@code ON DUPLICATE KEY UPDATE} 的受影响行数受 JDBC 驱动
  * 的 {@code useAffectedRows} 影响——Connector/J 默认 {@code false} 会带 {@code CLIENT_FOUND_ROWS}，
  * 此时「命中已有行」也计 1（与「新插入」不可区分）。因此调用方<b>不得</b>把返回值当作「新插入条数」的
- * 唯一依据：幂等条数以先查的结果为准，返回值只用于「小于提交行数 ⇒ 发生过并发重投」这一告警判据。</p>
+ * 唯一依据：幂等条数以先查的结果为准；该返回值**不得**用于任何判断——复核用真 JDBC 实测：默认
+ * {@code CLIENT_FOUND_ROWS} 下「命中已有行」也返回 1，据此做「小于提交行数 ⇒ 并发重投」的告警判据
+ * 永不触发，故该判据已在服务层删除，当前调用方完全不使用返回值。</p>
  *
  * <p><b>为什么显式写 {@code tenant_id}</b>：批量插入的 {@code id} 与 {@code tenant_id} 都由调用方
  * 逐行给（{@code IdWorker} 预生成 id + 按设备解析出的租户），这样一条语句可以服务同一租户下的多台设备；
