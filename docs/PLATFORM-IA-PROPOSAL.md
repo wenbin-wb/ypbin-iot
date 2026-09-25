@@ -30,7 +30,7 @@
 | # | 坑 | 后果 | 见 |
 |---|---|---|---|
 | **K1** | **缓存偏好会覆盖代码默认值** | 改 `preferences.ts` 里的 `layout` 对**已经访问过**的用户**不生效**（localStorage 里的旧值优先） | §2.4、§7.4 |
-| **K2** | **reparent 会产生"孤儿菜单"，整棵被后端丢弃** | 把子菜单挂到新模块目录下、却没把新目录授给"已拥有该子菜单的角色/模板" ⇒ 这些用户**看不到该子菜单**（不是灰掉，是消失）。**边界：只对"非超管 / 非平台用户"成立** —— 超管走全量菜单路径、不受影响；非平台用户还要多过一道**租户模板**过滤 | §2.5、§7.1 |
+| **K2** | **reparent 会产生"孤儿菜单"，整棵被后端丢弃** | 把子菜单挂到新模块目录下、却没把新目录授给"已拥有该子菜单的角色/模板" ⇒ 这些用户**看不到该子菜单**（不是灰掉，是消失）。**边界：只对「非超管」用户成立**（无论其是否平台用户）—— 超管走 `list(enabledMenusOrdered())` 全量菜单路径、父一定在集合里、不受影响；非超管一律走 `selectByUserId`（**父不在角色授权里就整棵丢**），其中**非平台**用户还要多过一道**租户模板**过滤（`applyTenantMenuFilter`），而 `platform_only=1` 的过滤对**平台**用户不生效 ⇒ 二者都不能免于 K2 | §2.5、§7.1 |
 | **K3** | **授权门禁有两重缺陷**：① 只覆盖 `32xx` 开头的 id；② 更要命的是它对 `sys_template_menu` 的检查是**假绿**（`sql.split("INSERT INTO "+table)` 的 block 跨语句串味，两表 `granted` 实测完全相同）| 新模块目录用 `33xx` 时不会被检查；**即使扩到 `33xx` 也不咬人**（实测删掉模板授权不转红）⇒ K2 的盲区重新打开。修正版门禁见 §7.1.4（已实测基线通过 + 三个变异转红）| §7.1.4、附录 C |
 
 ---
@@ -164,7 +164,7 @@ app: {
 
 ### 2.5 顶级菜单是不是按 `sys_menu.pid=0` 自动渲染？→ **是，前端不需要额外配置**
 
-> **⚠️ 先纠正一个前提（R4）**：顶级导航**不是**"按 `type=catalog` 的顶级节点"渲染的，而是**按 `pid=0`**。后端唯一的类型过滤是**剔除 `type=button`**（`SysMenuServiceImpl.java:72`），其余类型（`catalog` / `menu` / `embedded` / `link`）只要 `pid=0` **都会成为顶栏的一项**。
+> **⚠️ 先纠正一个前提（R4）**：顶级导航**不是**"按 `type=catalog` 的顶级节点"渲染的，而是**按 `pid=0`**。后端唯一的类型过滤是**剔除 `type=button`**（`SysMenuServiceImpl.java:73`——**第二轮复核更正：早前写的 `:72` 是 `List<SysMenu> routable = menus.stream()`，过滤在下一行**），其余类型（`catalog` / `menu` / `embedded` / `link`）只要 `pid=0` **都会成为顶栏的一项**。
 > **活库实证**：现有 13 个顶级菜单里，`2600 SystemFile` 的 `type` 是 **`menu`**、`4001 ApiDoc` 的 `type` 是 **`embedded`** —— 它们**不是** `catalog`，但同样出现在顶栏。
 > ⇒ 对本方案有直接影响：**新增的模块目录必须是 `type=catalog` + `component=BasicLayout`**（否则它自己会变成一个可点开的空页面），但"会不会出现在顶栏"只由 `pid` 决定。
 
@@ -178,9 +178,9 @@ app: {
 | 递归只按 `pid` 挂 | `SysMenuServiceImpl.java:340-354` | `if (pid.equals(menu.getPid())) { ... children = buildRouteTree(menus, menu.getId()) }`（**注意：pid 指向的父节点不在入参集合里 ⇒ 该子节点永远是孤儿、不会出现在结果中**，这是 K2 的机制） |
 | **谁受 K2 影响** | `SysMenuServiceImpl.java:69-70`、`:74`、`:78`、`:82-100`；`SysRoleServiceImpl.java:236-252` | **只影响"非超管"用户**（超管走 `list(enabledMenusOrdered())` 全量菜单，父一定在集合里）。非超管有两道：<br>① `selectByUserId` 只回 `sys_role_menu` 里授过的菜单 ⇒ **父不在角色授权里就整棵丢**；<br>② 非平台用户再过 `applyTenantMenuFilter`（`:78`、`:82-100`）：`allowedIds` 来自 `sys_template_menu`（经 `resolveTenantMenuIds`），函数会从"被允许的菜单"沿 `pid` 上溯把祖先并进 `keptIds`，**但只并"已在该用户菜单集合里"的祖先**（`byId.get(currentId)` 为空即跳出）⇒ 它救不回角色侧缺失的父。<br>③ **更硬的一条**：租户管理员给角色配菜单走 `SysRoleServiceImpl#validateMenus`（`:236-252`，由 `:132`/`:152` 在新建/改角色时调用），`!allowedIds.containsAll(requestedIds)` 直接抛 **"角色授权包含租户权限模板之外的菜单"** ⇒ **模块目录不进 `sys_template_menu`，租户侧连角色都保存不了**。<br>⇒ 若模块目录 `platform_only=0`，**两张表都必须补授**（§7.1.1 第 3 步） |
 | 排序 | `SysMenuServiceImpl.java:75-78`、`:333-338` | 先 `sort` 再 `id` |
-| 按钮类型被剔除 | `SysMenuServiceImpl.java:72` | `filter(menu -> !TYPE_BUTTON.equals(menu.getType()))` |
+| 按钮类型被剔除 | `SysMenuServiceImpl.java:73` | `filter(menu -> !TYPE_BUTTON.equals(menu.getType()))` |
 | 平台专属过滤 | `SysMenuServiceImpl.java:74`、`:78` | `filter(menu -> platformUser \|\| !TRUE.equals(menu.getPlatformOnly()))` |
-| 非超管菜单来源 | `SysMenuMapper.java:27-46`（`@Select`） | `sys_menu ⨝ sys_role_menu ⨝ sys_role ⨝ sys_user_role ⨝ sys_user` —— **只拿被授予的菜单** |
+| 非超管菜单来源 | `SysMenuMapper.java:32-45`（`@Select` 在 `:32-44`、方法在 `:45`） | `sys_menu ⨝ sys_role_menu ⨝ sys_role ⨝ sys_user_role ⨝ sys_user` —— **只拿被授予的菜单** |
 | title 即 i18n key | `SysMenuServiceImpl.java:386-388`（`meta.setTitle(menu.getTitle())`） | 前端 `generateMenus` 用 `title` 当菜单名：`packages/utils/src/helpers/generate-menus.ts:50`（`const name = (title \|\| routeName \|\| '')`），再由 `wrapperMenus` 走 `$t(...)`（`packages/effects/layouts/src/basic/layout.vue:183-191`） |
 
 **前端：** `apps/web-antd/src/router/access.ts:17-33`（`fetchMenuListAsync: getAllMenusApi()`）→ `packages/effects/access/src/accessible.ts:38-60`、`:70`（`generateMenus`）。顶级节点带子路由时会被删掉自身 `component`（`accessible.ts:42-43`），避免嵌套两层 `BasicLayout`。
@@ -558,7 +558,7 @@ SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (3310);
 -- 3) ★关键★ 防孤儿（K2）：把模块目录补授给「已经拥有其任一子菜单」的**所有**角色/模板。
 --    只授 role 1 是不够的：任何自定义角色/租户模板只要拥有子菜单而缺父目录，
 --    该子菜单就会被 buildRouteTree 整棵丢弃（SysMenuServiceImpl.java:340-354）。
---    用 INSERT IGNORE 兜住 PK(role_id,menu_id) 的重复（001-schema.sql 的 sys_role_menu 主键）。
+--    用 INSERT IGNORE 兜住 PK(role_id,menu_id) / PK(template_id,menu_id) 的重复（001-schema.sql:147-152、:477-482）。
 INSERT IGNORE INTO sys_role_menu (role_id, menu_id)
 SELECT DISTINCT rm.role_id, 3310 FROM sys_role_menu rm
 WHERE rm.menu_id IN (3001, 3002, 3003, 3005, 3007, 2600, 3008, 4001) AND rm.role_id <> 1;
@@ -569,6 +569,13 @@ WHERE tm.menu_id IN (3001, 3002, 3003, 3005, 3007, 2600, 3008, 4001) AND tm.temp
 INSERT IGNORE INTO sys_role_menu (role_id, menu_id)
 SELECT DISTINCT rm.role_id, 3320 FROM sys_role_menu rm
 WHERE rm.menu_id IN (3004, 3009) AND rm.role_id <> 1;
+-- 3320 的模板侧同款补授（**第二轮复核新增**）：生产数据下不可能命中——`resolveAvailableMenuIds`
+-- （SysAuthTemplateServiceImpl.java:199-209，`:207` 过滤 `platform_only=false`）不允许 platform_only=1
+-- 的菜单进模板。但「模板侧孤儿恒为 0 行」（§7.1.2）是本文要维持的不变量，补这一条把 latent gap
+-- 变成结构性保证：将来若 3004/3009 或 3320 被改成 platform_only=0，不会有整棵丢失的窗口。
+INSERT IGNORE INTO sys_template_menu (template_id, menu_id)
+SELECT DISTINCT tm.template_id, 3320 FROM sys_template_menu tm
+WHERE tm.menu_id IN (3004, 3009) AND tm.template_id <> 1;
 
 -- 4) reparent：子菜单的 path / component / auth_code 一律不动（⇒ 书签 URL 与权限码不变）
 UPDATE sys_menu SET pid = 3310 WHERE id IN (3001, 3002, 3003, 3005, 3007, 2600, 3008, 4001);
@@ -626,13 +633,16 @@ WHERE p.pid = 0 AND p.platform_only = 1 AND c.platform_only = 0;
 - 只收**文件名含 `-iot-`** 的迁移文件；没有匹配文件就直接报错退出（防"空跑假绿"）。
 
 ⇒ **本次新迁移文件必须命名为 `<日期>-iot-platform-module-menu.sql`**（例如 `2026-09-26-iot-platform-module-menu.sql`），并把**同一批语句原样追加到 `007-iot-data.sql` 末尾**。
-> ⚠️ 若命名为 `2026-09-26-platform-module-menu.sql`（**不含 `-iot-`**），该文件会**被排除在比较之外** ⇒ 等价性检查**恒绿但没检查它**，正是门禁注释里点名的"假绿"形态。
+> ⚠️ **命名不含 `-iot-` 的后果，分两种情况（第二轮复核更正，早前"一律恒绿"的说法不准确）：**
+> ① **只**写迁移文件、**不**追加到 `007`：该文件被 `ls deploy/sql/migration/*-iot-*.sql` 静默排除 ⇒ 等价性检查**恒绿（exit 0）但没检查它**，而 fresh 安装永远缺 `3310/3320`。**这才是真正的危险形态**（复核者实测 E5：`grep -c 3310` 在 `007` 为 0、在被排除的迁移文件里为 13）。
+> ② **同时**追加到 `007`：比较双方都少了这几句，但 fresh 侧（006+007）有、migration 侧没有 ⇒ 脚本**转红**（复核实测 E4：`exit 1`）。
+> ⇒ 两种都必须避免：**文件名含 `-iot-` 且同步追加 007**，缺一不可。
 > ⚠️ 追加顺序必须与文件名排序一致（新文件排在 `2026-09-25-iot-menu-group.sql` 之后，所以追加在 007 末尾即可）。
 > ⚠️ 注意 `007-iot-data.sql:4-5` 的既有约定：`002-data.sql` 的批量授权在本文件**之前**执行，所以本文件必须自己再授一次权——上面的第 2 步就是照这个约定做的。
 
 #### 7.1.4 菜单授权门禁怎么保过（**K3，最容易踩；本节已按独立复核的实测结论整段重写**）
 
-`IotMaintenanceAdminGateTest#everyMenuIdMustBeGranted`（`ypbin-service/ypbin-iot/src/test/java/cn/ypbin/admin/iot/config/IotMaintenanceAdminGateTest.java:62-101`）的核心是：
+`IotMaintenanceAdminGateTest#everyMenuIdMustBeGranted`（`ypbin-service/ypbin-iot/src/test/java/cn/ypbin/admin/iot/config/IotMaintenanceAdminGateTest.java:119-160`；**行号已按落地代码更新**，实施前的旧行号是 `:62-101`）的核心是：
 
 ```java
 for (String table : List.of("sys_role_menu", "sys_template_menu")) {
@@ -677,14 +687,23 @@ sys_template_menu 缺失 = ['320014', '320015']     ← 二者均 platform_only 
 ##### （3）修正版门禁（**已实测：基线通过 + 三个变异都能咬人**）
 
 ```java
-/** 菜单 INSERT 的 (id, pid, name, type, platform_only)。 */
+/** 菜单 INSERT 的值元组 (id, pid, name, type, platform_only)，含多行 INSERT 的续行。 */
 private static final Pattern MENU_INSERT = Pattern.compile(
     "\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*'([^']+)'\\s*,\\s*'([^']+)'\\s*,\\s*([01])\\s*,");
 
+/** 授权语句里的 id 清单。**必须锚定词边界**（第二轮复核新增）： */
+/** 旧写法 `id IN \(([^)]*)\)` 会命中 `menu_id IN (...)`，把防孤儿 SQL 里的**子菜单 id** 也当成授权。 */
+private static final Pattern GRANT_IN = Pattern.compile("(?<![A-Za-z0-9_])id\\s+IN\\s*\\(([^)]*)\\)");
+
 // 收集授权必须**按语句归属**：先剥 -- 注释，再按 ; 切语句，
 // 只在该语句确实是 INSERT [IGNORE] INTO <本表> 时，才取本语句内的 `id IN (...)`。
-// 切勿再沿用 sql.split("INSERT INTO " + table) —— 它的 block 会跨语句串味（实测两表 granted 完全相同）。
+// 切勿再沿用 sql.split("INSERT INTO " + table) —— 它的 block 会跨语句串味（实测两表 granted 完全相同），
+// 也切勿沿用逐行 `VALUES (` / `^(` 扫描 —— 它会把注释掉的 INSERT 当真实菜单、漏掉同行第二个元组。
 ```
+
+> **第二轮复核补充的两条细节**（都已实测）：
+> 1. **`GRANT_IN` 必须锚定词边界**（`(?<![A-Za-z0-9_])id`）。修正版里新增的防孤儿语句写的是 `WHERE tm.menu_id IN (3001, …)`，未锚定时 `menu_id` 里的 `id` 会被命中、把**子菜单 id** 灌进 `granted`。当前被检集合只含 `32xx/33xx` 而泄漏的是 `30xx/40xx`，结论不受影响，但一旦哪个防孤儿清单里出现 `32xx/33xx` 就会重新假绿。
+> 2. **`MENU_INSERT` 全局 `finditer` 顺带修掉了原门禁的两个 latent 缺陷**：① 原 `MENU_ID` 要求行内有 `VALUES (`、`MENU_ID_CONT` 要求行首 `(` ⇒ 同一行多行 VALUES 的第二个 id 会**漏扫**；② 原扫描不剥注释 ⇒ **注释掉的 INSERT 会被当成真实菜单**（两者当前数据尚未触发，但属真实缺口）。
 
 期望（对每个 `32xx` / `33xx` 菜单 id）：
 
@@ -701,7 +720,26 @@ private static final Pattern MENU_INSERT = Pattern.compile(
 | 变异 3：把 `3320` 改成 `platform_only=0` 却不补模板授权 | `[]` | `['3320']` | 转红 | ✅ 转红 |
 
 > 三个变异覆盖了规则的三个分支（模板缺 / 角色缺 / 由 `platform_only` 决定的期望切换）⇒ 这条门禁**是"咬过人"的**，不是装饰。
-> 另必须保留原有的**自检** `assertThat(menuIds).isNotEmpty()`（`IotMaintenanceAdminGateTest.java:77-78`），否则正则一改错就退化成"0 违规 = 没跑到"（旧仓教训八）。
+> 另必须保留原有的**自检** `assertThat(menuIds).isNotEmpty()`（落地后是 `IotMaintenanceAdminGateTest.java:130-131`，实施前是 `:77-78`），否则正则一改错就退化成"0 违规 = 没跑到"（旧仓教训八）。
+
+**（3′）补充断言：K2「防孤儿补授」本身也要门禁（第二轮实施复核新增）**
+
+上面那条断言只证明「模块目录被授给了**某些人**」，**不证明授给了所有拥有其子菜单的角色/模板** ——
+实施复核实测：把 §7.1.1 第 3 步那 4 条 `INSERT IGNORE` 全部删掉，真实 JUnit **仍然全绿**（记为变异 M5）⇒ K2 没有门禁覆盖。
+故新增 `IotMaintenanceAdminGateTest#orphanGuardMustBeGrantedForEveryModule`：
+用 `ORPHAN_GUARD` 正则解析出每条「防孤儿」语句的 `(表, 父 id, 子清单, WHERE 尾部)`，
+断言 `{sys_role_menu, sys_template_menu} × {3310, 3320}` 四条**都存在、子清单与 §4.2 归属表一致、且 WHERE 尾部就是 `AND <别名>.<id 列> <> 1`**，并保留 `isNotEmpty()` 自检。
+
+> **为什么连 WHERE 尾部也要断言**（第三轮复核新增）：只校验「语句形态 + 表名 + 父 id + 子清单」时，
+> 把尾部改成 `AND 1=0` 之类的**空操作**仍会全绿（复核变异 M7 实证）——语句在、子清单对、补授却失效。
+
+| 场景 | 期望 | 实测 |
+|---|---|---|
+| 基线 | 全绿 | ✅ `Tests run: 3, Failures: 0` |
+| 变异 M5：删掉全部 4 条防孤儿补授 | 转红 | ✅ 转红（自检 `isNotEmpty` 触发） |
+| 变异 M6：只删 `sys_template_menu` 的 `3320` 那条 | 转红 | ✅ 转红：`["sys_template_menu:3320（期望 3004,3009 \| 尾部: AND tm.template_id <> 1，实际 null）"]` |
+| 变异 M7：4 条尾部各加 ` AND 1=0`（形态/表名/父 id/子清单全不变） | 转红 | ✅ 转红：4 条全部报出「实际 … AND 1=0」 |
+
 
 ##### （4）五种处理办法对比（**已按实测更正**）
 
@@ -904,7 +942,68 @@ SELECT id FROM sys_menu WHERE id BETWEEN 3300 AND 3399;
 
 > **复核判定：FAIL（有条件）** —— "方向与迁移主干站得住，但有两处实质缺陷能否决'可直接实施'"：门禁假绿 + `4001` 归属矛盾。
 
-**本文的整改状态：§8.2 的 3 项 + §8.3 的 9 项已全部修正并落到文档与原型；K3 的修正版门禁基线通过、3 个变异转红（附录 A.10 有完整命令与输出）。** 修正后**未再送第二轮独立复核**——按 R6，**本文只能声明"已按复核意见整改"，不能声明"整改已通过独立验收"**。若要把本方案变成实施依据，**必须再做一轮针对修正稿的独立复核**（重点：修好的门禁是否真的咬人、§7.1.2 的新口径、`4001` 归属一致性）。
+**本文的整改状态：§8.2 的 3 项 + §8.3 的 9 项已全部修正并落到文档与原型；K3 的修正版门禁基线通过、3 个变异转红（附录 A.10 有完整命令与输出）。**
+
+### 8.6 第二轮独立复核（**2026-09-26，针对本修正稿**）
+
+> 第一轮复核（§8.1–§8.5）后本文自认"未再送复核"（原记为 U10）。**实施前已按 R6 补做第二轮独立复核**：复核者为**独立子代理**（不同上下文、只读、自行跑命令、不继承作者结论），两仓 `git status` 全程为空，生产库只读，用**本地一次性 MySQL 8.4.11 容器**（与生产同版本同 `sql_mode`）做真 SQL 校验，并用**真实 JUnit** 跑了原门禁的变异（此前本文只做过逻辑复刻）。
+
+**总判定：PASS（有条件）—— 可按本方案进入实施。** 六个断言组（id 占用 / 迁移 SQL 语法语义 / K2 机制 / K3 假绿与修正版 / K1 缓存优先 / `-iot-` 命名）**全部 PASS**。
+
+**复核者独立复现的关键结论（与本文一致）：**
+
+| 复核项 | 复核者实测 |
+|---|---|
+| K3 假绿 | 用**真实 JUnit 字节码**跑四个输入（基线 / 删 `3310` 模板授权 / 删 `3310+3320` 角色授权 / `3320` 改 `platform_only=0`）**全部"门禁通过"** ⇒ 原门禁对本次改动**完全无感** |
+| 原门禁取数污染 | 两表 `granted` 均 33 条、**集合完全相同**；`320014` 从未出现在任何 `sys_template_menu` 语句里却被判为已授权 |
+| **新的独立假绿路径（本文未提）** | 删掉 `3200` 的**全部直接授权**后门禁仍全绿 —— 因为 `007:173` 的 `UPDATE sys_menu SET pid = 3204 WHERE id IN (3200,…)` 被 `GRANT_IN` 当成"授权" |
+| 修正版门禁 | 按描述**独立实现**后：基线 `[]/[]` 全绿；变异 1 `template=['3310']`、变异 2 `role=['3310','3320']`、变异 3 `template=['3320']` **全部转红** |
+| 只修作用域不改规则 | 在真实数据上误报 `['320014','320015']` ⇒ "修作用域 + 改规则"必须同批做（与本文一致） |
+| 迁移 SQL 真执行 | 与生产同版本 MySQL 加载 `001+002+003+004+006+007+§7.1.1` **零错误**；迁移后 `pid=0` 恰为 `1/3310/3204/5000/3320` 五行；10 个 reparent 与 §4.2 逐行一致 |
+| 防孤儿 SQL 端到端 | 复核者**合成**自定义角色/模板后实测：`role 2→(3001,3310)`、`role 3→(3004,3320)`、`template 2→(3001,3310)` **全部补上**，角色侧孤儿仍为原 5 行、模板侧 0 行 |
+| 回滚脚本 | 执行后 `pid=0` 回到 13 行、`3310/3320` 菜单行与授权行归零 ⇒ 回滚完整可用 |
+| `-iot-` 命名 | 错名 + 不追加 007 ⇒ **恒绿**（危险形态）；错名 + 追加 007 ⇒ **转红**（与本文"恒绿"的旧表述不同，已按 §7.1.3 更正） |
+| K1 | `preferences.ts:144-148` 缓存优先成立；`accessMode` 先例在 `:150-158`；`apps/web-antd/src/preferences.ts` 与 `.env*` 均无布局覆盖 |
+
+**按复核意见所做的修正（本轮已落地）：**
+
+| # | 修正 | 位置 |
+|---|---|---|
+| 1 | `-iot-` 命名的后果**拆成两种情况**写清（恒绿只发生在"不追加 007"时） | §7.1.3 |
+| 2 | 补 `3320` 的**模板侧防孤儿** `INSERT IGNORE`，使"模板侧孤儿恒为 0 行"成为结构性保证 | §7.1.1 第 3 步 |
+| 3 | `GRANT_IN` **锚定词边界** `(?<![A-Za-z0-9_])id\s+IN\s*\(`，避免 `menu_id IN (…)` 泄漏 | §7.1.4(3) |
+| 4 | 补记 `MENU_INSERT` 全局扫描顺带修掉的两个 latent 缺陷（同行多值漏扫、注释 INSERT 误扫） | §7.1.4(3) |
+| 5 | K2 边界表述统一为「**只对非超管用户成立**（无论其是否平台用户）」（§0.2 早前写法易被误读为"平台用户免疫"） | §0.2 |
+| 6 | 行号校正：`SysMenuServiceImpl.java:72` → **`:73`**；`SysMenuMapper.java:27-46` → **`:32-45`** | §2.5 |
+| 7 | 记下 `-Dsurefire.failIfNoSpecifiedTests=false` 才是正确属性名（`-DfailIfNoSpecifiedTests=false` 无效，会让 `-am` 上游模块 FAILURE） | §8.6（本表） |
+
+**复核者未能核实的事项**：修正版门禁的**真实 JUnit** 运行（复核时修正版尚未落盘，其用 python 按描述独立复刻）——本方案实施时在 `ypbin-iot` 仓**已落盘并做了真实 JUnit 变异验证**（见实施 PR 回执）；`mixed-nav` 在真实数据下的渲染溢出、原型页真实点击仍需浏览器，记为 U1/U4/U12。
+
+### 8.7 实施轮独立复核（**2026-09-26，针对 A/B 两个 PR 的最终状态**）
+
+方案获批实施后，A（前端 `mixed-nav` + K1 归一）与 B（迁移 SQL + 门禁修正）各开一个 PR，并**再派一名独立子代理**（不同上下文、自行跑命令、不继承实施者结论）做实施验收。两仓 `git status` 全程干净、变异后 `007-iot-data.sql` 的 sha256 始终等于 HEAD、生产库只读、未 commit/push。
+
+**总判定（第一轮）：B = PASS；A = FAIL（有条件）。**
+**修后复验（同一复核者）：A = PASS（A@`93b28f9`，原 12 个场景零回归、线上与 artifact 398/398 文件全等，并反混淆入口 chunk 确认「取值判断已在 `try` 内」）；B = PASS（B@`06a2111`，基线 3/3 绿、M1–M4 仍全红、M5 由绿转红）。**
+**追加加固（针对复核新发现的 M7）：`orphanGuardMustBeGrantedForEveryModule` 现同时断言 WHERE 尾部，M7 转红（见 §7.1.4(3′)）。**
+
+| 复核项 | 结论 | 关键证据（复核者自跑） |
+|---|---|---|
+| A 代码正确性 | **FAIL → 已修 → 复验 PASS** | 功能全对（老用户→`mixed-nav`、用户自行改回被尊重、只清 `app.layout`、主题/语言/业务键不动、JSON 损坏不抛异常），**但** `window.localStorage` 的**取值本身**在沙箱 iframe / cookie 全禁下抛 `SecurityError`，被留在 `try` 之外 ⇒ 异常直穿 `main.ts` 的 `initApplication()`，应用**白屏**（本 PR 引入的回归；vben 的 `StorageManager#createDefaultDriver` 正是 try/catch 兜住此情形）。**已按复核建议把取值判断移入 `try`；复核者复验 12+4 个场景全绿，并反混淆线上入口 chunk 确认修复形态已上线** |
+| A 产物与部署 | PASS | 线上 `index.html` 200 且与 CI artifact **398/398 文件 sha256 全等**；`/api/system/menu/all` HTTP 200（body `code:401`，符合全局 HTTP200 约定）；dist 含 `mixed-nav`/`layout-migration-version`/`基础管理`/`运维与监控` |
+| A i18n | PASS | 两份语言包均有 `page.admin.title`/`page.ops.title`；`page.dashboard.title`/`page.ai.title` **只改值不改键**；`node scripts/check-iot-i18n-keys.mjs` exit 0 |
+| B 双写/命名/等价 | PASS | `007-iot-data.sql` 末尾与迁移文件**逐字节 sha256 相同**；等价脚本 `OK`；"命名不含 `-iot-` 被静默排除"已用 `/tmp` 最小目录独立复现 |
+| B SQL 语义 | PASS | 真实 MySQL **8.4.11**（同生产版本 + 严格模式）执行生产备份副本零错误；`pid=0` 恰 5 行；8+2 reparent 与 §4.2 逐行一致；合成自定义角色/模板验证防孤儿真的补上父目录，删掉 4 条 `INSERT IGNORE` 后一条不补 |
+| B 门禁咬人 | PASS（残留缺口已补，复验 PASS） | 真实 JUnit：基线绿；M1/M2/M3/M4 全红（M4 证明**旧门禁漏报 `3200`**）；**第一轮发现 M5「删掉 4 条防孤儿补授」仍全绿** ⇒ K2 无门禁覆盖；补断言后复验：M5 绿→红、M6 转红、**复核者自加 M7（尾部加 `AND 1=0`）也由绿转红**（见 §7.1.4(3′)） |
+| B 本机测试 | PASS | iot 模块 `Tests run: 213, Failures: 0, Errors: 0`；架构测试 **41/0** |
+| B 活库 | PASS（证据强度受限） | 生产三表 == 备份 + 迁移脚本（逐行逐列，除时间戳）；超管 47→49 节点**零丢失**、顶层顺序 = 工作台/基础管理/物联网/知识与 AI/运维与监控；**非超管 3 个用户的授权本来就是 0 行 ⇒「没变少」这条证据是空的**（已如实标注） |
+| B 回滚 | PASS | 副本库执行回滚后三表与迁移前**逐行完全一致**（152/102/81 行） |
+| B 文档一致性 | PASS（1 处行号不精确，已修） | §7.1.3 两情形、§7.1.4 锚定与 `3320` 模板侧补授均与代码一致；行号已按落地代码更新为 `:119-160` / `:130-131` |
+
+**复核者额外发现、本文已处置：** ① A 的启动崩溃回归（已修 + 复验 PASS）；② K2 防孤儿无门禁覆盖（已补 `orphanGuardMustBeGrantedForEveryModule` + M5/M6 变异，复验 PASS）；③ M7「尾部改成空操作」无覆盖（已把 WHERE 尾部纳入断言）；④ `MENU_INSERT` 靠"位置形状"识别菜单、段过滤只认 `32xx/33xx`、`code.split(";")` 遇含分号字面量会切坏、授权只认 `id IN (...)` 写法 —— 复核者评定**均不构成本轮阻塞**（当前数据无触发，且失败形态是 fail-loud 而非静默假绿），记为后续加固项；⑤ `docs/DEPLOY-UI.md` 的 19001 端口漂移仍在（既有问题，`deploy/ui-up.sh:25`/`docker-compose.yml:354` 的默认值同为 19001，建议单独 PR 对齐；本轮不改，见 §8.4）。
+
+**复核者未核实：** `mixed-nav` 的真实浏览器渲染/顶栏溢出/点击（需浏览器，本机禁止全量构建）——仍需用户在浏览器确认。
+
 
 ## 9. 未核实与本次不做的（R1 / R8）
 
@@ -917,14 +1016,16 @@ SELECT id FROM sys_menu WHERE id BETWEEN 3300 AND 3399;
 | **U4** | `mixed-nav` 在**本部署真实数据**（13 项 / 4-5 项）下的渲染截图 | **未核实** | 需要前端构建 + 浏览器；P0-1 就是为了拿到这个证据 |
 | **U5** | xxl-job 控制台能否被 iframe/免登集成 | **未核实** | `deploy/sql/005-xxl-job.sql` 只证明它是独立库与独立控制台；**没有**任何集成代码 |
 | **U6** | 上游 `ypbin-admin` 是否已有 `33xx` 段的规划 | **未核实** | 只查了本仓与活库；上游未来占用是**推测的风险**，不是既成事实（§7.2 给了缓解） |
-| **U7** | 「知识与 AI」模块名是否与产品口径一致 | **已查清口径冲突，待产品拍板** | 实测 `page.ai.title` 的现值是 **zh「AI 助手」/ en「AI Assistant」**，而用户原话是"知识库 / AI / 账号"、本文 §4.1 写的是「知识与 AI」⇒ **三处口径不一致**。库内**没有**独立的"AI 账号"菜单；与账号/配额最接近的是 `5003 模型配置`（`platform_only=1`）与 `5050 用量统计`（`platform_only=1`）。本文按**现有菜单**命名，**不硬造"账号与配额"页面**；模块名沿用键、按 §4.4 铁律三二选一（改值 / 保留"AI 助手"） |
-| **U9** | `page.dashboard.title` 现值是 **「概览」**（en: Dashboard），与"工作台"不一致 | **已查清，需产品确认** | 要"工作台"这个名字就必须改值（§7.3 F-C2）；不改则顶栏显示"概览" |
-| **U10** | **修正稿是否已通过独立验收** | **未核实（明确声明）** | 本文按独立复核意见整改了 12 处（§8.2/§8.3），但**整改后未再送第二轮独立复核** ⇒ 只能说"已按复核意见整改"，**不能说"整改已通过独立验收"**。要把本方案当实施依据，**必须再做一轮针对修正稿的独立复核** |
-| **U11** | 修正版门禁**真实 JUnit 行为** | **未核实（用逻辑复刻代替）** | 本机低配且复核要求只读，未跑 Maven；附录 A.10 是"逐字复刻其取数与判定逻辑"的复刻结果，**不是真实 JUnit 运行结果**。实施时必须在 CI 或他机跑一次真实测试，并**重做那 3 个变异** |
+| **U7** | 「知识与 AI」模块名是否与产品口径一致 | **已按用户当次指令落地改值（实施轮）** | 实测 `page.ai.title` 的现值曾是 **zh「AI 助手」/ en「AI Assistant」**。**实施轮**按用户明确给出的模块划分（工作台 / 基础管理 / **知识与 AI** / 物联网 / 运维与监控）把值改为 **「知识与 AI」/「Knowledge & AI」**（只改值不改键，两份语言包同时改）⇒ 一键可回退。仍保留：库内**没有**独立的"AI 账号"菜单，未硬造"账号与配额"页面 |
+| **U9** | `page.dashboard.title` 现值是 **「概览」**（en: Dashboard），与"工作台"不一致 | **已按用户当次指令落地改值（实施轮）** | 实施轮把值改为 **「工作台」/「Workspace」**（只改值不改键），与 §4.1 的模块命名一致；一键可回退 |
+| **U10** | **修正稿是否已通过独立验收** | **已解决（2026-09-26 第二轮独立复核 PASS（有条件））** | 第二轮复核（独立子代理、只读、自行跑命令）六个断言组全部 PASS，并用**真实 JUnit** 复现了 K3 假绿、用**真实 MySQL 8.4** 执行了迁移 SQL 与回滚脚本。结论与整改见 §8.6 |
+| **U11** | 修正版门禁**真实 JUnit 行为** | **已解决（实施时落盘并做真实 JUnit 变异）** | 第二轮复核时修正版尚未落盘，其用独立复刻代替；**实施 PR 已把修正版落成代码并跑真实 JUnit + 3 个变异**（基线绿、3 变异红，输出见实施回执） |
 | **U12** | `platform-nav.html` 的**实际渲染与点击** | **未核实** | 本次只做了静态检查（零外链、JS 语法、路由/条目与 README 双向一致）。**没有在浏览器里真正渲染、点击、切模块**（本机不跑前端全量构建，也无浏览器验证步骤）⇒ 视觉、布局宽度、交互手感均未核实。建议打开文件肉眼过一遍 |
 | **U13** | 生产环境**是否存在真实租户用户 / 自定义角色** | **未核实** | 本次只按"角色/模板全表"跑了孤儿普查（无过滤，是全量），但**没有枚举生产上实际有多少租户、多少自定义角色** ⇒ "K2 会影响多少真实用户"的规模未量化。迁移前建议先查一次租户与角色清单 |
 
 **本次明确不做（R8，避免范围蔓延）：** 不改生产库（全程只读 `SELECT`）、不改业务代码（**连方案里的迁移 SQL 与门禁修正都没有落地成文件**，只写在 §7 与 §8.2）、不动 IoT 模块内部（引旧文）、不合并任何 PR、不做 xxl-job 集成、不做移动端另套设计、不改 `docs/ux-mock/index.html` 的既有内容。**两个 PR 全程只含文档与静态原型**（ypbin-iot: 2 文件；ypbin-iot-ui: 2 文件），两仓 CI 全绿。
+
+> **上面这段描述的是"方案轮"的范围。** 第二轮复核判定 PASS（有条件）后，用户已批准**开始实施**（A 布局切换 → B 模块拆分），实施轮会在本仓与 `ypbin-iot-ui` 分别开 PR，把 §7.1.1 的迁移 SQL、§7.1.4 的修正版门禁、§7.3 的前端改动真正落地并在生产执行迁移。实施轮的范围与验收见对应 PR 与回执，不改变本文任何结论。
 
 ---
 

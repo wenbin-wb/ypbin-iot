@@ -21,20 +21,37 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
- * 维护窗口管理面的**源码/SQL 级门禁**（补齐外委复核指出的两个盲区）。
+ * 维护窗口管理面的**源码/SQL 级门禁**（补齐外委复核指出的盲区）。
  *
- * <p>① 每个 IoT 菜单 id 必须在 {@code sys_role_menu} 与 {@code sys_template_menu} 里都被授权——
+ * <p>① 本文件新增的 IoT 菜单（{@code 32xx}）与平台模块目录（{@code 33xx}）必须在授权表里被授权，
  * 否则菜单建出来但没人看得见；SQL 等价门禁只保证两份脚本一致、权限码门禁只看 {@code auth_code}，
- * **都发现不了**（复核用变异实证：两份 SQL 同时删掉授权后仍全绿）。</p>
+ * **都发现不了**。期望按 {@code platform_only} 分流：一律要 {@code sys_role_menu}；
+ * **仅当**菜单自身 {@code platform_only=0} 时才要 {@code sys_template_menu}
+ * （它同时是租户管理员配角色时的白名单，见 {@code SysRoleServiceImpl#validateMenus}）。</p>
+ *
+ * <p>①′ 光有①还不够：①只证明父目录被授给了**某些人**，不证明授给了**所有拥有其子菜单的角色/模板**。
+ * 没被补授父目录的角色，其子菜单会被 {@code buildRouteTree} 整棵丢弃（K2），于是再有
+ * {@link #orphanGuardMustBeGrantedForEveryModule()} 断言四条「防孤儿」补授语句存在且子清单正确。</p>
+ *
+ * <p><b>为什么取数必须按语句归属</b>：早前的实现用 {@code sql.split("INSERT INTO " + table)}，
+ * 切出的 block 会跨语句串味（一直延伸到下一次出现同一张表为止），把其它表的 INSERT、乃至
+ * {@code UPDATE ... WHERE id IN (...)} 都算成"已授权" ⇒ 两张表收集到的集合完全相同、
+ * 模板侧检查形同虚设。外委复核用**真实 JUnit** 实证：删掉某条模板授权、甚至删掉整条菜单授权，
+ * 门禁都**不转红**（独立发现的第二条假绿路径是 {@code 007} 末尾的
+ * {@code UPDATE sys_menu SET pid = 3204 WHERE id IN (3200, ...)} 被当成了授权）。</p>
  *
  * <p>② 管理端点的权限码必须**挂在方法上且逐一对号**：starter 3.5.0 起微服务下游的
  * {@code @SaCheckPermission} 真正生效（此前与登录拦截共用开关而静默失效，见 ROADMAP 四点十六），
@@ -48,56 +65,172 @@ class IotMaintenanceAdminGateTest {
 
     private static final Path REPO_ROOT = Path.of("..", "..").toAbsolutePath().normalize();
 
-    /** 菜单 INSERT 的 id（`VALUES (3203, ...)` 或续行 `(320301, 3203, ...)`）。 */
-    private static final Pattern MENU_ID = Pattern.compile("VALUES\\s*\\(\\s*(\\d+)\\s*,");
+    /**
+     * 菜单 INSERT 的值元组 {@code (id, pid, name, type, platform_only)}。
+     *
+     * <p>全局扫描（而不是逐行 {@code VALUES (} / 行首 {@code (}）顺带修掉两个缺口：
+     * 同一行多个 VALUES 元组的第二个不会再漏扫；剥注释后注释掉的 INSERT 不会再被当成真实菜单。</p>
+     */
+    private static final Pattern MENU_INSERT =
+        Pattern.compile("\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*'([^']+)'\\s*,\\s*'([^']+)'\\s*,\\s*([01])\\s*,");
 
-    private static final Pattern MENU_ID_CONT = Pattern.compile("^\\(\\s*(\\d+)\\s*,");
+    /**
+     * 授权语句里的菜单 id 清单。
+     *
+     * <p><b>必须锚定词边界</b>：旧写法 {@code id IN \(([^)]*)\)} 会命中 {@code menu_id IN (...)}，
+     * 把「防孤儿」SQL 里的**子菜单 id** 也算成父目录的授权。</p>
+     */
+    private static final Pattern GRANT_IN = Pattern.compile("(?<![A-Za-z0-9_])id\\s+IN\\s*\\(([^)]*)\\)");
 
-    private static final Pattern GRANT_IN = Pattern.compile("id IN \\(([^)]*)\\)");
+    /**
+     * 「防孤儿（K2）」补授语句：
+     * {@code INSERT IGNORE INTO <表> (<列>) SELECT DISTINCT x.y, <父 id> FROM <表> x WHERE x.menu_id IN (<子清单>) AND x.<id 列> <> 1;}
+     *
+     * <p>第 5 组捕获语句**尾部**（到 {@code ;} 为止）。尾部必须一并断言：只校验「语句形态 + 表名 + 父 id + 子清单」
+     * 时，把尾部改成 {@code AND 1=0} 之类的空操作仍会全绿（复核变异 M7 实证）。</p>
+     */
+    private static final Pattern ORPHAN_GUARD = Pattern.compile(
+        "INSERT\\s+IGNORE\\s+INTO\\s+(\\w+)\\s*\\([^)]*\\)\\s*"
+            + "SELECT\\s+DISTINCT\\s+\\w+\\.(\\w+)\\s*,\\s*(\\d+)\\s+FROM\\s+\\w+\\s+\\w+\\s*"
+            + "WHERE\\s+\\w+\\.menu_id\\s+IN\\s*\\(([^)]*)\\)([^;]*);",
+        Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+
+    /**
+     * 平台模块目录 → 其子菜单清单（与 {@code docs/PLATFORM-IA-PROPOSAL.md} §4.2 的归属表一致）。
+     *
+     * <p>防孤儿补授必须**逐一覆盖**这两组 × 两张授权表；否则拥有子菜单却没被补授父目录的角色/模板，
+     * 其菜单会被 {@code buildRouteTree} 整棵丢弃（K2），而「每个菜单都被授权」那条断言**发现不了**
+     * ——它只证明父目录被授给了**某些人**，不证明授给了**所有拥有子菜单的人**。</p>
+     */
+    private static final Map<String, String> MODULE_CHILDREN = Map.of(
+        "3310", "3001,3002,3003,3005,3007,2600,3008,4001",
+        "3320", "3004,3009");
+
+    /** 防孤儿语句尾部必须是「排除模板/角色 1」，否则补授会漏掉或变成空操作。 */
+    private static final Map<String, String> ORPHAN_GUARD_TAIL = Map.of(
+        "sys_role_menu", "AND rm.role_id <> 1",
+        "sys_template_menu", "AND tm.template_id <> 1");
 
     private static String sql() throws IOException {
         return Files.readString(REPO_ROOT.resolve("deploy/sql/007-iot-data.sql"), StandardCharsets.UTF_8);
     }
 
     @Test
-    @DisplayName("★ 每个 IoT 菜单 id 都必须在 sys_role_menu 与 sys_template_menu 里被授权（复核变异实证的盲区）")
+    @DisplayName("★ IoT/平台模块菜单必须在授权表里被授权（platform_only 决定是否必须进租户模板）")
     void everyMenuIdMustBeGranted() throws IOException {
-        String sql = sql();
-        Set<String> menuIds = new LinkedHashSet<>();
-        for (String line : sql.split("\\R")) {
-            Matcher inline = MENU_ID.matcher(line);
-            while (inline.find()) {
-                menuIds.add(inline.group(1));
-            }
-            Matcher cont = MENU_ID_CONT.matcher(line.trim());
-            if (cont.find()) {
-                menuIds.add(cont.group(1));
-            }
+        // 门禁文本匹配必须作用在**剥离注释后**的脚本上（教训二十三）：否则注释掉的 INSERT 会被当成真实菜单
+        String code = sql().replaceAll("--[^\\n]*", "");
+
+        // 菜单自身属性：id → platform_only。门禁不能只看 id，还要按 platform_only 决定期望。
+        Map<String, String> menuPlatformOnly = new LinkedHashMap<>();
+        Matcher menuMatcher = MENU_INSERT.matcher(code);
+        while (menuMatcher.find()) {
+            menuPlatformOnly.put(menuMatcher.group(1), menuMatcher.group(5));
         }
-        assertThat(menuIds).as("没扫到任何菜单 id ⇒ 本门禁空跑（教训八：0 违规可能是没跑到）")
+        assertThat(menuPlatformOnly).as("没扫到任何菜单 id ⇒ 本门禁空跑（教训八：0 违规可能是没跑到）")
             .isNotEmpty();
 
-        for (String table : List.of("sys_role_menu", "sys_template_menu")) {
-            Set<String> granted = new LinkedHashSet<>();
-            String[] blocks = sql.split("INSERT INTO " + table);
-            for (int i = 1; i < blocks.length; i++) {
-                Matcher matcher = GRANT_IN.matcher(blocks[i]);
-                while (matcher.find()) {
-                    for (String item : matcher.group(1).split(",")) {
-                        granted.add(item.trim());
+        Set<String> roleGranted = grantedMenuIds(code, "sys_role_menu");
+        Set<String> templateGranted = grantedMenuIds(code, "sys_template_menu");
+
+        List<String> missingRole = new ArrayList<>();
+        List<String> missingTemplate = new ArrayList<>();
+        for (Map.Entry<String, String> menu : menuPlatformOnly.entrySet()) {
+            String id = menu.getKey();
+            // 本文件只负责本仓新增的 IoT 菜单（32xx）与平台模块目录（33xx）段；平台既有菜单由 002-data.sql 负责
+            if (!id.startsWith("32") && !id.startsWith("33")) {
+                continue;
+            }
+            if (!roleGranted.contains(id)) {
+                missingRole.add(id);
+            }
+            // platform_only=0 ⇒ 必须同时进 sys_template_menu：
+            // ① 它是租户管理员配角色时的白名单（SysRoleServiceImpl#validateMenus 用 containsAll 卡口）；
+            // ② 父目录没进模板，非平台租户用户的菜单会整棵丢失。
+            // platform_only=1 的平台专用菜单按既有约定不进模板（先例：007-iot-data.sql 的 M2 台账菜单）。
+            if ("0".equals(menu.getValue()) && !templateGranted.contains(id)) {
+                missingTemplate.add(id);
+            }
+        }
+        assertThat(missingRole).as("sys_role_menu 缺少对以下菜单的授权（菜单会建出来但没人看得见）")
+            .isEmpty();
+        assertThat(missingTemplate)
+            .as("sys_template_menu 缺少对以下 platform_only=0 菜单的授权（租户侧角色保存会被 validateMenus 拦下）")
+            .isEmpty();
+    }
+
+    @Test
+    @DisplayName("★ K2 防孤儿补授必须存在：模块目录要补授给「已拥有其任一子菜单」的角色与模板")
+    void orphanGuardMustBeGrantedForEveryModule() throws IOException {
+        String code = sql().replaceAll("--[^\\n]*", "");
+        Map<String, String> found = new LinkedHashMap<>();
+        Matcher matcher = ORPHAN_GUARD.matcher(code);
+        while (matcher.find()) {
+            String table = matcher.group(1);
+            String children = normalizeIdList(matcher.group(4));
+            String tail = matcher.group(5) == null ? "" : matcher.group(5).trim().replaceAll("\\s+", " ");
+            found.put(table + ":" + matcher.group(3), children + " | 尾部: " + tail);
+        }
+        // 自检：一条都没扫到就说明正则与脚本形态脱节，本门禁退化成"0 违规 = 没跑到"（教训八）
+        assertThat(found).as("没扫到任何防孤儿补授语句 ⇒ 本门禁空跑").isNotEmpty();
+
+        List<String> missing = new ArrayList<>();
+        for (Map.Entry<String, String> module : MODULE_CHILDREN.entrySet()) {
+            for (String table : List.of("sys_role_menu", "sys_template_menu")) {
+                String key = table + ":" + module.getKey();
+                String expected = module.getValue() + " | 尾部: " + ORPHAN_GUARD_TAIL.get(table);
+                String actual = found.get(key);
+                if (!expected.equals(actual)) {
+                    missing.add(key + "（期望 " + expected + "，实际 " + actual + "）");
+                }
+            }
+        }
+        assertThat(missing).as("模块目录缺少防孤儿补授（或尾部条件被改坏）⇒ 拥有其子菜单的角色/模板会整棵丢菜单（K2）")
+            .isEmpty();
+    }
+
+    /**
+     * 归一化 id 清单：去空白、去空项、保持原顺序。
+     *
+     * @param ids 逗号分隔的 id 清单
+     * @return 归一化后的清单
+     */
+    private static String normalizeIdList(String ids) {
+        return Arrays.stream(ids.split(",")).map(String::trim).filter(item -> !item.isEmpty())
+            .collect(Collectors.joining(","));
+    }
+
+    /**
+     * 按**语句归属**收集某张授权表里的菜单 id。
+     *
+     * <p>先剥 {@code --} 行注释（调用方已剥），再按 {@code ;} 切语句，只在**该语句确实是**
+     * {@code INSERT [IGNORE] INTO <本表>} 时，才取本语句内的 {@code id IN (...)} ⇒ 不跨语句、
+     * 不会被其它表的 INSERT 或 {@code UPDATE ... id IN (...)} 污染。</p>
+     *
+     * @param code  已剥离行注释的安装脚本全文
+     * @param table 授权表名（{@code sys_role_menu} / {@code sys_template_menu}）
+     * @return 该表被显式授权的菜单 id 集合（查无授权返回空集合）
+     */
+    private static Set<String> grantedMenuIds(String code, String table) {
+        Pattern insert = Pattern.compile("^INSERT\\s+(?:IGNORE\\s+)?INTO\\s+" + Pattern.quote(table) + "\\b",
+            Pattern.CASE_INSENSITIVE);
+        Set<String> granted = new LinkedHashSet<>();
+        for (String statement : code.split(";")) {
+            String trimmed = statement.trim();
+            if (trimmed.isEmpty() || !insert.matcher(trimmed).find()) {
+                continue;
+            }
+            Matcher matcher = GRANT_IN.matcher(trimmed);
+            while (matcher.find()) {
+                for (String item : matcher.group(1).split(",")) {
+                    String id = item.trim();
+                    if (!id.isEmpty()) {
+                        granted.add(id);
                     }
                 }
             }
-            List<String> missing = new ArrayList<>();
-            for (String id : menuIds) {
-                // 只有本文件新增的 IoT 菜单（32xx）需要在这里被授权；平台既有菜单由 002-data.sql 负责
-                if (id.startsWith("32") && !granted.contains(id)) {
-                    missing.add(id);
-                }
-            }
-            assertThat(missing).as("%s 缺少对以下 IoT 菜单的授权（菜单会建出来但没人看得见）", table)
-                .isEmpty();
         }
+        return granted;
     }
 
     @Test
