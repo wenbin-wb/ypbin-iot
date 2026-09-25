@@ -421,6 +421,45 @@ CREATE TABLE outage_event
     KEY idx_outage_event_open (tenant_id, device_id, end_ts)
 ) COMMENT '断档事件（可用率的唯一数据来源）';
 
+-- =============================================================
+-- G6 运行期事件实例（2026-09-28 追加）
+-- 覆盖：iot_event_log —— 物模型 iot_event 是事件的**定义**（挂 service_id），本表是运行期**实例**
+--       （设备上报的一次事件），两者语义不同、不可互相替代（缺口 G6）。
+-- 租户表：含 tenant_id 且**不**进 deploy/nacos/ypbin-iot.yaml 的 ignore-tables
+--        （与 iot_device 一致，由租户插件统一追加 tenant_id 条件）。
+-- 门禁口径（如实）：兜住「漏登记」的是 NacosTenantIgnoreConfigTest 的**泛化反向门禁**
+--        （继承 TenantBaseEntity 的表一律不得进 ignore-tables）与「新增租户表须补进
+--        IotTenantIsolationGateTest 的表清单」这条人工约定；后者是清单式门禁，不补就不覆盖。
+-- 幂等：uk_iot_event_log_idem(tenant_id, device_id, idempotent_key) —— 内部上报端点重投
+--       不产生重复行；应用层「先查后插」有竞态窗口，并发重投只有这条唯一键兜得住。
+-- 等价性：本文件追加部分与 migration/2026-09-19-iot-m2-event-log-schema.sql 语句等价。
+-- ⚠️ 迁移文件名日期用 09-19（schema 批次）且取 `m2-event-log-schema`：等价性脚本按文件名
+--    排序拼接，本段 DDL 必须排在 m2-availability-schema 之后、m2-maintenance-schema 之前。
+-- =============================================================
+
+CREATE TABLE iot_event_log
+(
+    id             BIGINT       NOT NULL COMMENT '主键',
+    tenant_id      BIGINT       NOT NULL COMMENT '租户 ID',
+    device_id      BIGINT       NOT NULL COMMENT '设备 ID（iot_device.id）',
+    event_code     VARCHAR(64)  NOT NULL COMMENT '事件标识（对应物模型 iot_event.identifier；无对应定义时是上报方自定码）',
+    event_name     VARCHAR(128) NULL COMMENT '事件名称（上报方可选给出，便于无物模型定义时展示）',
+    level          VARCHAR(16)  NOT NULL DEFAULT 'info' COMMENT '事件级别码（枚举 code，非 ordinal）：info|warn|error',
+    params         TEXT         NULL COMMENT '事件参数（JSON 文本，由上报方给出，服务端不解析）',
+    event_ts       DATETIME     NOT NULL COMMENT '事件发生时刻（上报方给，不是入库时刻；乱序上报按它排序展示）',
+    idempotent_key VARCHAR(128) NOT NULL COMMENT '幂等键（同租户同设备内唯一；重投用它去重）',
+    create_user    BIGINT       NULL COMMENT '创建人',
+    create_time    DATETIME     NULL COMMENT '创建时间',
+    update_user    BIGINT       NULL COMMENT '更新人',
+    update_time    DATETIME     NULL COMMENT '更新时间',
+    status         TINYINT      NOT NULL DEFAULT 1 COMMENT '状态：1 启用 0 停用',
+    is_deleted     TINYINT      NOT NULL DEFAULT 0 COMMENT '逻辑删除',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_iot_event_log_idem (tenant_id, device_id, idempotent_key),
+    KEY idx_iot_event_log_device_ts (tenant_id, device_id, event_ts),
+    KEY idx_iot_event_log_level_ts (tenant_id, device_id, level, event_ts)
+) COMMENT 'IoT 运行期事件实例（G6）';
+
 CREATE TABLE maintenance_window
 (
     id          BIGINT      NOT NULL COMMENT '主键',

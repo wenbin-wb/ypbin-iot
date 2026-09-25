@@ -55,7 +55,9 @@ class IotTenantIsolationGateTest {
     private static final List<String> M1_TENANT_TABLES = List.of(
         "iot_product", "iot_product_version", "iot_service", "iot_property", "iot_command",
         "iot_event", "iot_point_mapping", "iot_device_group", "iot_device_group_member",
-        "iot_device_tag", "iot_shadow");
+        "iot_device_tag", "iot_shadow",
+        // G6（2026-09-28 追加）：新增租户表必须补进本清单，否则这个清单式门禁不覆盖它
+        "iot_event_log");
 
     /** 平台表（不继承租户基类，必须被忽略——作为「ignoreTable 能返回 true」的自检锚点）。 */
     /**

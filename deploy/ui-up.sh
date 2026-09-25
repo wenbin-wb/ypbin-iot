@@ -22,6 +22,9 @@ fi
 
 UI_REPO="${UI_REPO:-../ypbin-iot-ui}"
 DIST_DIR="${IOT_UI_DIST_DIR:-../iot-ui-dist}"
+# 端口默认 19001：与同一 compose 项目里 admin-ui 的默认 19000 并存（install.sh 全量 up -d 时
+# 两者不能同端口）；生产用 .env 的 IOT_UI_PORT 覆盖（本生产实例为 19000）。
+# 口径三处一致：本行 / deploy/docker-compose.yml / docs/DEPLOY-UI.md，改一处必须改三处。
 UI_PORT="${IOT_UI_PORT:-19001}"
 APP_FILTER="${UI_APP_FILTER:-@vben/web-antd}"
 

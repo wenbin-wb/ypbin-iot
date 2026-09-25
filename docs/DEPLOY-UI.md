@@ -29,13 +29,31 @@ cd ypbin-iot/deploy
 拷到 `IOT_UI_DIST_DIR`（默认 `../iot-ui-dist`）、`docker compose up -d --no-deps ypbin-iot-ui`。
 
 - 产物已就绪（例如 CI 产出）时：`SKIP_BUILD=1 ./ui-up.sh`
-- 改端口/产物目录：`deploy/.env` 里 `IOT_UI_PORT=19001`、`IOT_UI_DIST_DIR=../iot-ui-dist`
-  （脚本会 `source .env`，与 `docker compose` 读到的是同一份值；与 `ypbin-admin-ui` 的 19000 并存）
+- 改端口/产物目录：`deploy/.env` 里 `IOT_UI_PORT=<端口>`、`IOT_UI_DIST_DIR=<相对 deploy 的产物目录>`
+  （脚本会 `source .env`，与 `docker compose` 读到的是同一份值）
+
+### 端口口径（三处必须一致，别再各写一套）
+
+| 位置 | 口径 |
+|---|---|
+| `deploy/ui-up.sh`（`IOT_UI_PORT` 默认值） | **19001** |
+| `deploy/docker-compose.yml`（`${IOT_UI_PORT:-…}` 默认值） | **19001** |
+| `deploy/.env`（生产/安装时写入的值） | 本生产实例为 **19000**（见下） |
+
+- **默认 19001 而不是 19000** 是刻意的：`deploy/docker-compose.yml` 同一个 compose 项目里
+  `ypbin-admin-ui` 的默认端口就是 19000（`${ADMIN_UI_PORT:-19000}`），而 `install.sh` 会执行
+  **全量** `up -d` —— 两个前端默认同端口会让其中一个以「端口被占用」启动失败。
+  所以代码默认值取 19001，与管理台前端**并存**。
+- **生产用 `.env` 覆盖为 19000**：本生产实例未部署 `ypbin-admin-ui`，IoT 前端即主入口，
+  故 `deploy/.env` 里 `IOT_UI_PORT=19000`（`docker ps` 实测 `ypbin-iot-ui` 映射 `0.0.0.0:19000->80/tcp`）。
+- ⚠️ **同一台机器将来要同时跑 `ypbin-admin-ui` 与 `ypbin-iot-ui` 时**，必须显式给其中一个改端口
+  （本生产 `.env` 里 `ADMIN_UI_PORT` 与 `IOT_UI_PORT` 目前**都是 19000**，全量 `up -d` 会撞端口；
+  由于本机没有 admin-ui 容器，现状不影响访问）。改 `IOT_UI_PORT` 后按上面「改端口」一项覆盖即可。
 
 ## 2. 打开
 
 ```
-http://<服务器IP>:19001
+http://<服务器IP>:<IOT_UI_PORT>        # 本生产实例 = http://<服务器IP>:19000
 ```
 
 用**平台管理员**登录（与管理台同一账号体系）。左侧应出现上述四个 IoT 菜单。

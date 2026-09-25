@@ -305,6 +305,10 @@ class LeaseDbClockIT {
     private static void purge() {
         execute("DELETE FROM tenant_node_assignment WHERE tenant_id = " + TENANT);
         execute("DELETE FROM tenant_ledger WHERE tenant_id = " + TENANT);
+        // 必须一并清窗口：交接窗口的断言用 selectOne(source=LEASE_HANDOVER) 取那条窗口，上一轮残留的
+        // 旧窗会被 findTenantsWithOverlappingWindow 判成重叠 ⇒ **不再开新窗** ⇒ 断言读到旧窗的 end_ts。
+        // 外委复核在同一长生命周期库上复跑第二遍必红（2026-09-25），故清理必须含这张表。
+        execute("DELETE FROM maintenance_window WHERE tenant_id = " + TENANT);
         execute("DELETE FROM access_node WHERE access_node = '" + NODE + "'");
     }
 
