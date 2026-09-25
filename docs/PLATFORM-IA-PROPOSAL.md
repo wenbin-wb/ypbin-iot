@@ -163,6 +163,10 @@ app: {
 
 ### 2.5 顶级菜单是不是按 `sys_menu.pid=0` 自动渲染？→ **是，前端不需要额外配置**
 
+> **⚠️ 先纠正一个前提（R4）**：顶级导航**不是**"按 `type=catalog` 的顶级节点"渲染的，而是**按 `pid=0`**。后端唯一的类型过滤是**剔除 `type=button`**（`SysMenuServiceImpl.java:72`），其余类型（`catalog` / `menu` / `embedded` / `link`）只要 `pid=0` **都会成为顶栏的一项**。
+> **活库实证**：现有 13 个顶级菜单里，`2600 SystemFile` 的 `type` 是 **`menu`**、`4001 ApiDoc` 的 `type` 是 **`embedded`** —— 它们**不是** `catalog`，但同样出现在顶栏。
+> ⇒ 对本方案有直接影响：**新增的模块目录必须是 `type=catalog` + `component=BasicLayout`**（否则它自己会变成一个可点开的空页面），但"会不会出现在顶栏"只由 `pid` 决定。
+
 **后端：**
 
 | 证据 | 文件:行号 | 内容 |
