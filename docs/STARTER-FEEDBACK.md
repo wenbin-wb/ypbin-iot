@@ -5,8 +5,10 @@
 >
 > 维护约定：每条包含 **现象 / 证据 / 影响 / 期望能力 / 验收标准 / 会被替换掉的临时实现**；
 > 关闭本条时，请同时在 ypbin-iot 的 ROADMAP 对应条目上注明「starter 已支持（版本/PR）」。
-> 最后更新：2026-09-24 —— **三项均已关闭**：starter **3.5.0**（2026-09-24 发布；PR #51 / 合并 `f3ab2f9`，
+> 最后更新：2026-09-25 —— **SF-1~SF-3 已关闭**：starter **3.5.0**（2026-09-24 发布；PR #51 / 合并 `f3ab2f9`，
 > 四轮外委复核后 PASS）；本仓已同步升级 starter 版本至 3.5.0 并删除 SF-1 的临时防线 `IotPermissionGuard`。
+> **SF-4 为新增未关闭项（2026-09-25，高｜可用性）：3.5.0 引入的 `IdentityStpLogic` 让 identity 模式下的 auth 登录结构性失败。**
+> starter 侧修复的**目标版本是 3.5.1**（starter 工作树当前 `revision` = `3.5.1-SNAPSHOT`；本仓当前用 3.5.0）。
 
 ---
 
@@ -107,6 +109,244 @@ PROBE_IDEMPOTENT_CLOSE_KEYS >>> [...#close:73, ...#close:73]                # Lo
 `IdentityContext` 与 `LoginUser` 的包归属在 javadoc 里互指，减少误用。
 
 **验收标准**：javadoc 明确；不引入破坏性变更（别名即可）。
+
+---
+
+## SF-4（高｜可用性）identity 模式下 auth 登录结构性失败：token 生成 12 次重试后抛异常
+
+> **状态：⬜ 未关闭（2026-09-25 提出；starter 侧修复目标版本 3.5.1）** —— starter 仓 issue：
+> **https://github.com/wenbin-wb/ypbin-starter/issues/52**（标题与本节同）。
+> 前置条目：issue #50 / PR #51（SF-1~SF-3，随 starter 3.5.0 交付；**本缺陷正是 3.5.0 引入的**）。
+
+**现象**：`ypbin.security.identity.enabled=true` 的服务**登录功能结构性不可用**。
+以 `ypbin-auth` 为例，`POST /api/auth/login` **恒返回** `{"code":403,"message":"当前鉴权模式下该操作不可用"}`；
+`ypbin-auth` 日志里的真实异常是
+`SaTokenException: token 生成失败，已尝试12次，生成算法过于简单或资源池已耗尽`。
+**任何账号、任何密码、任何时刻都登录不上**——是结构性失败，不是"密码错/用户不存在"这类业务失败。
+
+**根因链（逐环给出可复现的一手证据）**
+
+**环 1｜sa-token-core 1.46.0 的"该 token 可用"判据是"严格 `== null`"**
+
+`StpLogic.distUsableToken(Object, SaLoginParameter)`（建 token 的实际入口）把
+`getLoginIdNotHandle(token) == null` 作为**唯一性判据**传给生成策略。字节码实证：
+
+```bash
+cd /tmp && mkdir -p satoken && cd satoken \
+  && jar xf ~/m2repo/cn/dev33/sa-token-core/1.46.0/sa-token-core-1.46.0.jar \
+       cn/dev33/satoken/stp/StpLogic.class cn/dev33/satoken/strategy/SaStrategy.class \
+  && javap -p -c -constants cn/dev33/satoken/stp/StpLogic.class | grep -A8 'lambda\$distUsableToken\$2'
+```
+```
+private java.lang.Boolean lambda$distUsableToken$2(java.lang.String);
+   2: invokevirtual #829  // Method getLoginIdNotHandle:(Ljava/lang/String;)Ljava/lang/String;
+   5: ifnonnull     12
+   8: iconst_1            // true = 可用  ⇒ 只有"返回 null"才算这个候选 token 可用
+```
+
+> **与任务单原文的差异（更精确，不改变结论）**：任务单把该判据记在 `SaStrategy.generateUniqueToken` 名下。
+> 字节码显示**判据函数定义在 `StpLogic` 的 lambda 里**（上），再作为第 4 个参数传进 SaStrategy 的默认策略（下）。
+
+**环 2｜重试 12 次后抛异常，发生在 `SaStrategy` 的默认策略里**
+
+```bash
+javap -p -c -constants cn/dev33/satoken/strategy/SaStrategy.class | grep -A45 'lambda\$new\$3'
+# 43: putfield  generateUniqueToken  ← SaStrategy.<init> 用 lambda$new$3 作为默认策略
+```
+```
+ 48: new  cn/dev33/satoken/exception/SaTokenException
+ 63: ldc  " 生成失败，已尝试"
+ 73: ldc  "次，生成算法过于简单或资源池已耗尽"
+ 84: athrow
+```
+循环上界来自 `maxTryTimes`：`SaTokenConfig.<init>` 里 `bipush 12 → putfield maxTryTimes`
+（`javap -p -c -constants cn/dev33/satoken/config/SaTokenConfig.class`）⇒ **默认 12 次**，与生产日志"已尝试12次"吻合。
+
+**环 3｜starter 3.5.0 的 `IdentityStpLogic#getLoginIdNotHandle` 在"无当前身份"时返回空串，而不是 `null`**
+
+源码（`ypbin-starter-security/src/main/java/cn/ypbin/starter/security/identity/IdentityStpLogic.java`）：
+- `:63` `private static final String NO_IDENTITY_TOKEN = "";`
+- `:90-96` `getLoginIdNotHandle`：`return token.equals(tokenValue) ? token : NO_IDENTITY_TOKEN;`（`token` 即 `currentToken()`）
+- `:109-111` `currentToken()`：`return IdentityContext.getUserId().map(String::valueOf).orElse(NO_IDENTITY_TOKEN);`
+- `:53` 类级 `@since 2026-09-24`；`:60-61` 的 Javadoc 明确写着"用空串而不是 `null` 表达无身份"——**这正是缺陷的来源**。
+
+**制品级复核（不只看工作树）**：3.5.0 的 jar 里就是这份实现：
+```bash
+mkdir -p /tmp/sf4jar && cd /tmp/sf4jar \
+  && jar xf ~/m2repo/cn/ypbin/ypbin-starter-security/3.5.0/ypbin-starter-security-3.5.0.jar \
+       cn/ypbin/starter/security/identity/IdentityStpLogic.class \
+  && javap -p -c -constants cn/ypbin/starter/security/identity/IdentityStpLogic.class
+```
+```
+  private static final java.lang.String NO_IDENTITY_TOKEN = "";
+  public java.lang.String getLoginIdNotHandle(java.lang.String);
+       6: invokevirtual #17  // Method java/lang/String.equals:(Ljava/lang/Object;)Z
+       9: ifeq          16
+      16: ldc           #23  // String        ← 不相等分支返回「空串」
+  private static java.lang.String currentToken();
+      11: ldc           #23  // String        ← orElse 也是「空串」
+```
+
+**环 4｜⇒ 判据恒不成立（结构性）**
+
+- **无身份时**（auth 登录时的真实处境）：`currentToken()` 恒为 `""`，于是 `getLoginIdNotHandle(候选token)`
+  要么返回 `""`（不相等分支）、要么返回候选值本身（相等分支）——**任何输入都不可能得到 `null`**；
+- **有身份时**同理：返回 `""` 或身份值，同样**绝不为 `null`**。
+
+⇒ 12 次重试必然全部失败 ⇒ **建 token 永远抛异常**（登录/短信登录/社交登录所有入口一起失效）。
+
+**环 5｜本地实证复现（真实 3.5.0 制品 + 真实 sa-token-core 1.46.0，不是推断）**
+
+在 `/tmp/sf4repro/Sf4Repro.java` 里**复刻** `lambda$distUsableToken$2` 的判据（`getLoginIdNotHandle(t) == null`），
+并调用**真实的** `SaStrategy.instance.generateUniqueToken.execute(...)`：
+
+```java
+import cn.dev33.satoken.strategy.SaStrategy;
+import cn.ypbin.starter.security.core.LoginUser;
+import cn.ypbin.starter.security.identity.IdentityContext;
+import cn.ypbin.starter.security.identity.IdentityStpLogic;
+import java.util.concurrent.atomic.AtomicInteger;
+
+/**
+ * SF-4 本地实证：用真实 ypbin-starter-security 3.5.0 制品 + sa-token-core 1.46.0
+ * 复刻 StpLogic.lambda$distUsableToken$2 的判据，走真实 SaStrategy.generateUniqueToken 策略。
+ */
+public class Sf4Repro {
+
+    public static void main(String[] args) {
+        IdentityStpLogic logic = new IdentityStpLogic();
+
+        // ---- CASE-1：当前无身份（auth 服务登录时的真实处境） ----
+        IdentityContext.clear();
+        String noIdentity = logic.getLoginIdNotHandle("cand-1");
+        System.out.println("[CASE-1] no identity -> getLoginIdNotHandle(\"cand-1\") = " + repr(noIdentity));
+        System.out.println("[CASE-1] predicate (getLoginIdNotHandle(token) == null) = "
+            + (noIdentity == null));
+
+        AtomicInteger calls = new AtomicInteger();
+        try {
+            String token = SaStrategy.instance.generateUniqueToken.execute(
+                "token", 12,
+                () -> "cand-" + calls.incrementAndGet(),
+                t -> logic.getLoginIdNotHandle(t) == null);
+            System.out.println("[CASE-1] UNEXPECTED: token generated = " + token);
+        } catch (Exception ex) {
+            System.out.println("[CASE-1] " + ex.getClass().getName() + ": " + ex.getMessage());
+        }
+        System.out.println("[CASE-1] supplier invoked times = " + calls.get());
+
+        // ---- CASE-2：当前有身份（网关下发身份头后下游服务的处境） ----
+        IdentityContext.setLoginUser(new LoginUser(1001L, "tester"));
+        String matched = logic.getLoginIdNotHandle("1001");
+        String other = logic.getLoginIdNotHandle("9999");
+        System.out.println("[CASE-2] with identity -> getLoginIdNotHandle(\"1001\") = " + repr(matched));
+        System.out.println("[CASE-2] with identity -> getLoginIdNotHandle(\"9999\") = " + repr(other));
+        System.out.println("[CASE-2] predicate on matched token = " + (matched == null));
+        IdentityContext.clear();
+    }
+
+    private static String repr(String s) {
+        return s == null ? "null" : "\"" + s + "\"";
+    }
+}
+```
+```bash
+cd /tmp/sf4repro && CP="$HOME/m2repo/cn/ypbin/ypbin-starter-security/3.5.0/ypbin-starter-security-3.5.0.jar:$HOME/m2repo/cn/dev33/sa-token-core/1.46.0/sa-token-core-1.46.0.jar" \
+  && javac -cp "$CP" -d out Sf4Repro.java && java -cp "out:$CP" Sf4Repro
+```
+```
+[CASE-1] no identity -> getLoginIdNotHandle("cand-1") = ""
+[CASE-1] predicate (getLoginIdNotHandle(token) == null) = false
+[CASE-1] cn.dev33.satoken.exception.SaTokenException: token 生成失败，已尝试12次，生成算法过于简单或资源池已耗尽
+[CASE-1] supplier invoked times = 12
+[CASE-2] with identity -> getLoginIdNotHandle("1001") = "1001"
+[CASE-2] with identity -> getLoginIdNotHandle("9999") = ""
+[CASE-2] predicate on matched token = false
+```
+> 上述输出是**上方程序原样编译运行的真实输出**（命令即上一代码块；2026-09-25 复核时逐字复现），
+> **与生产日志逐字一致**（异常类型、文案、次数）。
+
+> **一致性纪律（本条曾被独立复核判 FAIL 并整改）**：文档里"程序"与"输出"必须来自同一次运行。
+> 整改前贴的程序是被精简过的版本（少了打印判据的两行 `println`），而输出来自完整版本 ⇒ 属**不实引用**。
+> 复现校验：把上方 java 代码块原样存为 `Sf4Repro.java`，执行上一代码块，输出必须与本代码块**逐行一致**。
+
+**环 6｜403 响应体的来源（同样是 starter 侧）**
+
+`ypbin-starter-security/.../handler/SaTokenExceptionHandler.java:108-112`：`@ExceptionHandler(SaTokenException.class)`
+直接 `return R.fail(GlobalErrorCode.FORBIDDEN.getCode(), "当前鉴权模式下该操作不可用");`（并 `log.warn("[鉴权异常] {}: {}", ...)`）
+⇒ 生产上看到的 `code:403` + 该文案，就是"建 token 抛出的 `SaTokenException` 被这个 handler 兜住"，**不是**权限不足。
+
+**生产一手证据**
+
+`ypbin-auth` 容器日志（2026-09-25 部署实例实测，只读复核）：
+```
+2026-09-25T09:21:30.064+08:00  WARN 7 --- [ypbin-auth] [omcat-handler-3] c.y.s.s.handler.SaTokenExceptionHandler  : [鉴权异常] SaTokenException: token 生成失败，已尝试12次，生成算法过于简单或资源池已耗尽
+```
+
+**为什么会被误触发（开关来自共享配置，与设计相互矛盾）**
+
+- `deploy/nacos/ypbin-common.yaml:62-69`：`ypbin.security.identity.enabled: true`，注释写明"**保持 auth/system/ai
+  各 Servlet 服务既有行为不变**"——即这个开关是**共享**的，auth 也被它带上；
+- `deploy/nacos/ypbin-gateway.yaml:56`：网关的设计注释是"**统一鉴权：校验 token 后清洗外部头、签发内部身份头**"
+  ⇒ **建 token 的 auth 必须走经典会话模式**，不能同时启用 identity 模式（identity 模式的语义前提是"身份由上游网关给"）；
+- 于是"给下游开 identity"与"auth 自己能登录"被**同一个共享开关绑死**、互斥，而矛盾只在**运行期**以 403 暴露。
+
+**影响（可用性，不是"少个校验"）**
+
+1. auth 的**全部登录入口**不可用（账号密码 / 短信 / 社交）⇒ 前端拿不到 token ⇒ **整个平台无法登录**，后续所有请求 401/403；
+2. 故障**表现为"登录接口 403"**，排查者会先怀疑密码、用户状态、权限码，真实原因是"配置结构性矛盾"——
+   错误信息与根因相距很远，平均定位成本高（本次即为生产实测暴露）；
+3. 影响面 = **任何** `ypbin.security.identity.enabled=true` 且自身承担建 token 职责的服务（当前是 auth；
+   后续若有第二个"既是下游、又要签发 token"的服务会同样中招）。
+
+**期望能力（候选，推荐 A）**
+
+- **A（推荐）修正语义：`IdentityStpLogic#getLoginIdNotHandle` 在"没有当前身份"时返回 `null`。**
+  无身份就是无——这同时是基类语义（`StpLogic#getLoginIdNotHandle` 直接返回 `SaTokenDao.get(...)`，无键即 `null`）。
+  **注意边界**：`getTokenValue()` / `getTokenValueNotCut()` **仍应返回空串**（Sa-Token 的"未登录"判据是
+  `SaFoxUtil.isEmpty(...)`，依赖它），**只有 `getLoginIdNotHandle` 这一个方法需要改成 `null`**。
+  改前请一并复看它在 1.46.0 的全部调用点（实测：`getLoginId()`、`getLoginIdDefaultNull()`、
+  `getLoginIdByTokenNotThinkFreeze()`、`getTerminalInfoByToken()`、`isSafe()`、以及本判据 `lambda$distUsableToken$2`）：
+  其中 `getLoginIdByTokenNotThinkFreeze` 会用 `isValidLoginId` 把空串归一成 `null`，**所以只有"直接与 `null` 比"的判据会踩到**——
+  这也解释了为什么现有测试全绿而生产登录不通（见验收标准 2）。
+  *实现提示（未核实）*：方法签名可能需要 `@Nullable`（父类 `StpLogic` 是未注解的第三方类型，本仓有 NullAway 门禁），
+  具体以 starter 侧门禁实测为准。
+- **B 让 auth 服务不装配 `IdentityStpLogic`（按服务名/新增互斥开关条件装配），并在装配层做启动期 fail-fast**：
+  "启用 identity 模式的服务不得承担建 token 职责"。starter 现有 `@ConditionalOnMissingBean(StpLogic.class)`
+  允许宿主自建经典 `StpLogic` 让位（**未实测**），但 ypbin-iot 侧 `ypbin-auth` 是 admin 所有的既有模块
+  （`SYNC.md` 第二节「明确不动」清单），**改宿主代码不可行** ⇒ 需要 starter 出开关，而不是让下游自己绕。
+- **C 其它更优方案**（例如 identity 模式下整体短路/改走不查 token 表的登录路径）。
+
+> **无论选哪个，都必须满足验收标准 1**：`identity.enabled=true` 的服务**不因此丧失**自身登录能力；
+> 若设计上就该禁止，则必须**启动期 fail-fast + 文档写明**，**不得**是运行期的 403。
+
+**验收标准**
+
+1. `identity.enabled=true` 的服务**不因此丧失自身登录能力**（若设计上就该禁止，则必须**启动期 fail-fast + 文档写明**，
+   而不是运行期 403）；
+2. starter 级单测：
+   - **正例**：无身份时 `getLoginIdNotHandle("任意非空token")` 返回 **`null`**；
+   - **反例**：有身份（`IdentityContext.setLoginUser(...)`）时，`getLoginIdNotHandle(当前身份token)` 返回身份值；
+   - **端到端正向**：无身份时 `StpUtil.login(<userId>)` **能成功建 token**、不再抛 `SaTokenException`
+     ——这是本次缺失的那一层：现有 `IdentityStpLogicTest` 只断言 `StpUtil.isLogin()`/`StpUtil.getLoginId()`/
+     `getLoginIdByToken(...)` 这类**经 `isEmpty` 归一**的语义，**没有任何一条断言 `getLoginIdNotHandle` 的返回值**，
+     于是"空串"满足了"未登录"却违反了"token 可用"判据 ⇒ 测试全绿、生产登录不通；
+   - **变异验证**：把 `getLoginIdNotHandle` 改回返回空串 ⇒ 上述用例必须**转红**（否则用例是恒真的装饰）；
+3. `ypbin-iot` 侧撤掉临时规避（auth 不再需要 `identity.enabled: false` 覆盖）后，`POST /api/auth/login` 实测 **200**，
+   且 system / iot 等下游的注解鉴权仍正常（SF-1 的成果不被回退）。
+
+**会被替换掉的临时实现**：**部署侧临时规避（不是代码）**——生产 Nacos 上对 `ypbin-auth.yaml` 做**服务级覆盖**
+`ypbin.security.identity.enabled: false`（**不动**共享的 `ypbin-common.yaml`，system/ai/iot 保持 `true`），
+覆盖后登录**立刻恢复 200**；覆盖前的原始内容备份在服务器 `/opt/ypbin/nacos-ypbin-auth.yaml.bak`（本次只读复核：文件存在，2060 字节）。
+**这条规避是临时的，starter 修好后必须删除**：它顺手关掉了 auth 自己的身份头信任，属于"关掉一个能力换可用性"。
+> **本仓约束（重要）**：`deploy/nacos/ypbin-auth.yaml` 是 **admin 所有的既有文件**，**不在** ypbin-iot 的 SYNC 白名单
+> （当前 8 个文件，见 `SYNC.md` 第二节与 `.github/workflows/sync-whitelist.yml`）内 ⇒ 在仓里改它会让 `Sync Whitelist` 门禁转红。
+> 因此该覆盖目前**只存在于部署实例的 Nacos 配置**，仓内文件**未同步**（可复现校验：`grep -n identity deploy/nacos/ypbin-auth.yaml`
+> 当前**无输出**）。要把它固化进仓，必须先扩白名单（新增一个长期冲突点），这也是本条**必须由 starter 修**而非本仓自行解决的
+> 直接原因。
+
+**关联文档**：ypbin-iot `docs/IOT-ROADMAP.md` 四点十八（索引表 SF-4 行）；
+starter 侧前序：issue #50 / PR #51（SF-1~SF-3，3.5.0）。
 
 ---
 

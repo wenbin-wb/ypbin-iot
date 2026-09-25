@@ -654,17 +654,27 @@ value=紧凑 JSON `{v,q,ts}`），写入时机是**上报事务提交后**（Red
 
 ### 四点十八、反哺 starter 的需求清单（2026-09-24，交接材料）
 
-本仓在实现 M-2 过程中积累了三项**必须由 starter 层解决**的需求，已整理成自包含的交接文档
+本仓在实现 M-2 / **生产部署**过程中积累的**必须由 starter 层解决**的需求，已整理成自包含的交接文档
 **[`STARTER-FEEDBACK.md`](STARTER-FEEDBACK.md)**（含现象/证据/影响/期望能力/验收标准/会被替换掉的临时实现），
 并同步在 `wenbin-wb/ypbin-starter` 开了 issue（便于那边新开会话直接动手）：
 
-**状态：三项均已关闭（starter 3.5.0，2026-09-24 发布；PR #51 / 合并 `f3ab2f9`，四轮外委复核后 PASS）。**
+**状态：SF-1~SF-3 已关闭（starter 3.5.0，2026-09-24 发布；PR #51 / 合并 `f3ab2f9`，四轮外委复核后 PASS）；
+SF-4 为 2026-09-25 新增的未关闭项（生产部署实测暴露，starter 侧修复目标版本 3.5.1）。**
 
 | 编号 | 级别 | 摘要 | 本仓的临时处置（关闭后状态） |
 |---|---|---|---|
 | **SF-1** | 高（安全） | 微服务下游 `@SaCheckPermission` 实际不生效（注解鉴权与登录拦截被 `ypbin.security.interceptor` 一个开关绑死） | ✅ `IotPermissionGuard` **已删除**；端点由 starter 注解鉴权保护，源码门禁迁移为「逐方法校验注解权限码 + 禁止回退到临时防线」 |
 | **SF-2** | 中 | `@Idempotent` 默认键用 `Arrays.deepHashCode(args)`，对无 equals 的 Req DTO 形同虚设 | ✅ starter 已支持（默认键改为按字段值展开的 SHA-256 摘要）；本仓无需改动 |
 | **SF-3** | 低（DX） | `LoginUser` 字段是 `id` 而非 `userId`；`IdentityContext` 与 `LoginUser` 分属两个包易 import 错 | ✅ starter 已支持（新增 `getUserId()/setUserId()` 别名 + Javadoc 互指）；本仓无需改动 |
+| **SF-4** | 高（可用性） | `identity.enabled=true` 时 **auth 登录结构性失败**：starter 3.5.0 的 `IdentityStpLogic#getLoginIdNotHandle` 在无身份时返回空串（非 `null`）⇒ sa-token 1.46.0 的 token 唯一性判据（`getLoginIdNotHandle(token) == null`）恒不成立 ⇒ 12 次重试后抛 `SaTokenException`，`POST /api/auth/login` 恒返回 403 | ⏳ **临时处置**：生产 Nacos 对 `ypbin-auth.yaml` 做**服务级覆盖** `ypbin.security.identity.enabled: false`（**不动**共享的 `ypbin-common.yaml`，system/ai/iot 保持 `true`）⇒ 登录立刻 200；备份 `/opt/ypbin/nacos-ypbin-auth.yaml.bak`。**仓内文件未改**：`deploy/nacos/ypbin-auth.yaml` 是 admin 所有的既有文件、不在 SYNC 白名单（8 个），改仓会让 `Sync Whitelist` 门禁转红 ⇒ 该覆盖只存在于部署实例的 Nacos，待 starter 修复后删除 |
+
+> **SF-4 补充说明（2026-09-25）**：已开 starter issue
+> **https://github.com/wenbin-wb/ypbin-starter/issues/52**。本缺陷是 **3.5.0 升级带进来的自伤**——SF-1 交付的
+> `IdentityStpLogic` 在「无身份」时用**空串**而非 `null`，而 sa-token-core 1.46.0 的建 token 判据要求**严格 `null`**
+> （`StpLogic.lambda$distUsableToken$2`：`getLoginIdNotHandle(token) == null`）；同时 `ypbin-common.yaml` 的
+> **共享**开关把 auth 一起带进了 identity 模式，而网关的设计（`ypbin-gateway.yaml`「校验 token 后签发内部身份头」）
+> 前提恰恰是 **auth 必须自己建 token**。根因、逐环证据（含 3.5.0 制品字节码与本地复现命令）见
+> [`STARTER-FEEDBACK.md`](STARTER-FEEDBACK.md) SF-4。
 
 > **关闭记录（2026-09-24）**：本仓已把 `ypbin-starter.version` 升级至 **3.5.0** 并删除 SF-1 的临时防线；
 > 详见 [`STARTER-FEEDBACK.md`](STARTER-FEEDBACK.md) 各条目的「状态」标注。
