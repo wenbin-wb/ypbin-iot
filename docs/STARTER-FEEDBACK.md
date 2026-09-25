@@ -356,8 +356,8 @@ starter 侧前序：issue #50 / PR #51（SF-1~SF-3，3.5.0）。
 > **状态：⬜ 未关闭（2026-09-25 提出；starter 侧修复目标版本 3.5.1）** —— starter 仓 issue：
 > **https://github.com/wenbin-wb/ypbin-starter/issues/53**（标题与本节同）。
 
-**现象**：微服务下游服务（`ypbin-auth` / `ypbin-system` / `ypbin-iot` / `ypbin-ai` / `ypbin-access` …）在
-`ypbin.security.identity.enabled=true` 下装配
+**现象**：微服务 Servlet 下游服务（`ypbin-system` / `ypbin-iot` / `ypbin-ai` 等；**`ypbin-access` 不在其列**，
+见环 5 的口径说明）在 `ypbin.security.identity.enabled=true` 下装配
 `cn.ypbin.starter.security.identity.IdentityHeaderFilter`，它**只解析** `X-User-Id` / `X-User-Name` /
 `X-Tenant-Id` / `X-Dept-Id` / `X-Roles` 五个头并写入 `IdentityContext`，**完全不校验**网关
 （`GatewayAuthGlobalFilter`）在签发这些头的同时写出的来源标记 `X-Gateway-Signed`。
@@ -450,7 +450,8 @@ ypbin-starter-cloud-gateway-3.5.0.jar cn/ypbin/starter/gateway/autoconfigure/Gat
 （身份头消费侧、`IdentityHeaderFilter` 所在模块）**零命中**。ypbin-iot 仓自建代码同样零命中
 （`grep -rn "X-Gateway-Signed" --include=*.java ypbin-*/src` 无输出）。
 
-**环 5｜配置面的对称性缺陷：签发侧有、三个消费侧没有**
+**环 5｜配置面的对称性缺陷：签发侧有，`ypbin-auth` / `ypbin-common` / `ypbin-access` 三处没有**
+（注意：缺键的是"要经 Feign 透传身份头的服务"，与"装配身份头过滤器的服务"**不是同一个集合**，见下方口径说明）
 
 | `deploy/nacos/` 文件 | `ypbin.cloud.feign.require-trusted-source` | `trusted-source-token` | 本机实测计数 |
 |---|---|---|---|
@@ -475,16 +476,26 @@ deploy/nacos/ypbin-access.yaml   require=0 token=0
 ```
 
 签发侧只有一处：`ypbin-gateway.yaml:58-64` 的 `ypbin.gateway.auth.trusted-source-token`
-（**键路径不同**于下游的 `ypbin.cloud.feign.*`）。而三个消费侧服务共用的 `ypbin-common.yaml` 里
-`ypbin.security.identity.enabled: true`（`:66-69`，注释写"保持 auth/system/ai 各 Servlet 服务既有行为不变"）
-⇒ 这个"无条件信任身份头"的入口在生产是**在线**的，不是理论风险。
+（**键路径不同**于下游的 `ypbin.cloud.feign.*`）。而装配该过滤器的前置开关在**共享**配置 `ypbin-common.yaml`：
+`ypbin.security.identity.enabled: true`（`:66-69`，注释写"保持 auth/system/ai 各 Servlet 服务既有行为不变"）。
+该文件由 **auth / gateway / system / iot / ai** 五者导入（逐个核对各自 `src/main/resources/application.yml` 的
+`optional:nacos:ypbin-common.yaml`），其中 gateway 是 WebFlux、不装配该 Servlet 过滤器。
+
+> **口径说明（避免误计"消费侧"）**：`ypbin-access` **不导入** `ypbin-common.yaml`（其 `application.yml`
+> 只导入 `ypbin-access.yaml`，该文件头部也写明理由），它的 Data ID 里同样没有 `ypbin.security.identity.enabled`；
+> 而 starter 的 `IdentityAutoConfiguration` 是 `matchIfMissing = false`（`v3.5.0` 源码 `:42-45`）
+> ⇒ **access 不装配 `IdentityHeaderFilter`，不是身份头消费侧**。它缺的是 `ypbin.cloud.feign.*`（配置面缺口），
+> 与本条不是同一个问题，已在本仓单独登记（PR #38）。
 
 **生产环境一手证据（2026-09-25 部署实例只读复核）**
 
-① 收窄**前**的暴露面 = 仓内默认值即"绑所有网卡"（可复核）：`deploy/docker-compose.yml` 的服务端口一律写成
-`${INTERNAL_BIND_ADDR:-0.0.0.0}`（`:215` auth 18081、`:235` system 18082、`:256` ai 18083、`:281` access 18086、
-`:301` iot 18084、`:71` mysql 3306、`:28`/`:29` nacos 8848/9848 …），而 `deploy/.env.example:75` 把
-`INTERNAL_BIND_ADDR` 设为 `0.0.0.0` ⇒ **按仓内默认部署即把这些端口发布到所有网卡**。
+① 收窄**前**的暴露面 = 仓内默认值即"绑所有网卡"（可复核）：`deploy/docker-compose.yml` 里**下游与多数中间件
+端口**写成 `${INTERNAL_BIND_ADDR:-0.0.0.0}`（`:215` auth 18081、`:235` system 18082、`:256` ai 18083、
+`:281` access 18086、`:301` iot 18084、`:71` mysql 3306、`:28`/`:29` nacos 8848/9848 …），而
+`deploy/.env.example:75` 把 `INTERNAL_BIND_ADDR` 设为 `0.0.0.0` ⇒ **按仓内默认部署即把这些端口发布到所有网卡**。
+**例外（本仓自己就写了反例，因此不能写成"一律"）**：`:50` redis 6379 默认 `127.0.0.1`；
+`:118` iotdb 6667 用**独立**变量 `${IOTDB_BIND_ADDR:-127.0.0.1}`（`:115-117` 注释写明"共用会把 6667
+连同默认口令一起暴露到全网"）；`:197` gateway 18080 是**硬编码** `"18080:18080"`、不参与该变量的收窄。
 
 ② 收窄**后**（本次实测）：
 
@@ -503,17 +514,29 @@ LISTEN 0      4096         0.0.0.0:18080      0.0.0.0:*
 LISTEN 0      4096       127.0.0.1:3306       0.0.0.0:*          
 LISTEN 0      4096            [::]:18080         [::]:*          
 ```
-（`18080` = admin-ui；另 `19000` = IoT 前端对外；其余一律回环。配置面：生产
-`/opt/ypbin/ypbin-iot/deploy/.env:18` 为 `INTERNAL_BIND_ADDR=127.0.0.1`。）
+（`18080` = **网关 `ypbin-gateway`**（`docker-compose.yml:197` 硬编码；`.env.example:73` 亦写"只对外暴露前端（19000）
+与网关（18080）"）；`19000` = IoT 前端 `ypbin-iot-ui`。**口径限定**：在本次端口白名单
+（`1808x`/`3306`/`8848`/`9848`/`6379`/`6667`）**范围内**，除 `18080` 外均为回环——**不是**"全机只有这两个端口对外"。
+配置面：生产 `/opt/ypbin/ypbin-iot/deploy/.env:18` 为 `INTERNAL_BIND_ADDR=127.0.0.1`。）
 
-③ **框架自己知道这个缺口**：`ypbin-auth` 启动即打出 `FeignHeaderInterceptor` 构造函数（`:82-90`）的告警原文——
+> **全量 `ss -lnt` 的非回环行另有**（补测，避免"滤过视图当全量"）：`0.0.0.0:80` / `0.0.0.0:443` / `[::]:80` /
+> `[::]:443`（1Panel openresty）、`0.0.0.0:20232`（1panel-core）、`0.0.0.0:22` / `[::]:22`（sshd）。
+> 这些属 1Panel 面板 / 主机系统，不在本条缺陷的处置范围内，但**不能**用"只暴露两个端口"概括。
+
+③ **框架自己知道这个缺口（源码级依据，非生产观测）**：3.5.0 制品里 `FeignHeaderInterceptor` 构造函数（`:82-90`）
+的告警原文是——
 「未配置 ypbin.cloud.feign.trusted-source-token，身份头将不做来源校验直接透传；若服务可被外部直连，
 请配置该值并在网关签发 X-Gateway-Signed 标记，防止伪造身份经 Feign 放大越权」。
 `IdentityHeaderFilter` 的类级 Javadoc（`:41-44`）同样写着"若服务可被外部直接访问，
 **严禁开启（否则外部请求可伪造身份头冒充已认证用户）**" ⇒ **"不校验"是已知语义，只是被降级成了文档约定。**
 
+> **口径校正**：上述告警**本次未在生产日志中观测到**（对生产全部容器 grep 该文案，提及数 = 0）——因为加固后
+> `ypbin-auth` 容器已于 `01:51` 重建，**没有 pre-fix 日志基线**。该引文来自**制品字节码**，不是生产实测，
+> 请勿据此断言"生产启动时打出过"。
+
 ④ 本轮加固后的 auth 侧实测：容器 `Up`，其当前日志中该告警计数 = **0**
-（由构造函数语义 ⇒ auth 进程的 `trusted-source-token` 已非空）；
+（由构造函数语义 ⇒ auth 进程的 `trusted-source-token` 已非空）。**口径**：该容器于 `01:51` 重建、pre-fix 日志已
+不存在，所以这是"**当前计数为 0**"，**不是**"观测到从非零降到零"的转变；
 改动前的 Nacos 配置备份证实"原来没有"：
 `/opt/ypbin/nacos-ypbin-auth.yaml.bak-20260925-013857`（2305 B）与
 `/opt/ypbin/nacos-ypbin-common.yaml.bak-20260925-013857`（4271 B）两键计数均为 **0**，
@@ -524,6 +547,8 @@ LISTEN 0      4096            [::]:18080         [::]:*
 1. **任意身份冒充（认证绕过）**：`IdentityContext` 被业务与框架当作"当前登录用户"。伪造 `X-User-Id`
    即可以该用户（含平台超管）身份执行；网关的 token 校验、SF-1 修好的注解鉴权（按身份解析出的用户查权限）
    都会被"以正确用户的身份"合法通过。
+   （**口径**：本条是**机制层已证**——过滤器确实不校验、身份确实由该头无条件建立、租户值确实直接进 SQL
+   过滤条件；但**端到端的"伪造请求被成功执行"本轮未做攻击性实测**，见"未核实 / 边界"。）
 2. **跨租户数据读写（多租户隔离失效）**：`MicroserviceTenantProvider#getCurrentTenantId`
    （`ypbin-iot/ypbin-common/.../MicroserviceTenantProvider.java:29-30`）`return IdentityContext.getTenantId()`；
    该值经 `DefaultTenantLineHandler#getTenantId`（`ypbin-starter-extension-tenant`，`:57-62`）**直接作为
@@ -531,10 +556,15 @@ LISTEN 0      4096            [::]:18080         [::]:*
    实现跨租户读写（本仓 `iot_*` 业务表全在租户插件管辖内）。
 3. **爆炸半径 = 网络可达性**：收窄前，同内网 / 同宿主机可达者直连 `18081`/`18082`/`18084`（及 3306/8848 等）即可利用；
    收窄后降到"宿主机内进程 / 同宿主机容器 / 能把请求打到 `127.0.0.1` 的 SSRF"。**这只是缓解，不是修复**——
-   端口收窄是可被一次部署回退的运维动作，而缺陷在代码里。
-4. **放大链**：若被直连的下游自身 `trusted-source-token` 为空（默认即空；`auth` / `common` / `access` 原状），
-   其 Feign 出站会把伪造身份头**继续传给再下游**（`FeignHeaderInterceptor:129-131` fail-open）⇒ 一次伪造可扩散整条调用链；
-   配了 token 的 `iot` / `system` / `ai` 只是"局部攻陷"。
+   端口收窄是可被一次部署回退的运维动作，而缺陷在代码里。**具体到本机**：宿主机上另有 1Panel / openresty
+   监听 `80`/`443`/`20232`（见上）⇒ 面板或反代一旦被拿下（或任何宿主内进程被控制），
+   **回环收窄对这条路径不提供任何保护**。
+4. **放大链 + 横向扩散**：若被直连的**服务**自身 `trusted-source-token` 为空（`FeignProperties:73` 默认即空；
+   本仓 `ypbin-auth` / `ypbin-access` 的 Data ID 原状如此——注意 `ypbin-common.yaml` 是**共享配置文件**、不是服务），
+   其 Feign 出站会把伪造身份头**继续传给再下游**（`FeignHeaderInterceptor:129-131` fail-open）
+   ⇒ 一次伪造可扩散整条调用链；配了 token 的 `iot` / `system` / `ai` 只是"局部攻陷"。
+   另一层横向风险：该标记是**静态共享串**（各下游配同一个值）⇒ **任何一处下游被拿下，就等价于拿到全链的身份头
+   伪造能力**，"被攻陷的服务数量"不构成纵深。
 5. **对照：本仓已有正确范式**：`/internal/**` 的内部调用守卫 `InternalTokenGuardInterceptor`
    （`ypbin-iot/ypbin-service/ypbin-system/.../InternalTokenGuardInterceptor.java:51-64`）做的是 **fail-closed**
    （凭证未配置即整体拒绝，`:51-55`）+ **常量时间比较**（`MessageDigest.isEqual`，`:59`）。
@@ -581,8 +611,8 @@ LISTEN 0      4096            [::]:18080         [::]:*
    `18081`/`18082`/`18084`/`3306`/`8848`/`9848`/`6379`/`6667` 全部为回环。
 2. **补齐配置对称性**：在生产 **live Nacos** 的 `ypbin-auth.yaml` 与 `ypbin-common.yaml` 补上
    `ypbin.cloud.feign.trusted-source-token` 与 `ypbin.cloud.feign.require-trusted-source: true`
-   （值取自部署实例既有随机串，**本文档不记录该值**）；复核后 `ypbin-auth` 的
-   "身份头将不做来源校验直接透传"告警计数归零。
+   （值取自 `.env` 的 `GATEWAY_SIGN_TOKEN` = 64 个十六进制字符，**本文档不记录该值**）；复核后 `ypbin-auth` 的
+   "身份头将不做来源校验直接透传"告警**当前计数为 0**（容器 `01:51` 重建，无 pre-fix 基线）。
 
 > **本仓约束（重要，与 SF-4 同因）**：`deploy/nacos/ypbin-auth.yaml`、`deploy/nacos/ypbin-common.yaml`
 > 都是 **admin 所有的既有文件**，**不在** ypbin-iot 的 SYNC 白名单（当前 8 个文件，见 `SYNC.md` 第二节与
@@ -593,21 +623,46 @@ LISTEN 0      4096            [::]:18080         [::]:*
 > （附带发现：`deploy/nacos/ypbin-access.yaml` 是本仓**新增**文件、不受白名单限制，同样缺这两个键；
 > 本条**不做改动**，仅登记，留待与本条一起收口。）
 
-**未核实 / 边界（如实标注）**
+**未核实 / 边界（如实标注；本清单经独立子代理复核后补全，见下"独立复核整改"）**
+
+**已核实、原先误标为"未核实"的项（口径升级）**
+
+- **部署实例 token 的长度：已核实为 64 个十六进制字符**：`deploy/install.sh:1094` 用
+  `GATEWAY_SIGN_TOKEN="${GATEWAY_SIGN_TOKEN:-$(rand_hex 32)}"` 生成，而 `rand_hex`（`:1067-1075`）是
+  `openssl rand -hex "$1"` ⇒ 32 字节 = **64 个十六进制字符**；对 live `/opt/ypbin/ypbin-iot/deploy/.env` 的同名键
+  **只读测量长度 = 64**（只取长度，不读取、不回显值）。仓内该键一律写成占位符 `${GATEWAY_SIGN_TOKEN}`
+  （21 字符，变量名 18 字符 = 16 个大写字母 + 2 个下划线），由 `install.sh:1290-1298` 在导入 Nacos 前用 `.env`
+  实测值 `sed` 替换 ⇒ **真实 token 与其长度都不入库**。
+- **全量端口暴露面已补测**（原先只跑了带白名单过滤的 `ss`，属"滤过视图当全量"）：见上文生产证据 ② 的
+  "全量 `ss -lnt` 的非回环行另有"；`18080` 的归属也已核实为**网关**（原先误记为 admin-ui）。
+
+**仍然未核实**
 
 - **"收窄前绑所有网卡"无法回看现场**：缓解已生效，历史 `ss` 输出不可复现。上文该结论的依据是**仓内默认值**
-  （`docker-compose.yml` 的 `:-0.0.0.0` 与 `.env.example:75`），**不是**当时的 `ss` 抓取。
-- **"64 位 token"未核实其长度**：交接说明记为 64 位；本机**未核实**——live Nacos 用内嵌存储
-  （该 MySQL 实例的库里没有 Nacos 配置表），Nacos 3 管理 API 需鉴权（`/nacos/v3/admin/cs/config` 实测 **403**），
-  未读取 live 配置内容。仓内该键的值是**环境变量占位符**（本机实测：21 字符、形如 `${…}`、
-  16 个大写字母变量名，真实值不入库）——这一点是实测的，也说明真实串只在部署实例。
-- **键补在哪个 dataId 未逐项复核**：已验证的是**效果**（auth 进程 `Up` 且其日志中该告警计数为 0）；
-  "补在 `ypbin-auth.yaml` 还是 `ypbin-common.yaml`（或两处都补）"未逐 dataId 读取确认。
+  （`docker-compose.yml` 的 `${INTERNAL_BIND_ADDR:-0.0.0.0}` 与 `.env.example:75`），**不是**当时的 `ss` 抓取。
+- **live Nacos 的配置内容未读取**（Nacos 3 内嵌存储——该 MySQL 实例的库里没有 Nacos 配置表；管理 API 实测 **403**）：
+  ① "两个键已补到 `ypbin-auth.yaml` / `ypbin-common.yaml`"是**由效果演绎**（auth 进程 `Up` 且该告警当前计数为 0），
+  未逐 dataId 读到内容；② **live `ypbin-common.yaml` 里 `ypbin.security.identity.enabled` 的实际值也未读取**——
+  文中"这个入口在生产在线"的依据是**仓内** `common.yaml` + `ypbin-system` / `ypbin-iot` 容器 `Up`，
+  而 SF-4 已证明 **live 与仓内可以不一致**（auth 就是被服务级覆盖的例子）。就当前状态，生产上确定在线的
+  消费侧是 **`ypbin-system` / `ypbin-iot`**；`ypbin-auth` 已被 SF-4 的临时处置覆盖为 `identity.enabled=false`。
+- **端到端的"伪造头即可越权"未实证**：本条为**机制层已证**（过滤器不校验 + 身份由该头无条件建立 + 租户值直接
+  进 SQL 过滤条件 + 从无签名直连路径上没有任何拒绝点），但**利用链未做攻击性实测**（本轮只做只读复核与
+  源码/制品核查）。
+- **生产上 `ypbin-ai` / `ypbin-access` / `xxl-job-admin` 容器未运行**（`docker ps` 无这三个容器，`ss` 也无
+  `18083`/`18085`/`18086` 监听）⇒ 配置对称性缺陷对这二者当前**不构成在线暴露**；对 `ypbin-system` / `ypbin-iot` 构成。
 - **网关未把 `X-Gateway-Signed` 纳入外部头清洗名单**（`GatewayProperties$HeaderSanitize:181` 只清洗 5 个身份头）。
   经推理**不可经网关利用**（白名单路径无 token 时网关虽不签发标记，但同链的 `HeaderSanitizeGlobalFilter`
   已剥掉外部身份头，下游拿不到可伪的身份）——**但本次未做实测复现**，仅作为防御纵深建议记录。
-- 本次**未**对生产实例做任何写操作与攻击性验证（全部只读：`ss` / 读 `.env` / 读容器日志 / 读配置备份文件 /
-  只读查询库表结构）。
+- 本次**未**对生产实例做任何写操作与攻击性验证（全部只读：`ss` / 读 `.env` 单行 / 读容器日志计数 /
+  读配置备份文件 / 只读查询库表结构）。
+
+**顺带登记（与本条同源，建议一并更正，本轮未改）**
+
+- `deploy/.env.example:43-45` 的注释写着"网关签发 `X-Gateway-Signed`，**下游校验后才信任** `X-User-Id` 等
+  身份头"、"留空则下游不校验来源"——这与本条结论**直接矛盾**：下游（`IdentityHeaderFilter`）**从来不校验**
+  该标记，`GATEWAY_SIGN_TOKEN` 非空也**不改变**"身份头被无条件信任"这一事实。该误述会让人按"配了 token
+  就安全"行事。该文件在 SYNC 白名单内（可改），但本条是纯文档，**未改**，仅登记。
 
 **关联文档**：ypbin-iot `docs/IOT-ROADMAP.md` 四点十八（索引表 SF-5 行）；starter 侧相关：SF-1
 （身份头 → Sa-Token 桥，3.5.0 已支持）、`FeignHeaderInterceptor`（既有 trusted-source 机制）、

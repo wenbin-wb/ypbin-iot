@@ -667,7 +667,7 @@ SF-4 / SF-5 为 2026-09-25 新增的未关闭项（生产部署实测暴露，st
 | **SF-2** | 中 | `@Idempotent` 默认键用 `Arrays.deepHashCode(args)`，对无 equals 的 Req DTO 形同虚设 | ✅ starter 已支持（默认键改为按字段值展开的 SHA-256 摘要）；本仓无需改动 |
 | **SF-3** | 低（DX） | `LoginUser` 字段是 `id` 而非 `userId`；`IdentityContext` 与 `LoginUser` 分属两个包易 import 错 | ✅ starter 已支持（新增 `getUserId()/setUserId()` 别名 + Javadoc 互指）；本仓无需改动 |
 | **SF-4** | 高（可用性） | `identity.enabled=true` 时 **auth 登录结构性失败**：starter 3.5.0 的 `IdentityStpLogic#getLoginIdNotHandle` 在无身份时返回空串（非 `null`）⇒ sa-token 1.46.0 的 token 唯一性判据（`getLoginIdNotHandle(token) == null`）恒不成立 ⇒ 12 次重试后抛 `SaTokenException`，`POST /api/auth/login` 恒返回 403 | ⏳ **临时处置**：生产 Nacos 对 `ypbin-auth.yaml` 做**服务级覆盖** `ypbin.security.identity.enabled: false`（**不动**共享的 `ypbin-common.yaml`，system/ai/iot 保持 `true`）⇒ 登录立刻 200；备份 `/opt/ypbin/nacos-ypbin-auth.yaml.bak`。**仓内文件未改**：`deploy/nacos/ypbin-auth.yaml` 是 admin 所有的既有文件、不在 SYNC 白名单（8 个），改仓会让 `Sync Whitelist` 门禁转红 ⇒ 该覆盖只存在于部署实例的 Nacos，待 starter 修复后删除 |
-| **SF-5** | 高（安全） | 下游 `IdentityHeaderFilter` **不校验**网关签发的 trusted-source 标记（`X-Gateway-Signed`），无条件信任 `X-User-Id` / `X-Tenant-Id` 等身份头 ⇒ 直连下游服务端口（18081 auth / 18082 system / 18084 iot…）即可伪造任意用户与租户身份、越过网关鉴权；starter 的 trusted-source 机制只作用于 **Feign 出站透传**，不在身份头被消费的入口（3.5.0 制品级核查：`ypbin-starter-security` 对 `X-Gateway-Signed` 零引用） | ⏳ **临时处置（部署实例配置侧，非代码修复）**：① 生产 `/opt/ypbin/ypbin-iot/deploy/.env:18` 置 `INTERNAL_BIND_ADDR=127.0.0.1` ⇒ 仅 `18080`/`19000` 对外（`ss -lnt` 只读复核：18081/18082/18084/3306/8848/9848/6379/6667 全为回环）；② live Nacos 的 `ypbin-auth.yaml`/`ypbin-common.yaml` 补 `ypbin.cloud.feign.trusted-source-token` + `require-trusted-source: true` ⇒ `ypbin-auth` 的「身份头将不做来源校验直接透传」告警计数归零。**仓内文件未改**：这两个 nacos 文件是 admin 所有的既有文件、不在 SYNC 白名单（8 个），改仓会让 `Sync Whitelist` 门禁转红 |
+| **SF-5** | 高（安全） | 下游 `IdentityHeaderFilter` **不校验**网关签发的 trusted-source 标记（`X-Gateway-Signed`），无条件信任 `X-User-Id` / `X-Tenant-Id` 等身份头 ⇒ 直连下游服务端口（18081 auth / 18082 system / 18084 iot…）即可伪造任意用户与租户身份、越过网关鉴权；starter 的 trusted-source 机制只作用于 **Feign 出站透传**，不在身份头被消费的入口（3.5.0 制品级核查：`ypbin-starter-security` 对 `X-Gateway-Signed` 零引用） | ⏳ **临时处置（部署实例配置侧，非代码修复）**：① 生产 `/opt/ypbin/ypbin-iot/deploy/.env:18` 置 `INTERNAL_BIND_ADDR=127.0.0.1` ⇒ 端口白名单内仅 `18080`（**网关 `ypbin-gateway`**）对外，18081/18082/18084/3306/8848/9848/6379/6667 全为回环（全量 `ss` 另有 `80`/`443`/`20232`/`22`，属 1Panel 与主机系统，不在本条范围）；② live Nacos 的 `ypbin-auth.yaml`/`ypbin-common.yaml` 补 `ypbin.cloud.feign.trusted-source-token` + `require-trusted-source: true` ⇒ `ypbin-auth` 的「身份头将不做来源校验直接透传」告警**当前计数为 0**（容器 `01:51` 重建，**无 pre-fix 基线**，不是"观测到归零"）。**仓内文件未改**：这两个 nacos 文件是 admin 所有的既有文件、不在 SYNC 白名单（8 个），改仓会让 `Sync Whitelist` 门禁转红 |
 
 > **SF-4 补充说明（2026-09-25）**：已开 starter issue
 > **https://github.com/wenbin-wb/ypbin-starter/issues/52**。本缺陷是 **3.5.0 升级带进来的自伤**——SF-1 交付的
@@ -683,6 +683,15 @@ SF-4 / SF-5 为 2026-09-25 新增的未关闭项（生产部署实测暴露，st
 > 而 `IdentityHeaderFilter` 在这之前就已用 `X-User-Id` **无条件**建好 `IdentityContext`（`v3.5.0` 源码 `:57-100`）；
 > 网关制品**不含 Feign 类**（`grep -ci feign` = 0）⇒ 只签发、不校验。逐环证据、生产只读复核、
 > 负向用例与变异要求见 [`STARTER-FEEDBACK.md`](STARTER-FEEDBACK.md) SF-5。
+>
+> **口径与复核（2026-09-25）**：① `ypbin-access` **不导入** `ypbin-common.yaml`，且 starter 该开关是
+> `matchIfMissing = false` ⇒ 它**不装配** `IdentityHeaderFilter`，**不是身份头消费侧**（它的缺口是配置面少了
+> `ypbin.cloud.feign.*`，已另开 PR #38 对齐）；② 生产上真正在线的消费侧是 `ypbin-system` / `ypbin-iot`
+> （`ypbin-auth` 已被 SF-4 的临时处置覆盖为 `identity.enabled=false`；`ypbin-ai` / `ypbin-access` 容器未运行）。
+> ③ 本条已过**独立子代理复核**（R6）：核心主张逐条复现一致，复核指出的 4 处证据性表述已整改——
+> `18080` 归属（是**网关**不是 admin-ui）、compose 绑定**并非"一律"**（redis/iotdb/gateway 为例外）、
+> "其余一律回环"改为**端口白名单内**口径并补测全量 `ss`、消费侧口径（access 剔除）；
+> "64 位 token 长度"由"未核实"升级为**已核实**（`install.sh` 的 `rand_hex 32` ⇒ 64 个十六进制字符 + live `.env` 只读测量 = 64）。
 
 > **关闭记录（2026-09-24）**：本仓已把 `ypbin-starter.version` 升级至 **3.5.0** 并删除 SF-1 的临时防线；
 > 详见 [`STARTER-FEEDBACK.md`](STARTER-FEEDBACK.md) 各条目的「状态」标注。
