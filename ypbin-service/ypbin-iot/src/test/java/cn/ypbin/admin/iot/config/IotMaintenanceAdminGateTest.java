@@ -84,13 +84,16 @@ class IotMaintenanceAdminGateTest {
 
     /**
      * 「防孤儿（K2）」补授语句：
-     * {@code INSERT IGNORE INTO <表> (<列>) SELECT DISTINCT x.y, <父 id> FROM <表> x WHERE x.menu_id IN (<子清单>)}。
+     * {@code INSERT IGNORE INTO <表> (<列>) SELECT DISTINCT x.y, <父 id> FROM <表> x WHERE x.menu_id IN (<子清单>) AND x.<id 列> <> 1;}
+     *
+     * <p>第 5 组捕获语句**尾部**（到 {@code ;} 为止）。尾部必须一并断言：只校验「语句形态 + 表名 + 父 id + 子清单」
+     * 时，把尾部改成 {@code AND 1=0} 之类的空操作仍会全绿（复核变异 M7 实证）。</p>
      */
     private static final Pattern ORPHAN_GUARD = Pattern.compile(
         "INSERT\\s+IGNORE\\s+INTO\\s+(\\w+)\\s*\\([^)]*\\)\\s*"
-            + "SELECT\\s+DISTINCT\\s+\\w+\\.\\w+\\s*,\\s*(\\d+)\\s+FROM\\s+\\w+\\s+\\w+\\s*"
-            + "WHERE\\s+\\w+\\.menu_id\\s+IN\\s*\\(([^)]*)\\)",
-        Pattern.CASE_INSENSITIVE);
+            + "SELECT\\s+DISTINCT\\s+\\w+\\.(\\w+)\\s*,\\s*(\\d+)\\s+FROM\\s+\\w+\\s+\\w+\\s*"
+            + "WHERE\\s+\\w+\\.menu_id\\s+IN\\s*\\(([^)]*)\\)([^;]*);",
+        Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
 
     /**
      * 平台模块目录 → 其子菜单清单（与 {@code docs/PLATFORM-IA-PROPOSAL.md} §4.2 的归属表一致）。
@@ -102,6 +105,11 @@ class IotMaintenanceAdminGateTest {
     private static final Map<String, String> MODULE_CHILDREN = Map.of(
         "3310", "3001,3002,3003,3005,3007,2600,3008,4001",
         "3320", "3004,3009");
+
+    /** 防孤儿语句尾部必须是「排除模板/角色 1」，否则补授会漏掉或变成空操作。 */
+    private static final Map<String, String> ORPHAN_GUARD_TAIL = Map.of(
+        "sys_role_menu", "AND rm.role_id <> 1",
+        "sys_template_menu", "AND tm.template_id <> 1");
 
     private static String sql() throws IOException {
         return Files.readString(REPO_ROOT.resolve("deploy/sql/007-iot-data.sql"), StandardCharsets.UTF_8);
@@ -158,7 +166,10 @@ class IotMaintenanceAdminGateTest {
         Map<String, String> found = new LinkedHashMap<>();
         Matcher matcher = ORPHAN_GUARD.matcher(code);
         while (matcher.find()) {
-            found.put(matcher.group(1) + ":" + matcher.group(2), normalizeIdList(matcher.group(3)));
+            String table = matcher.group(1);
+            String children = normalizeIdList(matcher.group(4));
+            String tail = matcher.group(5) == null ? "" : matcher.group(5).trim().replaceAll("\\s+", " ");
+            found.put(table + ":" + matcher.group(3), children + " | 尾部: " + tail);
         }
         // 自检：一条都没扫到就说明正则与脚本形态脱节，本门禁退化成"0 违规 = 没跑到"（教训八）
         assertThat(found).as("没扫到任何防孤儿补授语句 ⇒ 本门禁空跑").isNotEmpty();
@@ -167,13 +178,14 @@ class IotMaintenanceAdminGateTest {
         for (Map.Entry<String, String> module : MODULE_CHILDREN.entrySet()) {
             for (String table : List.of("sys_role_menu", "sys_template_menu")) {
                 String key = table + ":" + module.getKey();
+                String expected = module.getValue() + " | 尾部: " + ORPHAN_GUARD_TAIL.get(table);
                 String actual = found.get(key);
-                if (!module.getValue().equals(actual)) {
-                    missing.add(key + "（期望子清单 " + module.getValue() + "，实际 " + actual + "）");
+                if (!expected.equals(actual)) {
+                    missing.add(key + "（期望 " + expected + "，实际 " + actual + "）");
                 }
             }
         }
-        assertThat(missing).as("模块目录缺少防孤儿补授 ⇒ 拥有其子菜单的角色/模板会整棵丢菜单（K2）")
+        assertThat(missing).as("模块目录缺少防孤儿补授（或尾部条件被改坏）⇒ 拥有其子菜单的角色/模板会整棵丢菜单（K2）")
             .isEmpty();
     }
 

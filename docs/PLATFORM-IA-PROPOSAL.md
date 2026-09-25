@@ -642,7 +642,7 @@ WHERE p.pid = 0 AND p.platform_only = 1 AND c.platform_only = 0;
 
 #### 7.1.4 菜单授权门禁怎么保过（**K3，最容易踩；本节已按独立复核的实测结论整段重写**）
 
-`IotMaintenanceAdminGateTest#everyMenuIdMustBeGranted`（`ypbin-service/ypbin-iot/src/test/java/cn/ypbin/admin/iot/config/IotMaintenanceAdminGateTest.java:110-146`；**行号已按落地代码更新**，实施前的旧行号是 `:62-101`）的核心是：
+`IotMaintenanceAdminGateTest#everyMenuIdMustBeGranted`（`ypbin-service/ypbin-iot/src/test/java/cn/ypbin/admin/iot/config/IotMaintenanceAdminGateTest.java:119-160`；**行号已按落地代码更新**，实施前的旧行号是 `:62-101`）的核心是：
 
 ```java
 for (String table : List.of("sys_role_menu", "sys_template_menu")) {
@@ -720,21 +720,25 @@ private static final Pattern GRANT_IN = Pattern.compile("(?<![A-Za-z0-9_])id\\s+
 | 变异 3：把 `3320` 改成 `platform_only=0` 却不补模板授权 | `[]` | `['3320']` | 转红 | ✅ 转红 |
 
 > 三个变异覆盖了规则的三个分支（模板缺 / 角色缺 / 由 `platform_only` 决定的期望切换）⇒ 这条门禁**是"咬过人"的**，不是装饰。
-> 另必须保留原有的**自检** `assertThat(menuIds).isNotEmpty()`（落地后在 `IotMaintenanceAdminGateTest.java:120-123`，实施前是 `:77-78`），否则正则一改错就退化成"0 违规 = 没跑到"（旧仓教训八）。
+> 另必须保留原有的**自检** `assertThat(menuIds).isNotEmpty()`（落地后是 `IotMaintenanceAdminGateTest.java:130-131`，实施前是 `:77-78`），否则正则一改错就退化成"0 违规 = 没跑到"（旧仓教训八）。
 
 **（3′）补充断言：K2「防孤儿补授」本身也要门禁（第二轮实施复核新增）**
 
 上面那条断言只证明「模块目录被授给了**某些人**」，**不证明授给了所有拥有其子菜单的角色/模板** ——
 实施复核实测：把 §7.1.1 第 3 步那 4 条 `INSERT IGNORE` 全部删掉，真实 JUnit **仍然全绿**（记为变异 M5）⇒ K2 没有门禁覆盖。
 故新增 `IotMaintenanceAdminGateTest#orphanGuardMustBeGrantedForEveryModule`：
-用 `ORPHAN_GUARD` 正则解析出每条「防孤儿」语句的 `(表, 父 id, 子清单)`，
-断言 `{sys_role_menu, sys_template_menu} × {3310, 3320}` 四条**都存在且子清单与 §4.2 归属表一致**，并保留 `isNotEmpty()` 自检。
+用 `ORPHAN_GUARD` 正则解析出每条「防孤儿」语句的 `(表, 父 id, 子清单, WHERE 尾部)`，
+断言 `{sys_role_menu, sys_template_menu} × {3310, 3320}` 四条**都存在、子清单与 §4.2 归属表一致、且 WHERE 尾部就是 `AND <别名>.<id 列> <> 1`**，并保留 `isNotEmpty()` 自检。
+
+> **为什么连 WHERE 尾部也要断言**（第三轮复核新增）：只校验「语句形态 + 表名 + 父 id + 子清单」时，
+> 把尾部改成 `AND 1=0` 之类的**空操作**仍会全绿（复核变异 M7 实证）——语句在、子清单对、补授却失效。
 
 | 场景 | 期望 | 实测 |
 |---|---|---|
 | 基线 | 全绿 | ✅ `Tests run: 3, Failures: 0` |
 | 变异 M5：删掉全部 4 条防孤儿补授 | 转红 | ✅ 转红（自检 `isNotEmpty` 触发） |
-| 变异 M6：只删 `sys_template_menu` 的 `3320` 那条 | 转红 | ✅ 转红：`["sys_template_menu:3320（期望子清单 3004,3009，实际 null）"]` |
+| 变异 M6：只删 `sys_template_menu` 的 `3320` 那条 | 转红 | ✅ 转红：`["sys_template_menu:3320（期望 3004,3009 \| 尾部: AND tm.template_id <> 1，实际 null）"]` |
+| 变异 M7：4 条尾部各加 ` AND 1=0`（形态/表名/父 id/子清单全不变） | 转红 | ✅ 转红：4 条全部报出「实际 … AND 1=0」 |
 
 
 ##### （4）五种处理办法对比（**已按实测更正**）
@@ -979,22 +983,24 @@ SELECT id FROM sys_menu WHERE id BETWEEN 3300 AND 3399;
 
 方案获批实施后，A（前端 `mixed-nav` + K1 归一）与 B（迁移 SQL + 门禁修正）各开一个 PR，并**再派一名独立子代理**（不同上下文、自行跑命令、不继承实施者结论）做实施验收。两仓 `git status` 全程干净、变异后 `007-iot-data.sql` 的 sha256 始终等于 HEAD、生产库只读、未 commit/push。
 
-**总判定：B = PASS；A = FAIL（有条件）→ 已按复核建议修复（A 点 ① 与 B 点 ② 均已落地，修后复验结论见 PR 评论）。**
+**总判定（第一轮）：B = PASS；A = FAIL（有条件）。**
+**修后复验（同一复核者）：A = PASS（A@`93b28f9`，原 12 个场景零回归、线上与 artifact 398/398 文件全等，并反混淆入口 chunk 确认「取值判断已在 `try` 内」）；B = PASS（B@`06a2111`，基线 3/3 绿、M1–M4 仍全红、M5 由绿转红）。**
+**追加加固（针对复核新发现的 M7）：`orphanGuardMustBeGrantedForEveryModule` 现同时断言 WHERE 尾部，M7 转红（见 §7.1.4(3′)）。**
 
 | 复核项 | 结论 | 关键证据（复核者自跑） |
 |---|---|---|
-| A 代码正确性 | **FAIL → 已修** | 功能全对（老用户→`mixed-nav`、用户自行改回被尊重、只清 `app.layout`、主题/语言/业务键不动、JSON 损坏不抛异常），**但** `window.localStorage` 的**取值本身**在沙箱 iframe / cookie 全禁下抛 `SecurityError`，被留在 `try` 之外 ⇒ 异常直穿 `main.ts` 的 `initApplication()`，应用**白屏**（本 PR 引入的回归；vben 的 `StorageManager#createDefaultDriver` 正是 try/catch 兜住此情形）。**已按复核建议把取值判断移入 `try`，修后 10/10 场景通过** |
+| A 代码正确性 | **FAIL → 已修 → 复验 PASS** | 功能全对（老用户→`mixed-nav`、用户自行改回被尊重、只清 `app.layout`、主题/语言/业务键不动、JSON 损坏不抛异常），**但** `window.localStorage` 的**取值本身**在沙箱 iframe / cookie 全禁下抛 `SecurityError`，被留在 `try` 之外 ⇒ 异常直穿 `main.ts` 的 `initApplication()`，应用**白屏**（本 PR 引入的回归；vben 的 `StorageManager#createDefaultDriver` 正是 try/catch 兜住此情形）。**已按复核建议把取值判断移入 `try`；复核者复验 12+4 个场景全绿，并反混淆线上入口 chunk 确认修复形态已上线** |
 | A 产物与部署 | PASS | 线上 `index.html` 200 且与 CI artifact **398/398 文件 sha256 全等**；`/api/system/menu/all` HTTP 200（body `code:401`，符合全局 HTTP200 约定）；dist 含 `mixed-nav`/`layout-migration-version`/`基础管理`/`运维与监控` |
 | A i18n | PASS | 两份语言包均有 `page.admin.title`/`page.ops.title`；`page.dashboard.title`/`page.ai.title` **只改值不改键**；`node scripts/check-iot-i18n-keys.mjs` exit 0 |
-| B 双写/命名/等价 | PASS | `007-iot-data.sql:175-232` 与迁移文件**逐字节 sha256 相同**；等价脚本 `OK`；"命名不含 `-iot-` 被静默排除"已用 `/tmp` 最小目录独立复现 |
+| B 双写/命名/等价 | PASS | `007-iot-data.sql` 末尾与迁移文件**逐字节 sha256 相同**；等价脚本 `OK`；"命名不含 `-iot-` 被静默排除"已用 `/tmp` 最小目录独立复现 |
 | B SQL 语义 | PASS | 真实 MySQL **8.4.11**（同生产版本 + 严格模式）执行生产备份副本零错误；`pid=0` 恰 5 行；8+2 reparent 与 §4.2 逐行一致；合成自定义角色/模板验证防孤儿真的补上父目录，删掉 4 条 `INSERT IGNORE` 后一条不补 |
-| B 门禁咬人 | PASS（含残留缺口，已补） | 真实 JUnit：基线绿；M1/M2/M3/M4 全红（M4 证明**旧门禁漏报 `3200`**）；**但 M5「删掉 4 条防孤儿补授」仍全绿** ⇒ K2 无门禁覆盖（见 §7.1.4(3′)，本轮已补 M6 断言） |
-| B 本机测试 | PASS | iot 模块 `Tests run: 212, Failures: 0, Errors: 0`；架构测试 **41/0** |
+| B 门禁咬人 | PASS（残留缺口已补，复验 PASS） | 真实 JUnit：基线绿；M1/M2/M3/M4 全红（M4 证明**旧门禁漏报 `3200`**）；**第一轮发现 M5「删掉 4 条防孤儿补授」仍全绿** ⇒ K2 无门禁覆盖；补断言后复验：M5 绿→红、M6 转红、**复核者自加 M7（尾部加 `AND 1=0`）也由绿转红**（见 §7.1.4(3′)） |
+| B 本机测试 | PASS | iot 模块 `Tests run: 213, Failures: 0, Errors: 0`；架构测试 **41/0** |
 | B 活库 | PASS（证据强度受限） | 生产三表 == 备份 + 迁移脚本（逐行逐列，除时间戳）；超管 47→49 节点**零丢失**、顶层顺序 = 工作台/基础管理/物联网/知识与 AI/运维与监控；**非超管 3 个用户的授权本来就是 0 行 ⇒「没变少」这条证据是空的**（已如实标注） |
 | B 回滚 | PASS | 副本库执行回滚后三表与迁移前**逐行完全一致**（152/102/81 行） |
-| B 文档一致性 | PASS（1 处行号陈旧，已修） | §7.1.3 两情形、§7.1.4 锚定与 `3320` 模板侧补授均与代码一致；行号 `:62-101`/`:77-78` 已更新为落地后的实际行号 |
+| B 文档一致性 | PASS（1 处行号不精确，已修） | §7.1.3 两情形、§7.1.4 锚定与 `3320` 模板侧补授均与代码一致；行号已按落地代码更新为 `:119-160` / `:130-131` |
 
-**复核者额外发现、本文已处置：** ① A 的启动崩溃回归（已修）；② K2 防孤儿无门禁覆盖（已补 `orphanGuardMustBeGrantedForEveryModule` + M5/M6 变异）；③ `MENU_INSERT` 靠"位置形状"识别菜单、段过滤只认 `32xx/33xx`、`code.split(";")` 遇含分号字面量会切坏 —— 均为**已知潜在边界**，当前数据无触发，记为后续加固项；④ `docs/DEPLOY-UI.md` 的 19001 端口漂移仍在（既有问题，本轮不改，见 §8.4）。
+**复核者额外发现、本文已处置：** ① A 的启动崩溃回归（已修 + 复验 PASS）；② K2 防孤儿无门禁覆盖（已补 `orphanGuardMustBeGrantedForEveryModule` + M5/M6 变异，复验 PASS）；③ M7「尾部改成空操作」无覆盖（已把 WHERE 尾部纳入断言）；④ `MENU_INSERT` 靠"位置形状"识别菜单、段过滤只认 `32xx/33xx`、`code.split(";")` 遇含分号字面量会切坏、授权只认 `id IN (...)` 写法 —— 复核者评定**均不构成本轮阻塞**（当前数据无触发，且失败形态是 fail-loud 而非静默假绿），记为后续加固项；⑤ `docs/DEPLOY-UI.md` 的 19001 端口漂移仍在（既有问题，`deploy/ui-up.sh:25`/`docker-compose.yml:354` 的默认值同为 19001，建议单独 PR 对齐；本轮不改，见 §8.4）。
 
 **复核者未核实：** `mixed-nav` 的真实浏览器渲染/顶栏溢出/点击（需浏览器，本机禁止全量构建）——仍需用户在浏览器确认。
 
