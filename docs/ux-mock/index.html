@@ -696,7 +696,8 @@ function viewProducts(){
 
 /* ---------- 5.4 产品详情（含物模型编辑器） ---------- */
 function viewProductDetail(){
-  const p = prod(state.id) || DB.products[0];
+  /* 同 viewDeviceDetail：显式 find 兜底，避免无效 id 渲染空白页 */
+  const p = DB.products.find(x => x.id === state.id) || DB.products[0];
   const tab = state.prodTab || 'model';
   const devs = DB.devices.filter(d => d.productId === p.id);
   const allProps = p.services.reduce((a,s)=>a.concat(s.properties),[]);
@@ -944,7 +945,9 @@ function viewDevices(){
 
 /* ---------- 5.6 设备详情 ---------- */
 function viewDeviceDetail(){
-  const d = dev(state.id) || DB.devices[0];
+  /* 注意：dev()/prod() 找不到时返回 {}（truthy），所以这里必须显式 find 再兜底，
+     否则 #/devices/<无效 id> 会渲染出一个空白详情页，而不是回落到第一台设备。 */
+  const d = DB.devices.find(x => x.id === state.id) || DB.devices[0];
   const p = prod(d.productId);
   const allProps = p.services ? p.services.reduce((a,s)=>a.concat(s.properties),[]) : [];
   const tab = state.devTab || 'overview';

@@ -19,9 +19,9 @@
    后端已有 `15` 个 IoT 控制器、`18` 张实体表；前端只做了 **4 个列表页 + 6 个模块组件（含 3 个功能抽屉）**，
    连 `productId` 都从未在任何一个视图里被赋值或展示 —— 所以「产品/设备/物模型看不出关联」不是感觉，是**代码事实**。
 
-2. **菜单其实「孤立」得比看上去更严重：SQL 里已经准备好了 14 个能力权限码，却只有 4 个页面。**
-   `deploy/sql/007-iot-data.sql` 已经写入 `iot:point:*`、`iot:shadow:*`、`iot:tag:*`、
-   `iot:product:tsl-import/export`、`iot:availability:get`、`iot:series:get`、`iot:ledger:*` 等权限，
+2. **菜单其实「孤立」得比看上去更严重：SQL 里已经准备好了 16 个能力权限码，却只有 4 个页面。**
+   `deploy/sql/007-iot-data.sql` 已写入 `iot:point:*`(4)、`iot:shadow:*`(2)、`iot:tag:*`(4)、
+   `iot:product:tsl-import/export`(2)、`iot:availability:get`(1)、`iot:series:get`(1)、`iot:ledger:*`(2) —— **共 16 个**，
    并按「挂为设备菜单 3200 下的按钮」处理（注释原文：「挂一个点不开的页面菜单才是更差的体验」）。
    **这些权限码在前端视图里出现次数为 0** —— 权限树里有一堆点不开的按钮。
 
@@ -58,12 +58,30 @@
 | G11 | **无 TSL 版本差异对比** | 有 `POST /iot/products/{id}/draft`、`/{id}/publish`、`GET /{id}/versions`，**无 diff 接口** | 产品详情「版本」页签 | **P2** |
 | G12 | **`iot_device.shadow_json` 是死列** | DDL 与实体都有该列，但 `grep shadow_json\|shadowJson` **除 DDL 注释与实体字段外零命中** —— 与 `iot_shadow` 表语义重复 | 影子实现取舍（需明确，否则双写/双读混乱） | **P2** |
 
-### 0.3 附带发现（不影响本轮交付，但应记录）
+### 0.3 基线说明与一条**已更正**的早期判断
 
-- **`sys_menu` 3204（「IoT 平台」父目录）不在仓库 SQL 里。**
-  `grep -rn "3204"` 在 `ypbin-iot`、`ypbin-iot-ui`、`ypbin-admin` 三仓只命中 `docs/DEMO-DATA.md` 的说明文字；
-  `deploy/sql/007-iot-data.sql` 里 `3200/3201/3202/3203` 仍是 `pid=0` 的**顶级菜单**。
-  而 `ypbin-iot-ui` 的提交 `7d66907` 明确写「后端 `sys_menu` id=3204」。⇒ **活库与仓库 SQL 已漂移，缺少可重放的迁移脚本。**
+> ⚠️ **本节是一处自我更正记录，保留它是为了让读者知道「文档里的结论被独立复核修正过」。**
+
+**基线**：本方案的全部仓内事实，已于 **2026-09-25** 在 `origin/main`（`ypbin-iot` @ `4aebb95`、
+`ypbin-iot-ui` @ `b067f41`）上**逐条重跑核验**。初稿曾基于一个**过期基线**（从 `docs/iot-demo-data-guide`
+分支切出，落后 `main` 2 个提交），由此产出了一条**错误结论**。
+
+| 项 | 初稿（错误） | **实际情况（已在 main）** |
+|---|---|---|
+| `sys_menu` id=3204「IoT 平台」父目录 | 「不在仓库 SQL 里；活库与仓库 SQL 已漂移；缺可重放迁移脚本；空库装不出该目录」 | **已由 PR #39 落在 `main`**：`deploy/sql/007-iot-data.sql` 第 154–173 行新增 `VALUES (3204, 0, 'IotPlatform', 'catalog', 0, '/iot', 'BasicLayout', NULL, 'page.iot.title', 'carbon:iot', 6, …)`，并 `UPDATE sys_menu SET pid = 3204 WHERE id IN (3200,3201,3202,3203)`；同时落在 `sys_role_menu` 与 `sys_template_menu` 两张授权表；**可重放迁移脚本为 `deploy/sql/migration/2026-09-25-iot-menu-group.sql`**。 |
+
+**更正后的结论**：菜单归并（把 4 个 IoT 页面收进一级目录「IoT 平台」）**已经完成且有可重放脚本**，
+本方案**不需要**再为此建任何东西。
+
+**但本方案的 IA 建议仍然有效，且与 #39 是两件事**：
+#39 只做了「**加一层父目录**」（3200–3203 由顶级变为 3204 的子菜单，层级形态 `type=catalog` + `component=BasicLayout`）；
+本方案要做的是「**在 3204 之下再分五组二级目录**」（接入配置 / 设备管理 / 运维中心 / 数据与调试 / 系统），
+并为 3200 之外的新页面（产品详情、设备详情、健康总览、模板中心…）建菜单项。
+即：**#39 解决的是「有没有一个总入口」，本方案解决的是「进去之后按什么顺序走」**。
+
+**教训（已记入 §10.2 R10）**：切分支做调研前必须先 `git fetch origin main` 并确认基线，
+否则「检索不到」会被误读成「不存在」——**这是 R1 意义上最危险的错误类型：把基线的局限当成事实**。
+
 
 ---
 
@@ -77,6 +95,18 @@
 - **访问日期**：**2026-09-25**（如无特别说明，第 2 节所有引用均为该日访问）。
 - **标注格式**：`[来源性质 | URL | 访问日期]`。
 - **未核实即声明**：凡未能由官方文档证实的，一律标注「未核实」，**不臆造界面截图、按钮文案与 tab 名称**。
+
+**代码基线（重要）**：本文所有「仓内实际」断言，均以 **`origin/main`** 为准，并已逐条重跑核验：
+
+| 仓 | 基线 | 核验日期 |
+|---|---|---|
+| `ypbin-iot`（后端） | `origin/main` @ `4aebb95`（含 PR #39 菜单归并、#40 演示数据文档） | 2026-09-25 |
+| `ypbin-iot-ui`（前端） | `origin/main` @ `b067f41` | 2026-09-25 |
+
+> ⚠️ 初稿曾基于一个**落后 main 2 个提交**的分支切出，由此产出一条**错误结论**（关于 `sys_menu` 3204）。
+> 该结论已更正，完整记录见 **§0.3**，教训见 **§10.2 R10**。凡本文出现「不存在 / 缺接口」的判断，
+> 均已在 `origin/main` 上用 `git grep … origin/main -- <path>` 复核（而非仅 grep 本地工作树）。
+
 
 ### 1.2 来源性质说明（重要，影响结论强度）
 
@@ -108,7 +138,7 @@
 
 | 平台 | 主线（信息架构主干） | 物模型怎么建模 | 产品 ↔ 设备怎么关联 | 新手引导 / 模板 | 设备详情页区块 |
 |---|---|---|---|---|---|
-| **阿里云 IoT** | 官方快速入门 **6 步**：创建企业版实例 → 创建产品和设备 → 设备接入和上报数据 → 数据转发到表格存储 → 服务端订阅 → 云端下发指令。「定义物模型」**嵌在第 2 步内部**。[1] | TSL = **模块下的平级三元**：产品 → 模块（默认/自定义，≤20）→ `properties` / `services` / `events`。属性有 `identifier`/`accessMode(r,rw)`/`dataType.specs`；服务有 **`callType(sync/async)`** + `inputData`/`outputData`；事件有 **`type(info/alert/error)`** + `outputData`。[2][3] | 产品 = 同型号设备集合，设备继承产品功能。设备证书 = **ProductKey + DeviceName + DeviceSecret**；一机一密（官方"推荐"）vs 一型一密（预注册/免预注册，有泄露风险）。[4][5] | 官方**文档区**有「快速入门」+「学习路径图」（6 模块）；**控制台内是否有引导向导：未核实**。模板 =「**所属品类**」（文档标注"相当于产品模板"），标准品类预定义功能，分**必选/可选**。[6] | **〔文档所述〕10 个区块**：设备信息 / Topic列表 / **物模型数据**（运行状态·事件管理·服务调用）/ **设备影子** / 文件管理 / 日志服务 / **在线调试** / 子设备管理 / **分组** / 任务。[7] |
+| **阿里云 IoT** | 官方快速入门 **6 步**：创建企业版实例 → 创建产品和设备 → 设备接入和上报数据 → 数据转发到表格存储 → 服务端订阅 → 云端下发指令。「定义物模型」**嵌在第 2 步内部**。[1] | TSL = **模块下的平级三元**：产品 → 物模型模块 → `properties` / `services` / `events`。属性有 `identifier`/`accessMode(r,rw)`/`dataType.specs`；服务有 **`callType(sync/async)`** + `inputData`/`outputData`；事件有 **`type(info/alert/error)`** + `outputData`。[2][3] ⚠️ **模块数上限官方两页不一致**：英文 `add-a-tsl-feature` 写「不能超过 **20**」，中文 `what-is-a-tsl-model` 写「总个数不能超过 **200**」（批量导入另有 ≤1 默认 + ≤9 自定义的限制）—— **如实并列，不取其一**（详见 §2.2） | 产品 = 同型号设备集合，设备继承产品功能。设备证书 = **ProductKey + DeviceName + DeviceSecret**；一机一密（官方"推荐"）vs 一型一密（预注册/免预注册，有泄露风险）。[4][5] | 官方**文档区**有「快速入门」+「学习路径图」（6 模块）；**控制台内是否有引导向导：未核实**。模板 =「**所属品类**」（文档标注"相当于产品模板"），标准品类预定义功能，分**必选/可选**。[6] | **〔文档所述〕10 个区块**：设备信息 / Topic列表 / **物模型数据**（运行状态·事件管理·服务调用）/ **设备影子** / 文件管理 / 日志服务 / **在线调试** / 子设备管理 / **分组** / 任务。[7] |
 | **华为云 IoTDA** | 创建产品 →（开发产品模型 → 开发编解码插件）→ 在线调试 → 注册设备。快速入门编号步骤数**未核实**（HTML 页 404）。[8] | 官方术语是「**产品模型 Product Model**」= 产品信息 + **服务能力**（服务 → 属性 / 命令）。属性有数据类型（int/long/decimal/string/dateTime/jsonObject/enum/boolean/stringList）、**访问权限（可读/可写）**、范围、步长、单位；命令有下发参数与**响应参数**。**「事件」未被列为构成要素**。[9][10] | 设备「归属于某个产品下的设备实体」，注册后即使用控制台定义的产品模型 ⇒ **继承**。鉴权支持**密钥与 X.509 两种**。[8][11] | 有平台预置模板：「**导入库模型**（标准模型 + 厂商模型）」；共 **4 种**开发方法（自定义在线开发 / 上传模型文件 / Excel 导入 / 导入库模型）。[8][10] | 官方可核实到的区块：**设备影子**、**消息跟踪**、**群组**、**标签**。命令下发/OTA/运行日志仅列为平台级能力，**完整 tab 排布未核实**。[12][13] |
 | **腾讯云 IoT Explorer** | **明确 6 步**：新建产品 → 定义物模型 → 创建设备 → 查看设备 → 模拟设备调试 → 查看设备状态。[14] | 物模型 = **属性 / 事件 / 行为**（**「行为」取代了「服务」**，含请求参数 + 返回参数，设备须 **5 秒内响应**）。事件类型 = **信息 / 告警 / 故障**；属性**读写 / 只读**。标识符产品内唯一。[15][16] | 平台按**设备三元组**（产品ID、设备名称、设备密钥）自动计算「设备连接参数」供复制。认证方式可选证书认证 / 密钥认证。[17] | 有 **6 步**编号快速入门 + 「快速入门总览」目标导航页。模板能力 = **导入物模型 JSON（覆盖式）**，官方警告量产产品慎用；**「一键创建产品模板」无一手证据**。[15][14] | 官方可核实区块：**物模型数据（属性/事件/行为）**、**云日志**（内容日志、上下线日志）、设备标签、设备连接参数。**完整 tab 排布未核实**。[16][18] |
 | **AWS IoT Core** | 以 API/CLI 为主线；控制台是**线性向导**：Connect → Connect one device → Register and secure → 下载 connection kit → 跑示例 → MQTT test client（Quick connect 5 步，15–20 分钟）。[19] | **无强制物模型层**（推断，非官方原句）。建模能力分散在：thing type `attributes`、Device Shadow、**IoT SiteWise asset model**（measurement/transform/metric/attribute/hierarchy，不能嵌 asset model，需 component model）、**TwinMaker** entity/component/knowledge graph（PartiQL）。**AWS IoT Things Graph 已停服**。[20][21][22] | thing = registry 条目（**不建 thing 也能连设备**）→ thing type（**可选**；无 type 上限 3 attributes，有 type 上限 50；一个 thing 只能一个 type）→ thing group（静态可嵌套 / 动态查询驱动）。一个 thing 最多属 **10** 组。[20][23][24] | 4 条并行入口（Quick connect / Interactive / Hands-on / MQTT messages）；官方提示重复做 tutorial 前要先删上次建的 thing。**thing name 创建后不可改**。[19][25] | **官方文档未描述 thing 详情页 tab → 未核实。** 文档确实存在的功能点：证书/principal、影子、Jobs、Device Defender、连接状态、策略与有效权限。[23][26] |
@@ -121,7 +151,16 @@
 
 ### 2.2 逐平台要点补充
 
-**阿里云 IoT —— 与本方案直接相关的三个细节**
+**阿里云 IoT —— 与本方案直接相关的四个细节**
+
+0. **⚠️ 先记一处「官方自相矛盾」**：物模型**模块数上限**在阿里云自己的两页里不一致 ——
+   英文 `add-a-tsl-feature` 原文 `The sum of the number of default modules and the number of custom modules in each product cannot exceed 20.`（**20**），
+   中文 `what-is-a-tsl-model` 原文「每个产品中默认模块和自定义模块总个数不能超过**200**个」（**200**）；
+   同一中文页的批量导入限制又写「最多包含 **1** 个默认模块物模型文件，**9** 个自定义模块物模型文件」。
+   → **本方案不取其一，如实并列**；该数字**不影响任何 IA 结论**（我方根本没有模块层）。
+   两页均由本人于 2026-09-25 实际抓取：
+   [一手官方 | https://help.aliyun.com/zh/iot/user-guide/what-is-a-tsl-model | 2026-09-25] ·
+   [一手官方 | https://www.alibabacloud.com/help/en/iot/user-guide/add-a-tsl-feature | 2026-09-25]
 
 1. **点位映射在「产品级」**：属性的「**扩展信息 Extended Information**」用于「指定连接协议与设备标准 TSL 模型的映射」；
    选 Modbus 时要在**属性**上配置操作类型（离散输入/线圈/保持寄存器/输入寄存器及其读写下标）、
@@ -346,7 +385,7 @@ EMQX Dashboard 的一等实体是 **Client**（含尚未过期的会话），**�
 | 检查项 | 实际结果 |
 |---|---|
 | 前端 IoT 视图文件 | 只有 `devices/`、`products/`、`groups/`、`maintenance/` 四个目录，共 **10 个 `.vue`**（4 个 `index.vue` 列表页 + 6 个 `modules/*.vue`） |
-| 菜单 SQL 中已有的 IoT 权限码 | `320001-320017` 等共 **28 个按钮权限**（`type='button'` 计数）+ 4 个 `type='menu'`，覆盖 point/shadow/tag/tsl/availability/series/ledger |
+| 菜单 SQL 中已有的 IoT 权限码 | **28 个 `type='button'`**：设备菜单 3200 下 **17 个**（`320001-320017`，含 point 4 / shadow 2 / tag 4 / ledger 2 / availability 1 / series 1 / device create-delete-update 3）+ 产品 3201 下 **6 个**（`320101-320106`，含 tsl 2）+ 分组 3202 下 **3 个** + 维护 3203 下 **2 个**；另有 **4 个 `type='menu'`**（3200/3201/3202/3203）。覆盖 point / shadow / tag / tsl / availability / series / ledger |
 | 前端视图里这些权限码的出现次数 | **全部为 0** |
 
 具体验证命令与输出见附录 A.2。结论：**权限树里有一批「点不开的能力」**，
@@ -436,10 +475,12 @@ api/iot/device.ts:34:    productVersion?: string; ← 仅类型声明
 
 > 全部挂在现有顶级目录「IoT 平台」（`sys_menu` id=**3204**）之下。
 > 「来源」列：**复用** = 现有页面/接口直接用；**新增页** = 需新建页面（接口已就绪）；**新增接口** = 后端需补能力。
-> `menu id` 为**建议值**（现有已占用 3200–3204、320001–320017、3201xx、3202xx、3203xx）。
+> `menu id` 为**建议值**。仓库**已占用**：`3200-3203`（4 个页面菜单）、`3204`（#39 新增的父目录）、
+> `320001-320017`、`320101-320106`、`320201-320203`、`320301-320302`。
+> 本方案新提议的 `3210 / 3220 / 3230 / 3240 / 3250` 与各页面项**均未被占用**（建议实现前再按仓库注释的做法查一次活库 `sys_menu` 的 3000–3400 区间）。
 
 ```
-IoT 平台 (3204)                                     ← 顶级目录（⚠️ 该行不在仓库 SQL 中，见 §0.3）
+IoT 平台 (3204)                                     ← 顶级目录（✅ 已在 main：PR #39 + migration 2026-09-25-iot-menu-group.sql）
 │
 ├── 🚀 起步
 │   └── 接入向导                    /iot/onboarding        [新增页]   三步引导 + 空态（无需权限码，所有角色可见）
@@ -1030,7 +1071,7 @@ flowchart TD
 | P0-7 | **产品详情页 5 页签骨架 + 物模型编辑器**（服务 → 属性/命令/事件 CRUD） | 前端·新页 | **零后端改动**：`IotThingModelController` 的 services/properties/commands/events 端点全部已存在 | 新增 `views/iot/products/detail/**` 与 `api/iot/thingmodel.ts`；能增删改属性/命令/事件 |
 | P0-8 | **「从产品一键添加设备」** | 前端·改 | 跳设备台账并带 `?productId=` 预筛（P0-5 就绪后） | 产品列表行内与产品详情右上各有该按钮 |
 | P0-9 | **接入向导 / 空态页（三步）** | 前端·新页 | 复用产品与设备的新增流程；**模板可先用前端内置静态 JSON** | 无产品/无设备时健康总览与设备台账都显示该入口 |
-| P0-10 | **菜单 SQL 补 3204 父目录 + 新分组目录（3210/3220/3230/3240/3250）并修正顺序** | DB·迁移 | 新增迁移脚本（**⚠️ 3204 当前只存在于活库，仓库无脚本**）；`sort` 改为「配置 < 设备 < 运维 < 数据 < 系统」 | 提供可重放脚本；空库执行后菜单树与 §4.1 一致 |
+| P0-10 | **菜单 SQL 新增 5 个分组目录（3210/3220/3230/3240/3250）与新页面菜单项，并修正 `sort` 顺序** | DB·迁移 | ✅ 3204 父目录**已存在**（PR #39 + `migration/2026-09-25-iot-menu-group.sql`），**不需要重建**；本项只新增分组目录与页面项。`sort` 改为「配置 < 设备 < 运维 < 数据 < 系统」（修正现状「设备 sort=6 排在产品 sort=7 之前」的倒置） | 新增迁移脚本；执行后菜单树与 §4.1 一致；**注意 `IotMaintenanceAdminGateTest` 会校验 32xx 菜单必须同时被 `sys_role_menu` 与 `sys_template_menu` 覆盖** |
 | P0-11 | **设备台账行操作改以「详情」为主入口**，可用率/历史曲线保留为快捷入口 | 前端·改 | 零后端改动 | 操作列首项为「详情」 |
 
 ### 9.2 P1 —— 让「数据 → 运维」闭环，并补齐物模型缺口
@@ -1075,6 +1116,24 @@ flowchart TD
 「看不出关联、不知道从哪下手」这两个最痛的问题，**主要靠前端信息架构就能解决**；
 真正需要后端投入的是「在线调试」「事件告警」「日志」三块**新增能力**。
 
+### 9.5 只改前端即可先落地的 P0 界面清单（建议作为第一批迭代）
+
+> **不需要等后端排期**。以下 6 项所需的接口**今天就能调用**（已由独立复核逐条核对源码位置与权限码，见 §11）。
+> 建议**第一批就做这 6 项**，因为它们直接消灭「菜单孤立 / 看不出关联 / 不知道从哪下手」三个最痛的问题。
+
+| 序 | 界面 | 复用哪些已就绪接口 | 解决的现状问题 | 依赖 |
+|---|---|---|---|---|
+| **F1** | **设备详情页骨架 + 4 个区块**（概览 / 属性与点位 / 历史曲线 / 设备影子） | `GET /iot/devices/{id}/points`、`/series`、`/shadow`、`/availability`（4 个全就绪） | 「看不出关联」（属性↔点位并排）＋「没引导」（有下一个动作） | ⚠️ 「概览」里的最新值需 P0-6；**可先只放设备信息 + 可用率 + 主曲线，最新值留空位** |
+| **F2** | **产品详情 5 页签 + 物模型编辑器**（服务 → 属性/命令/事件 CRUD） | `IotThingModelController` 全套（services / properties / commands / events）+ `POST /products/{id}/publish` | 「菜单孤立」（物模型终于有页面）＋「表单堆叠」（从平面表单变三层结构化） | 无 |
+| **F3** | **维护窗口列表把 `deviceId` 显示成设备名** | `getDeviceOptions()`（已就绪） | 「看不出关联」最直观的一处（现在是裸雪花 ID） | 无 —— **改动量最小、收益最直接，建议第一个做** |
+| **F4** | **设备分组成员管理**（穿梭框） | `GET\|POST /iot/groups/{id}/members`、`DELETE .../members/{memberId}`（3 个全就绪） | 分组目前**只能靠直接改库维护成员** | 需在 `api/iot/group.ts` 补导出函数 |
+| **F5** | **租户接入台账页面** | `GET /iot/tenant-ledger`、`PUT /iot/tenant-ledger/{tenantId}/assignable`（就绪，`platform_only=1`） | 权限码挂在设备菜单下却无页面（「点不开的按钮」） | 无 |
+| **F6** | **接入向导 / 空态页**（三步 + 模板卡片） | 复用 F2 的产品创建与物模型接口；模板**先用前端内置静态 JSON** | 「普通用户不知道从哪下手」 | 无（模板后端化可延后到 P1-11） |
+
+**为什么这 6 项不需要后端**：它们要么只读已有端点（F1/F3/F4/F5），要么只调用已实现的物模型写接口（F2/F6）。
+唯一例外是 F1 的「最新值」与「事件数」两个小卡片 —— 方案里明确允许**先留空位并在 UI 上标注「待接入」**，
+不要为了填满这两个格子而把整页卡住。
+
 ---
 
 ## 10. 未核实与风险（R8）
@@ -1090,8 +1149,12 @@ flowchart TD
 | U5 | AWS「**无强制物模型层**」 | **推断**，非官方原句 | 已在 §2.1 与 §2.2 明确标注为推断 |
 | U6 | 腾讯云是否有**设备分组** | 8 个已核实页面中不存在 | §2.1 标「未核实」，不作为对标依据 |
 | U7 | `iotda-product-model-report.md`（仓内既有报告）引用的官方页面 | **本轮未逐一重访** | 该报告仅用于「我方 TSL 与 IoTDA 同构」的**辅助**论证，主论证由本轮一手抓取的阿里云 TSL 结构承担 |
-| U8 | 活库 `sys_menu` 的实际菜单树 | **本轮未连生产库**（凭据纪律：不取用口令） | §0.3 的「3204 不在仓库 SQL 里」基于**三仓源码检索**得出，非查库结论 |
+| U8 | 活库 `sys_menu` 的实际菜单树 | **本轮未连生产库**（凭据纪律：不取用口令） | §0.3 的 3204 结论已改为**基于 `origin/main` 的 SQL 文本核验**（非查库）；活库与 main 是否一致**未核实** |
 | U9 | 原型 `docs/ux-mock/index.html` 的**视觉还原度** | 手写 CSS，非 vben/antd 组件库 | 仅表达 IA 与交互意图，**组件外观不保证一致** |
+| U10 | **ThingsBoard 的全部主张**（9 个 tab / Attributes 无历史 / Client-side attributes 不可从 UI 改 / 关系 type 自由文本且无时间戳） | 由研究子代理抓取成功（Astro SSR、需从 `<main>` 提取）；但**独立复核者重抓时正文为空、`.md` 返回 404 → 复核者未能复现** | 该平台在本方案中**只作旁证**（§2.2 用于印证「最新值无历史」与「通用关系表」两点），**不承担任何设计结论**。若要据此做决策，需重新抓取核实 |
+| U11 | **阿里云「发布前查看差异 / View Differences」** | 复核者在其抓取的中文页中该段落被截断，**未能核实**；但**本文作者在英文页 `add-a-tsl-feature` 上实际抓到该流程原文**（"Click **View Differences**… view the differences between the versions…Confirm"） | 作为 G11（补 diff 接口）的对标依据**成立**，但来源是**英文页**；若需中文页佐证请自行复核 |
+| U12 | **阿里云属性「扩展信息」里的 Modbus 明细字段** | 复核者抓取的中文页在「扩展描述」处截断 → **未能核实**；**本文作者在英文页实抓到完整字段表**（Operation Type / Register Address `0x0~0xFFFF` / Original Data Type / Bit Position / **Scale Factor** / Switch High Byte and Low Byte / Switch Register Bits Sequence / Data Report） | 作为 G4（点位映射层级差异）的**核心承重论据**，来源为**英文页**；建议实现前再复核一次中文页是否已同步 |
+| U13 | 阿里云**模块数上限** | 官方**两页自相矛盾**：英文 `add-a-tsl-feature` 写「不能超过 **20**」，中文 `what-is-a-tsl-model` 写「总个数不能超过 **200**」（批量导入另有 ≤1 默认 + ≤9 自定义） | 本方案**不取其一**，已在 §2.1/§2.2 如实并列；该数字**不影响任何 IA 结论**（我方无模块层） |
 
 ### 10.2 风险（主动提示，不等被问）
 
@@ -1106,9 +1169,52 @@ flowchart TD
 | R7 | **点位模板引入后语义混乱** | P1-10 未明确「模板 vs 覆盖」优先级 | 必须定义清楚：模板是**默认值快照**还是**持续绑定**？建议「快照 + 可覆盖」，并在 UI 上标出「该点位已被设备级覆盖」 |
 | R8 | **物模型加字段破坏 TSL 导入导出兼容** | P1-8 加 `eventType`/`callType`/`description` 但没同步改 `TslEvent`/`TslService`/`TslProperty` | 加字段必须**同时**改实体、DTO、TSL 映射与导入校验，否则**导入的 TSL 会静默丢字段**（比报错更危险） |
 | R9 | **凭据泄露** | P2-2 实现时把凭据写进日志/前端存储 | 明文凭据**不入日志、不入前端持久化**；一次性展示 + 重置语义；沿用「`credential_ref` 不透明引用」的既有设计意图 |
-| R10 | **菜单 SQL 与活库继续漂移** | P0-10 不补 3204 迁移脚本 | 任何新环境（或空库重建）都装不出「IoT 平台」父目录。**这是本轮发现的既有缺陷，建议优先补** |
+| R10 | **在过期基线上做调研，把「检索不到」误读成「不存在」** | 切分支后未 `git fetch origin main` | **本项目已实际发生一次**（见 §0.3）：初稿曾断言「`sys_menu` 3204 不在仓库 SQL 里、缺可重放迁移脚本」，实际 PR #39 早已合并。**规则**：任何「仓内不存在 X」的结论，必须先 `git fetch` 并 `git log HEAD..origin/main` 确认为 0，再下断言；把基线 SHA 写进文档 |
 | R11 | **强物模型约束在 UI 上不可见** | P0-2 只加了产品下拉但没说明「为什么只有已发布产品」 | 下拉里必须给出「只列已发布产品」的原因，并提供「去创建/发布产品」的入口，否则用户会认为下拉「少数据」 |
 | R12 | **IoTDB 时序不被保留策略覆盖** | 用户在「数据保留与清理」设了 396 天就以为全清了 | P1-7 必须把「清什么、不清什么」写在页面上（当前清理器**只清 MySQL 的断档与维护窗口**，不清时序） |
+
+---
+
+## 11. 独立复核结论（R6）
+
+> 本节由**独立复核子代理**产出（不同上下文、只读、自行跑命令与抓网页、不继承作者结论）。
+> 原始判定为 **FAIL**，原因是文档（初稿）存在若干**不实断言**；下表列出全部问题与处理结果。
+> **复核者同时确认：三项承重结论全部成立** ——
+> ①「复用现有接口」9 组断言与源码逐条一致；② 缺口 G1–G12 **全部 12 条**成立；
+> ③ 原型离线可开、无外链、可渲染（复核者自建 DOM 桩实跑 **45 次渲染、0 失败**）。
+
+### 11.1 复核发现的问题与处理（全部已修）
+
+| # | 严重度 | 复核者发现 | 我的核实 | 处理 |
+|---|---|---|---|---|
+| 1 | 重要 | §0.1 写「**17** 个 IoT 控制器」，与本文档附录 A.1 的「15」**自相矛盾** | 实测 **15**（`ls controller/*.java \| wc -l` = 15） | ✅ **已改 15**（复核者读到的是更早快照；现文已一致） |
+| 2 | 重要 | §2.1 阿里云「模块 ≤**20**」与其自引官方页原文「不能超过 **200** 个」冲突 | **两页真的冲突**：英文 `add-a-tsl-feature` 写 20、中文 `what-is-a-tsl-model` 写 200（我已亲自 `web_fetch` 复核中文页原文） | ✅ **改为如实并列两页数值 + 标注矛盾**，不取其一（见 §2.1 / §2.2 / U13） |
+| 3 | 次要 | §0.1「SQL 里准备好了 **14** 个能力权限码」——同句列举实为 **16** | 逐项相加 = 4+2+4+2+1+1+2 = **16** | ✅ **已改 16** 并列出各项计数 |
+| 4 | 次要 | §3.1「共 **11** 个 `.vue`」 | 实测 **10** | ✅ **已改 10**（并注明 4 个 `index.vue` + 6 个 `modules/*.vue`） |
+| 5 | 次要 | §3.1「`320001-320017` 共约 **24** 个按钮权限」——该区间恰 17 个，且 tsl 码不在区间内，句子自相矛盾 | 全文件 **28** 个 button；区间 320001-320017 = 17 个 | ✅ **已改为精确拆分**：3200 下 17 + 产品 6 + 分组 3 + 维护 2 = 28 |
+| 6 | 次要 | 「4 个列表页 + **3 个抽屉**」与实测 6 个 `modules/` 组件口径不一 | 实测 6 个（4×form.vue + availability.vue + series.vue） | ✅ **已改为「4 个列表页 + 6 个模块组件（含 3 个功能抽屉）」** |
+| 7 | 提示 | §4.1 注「现有已占用 3200–**3204**」与 §0.3 的「3204 只存在于活库」口径冲突 | 3204 **已在 main**（#39），故「已占用」成立，但需与 §0.3 对齐 | ✅ **已重写**：明确列出仓库已占用的全部 id 段，并说明新提议 id 未被占用 |
+| 8 | 提示 | 附录 A.3 的 G1 命令用 `grep -iv writer` 把 `RedisLatestValueWriterTest` 一并滤掉，**口径略糙** | 属实（该测试文件也命中 `iot:latest`），但**结论不变**（测试文件不构成读取接口） | ✅ **已改为精确命令**（只排除主类名、并显式检查是否存在 `opsForHash` 读操作），见 A.3 |
+
+### 11.2 复核者未能复现、但本文有更早一手证据的两处（已在 §10.1 记为 U11/U12）
+
+- **阿里云「View Differences」** 与 **Modbus 扩展信息明细字段**：复核者抓取的中文页在相应段落前被截断；
+  本文作者在**英文页** `add-a-tsl-feature` 上实抓到完整原文（含 `View Differences` 全流程与
+  `Operation Type` / `Register Address` / `Scale Factor` / 字节序交换等字段表）。
+  → 结论**保留**，但来源明确记为**英文页**，且已列入待复核项。
+
+### 11.3 复核者另有一条**未能核实**（已影响本方案的引用强度）
+
+- **ThingsBoard 的全部主张**：复核者 `web_fetch` 该站正文为空（Astro 未渲染）、`.md` 返回 404，**未能复现**。
+  该平台在本方案中**只作旁证**（印证「最新值无历史」与「不引入通用关系表」两点），**不承担设计结论**。
+  已在 §10.1 U10 显式标注。
+
+### 11.4 复核后的判定
+
+复核者原判定 FAIL 的**全部 8 条问题均已修正**（其中 2 条为「如实并列冲突来源」而非「改成单一值」）。
+修正后：**① 接口复用 9/9 一致、② 原型离线可渲染、③ 缺口 G1–G12 12/12 成立、④ 设计取舍无事实性问题**。
+需要读者注意的是：**初稿的失败模式是「辅助计数与厂商细节失真」，不是「设计结论造假」** ——
+这也正是本方案把「事实核验命令与输出」单列为附录 A 的原因：**让每个数字都可被复算**。
 
 ---
 
@@ -1177,9 +1283,21 @@ api/iot/device.ts:34:    productVersion?: string;
 
 ```bash
 # G1 最新值只写不读
-$ grep -rn "KEY_PREFIX\|iot:latest" --include=*.java ypbin-service/ypbin-iot/src/main/java | grep -iv writer
+# 步骤 1：确认唯一写路径（输出省略 writer 实现细节）
+$ grep -rn "opsForHash" --include=*.java ypbin-service/ypbin-iot/src/main/java
+ypbin-service/ypbin-iot/src/main/java/cn/ypbin/admin/iot/values/RedisLatestValueWriter.java:86:
+        redisTemplate.opsForHash().putAll(entry.getKey(), entry.getValue());
+# ⇒ 全仓唯一一处 Redis 哈希操作，且是「写」（putAll）
+# 步骤 2：确认没有任何读取（putAll 之外的 hash 读 API 一律为零）
+$ grep -rn "opsForHash\(\)\.\(get\|entries\|multiGet\|keys\|values\|size\|hasKey\)" \
+    --include=*.java ypbin-service/ypbin-iot/src/main/java ypbin-service-api/ypbin-iot-api/src/main/java
 （无输出）
-# ⇒ 除 RedisLatestValueWriter 外无任何命中；无读取端点
+# 步骤 3：确认没有对外读取端点
+$ grep -rln "iot:latest\|KEY_PREFIX" --include=*.java ypbin-service/ypbin-iot/src/main/java/cn/ypbin/admin/iot/controller/
+（无输出）
+# ⇒ G1 成立：最新值只有写路径（RedisLatestValueWriter），既无读取代码也无读取端点。
+#   注：测试文件 RedisLatestValueWriterTest 也会命中「iot:latest」，但它不构成读取接口；
+#   上面的命令不再用 `grep -iv writer` 这种「按文件名过滤」的糙口径，改为按「Redis 读 API 是否存在」判定。
 
 # G2 影子 reported 无生产写入方
 $ grep -rn "setReported" --include=*.java . | grep -v target
@@ -1215,24 +1333,50 @@ $ ls ypbin-service/ypbin-iot/src/main/java/cn/ypbin/admin/iot/controller/ | grep
 # ⇒ 只有定时任务，无 Controller
 ```
 
-### A.4 菜单 SQL 与 3204 漂移
+### A.4 基线核对（含一处**已更正**的早期错误结论）
+
+**第一步：先确认基线是否最新**（初稿漏了这一步，导致一条错误结论）：
 
 ```bash
-$ grep -rn "3204" --include="*.sql" --include="*.md" --include="*.json" --include="*.ts" \
-    --include="*.vue" --include="*.java" ypbin-iot ypbin-iot-ui ypbin-admin | grep -v node_modules | grep -v /target/
-ypbin-iot/docs/DEMO-DATA.md:239:#       DELETE FROM sys_role_menu WHERE menu_id=3204;
-ypbin-iot/docs/DEMO-DATA.md:240:#       DELETE FROM sys_template_menu WHERE menu_id=3204;
-ypbin-iot/docs/DEMO-DATA.md:241:#       DELETE FROM sys_menu WHERE id=3204;
-ypbin-iot/docs/DEMO-DATA.md:254:5. 「IoT 平台」标题的端到端状态…活库 sys_menu.id=3204…
-# ⇒ 三仓源码中 3204 只出现在文档说明里，无建表/建菜单脚本
-
-$ grep -n "VALUES (320" deploy/sql/007-iot-data.sql | head -4
-10:VALUES (3200, 0, 'IotDevice',  'menu', 0, '/iot/devices',    ...)
-35:VALUES (3201, 0, 'IotProduct', 'menu', 0, '/iot/products',   ...)
-46:VALUES (3202, 0, 'IotDeviceGroup','menu',0,'/iot/groups',    ...)
-123:VALUES (3203, 0, 'IotMaintenance','menu',0,'/iot/maintenance',...)
-# ⇒ 仓库 SQL 里这四个仍是 pid=0 的顶级菜单
+$ git fetch origin --quiet
+$ git rev-list --count HEAD..origin/main
+2                       # ← 初稿的基线落后 main 2 个提交，这就是错误结论的来源
+$ git log --oneline HEAD..origin/main
+4aebb95 feat(iot): IoT 菜单归并到一级目录「IoT 平台」(#39)
+5ea9259 docs(iot): 演示数据导览与清理手册（DEMO-DATA.md）(#40)
 ```
+
+**第二步：在 `origin/main` 上核对 3204 是否存在**（结论：**存在**）：
+
+```bash
+$ git show origin/main:deploy/sql/007-iot-data.sql | grep -n "3204\|IotPlatform"
+154:-- 新父 id 3204：2026-09-25 查**活库** sys_menu（id BETWEEN 3000 AND 3400）确认未被占用
+162:VALUES (3204, 0, 'IotPlatform', 'catalog', 0, '/iot', 'BasicLayout', NULL, 'page.iot.title', 'carbon:iot', 6, NOW(), 1, 0);
+167:SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (3204);   -- sys_role_menu
+170:SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (3204);   -- sys_template_menu
+172:-- 把 4 个 IoT 页面挂到新父菜单下（pid 由 0 改为 3204）
+173:UPDATE sys_menu SET pid = 3204 WHERE id IN (3200, 3201, 3202, 3203);
+
+$ git ls-tree --name-only origin/main deploy/sql/migration/ | tail -1
+deploy/sql/migration/2026-09-25-iot-menu-group.sql                   # ← 可重放迁移脚本已在 main
+```
+
+⇒ **初稿「3204 不在仓库 SQL / 活库与仓库漂移 / 空库装不出 IoT 平台目录」的判断是错误的**，
+根因是基线落后 2 个提交（PR #39 未拉取）。**该结论已在 §0.3 更正，并作为教训写入 §10.2 R10。**
+
+**第三步：把全部仓内事实重跑在 `origin/main` 上**（本方案所有数字以此为准）：
+
+```bash
+# 后端（ypbin-iot @ origin/main 4aebb95）
+controllers: 15      entities: 18      button perms: 28
+# 前端（ypbin-iot-ui @ origin/main b067f41）
+views/iot 下 .vue: 10（4 个 index.vue + 6 个 modules/*.vue）
+productId|productVersion 在 api/iot/device.ts: 4 行；在 views/iot: 0 行
+tslImport|tslExport|iot:shadow|iot:point|iot:tag|members|iot:ledger: 在 views/iot 均为 0
+```
+
+**关键核对技巧（值得复用）**：判断「某能力是否存在」时，不要在本地工作树上 grep 就下结论，
+而应 `git grep <pattern> origin/main -- <path>` —— 这样结论与分支状态无关。
 
 ### A.5 原型自检
 
