@@ -19,6 +19,13 @@ ypbin:
   # 出站内部凭证：与 iot 的 /internal/lease/** 守卫共用同一个值（未配置 ⇒ 服务端 fail-closed 拒绝）
   internal:
     token: ${INTERNAL_TOKEN}
+  # 身份头来源校验：仅信任带网关签名标记的身份头；未配置密钥则拒绝启动（fail-fast）
+  # （access 不引 ypbin-common.yaml，拿不到共享配置里的同名键 ⇒ 必须在本 Data ID 里显式声明；
+  #   占位符由 install.sh 导入 Nacos 前用 .env 的 GATEWAY_SIGN_TOKEN 替换，仓库不提交真实值）
+  cloud:
+    feign:
+      trusted-source-token: ${GATEWAY_SIGN_TOKEN}
+      require-trusted-source: true
   # access 是下游服务：登录态由网关校验，本地关闭 Sa-Token 全局拦截
   # （键是 ypbin.security.interceptor；写成 ypbin.sa-token.* 是不存在的键，会静默无效）
   security:
