@@ -57,14 +57,19 @@ import org.junit.jupiter.api.Test;
  * <p><b>已知边界（如实声明，避免虚假安心）</b>：</p>
  * <ul>
  *   <li>守卫判定是<b>文本启发式，不是可达性分析</b>：{@link #thenBranchBlocksControlFlow} 只检查
- *       「非草稿分支内以 throw 收口，且没有嵌套 {@code if}/放过型日志」。「把 throw 放到真正不可达的
- *       分支里但用更绕的方式伪装」理论上仍能骗过——这类刻意绕过（而非顺手漏写）由 review 兜。</li>
+ *       「非草稿分支的**最后一条语句**是 throw（或 {@code throwXxx(…)}）」。「用更绕的方式把 throw
+ *       伪装成收口语句、实际不可达」理论上仍能骗过——这类刻意绕过（而非顺手漏写）由 review 兜。
+ *       该判据刻意**不**禁用日志：「先 log.warn 留痕、再 throw 拒绝」是合法且更好的写法
+ *       （三轮复核 FPc 证明用「禁日志」的黑名单会把它误判）。</li>
  *   <li>只查 public / 包级私有 方法与类内调用图。<b>private</b> 辅助方法（如 {@code replaceTsl}）
  *       允许不自己校验——编译器保证它无法从别的类调用，只能由本类的入口进来，而入口必须带守卫。
  *       这也是刻意要求的形态：守卫写在入口，review 时一眼可见。</li>
- *   <li>写动词是**闭集**（{@link #WRITE_CALL}）：用了新命名的写 API（例如自定义
- *       {@code updateStatus(...)}）必须同步登记，否则会被漏判——本规则靠「已知写入口清单」自检
- *       兜住「一个都没扫到」，但兜不住「某个新命名写 API 没被识别」。</li>
+ *   <li>写动词是**闭集**（{@link #WRITE_CALL}）：已覆盖「动词 + 任意大写后缀」（
+ *       {@code deleteStartedBefore} / {@code insertIgnoringDuplicates} / {@code reviveAndBump} 这类本仓
+ *       命名风格都命中），但**没有**收录 {@code replace}/{@code merge}（与 {@code String.replace}、
+ *       {@code Map.merge} 同形，会让只读方法误报）、也没有 {@code insertSelective} 之外的 ORM 专属命名。
+ *       新命名写 API 必须同步登记——「已知写入口清单」自检只能兜住「一个都没扫到」。
+ *       （三轮复核建议进一步改成「Mapper 接收者 + 读白名单」的白名单制，属后续增强。）</li>
  *   <li>接收者不限 ⇒ {@code otherBean.save(x)} 也会被算成写入口（**不会**漏放）；代价是
  *       「调用别的 Bean 的只读方法但方法名像写」会有误报，需按实际语义调整白名单。</li>
  *   <li>新增守卫方法时必须同步登记进 {@link #GUARD_CALLS}，否则会被判成「缺守卫」（这是有意的：
@@ -108,10 +113,8 @@ class IotThingModelDraftGuardTest {
      * {@code updateByXxx} 这类「动词+后缀」命名。新增写 API 命名时同步登记本常量。</p>
      */
     private static final Pattern WRITE_CALL = Pattern.compile(
-        "\\.?\\b(?:save|saveBatch|saveOrUpdate|saveOrUpdateBatch|update|updateById|updateBatchById"
-            + "|updateBy[A-Z]\\w*|remove|removeById|removeByIds|removeBatchByIds|removeBy[A-Z]\\w*"
-            + "|insert|insertBatch|insertSelective|insertOrUpdate|delete|deleteById|deleteBatchIds"
-            + "|deleteBy[A-Z]\\w*|batchUpdate|updateBatch|physicalDelete\\w*)\\s*\\(");
+        "\\.?\\b(?:save|update|remove|insert|delete|revive|bump|upsert|batchUpdate|updateBatch"
+            + "|physicalDelete)(?:[A-Z]\\w*)?\\s*\\(");
 
     /** Java 关键字/修饰符：出现在「类型」位置说明这条匹配不是方法声明（构造器、调用点、控制语句）。 */
     private static final Set<String> NOT_A_TYPE = Set.of(
@@ -221,11 +224,23 @@ class IotThingModelDraftGuardTest {
      * @return 分支以抛异常收口返回 {@code true}
      */
     static boolean thenBranchBlocksControlFlow(String thenBlock) {
-        boolean throwsInside = thenBlock.contains("throw ")
-            || Pattern.compile("\\bthrow[A-Z]\\w*\\s*\\(").matcher(thenBlock).find();
-        boolean letsThrough = thenBlock.contains("if (")
-            || Pattern.compile("\\blog\\.(?:warn|info|debug)\\s*\\(").matcher(thenBlock).find();
-        return throwsInside && !letsThrough;
+        String inner = thenBlock.strip();
+        if (inner.startsWith("{") && inner.endsWith("}")) {
+            inner = inner.substring(1, inner.length() - 1);
+        }
+        inner = inner.strip();
+        while (inner.endsWith(";")) {
+            inner = inner.substring(0, inner.length() - 1).strip();
+        }
+        // 取分支里**最后一条语句**：它必须就是抛异常（`throw …` 或名字以 throw 开头的自建方法）。
+        // 反过来看「分支内是否出现过 throw」是不行的——把不可达 throw 塞进子结构（if/for/while）
+        // 再配一句合法日志即可骗过（复核 N2/LEAK1）；而「先 log.warn 留痕再 throw」是**合法且更好**
+        // 的写法，用黑名单禁日志会把它误判（复核 FPc）。收口判据一次解决两头。
+        int boundary = Math.max(inner.lastIndexOf(';'),
+            Math.max(inner.lastIndexOf('{'), inner.lastIndexOf('}')));
+        String lastStatement = inner.substring(boundary + 1).strip().replaceAll("\\s+", " ");
+        return lastStatement.startsWith("throw ")
+            || Pattern.compile("^throw[A-Z]\\w*\\s*\\(").matcher(lastStatement).find();
     }
 
     @Test
@@ -330,6 +345,32 @@ class IotThingModelDraftGuardTest {
         assertThat(guardThrowsOnNonDraft(methods(syntheticClass(extracted)).getFirst().body()))
             .as("提取局部布尔变量的等价重构不得被拒（复核 N3：假红会把正常重构逼向削弱规则）")
             .isTrue();
+
+        // 第三轮复核 FPc：**合法**的「先 log.warn 留痕、再 throw 拒绝」不得被判红
+        String logThenThrow = "    private void requireProductDraft(Long productId) {\n"
+            + "        Thing product = requireProduct(productId);\n"
+            + "        if (!ModelStatus.DRAFT.getCode().equals(product.getModelStatus())) {\n"
+            + "            log.warn(\"非草稿态，将拒绝：productId={}\", productId);\n"
+            + "            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, \"先新建草稿\");\n"
+            + "        }\n"
+            + "    }\n";
+        assertThat(guardThrowsOnNonDraft(methods(syntheticClass(logThenThrow)).getFirst().body()))
+            .as("「先 log.warn 再 throw」是合法（甚至更好）的守卫写法，不得被误判为放过（复核 FPc）")
+            .isTrue();
+
+        // 第三轮复核 LEAK1：「合法日志 + 子结构里的不可达 throw」不得被当成已拦下
+        String loopDecoration = "    private void requireProductDraft(Long productId) {\n"
+            + "        Thing product = requireProduct(productId);\n"
+            + "        if (!ModelStatus.DRAFT.getCode().equals(product.getModelStatus())) {\n"
+            + "            log.error(\"非草稿态，实际放过：productId={}\", productId);\n"
+            + "            for (int i = 0; i < 0; i++) {\n"
+            + "                throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, \"不可达\");\n"
+            + "            }\n"
+            + "        }\n"
+            + "    }\n";
+        assertThat(guardThrowsOnNonDraft(methods(syntheticClass(loopDecoration)).getFirst().body()))
+            .as("把不可达 throw 塞进子结构、真实动作仍是放过 ⇒ 必须转红（复核 LEAK1）")
+            .isFalse();
 
         // 漏放 ③：包级私有（无修饰符）写入口——同包其它 *ServiceImpl 可直接调用
         List<Method> packagePrivate = writeEntryMethods(methods(syntheticClass(
