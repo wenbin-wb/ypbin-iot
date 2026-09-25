@@ -147,7 +147,8 @@ app: {
 
 - **是否需要重建前端产物：需要。** 偏好默认值编译进 bundle；本仓构建链路是现成的（上一轮已跑通）：
   `pnpm -F @vben/web-antd build` → 产物拷到 `../iot-ui-dist` → `docker compose up -d --no-deps ypbin-iot-ui`（一条命令 `deploy/ui-up.sh`，见 `docs/DEPLOY-UI.md` §1）；CI 侧 `.github/workflows/ci.yml` 的"构建（web-antd）"步骤也会跑同一构建 ⇒ **改错了 CI 会红**。
-  > 生产实测端口：容器 `ypbin-iot-ui` 映射 `0.0.0.0:19000->80`（本次 SSH 实测）。`docs/DEPLOY-UI.md` 里写的 `19001` 与实际 `.env`（`IOT_UI_PORT`）不一致，属**文档漂移**，与本次改动无关，但建议顺手校正。
+  > 生产实测端口（本次 SSH 实测，**不含任何凭据**）：`docker ps` 显示 `ypbin-iot-ui` 映射 `0.0.0.0:19000->80/tcp`；服务器 `deploy/.env` 里是 `IOT_UI_PORT=19000`。而 `docs/DEPLOY-UI.md` 的示例写的是 `IOT_UI_PORT=19001`（还写着"与 `ypbin-admin-ui` 的 19000 并存"）⇒ 这是**文档漂移**，与本次改动无关，但建议顺手校正（否则照文档部署会得到第二个 UI 端口）。
+  > 另：原型 `index.html` 目前被放在 `ypbin-iot-ui` 容器的 `/usr/share/nginx/html/ux-mock/` 下，因此可经 `:19000/ux-mock/` 访问（本次实测 200）。`platform-nav.html` 上线到同一位置即可（`docker cp` 或 `deploy/ui-up.sh` 的产物目录，见该原型 README）。
 - **零构建的验证路径（推荐先做）：** 右上角「偏好设置 → 布局 → 混合垂直」当场可切（渲染入口 `.../preferences-drawer.vue:429-431`，`Layout v-model="appLayout"`），值写进 localStorage。
 
 **⚠️ K1（必须记住）：** 因为缓存优先（`preferences.ts:139-150`），把默认值改成 `mixed-nav` 后，**已访问过的用户仍是旧布局**。三个可选处置：
@@ -350,9 +351,18 @@ const currentLayout = computed(() =>
 | `page.admin.title` | 基础管理 | Administration | `apps/web-antd/src/locales/langs/zh-CN/page.json` + `en-US/page.json` |
 | `page.ops.title` | 运维与监控 | Operations | 同上 |
 
-**已存在、本次不改的键：** `page.iot.title`（= IoT 平台，在 PR #41 前的分支上补过，现已随 `feat/iot-i18n-menu-title` 处理）、`page.ai.title`、`page.dashboard.title`，以及 `system.*` / `tracking.*` 命名空间下的全部既有键。
+**已存在、本次不改键的键（实测 `origin/main`，`apps/web-antd/src/locales/langs/*/page.json`）：**
 
-> **⚠️ 铁律：不要为了"统一命名"去重命名既有 title 键。** `sys_menu.title` 直接就是 i18n key（`SysMenuServiceImpl.java:388` → `generate-menus.ts:50` → `$t()`），重命名意味着**同时**改 DB 数据与两份语言包，任何一处漏改都会让菜单显示原始 key（旧仓已经踩过一次"95 处文案渲染成原始 key"的事故，见 `scripts/check-iot-i18n-keys.mjs` 头部注释）。**只增不改。**
+| key | zh-CN 现值 | en-US 现值 | 用途 | 本次动作 |
+|---|---|---|---|---|
+| `page.dashboard.title` | **概览** | Dashboard | 顶级菜单 `1 Dashboard` | 键不动。**建议改值**为「工作台 / Workspace」（要"工作台"这个名字就必须改，否则顶栏显示"概览"） |
+| `page.iot.title` | IoT 平台 | IoT Platform | 顶级菜单 `3204 IotPlatform` | **不动**（已在 `origin/main`，由 PR #17 / `b067f41` 补齐）。用户原话也是"IoT 平台"，故模块名沿用 |
+| `page.ai.title` | **AI 助手** | AI Assistant | 顶级菜单 `5000 AiManage` | 键不动。**建议改值**为「知识与 AI / Knowledge & AI」（否则顶栏显示"AI 助手"，与"知识与 AI 模块"口径不一致） |
+| `system.*` / `tracking.*` 下的全部既有键（`system.org.title`、`system.auth.title`、`system.sys.title`、`system.tenant.title`、`system.messageCenter.title`、`system.file.title`、`system.license.title`、`system.apiDoc.title`、`system.monitor.title`、`tracking.title` 等） | 各自现值 | 各自现值 | 被 reparent 的 10 个顶级菜单 | **一律不动**（键与值都不动） |
+
+> **⚠️ 铁律一：只增键、不改键名。** `sys_menu.title` 直接就是 i18n key（`SysMenuServiceImpl.java:388` → `generate-menus.ts:50` → `$t()`），重命名 key 意味着**同时**改 DB 数据与两份语言包，任何一处漏改都会让菜单显示原始 key（旧仓已经踩过一次"95 处文案渲染成原始 key"的事故，见 `scripts/check-iot-i18n-keys.mjs` 头部注释）。
+> **⚠️ 铁律二：改"值"是安全的，但仍要两份语言包同时改。** 上面两处"建议改值"（`page.dashboard.title`、`page.ai.title`）只改字符串、不动 key，风险与改一条文案相同；但如果只改 zh-CN 不改 en-US，切到英文时会看到中文（或反之），必须成对改。
+> **⚠️ 铁律三：`page.ai.title = "AI 助手"` 这个现值意味着一件事——模块名必须与产品确认。** 本文 §4.1 用的是「知识与 AI」，与现值不一致；**这是需要产品拍板的一处口径**（见 §9 U7）。若产品接受沿用「AI 助手」，则 §4.1 的模块名应同步改回，`page.ai.title` 零改动。
 
 **新模块里的新页面的命名示例**（供后续沿用）：`page.iot.devices.title`、`page.iot.onboarding.title`、`page.admin.tenant.list`、`page.ops.tracking.funnel`。
 
@@ -692,6 +702,7 @@ SELECT id FROM sys_menu WHERE id BETWEEN 3300 AND 3399;
 | F-A | 布局切 `mixed-nav` | `apps/web-antd/src/preferences.ts`（`app.layout`） | **是** | §2.4；一行 |
 | F-B | 偏好"布局版本号"强制归一（破 K1） | `packages/@core/preferences/src/preferences.ts` + `types.ts` | **是** | P0，§7.5；约 5-10 行 |
 | F-C | 新增 2 个 i18n 键 | `apps/web-antd/src/locales/langs/{zh-CN,en-US}/page.json` | **是** | `page.admin.title` / `page.ops.title`；**不新增就会在顶栏显示原始 key** |
+| F-C2 | （仅在产品确认时）改 2 个**值**：`page.ai.title` → 知识与 AI / Knowledge & AI；`page.dashboard.title` → 工作台 / Workspace | 同上两份 `page.json` | **是** | **只改值不改键**；两份语言包必须成对改。若产品接受沿用「AI 助手」「概览」，则本项不做（§4.4 铁律三） |
 | F-D | 工作台升级为模块门户 | `apps/web-antd/src/views/dashboard/workspace/index.vue`（**已存在**） | **是** | §6；纯前端，无新接口（告警区块先显示"能力未上线"） |
 | F-E | 打开 `sidebar.autoActivateChild` | `apps/web-antd/src/preferences.ts`（`sidebar.autoActivateChild`） | 是 | P1，可选；让点模块即进第一页 |
 | F-F | 面包屑/搜索**无需改动** | — | — | 面包屑读 `route.matched`（`packages/effects/layouts/src/widgets/breadcrumb.vue:29-52`），层级变深会自动多一段；搜索读 `accessStore.accessMenus`（`user-dropdown.vue:347-352`），自动跟随新层级 |
@@ -783,7 +794,8 @@ SELECT id FROM sys_menu WHERE id BETWEEN 3300 AND 3399;
 | **U4** | `mixed-nav` 在**本部署真实数据**（13 项 / 4-5 项）下的渲染截图 | **未核实** | 需要前端构建 + 浏览器；P0-1 就是为了拿到这个证据 |
 | **U5** | xxl-job 控制台能否被 iframe/免登集成 | **未核实** | `deploy/sql/005-xxl-job.sql` 只证明它是独立库与独立控制台；**没有**任何集成代码 |
 | **U6** | 上游 `ypbin-admin` 是否已有 `33xx` 段的规划 | **未核实** | 只查了本仓与活库；上游未来占用是**推测的风险**，不是既成事实（§7.2 给了缓解） |
-| **U7** | 「知识与 AI」模块名是否与产品口径一致（"知识库/AI/账号"） | **待产品确认** | 用户原话提到"账号"，但库内**没有**独立的"AI 账号"菜单；与账号/配额最接近的是 `5003 模型配置`（`platform_only=1`）与 `5050 用量统计`（`platform_only=1`）。本文按**现有菜单**命名，**不硬造"账号与配额"页面** |
+| **U7** | 「知识与 AI」模块名是否与产品口径一致 | **已查清口径冲突，待产品拍板** | 实测 `page.ai.title` 的现值是 **zh「AI 助手」/ en「AI Assistant」**，而用户原话是"知识库 / AI / 账号"、本文 §4.1 写的是「知识与 AI」⇒ **三处口径不一致**。库内**没有**独立的"AI 账号"菜单；与账号/配额最接近的是 `5003 模型配置`（`platform_only=1`）与 `5050 用量统计`（`platform_only=1`）。本文按**现有菜单**命名，**不硬造"账号与配额"页面**；模块名沿用键、按 §4.4 铁律三二选一（改值 / 保留"AI 助手"） |
+| **U9** | `page.dashboard.title` 现值是 **「概览」**（en: Dashboard），与"工作台"不一致 | **已查清，需产品确认** | 要"工作台"这个名字就必须改值（§7.3 F-C2）；不改则顶栏显示"概览" |
 
 **本次明确不做（R8，避免范围蔓延）：** 不改生产库、不改业务代码、不动 IoT 模块内部（引旧文）、不合并任何 PR、不做 xxl-job 集成、不做移动端另套设计、不改 `docs/ux-mock/index.html` 的既有内容。
 
@@ -873,6 +885,15 @@ REMOTE
 ```
 
 **实测输出：两条均无输出（0 行）** ⇒ `3310/3320` 未占用，且 `3300-3399` 全段空闲。
+
+顺带把旧文 §4.1 建议的 **IoT 内部 5 个分组目录 id（`3210/3220/3230/3240/3250`）** 一起查了（一次查 `3205-3399` 全段）：
+
+```bash
+ssh ypbin-prod 'docker exec ypbin-mysql bash -c '"'"'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot -N -B \
+ -e "SELECT id FROM sys_menu WHERE id BETWEEN 3205 AND 3399" ypbin_admin'"'"''
+```
+
+**实测输出：无输出（0 行）** ⇒ `3205-3399` 全段空闲，旧文的 `3210-3250` 与本文的 `3310/3320` **互不冲突、都可用**。
 
 仓内侧：
 
