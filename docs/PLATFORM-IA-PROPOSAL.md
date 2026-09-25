@@ -963,6 +963,22 @@ grep -n "system:app:" ypbin-iot/deploy/sql/002-data.sql
 
 ---
 
+## 附录 B · 交付物与 PR
+
+| 交付物 | 仓库 / 路径 | PR |
+|---|---|---|
+| 本方案（平台级 IA） | `ypbin-iot` → `docs/PLATFORM-IA-PROPOSAL.md` | [ypbin-iot#42](https://github.com/wenbin-wb/ypbin-iot/pull/42) |
+| 原型互链说明（+5 行，**不改 `index.html`**） | `ypbin-iot` → `docs/ux-mock/README.md` | 同上 |
+| 平台级可点原型（单文件、零外链） | `ypbin-iot-ui` → `docs/ux-mock/platform-nav.html` | [ypbin-iot-ui#19](https://github.com/wenbin-wb/ypbin-iot-ui/pull/19) |
+| 原型说明（含与 `index.html` 的分工对比） | `ypbin-iot-ui` → `docs/ux-mock/README.md` | 同上 |
+| IoT 模块内部 IA（上一轮，已被本方案引用） | `ypbin-iot` → `docs/IOT-UX-PROPOSAL.md` + `docs/ux-mock/index.html` | 已合并（#41，`4fdba39`） |
+
+**两个 PR 均按要求不合并。** 分支：`docs/platform-ia-proposal`（ypbin-iot）、`docs/platform-nav-mock`（ypbin-iot-ui），均基于各自 `origin/main`。
+
+**部署原型（可选）**：`platform-nav.html` 与 `index.html` 一样是静态文件，拷进 `ypbin-iot-ui` 容器的 `/usr/share/nginx/html/ux-mock/` 即可经 `http://<host>:19000/ux-mock/platform-nav.html` 访问（实测该容器映射 `19000->80`）。
+
+---
+
 ## 附：独立复核回执
 
-> 待独立复核子代理完成后填写（复核项见 §8）。**本节为空 = 复核未完成。**
+> 由独立复核子代理（不同上下文、只读、自行跑命令）填写；复核项清单见 §8。**本节为空 = 复核未完成。**
