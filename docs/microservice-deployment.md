@@ -98,24 +98,6 @@ docker compose -f docker-compose.yml up -d --build
 
 ## 手动构建部署
 
-> ⚠️ **生产部署机（`113.142.217.58`）无法访问 GitHub，且源码树可能停在旧提交 ⇒ 严禁在该机器上跑 Maven 重建 jar。**
-> 该机 `git fetch` 会挂到超时（实测 `git ls-remote` exit=124），仓库文本停留在较早的提交，
-> 但 `target/*.jar` 是**从外部上传的新产物**。此时若在该机执行 `mvn package`，
-> 会从**陈旧源码**编译出一个**缺少新端点**的旧 jar（真实事故风险：例如会丢掉
-> `GET /iot/devices/{deviceId}/latest`），随后 `docker compose build` 把旧 jar 打进镜像 ⇒ 线上能力静默回退。
->
-> **正确做法**：在能访问 GitHub 的机器（或 CI）上构建 → 上传 jar → 只做「打镜像 + 重启」：
-> ```bash
-> # 本地/CI：构建并上传（服务器不编译）
-> mvn -s <settings> -Dmaven.repo.local=<repo> -pl ypbin-service/ypbin-iot -am -DskipTests package
-> scp ypbin-service/ypbin-iot/target/ypbin-iot-*.jar <server>:/tmp/new.jar
-> # 服务器：只替换 jar 再打镜像（Dockerfile 只 COPY target/*.jar，不编译源码）
-> install -m 644 /tmp/new.jar ypbin-service/ypbin-iot/target/ypbin-iot-1.0.0-SNAPSHOT.jar
-> docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.override.yml build ypbin-iot
-> docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.override.yml up -d --no-deps ypbin-iot
-> ```
-> 换 jar 前先备份「当前镜像 tag + 当前 jar」，否则回滚只能靠重建（而重建正是上面禁止的操作）。
-
 ```bash
 # 1. 构建（需要 JDK 21 + Maven）
 export JAVA_HOME=/path/to/jdk21
