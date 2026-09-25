@@ -30,8 +30,8 @@
 | # | 坑 | 后果 | 见 |
 |---|---|---|---|
 | **K1** | **缓存偏好会覆盖代码默认值** | 改 `preferences.ts` 里的 `layout` 对**已经访问过**的用户**不生效**（localStorage 里的旧值优先） | §2.4、§7.4 |
-| **K2** | **reparent 会产生"孤儿菜单"，整棵被后端丢弃** | 把子菜单挂到新模块目录下、却没把新目录授给"已拥有该子菜单的角色/模板" ⇒ 这些用户**看不到该子菜单**（不是灰掉，是消失） | §2.5、§7.1 |
-| **K3** | **授权门禁只覆盖 `32xx` 开头的 id** | 新模块目录若用 `33xx`，现有 `IotMaintenanceAdminGateTest` **不会**检查它的两张授权表 ⇒ K2 的盲区重新打开 | §7.1.4 |
+| **K2** | **reparent 会产生"孤儿菜单"，整棵被后端丢弃** | 把子菜单挂到新模块目录下、却没把新目录授给"已拥有该子菜单的角色/模板" ⇒ 这些用户**看不到该子菜单**（不是灰掉，是消失）。**边界：只对"非超管 / 非平台用户"成立** —— 超管走全量菜单路径、不受影响；非平台用户还要多过一道**租户模板**过滤 | §2.5、§7.1 |
+| **K3** | **授权门禁有两重缺陷**：① 只覆盖 `32xx` 开头的 id；② 更要命的是它对 `sys_template_menu` 的检查是**假绿**（`sql.split("INSERT INTO "+table)` 的 block 跨语句串味，两表 `granted` 实测完全相同）| 新模块目录用 `33xx` 时不会被检查；**即使扩到 `33xx` 也不咬人**（实测删掉模板授权不转红）⇒ K2 的盲区重新打开。修正版门禁见 §7.1.4（已实测基线通过 + 三个变异转红）| §7.1.4、附录 C |
 
 ---
 
@@ -115,7 +115,8 @@ type LayoutType =
 
 **顺带排除两个容易误认的候选：**
 
-- `header-nav`（纯顶部）：`showHeaderNav` 为真，但此时 `needSplit` 为假 ⇒ **左侧菜单拿到的是完整菜单树**，等于"顶部一份 + 左侧一份"，不是"顶部一级 / 左侧二级"。
+- `header-nav`（纯顶部）：`showHeaderNav` 为真，但此时 `needSplit` 为假，**而且侧边栏整体不渲染** —— `vben-layout.vue:165-168` 的 `sidebarEnableState = !isHeaderNav && sidebarEnable`，`:565` 的 `<LayoutSidebar v-if="sidebarEnableState">` ⇒ `header-nav` 下**没有左侧栏**，顶栏里放的是**完整菜单树**。它既不是"顶部一级 / 左侧二级"，也不是"顶部一份 + 左侧一份"。
+  > 另：`isSideMode`（`:220-227`）也不含 `header-nav`/`full-content`。
 - `header-sidebar-nav`：**不在** `showHeaderNav` 里（`layout.vue:131-136` 只含 `isHeaderNav || isMixedNav || isHeaderMixedNav`）⇒ 顶部**不放**一级导航，是一个通栏顶栏 + 完整侧边菜单，与需求无关。
 
 ### 2.3 当前生效的是哪种布局？→ **`sidebar-nav`（垂直单列）**
@@ -175,9 +176,10 @@ app: {
 | 树根 = `pid=0` | `ypbin-service/.../SysMenuServiceImpl.java:67-79` | `return buildRouteTree(visible, AdminConstants.ROOT_PARENT_ID);` |
 | 根常量 | `ypbin-common/.../AdminConstants.java:38-39` | `ROOT_PARENT_ID = 0L` |
 | 递归只按 `pid` 挂 | `SysMenuServiceImpl.java:340-354` | `if (pid.equals(menu.getPid())) { ... children = buildRouteTree(menus, menu.getId()) }`（**注意：pid 指向的父节点不在入参集合里 ⇒ 该子节点永远是孤儿、不会出现在结果中**，这是 K2 的机制） |
+| **谁受 K2 影响** | `SysMenuServiceImpl.java:69-70`、`:74`、`:78`、`:82-100`；`SysRoleServiceImpl.java:236-252` | **只影响"非超管"用户**（超管走 `list(enabledMenusOrdered())` 全量菜单，父一定在集合里）。非超管有两道：<br>① `selectByUserId` 只回 `sys_role_menu` 里授过的菜单 ⇒ **父不在角色授权里就整棵丢**；<br>② 非平台用户再过 `applyTenantMenuFilter`（`:78`、`:82-100`）：`allowedIds` 来自 `sys_template_menu`（经 `resolveTenantMenuIds`），函数会从"被允许的菜单"沿 `pid` 上溯把祖先并进 `keptIds`，**但只并"已在该用户菜单集合里"的祖先**（`byId.get(currentId)` 为空即跳出）⇒ 它救不回角色侧缺失的父。<br>③ **更硬的一条**：租户管理员给角色配菜单走 `SysRoleServiceImpl#validateMenus`（`:236-252`，由 `:132`/`:152` 在新建/改角色时调用），`!allowedIds.containsAll(requestedIds)` 直接抛 **"角色授权包含租户权限模板之外的菜单"** ⇒ **模块目录不进 `sys_template_menu`，租户侧连角色都保存不了**。<br>⇒ 若模块目录 `platform_only=0`，**两张表都必须补授**（§7.1.1 第 3 步） |
 | 排序 | `SysMenuServiceImpl.java:75-78`、`:333-338` | 先 `sort` 再 `id` |
 | 按钮类型被剔除 | `SysMenuServiceImpl.java:72` | `filter(menu -> !TYPE_BUTTON.equals(menu.getType()))` |
-| 平台专属过滤 | `SysMenuServiceImpl.java:73`、`:78` | `filter(menu -> platformUser \|\| !TRUE.equals(menu.getPlatformOnly()))` |
+| 平台专属过滤 | `SysMenuServiceImpl.java:74`、`:78` | `filter(menu -> platformUser \|\| !TRUE.equals(menu.getPlatformOnly()))` |
 | 非超管菜单来源 | `SysMenuMapper.java:27-46`（`@Select`） | `sys_menu ⨝ sys_role_menu ⨝ sys_role ⨝ sys_user_role ⨝ sys_user` —— **只拿被授予的菜单** |
 | title 即 i18n key | `SysMenuServiceImpl.java:386-388`（`meta.setTitle(menu.getTitle())`） | 前端 `generateMenus` 用 `title` 当菜单名：`packages/utils/src/helpers/generate-menus.ts:50`（`const name = (title \|\| routeName \|\| '')`），再由 `wrapperMenus` 走 `$t(...)`（`packages/effects/layouts/src/basic/layout.vue:183-191`） |
 
@@ -211,7 +213,7 @@ const currentLayout = computed(() =>
 | 深度菜单（3 层：模块→分组→页） | ✅ 左侧垂直菜单原生支持嵌套 | ❌ 水平菜单放不下 3 层 | ✅ 支持 | 同 ① | 各自独立，互不影响 |
 | 普通用户能否上手 | ✅ 顶部只有 4-5 个中文大词，左边是当前模块的菜单 → 认知负担最低 | ⚠️ 一级全平铺，找东西靠记忆/搜索 | ⚠️ 20+ 条长列表，靠滚动与搜索 | ✅ 首页卡片 = 显式入口，对新手最友好 | ⚠️ 用户要理解"在哪个站" |
 | 与 vben 原生能力匹配度 | **最高**（顶部一级/左侧二级是 `mixed-nav` 的定义行为） | 高（但用途不同） | 高 | 最高 | 低（vben 5 是单应用架构） |
-| 主要风险 | 见 §7.4（缓存偏好 / 孤儿菜单 / 门禁） | 一级入口被折叠隐藏 | 不解决"整体拆分"诉求 | 首页维护成本（卡片要跟着模块变） | 登录态与权限跨站一致性；运维成本 |
+| 主要风险 | 见 §7.4（缓存偏好 / 孤儿菜单 / 门禁） | 一级入口被折叠隐藏，**且侧边栏整体不渲染**（`vben-layout.vue:165-168`、`:565`）⇒ 没有纵向承载二级/三级菜单的地方 | 不解决"整体拆分"诉求 | 首页维护成本（卡片要跟着模块变） | 登录态与权限跨站一致性；运维成本 |
 
 ### 3.2 推荐：**① + ④ 的组合**，即 `mixed-nav` + 一个真正的"工作台"首页
 
@@ -294,10 +296,10 @@ const currentLayout = computed(() =>
 - **物联网**：**沿用旧文 §4.1 已定的 5 组，顺序也照旧文**：`① 接入配置 → ② 设备管理 → ③ 运维中心 → ④ 数据与调试 → ⑤ 系统`（建议 group id `3210/3220/3230/3240/3250`，**均已实测空闲**）。不重复论证——见 [`IOT-UX-PROPOSAL.md`](IOT-UX-PROPOSAL.md) §4.1、§4.2。
   > ⚠️ **一处必须说明的不一致**：旧文 §4.1 的树是"运维中心(③) → 数据与调试(④)"，而旧文 `docs/ux-mock/README.md` 开头那句概括写的是"配置 → 设备 → **数据** → **运维** → 系统"。**本文与 `platform-nav.html` 一律以 §4.1 的编号顺序为准**（运维中心在数据与调试之前）；旧 README 那句概括属**表述漂移**，建议后续顺手改正，但它不影响任何实现。
   > ⚠️ **不要把"点位映射"当成独立菜单**：旧文把「属性与点位」放在**设备详情页的一个区块**里（§8 第 2 行），并且 §5 明确"参考 → 关系图与口径**不占菜单**"。本文照办。
-- **运维与监控**（3 组）：
+- **运维与监控**（2 组）：
   1. **系统监控**：`3004 监控管理`（操作日志/在线用户）
   2. **埋点分析**：`3009 埋点管理`（事件列表/事件目录/分析/漏斗/留存）
-  3. **开发者工具**：`4001 接口文档`
+  > `4001 接口文档` **只归「基础管理 → 授权与开发」**（理由见 §4.2 的 (A)：它 `platform_only=0`，放进 `platform_only=1` 的 3320 会在租户侧消失）。**本方案早前版本在 §4.1（运维与监控列了 4001）与 §4.2/§7.1.1 SQL（4001 归 3310）之间自相矛盾，已按独立复核意见统一为"基础管理"——全文与原型现在只有这一个归属。**
   > **命名取舍（R8）**："埋点分析"更偏**产品运营分析**而非运维。之所以暂放这里：它只有 5 个页面、且 `platform_only=1`（平台专用），单独成模块会得到"平台专用 + 5 项"的第二个小模块。**若将来埋点长成独立分析体系（归因/看板/实验），再拆出「数据分析」模块**——现在不拆。
 
 ### 4.2 现有顶级菜单归属表（**活库实测**，`pid=0` 共 13 条）
@@ -320,14 +322,14 @@ const currentLayout = computed(() =>
 
 **⚠️ `4001 ApiDoc` 的三个选项（R8 主动提示）：**
 - **(A) 推荐：放进「基础管理 → 授权与开发」，`platform_only` 保持 0** ⇒ 租户可见性**零变化**、零回归风险。
-- (B) 放进「运维与监控」（`platform_only=1`）：**会在租户侧消失**（因 `SysMenuServiceImpl.java:73` 对非平台用户直接过滤掉 `platform_only=1` 的行）⇒ 属**有意的行为变更**，需要产品确认。
+- (B) 放进「运维与监控」（`platform_only=1`）：**会在租户侧消失**（因 `SysMenuServiceImpl.java:74` 对非平台用户直接过滤掉 `platform_only=1` 的行）⇒ 属**有意的行为变更**，需要产品确认。
 - (C) 保持顶级：顶栏变成 6 项，且它是一个 `embedded` 内嵌页，作为"大模块"没有意义。
 本文取 (A)。
 
 **模块目录自身的 `platform_only` 怎么定（关键规则，容易错）：**
 
 > **一个模块目录的 `platform_only` 必须是 `0`，只要它下面有任何一个 `platform_only=0` 的子菜单；否则该子菜单对所有非平台用户变成孤儿（K2）。**
-> 依据：`SysMenuServiceImpl.java:73`（非平台用户直接丢 `platform_only=1` 的行）+ `:340-354`（只按 `pid` 挂树）⇒ 父被丢、子永远接不上。
+> 依据：`SysMenuServiceImpl.java:74`（非平台用户直接丢 `platform_only=1` 的行）+ `:340-354`（只按 `pid` 挂树）⇒ 父被丢、子永远接不上。
 > 因此：`3310 基础管理` = **0**（下有 3001/3002/3007/4001 等租户可见项）；`3320 运维与监控` = **1**（子项 3004/3009 均 `platform_only=1`，4001 已按 (A) 移走）。
 
 ### 4.3 备选方案与取舍
@@ -444,14 +446,13 @@ flowchart TD
 
   OPS --> MON["系统监控<br/>3004 监控管理（复用）"]
   OPS --> TRK["埋点分析<br/>3009 埋点管理（复用）"]
-  OPS --> DEV["开发者工具<br/>4001 接口文档（复用）"]
   MON --> MON1["操作日志 / 在线用户（复用）"]
   TRK --> TRK1["事件列表 / 事件目录 / 分析 / 漏斗 / 留存（复用）"]
 
   classDef reuse fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20
   classDef add fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
   classDef gap fill:#ffebee,stroke:#c62828,color:#b71c1c
-  class DASH,DASH1,DASH2,ORG,AUTH,SYS,TEN,MSG,FILE,LIC,DOC,ORG1,AUTH1,SYS1,TEN1,MSG1,LIC1,AI,AI1,AI2,AI3,AI4,AI5,AI6,AI7,IOT1c,IOT2a,IOT2b,IOT4a,IOT4c,IOT5b,MON,TRK,DEV,MON1,TRK1 reuse
+  class DASH,DASH1,DASH2,ORG,AUTH,SYS,TEN,MSG,FILE,LIC,DOC,ORG1,AUTH1,SYS1,TEN1,MSG1,LIC1,AI,AI1,AI2,AI3,AI4,AI5,AI6,AI7,IOT1c,IOT2a,IOT2b,IOT4a,IOT4c,IOT5b,MON,TRK,MON1,TRK1 reuse
   class ADMIN,OPS,IOT1a,IOT1c1,IOT2a1,IOT6 add
   class IOT1b,IOT3a,IOT3b,IOT3d,IOT4b,IOT5a gap
 ```
@@ -542,7 +543,11 @@ INSERT INTO sys_menu (id, pid, name, type, platform_only, path, component, auth_
 VALUES (3320, 0, 'PlatformOps', 'catalog', 1, '/ops', 'BasicLayout', NULL, 'page.ops.title', 'carbon:activity', 12, NOW(), 1, 0);
 
 -- 2) 模块目录自身的授权（形态与既有 007 段一致；门禁 IotMaintenanceAdminGateTest 可识别）
---    ⚠️ 3310 必须授给 sys_template_menu（其下有 platform_only=0 的租户可见子菜单）；
+--    ⚠️ 3310 必须同时授给 sys_template_menu —— 不是"保险"而是**必需**：
+--       3310 的 platform_only=0，会被 resolveAvailableMenuIds 收进"租户可授菜单"（SysAuthTemplateServiceImpl.java:199-209）；
+--       若不进模板，租户管理员新建/修改角色时会被 SysRoleServiceImpl#validateMenus
+--       （:236-252，由 :132/:152 调用）抛「角色授权包含租户权限模板之外的菜单」——租户侧连角色都保存不了。
+--       （3310 自身也仍有"平台管理员看不见模块"的风险，故 sys_role_menu 同样必需。）
 --       3320 只授 sys_role_menu：其下全是 platform_only=1 的平台专用菜单，按既有约定不进 sys_template_menu
 --       （先例：007-iot-data.sql:91-97 的 M2 台账菜单同样"只授角色 1，绝不进 sys_template_menu"）。
 INSERT INTO sys_role_menu (role_id, menu_id)
@@ -572,17 +577,31 @@ UPDATE sys_menu SET pid = 3320 WHERE id IN (3004, 3009);
 
 **为什么 `4001 ApiDoc` 走 3310**：见 §4.2 的 (A) —— 它是 `platform_only=0`，放进 `platform_only=1` 的 3320 会让它在租户侧消失。
 
-#### 7.1.2 迁移后必须跑的**孤儿自检**（期望 0 行）
+#### 7.1.2 迁移后必须跑的**孤儿自检**
+
+> **⚠️ 角色侧那条查询在迁移前**就不是** 0 行（实测），别把"迁移后仍有行"误判成迁移回归。**
+
+**实测（迁移前的活库现状，命令见附录 C）：**
+
+| 查询 | 迁移前实际结果 |
+|---|---|
+| 角色侧孤儿（子被授予、父未授予同角色） | **5 行**：`role 1` 的 `230 SystemMenu→3002`、`290 SystemClient→3002`、`5003 AiConfig→5000`、`5050 AiUsage→5000`、`270004 SystemPushTest→2700` |
+| 模板侧孤儿 | **0 行** |
+
+这 5 行是 `002-data.sql` 的种子方式造成的**既有现象**：它给 role 1 授的是 `platform_only=1` 的菜单，而 `3002 AuthManage` / `5000 AiManage` / `2700 SystemNotice` 自身是 `platform_only=0` ⇒ 父没进 role 1 的授权。**role 1 是超管**（`SysMenuServiceImpl.java:69-70` 走 `enabledMenusOrdered()` 全量菜单），所以功能上**没有可见影响**；受影响的是**非超管角色**——这也正是 K2 的适用边界（见 §2.5）。
+
+**因此正确的自检口径是：**
 
 ```sql
--- 期望 0 行：任何「被某角色授予、但同角色没有其父目录」的菜单 = 会被后端整棵丢弃
+-- 角色侧：迁移后应与「迁移前基线」一致（期望仍是同样那 5 行，且不新增）
 SELECT rm.role_id, m.id AS child_id, m.name AS child_name, m.pid AS missing_parent
 FROM sys_role_menu rm
 JOIN sys_menu m ON m.id = rm.menu_id AND m.is_deleted = 0 AND m.status = 1
 LEFT JOIN sys_role_menu pr ON pr.role_id = rm.role_id AND pr.menu_id = m.pid
-WHERE m.pid <> 0 AND pr.menu_id IS NULL;
+WHERE m.pid <> 0 AND pr.menu_id IS NULL
+ORDER BY rm.role_id, m.id;
 
--- 期望 0 行：模板侧的同一件事
+-- 模板侧：期望 0 行（当前实测就是 0 行；迁移后若出现行 = 真回归）
 SELECT tm.template_id, m.id AS child_id, m.name AS child_name, m.pid AS missing_parent
 FROM sys_template_menu tm
 JOIN sys_menu m ON m.id = tm.menu_id AND m.is_deleted = 0 AND m.status = 1
@@ -594,6 +613,9 @@ SELECT p.id AS parent_id, p.name AS parent, c.id AS child_id, c.name AS child
 FROM sys_menu p JOIN sys_menu c ON c.pid = p.id AND c.is_deleted = 0
 WHERE p.pid = 0 AND p.platform_only = 1 AND c.platform_only = 0;
 ```
+
+> **更好的做法（建议顺手做）**：迁移**之前**先把角色侧那条查询的输出存成基线文件，迁移后用 `diff` 比对 —— "不新增孤儿"才是正确且可验证的口径，"绝对 0 行"不是。
+> **本条是独立复核发现的**：本文早前版本写"两条都期望 0 行"，实测迁移前角色侧就有 5 行 ⇒ 已按复核意见更正（见 §8）。
 
 #### 7.1.3 双写与等价性门禁
 
@@ -608,49 +630,91 @@ WHERE p.pid = 0 AND p.platform_only = 1 AND c.platform_only = 0;
 > ⚠️ 追加顺序必须与文件名排序一致（新文件排在 `2026-09-25-iot-menu-group.sql` 之后，所以追加在 007 末尾即可）。
 > ⚠️ 注意 `007-iot-data.sql:4-5` 的既有约定：`002-data.sql` 的批量授权在本文件**之前**执行，所以本文件必须自己再授一次权——上面的第 2 步就是照这个约定做的。
 
-#### 7.1.4 菜单授权门禁怎么保过（**K3，最容易踩**）
+#### 7.1.4 菜单授权门禁怎么保过（**K3，最容易踩；本节已按独立复核的实测结论整段重写**）
 
-`IotMaintenanceAdminGateTest#everyMenuIdMustBeGranted`（`ypbin-service/ypbin-iot/src/test/java/cn/ypbin/admin/iot/config/IotMaintenanceAdminGateTest.java:62-101`）的判定是：
+`IotMaintenanceAdminGateTest#everyMenuIdMustBeGranted`（`ypbin-service/ypbin-iot/src/test/java/cn/ypbin/admin/iot/config/IotMaintenanceAdminGateTest.java:62-101`）的核心是：
 
 ```java
-// 只对 32xx 开头的新增 IoT 菜单要求两张授权表都覆盖
+for (String table : List.of("sys_role_menu", "sys_template_menu")) {
+    Set<String> granted = new LinkedHashSet<>();
+    String[] blocks = sql.split("INSERT INTO " + table);     // ← 问题在这一行
+    for (int i = 1; i < blocks.length; i++) {
+        Matcher matcher = GRANT_IN.matcher(blocks[i]);       // GRANT_IN = "id IN \\(([^)]*)\\)"
+        while (matcher.find()) { /* granted.add(...) */ }
+    }
+}
 if (id.startsWith("32") && !granted.contains(id)) { missing.add(id); }
 ```
 
-- 它从 `007-iot-data.sql` 里用正则抽 `VALUES (数字,` 与行首 `(数字,` 收集菜单 id，再在 `INSERT INTO sys_role_menu` / `sys_template_menu` 块里用 `id IN (...)` 收集已授权 id。
+##### （1）先说一个**已存在的严重缺陷**：这张门禁的 `sys_template_menu` 覆盖检查是**假绿**
 
-**后果：新模块目录用 `33xx` 时，这条门禁不会检查它们。** 但**不能**天真地只把判断改成 `startsWith("32") || startsWith("33")` —— 请先看下面的坑：
+`sql.split("INSERT INTO " + table)` 切出来的 block **不只覆盖该表自己的语句**——它一直延伸到**下一次**出现同一张表的 INSERT 为止，中间夹着的**其它表的 INSERT、乃至 `UPDATE ... WHERE id IN (...)`**，其 `id IN (...)` 也被算进了本表的 `granted`。
 
-> ### ⚠️ 天真扩法会产生**假红**（本条是 R8 主动提示，实施者必读）
->
-> 现有门禁对命中的 id **无条件**要求 `sys_role_menu` 与 `sys_template_menu` **两张表都覆盖**。
-> 而本方案的 `3320 运维与监控` 是 `platform_only=1`（其下 3004/3009 全是平台专用），**按既有约定就不该进 `sys_template_menu`**：`007-iot-data.sql:91-97` 的 M2 台账菜单（`320014/320015`）明文写了「**只授平台管理员角色 1，绝不进 sys_template_menu：否则任一租户管理员都能改「别的租户是否被采集」**」。
-> ⇒ 天真扩法会要求把 `3320` 塞进 `sys_template_menu`，**与既有约定冲突**；而"塞进去"虽然功能上无害（`SysAuthTemplateServiceImpl.java:199-209` 的 `resolveAvailableMenuIds` 会按 `.eq(SysMenu::getPlatformOnly, false)` 把它过滤掉，属**死数据**），但会让读者以为平台专用模块可以被授给租户。
->
-> **正确扩法**（按 `platform_only` 分流，语义与功能要求一致）：把门禁用来收集 id 的正则**升级为连类型与 `platform_only` 一起捕获**：
->
-> ```java
-> // 形如 VALUES (3310, 0, 'BasicAdmin', 'catalog', 0, '/admin', 'BasicLayout', NULL, 'page.admin.title', ...)
-> private static final Pattern MENU_INSERT = Pattern.compile(
->     "VALUES\\s*\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*'([^']+)'\\s*,\\s*'([^']+)'\\s*,\\s*([01])\\s*,");
-> ```
->
-> 然后对**每个 `33xx` 且 `type = 'catalog'`** 的模块目录：
-> 1. **必须**出现在 `sys_role_menu` 的授权里（否则平台管理员看不到整个模块）；
-> 2. **仅当它自身 `platform_only = 0` 时**，才**必须**同时出现在 `sys_template_menu`（否则租户侧的子菜单会因缺父而整棵消失，即 K2）。
->
-> 本方案的 SQL 满足该规则：`3310`（`platform_only=0`）进两张表；`3320`（`platform_only=1`）只进 `sys_role_menu`。
+**实测（复刻门禁逻辑跑真实 `007-iot-data.sql`，命令与输出见附录 C）：**
 
-**三种处理办法对比：**
+| 实测项 | 结果 |
+|---|---|
+| 从 `sys_role_menu` 块收集到的 `granted` | **33 条** |
+| 从 `sys_template_menu` 块收集到的 `granted` | **33 条**（**与上完全相同**） |
+| `320014` 是否出现在任何 `INSERT INTO sys_template_menu` 语句里 | **否**（`007-iot-data.sql:90-97` 明文写"绝不进 sys_template_menu"） |
+| 门禁是否认为 `320014` 已被 `sys_template_menu` 授权 | **是**（被 `:96-97` 的 role 授权语句污染） |
+| **变异**：删掉 `3310` 的 `sys_template_menu` 授权 | **不转红**（`MISSING=[]`） |
+
+⇒ **结论：这条门禁对 `sys_template_menu` 的检查根本不生效**；它实际等价于"该 id 在文件里任意一处 `id IN (...)` 里出现过"。两份 SQL 的授权**同时**被删时它确实会红（那是它唯一挡得住的情形），但**只删模板侧授权它抓不住**。
+
+> **⚠️ 同时撤回本文更早版本的一个错误判断**：本文曾断言"天真扩到 `startsWith("33")` 会产生假红"。**实测不成立** —— 因为模板侧的 `granted` 早已被污染，`3320` 不在 `sys_template_menu` 也会被判为已授权（`MISSING=[]`）。**问题不是"会假红"，而是"根本不咬人"。** 该错误已按独立复核意见更正（见 §8）。
+
+##### （2）还要知道：**即使修好作用域，"两张表都必须覆盖"这条规则本身也是错的**
+
+把收集方式改成**语句级归属**（先剥 `--` 注释、按 `;` 切语句、只在该语句确实是 `INSERT [IGNORE] INTO <本表>` 时取语句内的 `id IN (...)`）后，在**真实 007** 上跑朴素规则（32xx 一律要求两张表）：
+
+```
+sys_template_menu 缺失 = ['320014', '320015']     ← 二者均 platform_only = 1
+```
+
+`320014/320015` 是**故意**不进 `sys_template_menu` 的 M2 台账菜单（`007-iot-data.sql:90-97`）。⇒ 朴素规则会在**完全正确的数据**上报红。**所以"修作用域"与"改规则"必须同时做，只做一件都会得到错误结论。**
+
+##### （3）修正版门禁（**已实测：基线通过 + 三个变异都能咬人**）
+
+```java
+/** 菜单 INSERT 的 (id, pid, name, type, platform_only)。 */
+private static final Pattern MENU_INSERT = Pattern.compile(
+    "\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*'([^']+)'\\s*,\\s*'([^']+)'\\s*,\\s*([01])\\s*,");
+
+// 收集授权必须**按语句归属**：先剥 -- 注释，再按 ; 切语句，
+// 只在该语句确实是 INSERT [IGNORE] INTO <本表> 时，才取本语句内的 `id IN (...)`。
+// 切勿再沿用 sql.split("INSERT INTO " + table) —— 它的 block 会跨语句串味（实测两表 granted 完全相同）。
+```
+
+期望（对每个 `32xx` / `33xx` 菜单 id）：
+
+1. **必须**出现在 `sys_role_menu` 的授权里；
+2. **仅当**该菜单自身 `platform_only = 0` 时，才**必须**同时出现在 `sys_template_menu`（理由不止"防孤儿"：`sys_template_menu` 还是**租户管理员配角色时的白名单** —— `SysRoleServiceImpl#validateMenus:236-252` 用 `allowedIds.containsAll(requestedIds)` 卡住不在模板里的菜单）。
+
+**实测结果（完整命令与输出见附录 C）：**
+
+| 场景 | `sys_role_menu` 缺失 | `sys_template_menu` 缺失 | 期望 | 实际 |
+|---|---|---|---|---|
+| **基线**：真实 007 + 本方案 §7.1.1 的追加 SQL | `[]` | `[]` | 全绿 | ✅ 全绿 |
+| 变异 1：删 `3310` 的模板授权（它是 `platform_only=0`） | `[]` | `['3310']` | 转红 | ✅ 转红 |
+| 变异 2：删 `3310/3320` 的角色授权 | `['3310','3320']` | `[]` | 转红 | ✅ 转红 |
+| 变异 3：把 `3320` 改成 `platform_only=0` 却不补模板授权 | `[]` | `['3320']` | 转红 | ✅ 转红 |
+
+> 三个变异覆盖了规则的三个分支（模板缺 / 角色缺 / 由 `platform_only` 决定的期望切换）⇒ 这条门禁**是"咬过人"的**，不是装饰。
+> 另必须保留原有的**自检** `assertThat(menuIds).isNotEmpty()`（`IotMaintenanceAdminGateTest.java:77-78`），否则正则一改错就退化成"0 违规 = 没跑到"（旧仓教训八）。
+
+##### （4）五种处理办法对比（**已按实测更正**）
 
 | 办法 | 做法 | 评价 |
 |---|---|---|
-| **(a) 推荐：按 `platform_only` 分流扩** | 上面的 `MENU_INSERT` 正则 + 两条规则（见上框） | 语义正确、不产生假红、沿用既有验证结构；**必须配套变异验证**（删 `id IN (3310)` 的模板授权 ⇒ 门禁转红；删 `3320` 的角色授权 ⇒ 也转红；把 `3320` 的 `platform_only` 改成 0 而不补模板授权 ⇒ 仍转红），否则等于"没咬过人"的门禁 |
-| (b) 天真扩到 `startsWith("33")` | 1 行 | ❌ 会在 `3320` 上产生**假红**，且把平台专用模块写进租户可授模板，与 `007:91-97` 的约定冲突 |
-| (c) 把新目录放 `32xx`（3210/3220） | 靠现有规则自动覆盖 | 能过门禁，但**污染"32xx = 物联网"的约定**（`007-iot-data.sql:154-155` 明文写了 32xx 是 IoT 段） |
-| (d) 不扩门禁 | 什么都不做 | ❌ 等于把 K2 的盲区重新打开（原门禁的 Javadoc 就是为堵这个盲区而写的） |
+| **(a) 推荐：修作用域 + `platform_only` 分流** | （3）的 `MENU_INSERT` 正则 + 语句级收集 + 两条期望 | 唯一能真正咬人的做法；基线通过、三个变异全转红（**已实测**） |
+| (b) 只把 `startsWith("32")` 改成 `\|\| startsWith("33")` | 1 行 | ❌ **不咬人**（实测 `MISSING=[]`，因为模板侧 `granted` 被污染）。**本文早前说它会"假红"，那是错的** |
+| (c) 只修作用域、不改规则 | 语句级收集 + 仍要求两张表 | ❌ 会在**正确数据**上报红（`320014/320015`），把门禁变成噪声 |
+| (d) 把新目录放 `32xx`（3210/3220） | 靠"现有规则自动覆盖" | ❌ 前提本身不成立（现有规则失效）；且会**污染"32xx = 物联网"的约定**（`007-iot-data.sql:154-155` 明文写了 32xx 是 IoT 段） |
+| (e) 不扩门禁 | 什么都不做 | ❌ K2 的盲区继续没有门禁覆盖 |
 
-> **另注意**：`IotPermissionCodeGateTest` 只校验 `auth_code`（权限码），**不校验目录类菜单的授权表覆盖**；`check-iot-sql-equivalence.sh` 只保证两份脚本一致。**所以"菜单建出来但没人看得见"这个盲区，唯一能兜住的就是 `IotMaintenanceAdminGateTest` 这条门禁**（这正是它 Javadoc 里说的"复核用变异实证：两份 SQL 同时删掉授权后仍全绿"）。**本次必须按 (a) 扩它，并用 §7.1.2 的孤儿自检做第二道网。**
+> **顺带提醒**：`IotPermissionCodeGateTest` 只校验 `auth_code`，`check-iot-sql-equivalence.sh` 只保证两份脚本一致 ⇒ **"菜单建出来但没人看得见"这个盲区，只能靠**（a）**修好的门禁 + §7.1.2 的孤儿自检配合**。
+> **修复范围提示（R8）**：`IotMaintenanceAdminGateTest` 位于 `ypbin-service/ypbin-iot`，而 `3310/3320` 是**平台级**菜单。放在这里虽然能用，但语义上更合适的做法是把"菜单授权表覆盖"这条检查**提到 `ypbin-system` 或独立成一个 SQL 级检查脚本**，让 IoT 模块的测试不必为平台菜单负责。本方案只提示，不在范围里。
 
 **本次改动会碰到的门禁，逐个过一遍（其余不受影响）：**
 
@@ -722,7 +786,7 @@ SELECT id FROM sys_menu WHERE id BETWEEN 3300 AND 3399;
 | R4 | **菜单搜索** | **不受影响** | 搜索遍历 `accessMenus`，层级无关（`user-dropdown.vue:347-352` + `global-search/search-panel.vue:216`） |
 | R5 | **移动端** | **形态不变** | 移动端强制 `sidebar-nav`（`use-layout.ts:8-10`）⇒ 顶部大模块**不出现**；且**不会有白屏/错乱**。要在验收预期里写明 |
 | R6 | **i18n 缺键显示原始 key** | **会，若漏加 F-C** | 顶栏文案 = `$t(sys_menu.title)`；缺键时 vben 渲染原始 key（旧仓已发生过"95 处文案渲染成 key"的事故） |
-| R7 | **孤儿菜单（K2）** | **会，若不跑 §7.1.1 第 3 步** | 机制见 `SysMenuServiceImpl.java:73` + `:340-354`；自检见 §7.1.2 |
+| R7 | **孤儿菜单（K2）** | **会，若不跑 §7.1.1 第 3 步** | 机制见 `SysMenuServiceImpl.java:74` + `:340-354`；自检见 §7.1.2 |
 | R8 | **缓存偏好覆盖默认值（K1）** | **会** | `preferences.ts:139-150`；缓解 = F-B |
 | R9 | **门禁假绿（K3）** | **会，若不扩门禁** | `IotMaintenanceAdminGateTest.java:94` 的 `startsWith("32")` |
 | R10 | **上游 admin 未来占用 33xx** | 可能 | §7.2 的缓解三条 |
@@ -750,10 +814,15 @@ SELECT id FROM sys_menu WHERE id BETWEEN 3300 AND 3399;
 
 #### P1 —— 真正的模块化（**需要动数据**，1-2 天）
 
-1. 写 `<日期>-iot-platform-module-menu.sql` + 追加到 `007-iot-data.sql`（§7.1.1 全部 SQL），**双写**并过 `tools/check-iot-sql-equivalence.sh`。
-2. 按 §7.1.4 扩 `IotMaintenanceAdminGateTest` 到 `33xx`，并做**变异验证**（删授权 ⇒ 必须转红）。
+1. 写 `deploy/sql/migration/<日期>-iot-platform-module-menu.sql`（**文件名必须含 `-iot-`**，否则会被等价性脚本静默排除）+ 把同一批语句**逐字**追加到 `007-iot-data.sql` 末尾（§7.1.1 全部 SQL），然后过 `tools/check-iot-sql-equivalence.sh`。
+2. **先修门禁的作用域、再扩到 `33xx`**（两件事必须同时做，§7.1.4）：
+   - 把 `sql.split("INSERT INTO " + table)` 换成**按语句归属**的收集（剥 `--` 注释 → 按 `;` 切语句 → 只在该语句确实是 `INSERT [IGNORE] INTO <本表>` 时取 `id IN (...)`）；
+   - 把期望改成 `MENU_INSERT` 正则捕获的 **`platform_only` 感知**规则（一律要 `sys_role_menu`；`platform_only=0` 时才要 `sys_template_menu`）；
+   - 保留 `assertThat(menuIds).isNotEmpty()` 自检；
+   - **重做 3 个变异**（模板缺 / 角色缺 / `platform_only` 从 1 改 0 而不补模板授权）⇒ 三个都必须转红，基线必须全绿（附录 A.10 有可复现脚本与预期输出）。
+   - ⚠️ 只改 `startsWith("32")` 为 `\|\| startsWith("33")` 是**无效**的（实测不咬人）。
 3. 加 `page.admin.title` / `page.ops.title`（zh-CN + en-US）。
-4. 执行迁移 → 跑 §7.1.2 三条自检（期望全 0 行）→ 用**平台管理员 + 一个普通租户用户**各登一次，核对模块数与菜单项。
+4. **迁移前**先存孤儿基线（§7.1.2 的角色侧查询，实测基线是 5 行）→ 执行迁移 → **再跑同一查询，必须与基线一致（不新增）**，另两条（模板侧、`platform_only` 嵌套）期望 0 行 → 用**平台管理员 + 一个普通租户用户**各登一次，核对模块数与菜单项。
 5. 前端 F-A/F-B 上线；验收清单包含 §7.4 的 R3（面包屑变三层）与 R5（移动端不变）。
 
 #### P2 —— 体验打磨（可选）
@@ -770,22 +839,71 @@ SELECT id FROM sys_menu WHERE id BETWEEN 3300 AND 3399;
 
 ## 8. 独立复核结论（R6）
 
-> 本节由**独立复核子代理**（不同上下文、只读、自行跑命令）填写。复核项与结论见下（本轮复核结论由复核代理给出后追加）。
+本节由**独立复核子代理**执行（不同上下文、只读、自行跑命令、不继承本文结论），**复核对象是两个仓的两个分支的最终状态**，复核项在派发时固定为下面 8 条 + "额外找作者没提的问题"。
 
-**复核项清单（派发时固定）：**
+### 8.1 逐项结论
 
-| # | 复核什么 | 复核方式（要求复核者自己跑） |
-|---|---|---|
-| ① | "vben 支持 `mixed-nav` 且它 = 顶部一级 + 左侧二级"这条断言与仓内类型/实现是否一致 | 打开 `app.d.ts`、`use-mixed-menu.ts`、`basic/layout.vue`，逐条核对行号；确认 `mixed-nav` 需要 `navigation.split` |
-| ② | "当前布局 = `sidebar-nav`、改法是 `app.layout: 'mixed-nav'` + 重建"是否可复现 | 读 `config.ts:28`、`apps/web-antd/src/preferences.ts`（确认无 layout/navigation 覆盖）、`preferences.ts:139-150`（缓存优先） |
-| ③ | 迁移 SQL 里的新 id `3310/3320` **未占用** | 自己跑附录 A.5 的**只读**查询（`ssh ypbin-prod` + `docker exec ypbin-mysql …`），给出命令与原始输出；同时 `grep -rn "3310\|3320" deploy/sql/` |
-| ④ | 原型 `platform-nav.html` 离线可打开且**零外链** | `grep -c 'http'`（期望 0）、`grep -nE '<(script\|link\|img\|iframe)'`；并用浏览器/**Node 解析**证明 JS 语法可执行 |
-| ⑤ | 方案里"复用现有页面"的断言与仓内实际一致 | 抽查：`views/iot/**`、`views/ai/**`、`views/system/app/list.vue`、`views/dashboard/workspace/index.vue` 是否真实存在；`/system/app` 的权限码是否如文中所写 |
-| ⑥ | 活化库实测的 13 个顶级菜单与本文 §4.2 表格是否逐行一致 | 自己跑附录 A.4 查询比对 |
+| # | 复核项 | 结论 | 复核者的关键取证 |
+|---|---|---|---|
+| ① | `mixed-nav` = 顶部一级 + 左侧二级，与仓内类型/实现一致 | **PASS**（并纠正 1 处论据） | `app.d.ts:1-8` 7 种；`use-preferences.ts:113-115`；`use-mixed-menu.ts:24-29`（`needSplit` 确含 `navigation.split && isMixedNav`）、`:43-53`（headerMenus 清空 children）、`:58-60`；`basic/layout.vue:131-136`、`:367-377`、`:390-403`；`vben-layout.vue:597` 无第三列。**纠正**：本文原来说 `header-nav` 是"顶部一份 + 左侧一份"——**错**，`header-nav` 下 `sidebarEnableState = !isHeaderNav && ...`（`:165-168`）、`<LayoutSidebar v-if="sidebarEnableState">`（`:565`）⇒ **侧边栏整体不渲染**。已改（§2.2） |
+| ② | 当前 = `sidebar-nav`、改法 = 加 `app.layout` + 重建；缓存优先（K1） | **PASS** | `config.ts:28`/`:20`/`:76`/`:88`；`apps/web-antd/src/preferences.ts` 无 layout/navigation 覆盖；`.env*` 无布局变量；**K1 独立复核成立**：`preferences.ts:132` merge、`:139-150` 缓存优先、`:356-358` 读、`:437-440` 写整份 state；旁证 `:150-158` 已为 `accessMode` 单开"强制用 overrides"先例 ⇒ P0 的 F-B 可行 |
+| ③ | `3310/3320` 未占用 | **PASS** | 活库 `id IN (3310,3320)` **0 行**、`BETWEEN 3205 AND 3399` **0 行**；仓内 grep **0 命中**；§7.2 的 id 段表与活库 `GROUP BY FLOOR(id/1000)` **逐格一致** |
+| ④ | 原型离线可打开、零外链 | **PASS**（含增值） | `grep -c http`=0；仅 1 个无 `src` 的内联 `<script>`；无 link/img/iframe/xmlns/url()/@import/fetch/XHR/localStorage；`node --check` 通过。**独立统计**：5 模块、admin16/ai7/iot16/ops7=**46**、iot 分组 4/3/4/3/2、标记 复用37/新增3/缺接口6；HTML 47 条 route 全部在 README §4 登记（漏登记 0），README 唯一多出的 `#/dashboard` 在 HTML 中是**别名**（虚登记 0）；6 个实页吻合 |
+| ⑤ | "复用现有页面"与仓内实际一致 | **PASS** | **35/35 文件存在**（含本文点名的全部路径）；`002-data.sql:312-315` 的 `system:app:*` 4 个权限码 ✓；**IoT 标记 16/16 与旧文 §4.1 逐条一致**。唯一口径差异：旧文把「接入向导」画在独立的「🚀 起步」组，原型并入「① 接入配置」 |
+| ⑥ | 活库 13 个顶级菜单与 §4.2 逐行一致 | **PASS** | 复核者实跑 `pid=0` 查询得 13 行，与 §4.2 的 id/name/type/platform_only/path **逐行一致**（含 `2600=menu`、`4001=embedded`）；附录 A.4 的输出与其实跑**逐字节相同** |
+| ⑦ | 两个机制性断言（K2 孤儿 / K3 门禁） | **K2 = PASS；K3 = FAIL（已修）** | K2 成立（复核者独立读 `buildRoutes`/`buildRouteTree`/`applyTenantMenuFilter`/`selectByUserId`/`ROOT_PARENT_ID` 后确认）。**K3 判 FAIL** —— 见 §8.2 |
+| ⑧ | 外部引用给得出、点得开 | **PASS** | 6 条 URL 全 200；抽查 5 条**引语逐字命中**（腾讯云/AWS/企业微信/Azure/阿里云）；自我声明诚实（"通式"标我方推断、飞书标未核实，未把二手冒充一手） |
 
-**复核结论：见本文件末尾「附：独立复核回执」**（若本文件交付时该节仍为空，说明复核未完成 —— **不得据此宣称方案已验证**）。
+### 8.2 K3 的 FAIL 与整改（本次最重要的修正）
 
----
+**复核者用真实 JDK 复刻门禁逻辑后实测**：
+
+1. **原门禁对 `sys_template_menu` 的检查是假绿** —— `sql.split("INSERT INTO " + table)` 的 block 跨语句串味，两张表实测 `granted` 完全相同；`320014` 从未进任何 `sys_template_menu` INSERT 却被判为已授权。**变异：删掉 `3310` 的模板授权，门禁不转红。**
+2. **本文早前的判断"天真扩到 `startsWith("33")` 会产生假红"是错的** —— 实测 `MISSING=[]`。问题不是假红，而是**根本不咬人**。
+3. **即使修好作用域，"两张表都必须覆盖"这条规则本身也错** —— 会在正确数据上误报 `320014/320015`（`platform_only=1`，按 `007:90-97` 的约定故意不进模板）。
+
+**整改（已写入 §7.1.4 + 附录 A.10，并由本文作者独立复现）**：
+
+| 整改项 | 内容 |
+|---|---|
+| 收集方式 | 改为**按语句归属**（剥 `--` 注释 → 按 `;` 切语句 → 只在该语句确实是 `INSERT [IGNORE] INTO <本表>` 时取 `id IN (...)`） |
+| 期望规则 | 一律要 `sys_role_menu`；**仅当 `platform_only=0`** 时才要 `sys_template_menu`（正则升级为 `MENU_INSERT`，同时捕获 `id/pid/name/type/platform_only`） |
+| 变异验证 | **3 个变异全部实测转红**（模板缺 / 角色缺 / 由 `platform_only` 决定的期望切换），基线实测全绿 |
+| 保留自检 | 必须保留 `assertThat(menuIds).isNotEmpty()`，防"0 违规 = 没跑到" |
+| 撤回 | 本文早前"天真扩法会假红"的结论与"沿用既有验证结构"的建议**均已撤回** |
+
+### 8.3 复核者额外发现、本文已修的问题
+
+| # | 问题 | 严重度 | 处置 |
+|---|---|---|---|
+| 1 | **`4001 接口文档` 归属自相矛盾**：§4.1「运维与监控」列了它，而 §4.2/§7.1.1 SQL 归「基础管理」，§5 mermaid 同时挂了两处，原型只放了 ops | **高** | 统一为 **基础管理 / 授权与开发**（理由：`platform_only=0`，放进 `platform_only=1` 的 3320 会在租户侧消失）；§4.1、§5 mermaid、原型 HTML 与原型 README **四处已全部改为同一归属**（`#/admin/api-docs`）；「运维与监控」由 3 组收为 2 组 |
+| 2 | 门禁模板侧假绿（= §8.2） | **高** | 已整段重写 §7.1.4 |
+| 3 | 变异验证计划不成立（= §8.2） | **高** | 已重写并给出实测通过的 3 个变异 |
+| 4 | **§7.1.2"期望 0 行"实测不为 0**：活库角色侧**已有 5 条**超管孤儿（`role 1`：`230/290→3002`、`5003/5050→5000`、`270004→2700`） | 中高 | 改为"**不新增**孤儿"口径，列出迁移前基线 5 行 + 模板侧 0 行，并说明这 5 行是 `002-data.sql` 种子方式造成的既有现象、对超管无可见影响（附录 A.10 有实测输出） |
+| 5 | `platform_only` 过滤实际在 `SysMenuServiceImpl.java:**74**`，本文多处写 `:73` | 低 | 已全文更正 |
+| 6 | `header-nav` 形态描述错（= ①） | 低 | 已更正（§2.2、§3.1） |
+| 7 | 附录 A.2 的自证命令字符串与源码不符（实际注释是"用户缓存的设置优先"） | 低 | 已更正 |
+| 8 | **K2 漏了"租户模板"这一层**：非平台用户还要过 `applyTenantMenuFilter`（`allowedIds ← sys_template_menu`） | 中低 | §2.5 增补"谁受 K2 影响"行，说明两道过滤 + 指出它只补"已在用户菜单集合里"的祖先 |
+| 9 | "HTTP 200 ≠ 文件存在"（nginx SPA 回退） | 中·方法学 | 已在 §2.4 明确：只对**实测过字节数一致**的 `index.html` 声明可访问；`platform-nav.html` 写的是"上线到同一位置**即可**"（未声称已部署） |
+
+### 8.4 复核者主动确认"做得对"的部分
+
+- K2 的机制定位与"防孤儿补授 SQL"是全篇最有价值的判断；
+- §3.4 **主动推翻用户前提**且 3 条反向证据被逐一核实为真；
+- K1 行号精确且有 `accessMode` 先例；
+- 附录 A 基本可直接复现（A.4/A.5 与实跑**逐字节一致**）；
+- `check-iot-sql-equivalence.sh` 的三条特征（只收 `*-iot-*`、归一化方式、空跑即报错）**全部属实**；
+- `ItSchema` 确实只加载 `006-iot-schema.sql`（`ItSchema.java:53`）；
+- `check-iot-i18n-keys.mjs:16` 确实只扫 `views/iot`+`api/iot`；
+- 原型工程质量高（真零外链、46 项与 README 表格逐格吻合、route 双向无缺口）；
+- 顺手发现的真实漂移属实（`docs/DEPLOY-UI.md:32-33` 写 19001，生产 `.env` = 19000、`docker ps` = `19000->80`）；
+- `3310/3320` 与 `3210-3250` 空闲的结论可靠。
+
+### 8.5 复核者的判定与本文的整改状态
+
+> **复核判定：FAIL（有条件）** —— "方向与迁移主干站得住，但有两处实质缺陷能否决'可直接实施'"：门禁假绿 + `4001` 归属矛盾。
+
+**本文的整改状态：§8.2 的 3 项 + §8.3 的 9 项已全部修正并落到文档与原型；K3 的修正版门禁基线通过、3 个变异转红（附录 A.10 有完整命令与输出）。** 修正后**未再送第二轮独立复核**——按 R6，**本文只能声明"已按复核意见整改"，不能声明"整改已通过独立验收"**。若要把本方案变成实施依据，**必须再做一轮针对修正稿的独立复核**（重点：修好的门禁是否真的咬人、§7.1.2 的新口径、`4001` 归属一致性）。
 
 ## 9. 未核实与本次不做的（R1 / R8）
 
@@ -800,8 +918,12 @@ SELECT id FROM sys_menu WHERE id BETWEEN 3300 AND 3399;
 | **U6** | 上游 `ypbin-admin` 是否已有 `33xx` 段的规划 | **未核实** | 只查了本仓与活库；上游未来占用是**推测的风险**，不是既成事实（§7.2 给了缓解） |
 | **U7** | 「知识与 AI」模块名是否与产品口径一致 | **已查清口径冲突，待产品拍板** | 实测 `page.ai.title` 的现值是 **zh「AI 助手」/ en「AI Assistant」**，而用户原话是"知识库 / AI / 账号"、本文 §4.1 写的是「知识与 AI」⇒ **三处口径不一致**。库内**没有**独立的"AI 账号"菜单；与账号/配额最接近的是 `5003 模型配置`（`platform_only=1`）与 `5050 用量统计`（`platform_only=1`）。本文按**现有菜单**命名，**不硬造"账号与配额"页面**；模块名沿用键、按 §4.4 铁律三二选一（改值 / 保留"AI 助手"） |
 | **U9** | `page.dashboard.title` 现值是 **「概览」**（en: Dashboard），与"工作台"不一致 | **已查清，需产品确认** | 要"工作台"这个名字就必须改值（§7.3 F-C2）；不改则顶栏显示"概览" |
+| **U10** | **修正稿是否已通过独立验收** | **未核实（明确声明）** | 本文按独立复核意见整改了 12 处（§8.2/§8.3），但**整改后未再送第二轮独立复核** ⇒ 只能说"已按复核意见整改"，**不能说"整改已通过独立验收"**。要把本方案当实施依据，**必须再做一轮针对修正稿的独立复核** |
+| **U11** | 修正版门禁**真实 JUnit 行为** | **未核实（用逻辑复刻代替）** | 本机低配且复核要求只读，未跑 Maven；附录 A.10 是"逐字复刻其取数与判定逻辑"的复刻结果，**不是真实 JUnit 运行结果**。实施时必须在 CI 或他机跑一次真实测试，并**重做那 3 个变异** |
+| **U12** | `platform-nav.html` 的**实际渲染与点击** | **未核实** | 本次只做了静态检查（零外链、JS 语法、路由/条目与 README 双向一致）。**没有在浏览器里真正渲染、点击、切模块**（本机不跑前端全量构建，也无浏览器验证步骤）⇒ 视觉、布局宽度、交互手感均未核实。建议打开文件肉眼过一遍 |
+| **U13** | 生产环境**是否存在真实租户用户 / 自定义角色** | **未核实** | 本次只按"角色/模板全表"跑了孤儿普查（无过滤，是全量），但**没有枚举生产上实际有多少租户、多少自定义角色** ⇒ "K2 会影响多少真实用户"的规模未量化。迁移前建议先查一次租户与角色清单 |
 
-**本次明确不做（R8，避免范围蔓延）：** 不改生产库、不改业务代码、不动 IoT 模块内部（引旧文）、不合并任何 PR、不做 xxl-job 集成、不做移动端另套设计、不改 `docs/ux-mock/index.html` 的既有内容。
+**本次明确不做（R8，避免范围蔓延）：** 不改生产库（全程只读 `SELECT`）、不改业务代码（**连方案里的迁移 SQL 与门禁修正都没有落地成文件**，只写在 §7 与 §8.2）、不动 IoT 模块内部（引旧文）、不合并任何 PR、不做 xxl-job 集成、不做移动端另套设计、不改 `docs/ux-mock/index.html` 的既有内容。**两个 PR 全程只含文档与静态原型**（ypbin-iot: 2 文件；ypbin-iot-ui: 2 文件），两仓 CI 全绿。
 
 ---
 
@@ -833,7 +955,7 @@ sed -n '24,29p' packages/effects/layouts/src/basic/menu/use-mixed-menu.ts
 grep -n "layout: 'sidebar-nav'" packages/@core/preferences/src/config.ts     # 28
 grep -rn "layout" apps/web-antd/src/preferences.ts                          # 无输出（未覆盖）
 grep -rn "VITE_.*LAYOUT\|LAYOUT" apps/web-antd/.env*                        # 无输出（无构建期变量）
-grep -n "cachedPreferences, // 用户缓存" packages/@core/preferences/src/preferences.ts   # 146（缓存优先）
+grep -n "用户缓存的设置优先" packages/@core/preferences/src/preferences.ts   # 146（缓存优先；注释原文是"用户缓存的设置优先"）
 ```
 
 ### A.3 顶级菜单来源（仓内，后端 + 前端）
@@ -967,6 +1089,94 @@ grep -n "system:app:" ypbin-iot/deploy/sql/002-data.sql
 
 ---
 
+### A.10 门禁缺陷的复现与修正版验证（§7.1.4 的全部证据）
+
+**复现方式**：不跑 Maven（本机低配，且复核要求只读），而是**逐字复刻** `IotMaintenanceAdminGateTest#everyMenuIdMustBeGranted` 的取数与判定逻辑（同样的 `sql.split("INSERT INTO " + table)`、同样的 `GRANT_IN = id IN \(([^)]*)\)` 正则），输入 = **真实 `deploy/sql/007-iot-data.sql` + 本方案 §7.1.1 的追加 SQL**。
+
+#### （1）复现"假绿"（原门禁逻辑）
+
+```python
+import re
+sql = open('deploy/sql/007-iot-data.sql', encoding='utf-8').read()
+GRANT_IN = re.compile(r"id IN \(([^)]*)\)")
+def granted(sql, table):
+    g = set()
+    for b in re.split(r"INSERT INTO " + table, sql)[1:]:   # 复刻 Java String.split 的语义
+        for m in GRANT_IN.finditer(b):
+            for it in m.group(1).split(','):
+                g.add(it.strip())
+    return g
+for t in ("sys_role_menu", "sys_template_menu"):
+    print(t, len(granted(sql, t)), "| 320014 in granted:", "320014" in granted(sql, t))
+print("320014 真的出现在 sys_template_menu 的 INSERT 里吗:",
+      any("320014" in re.search(r"id IN \(([^)]*)\)", s).group(1)
+          for s in re.findall(r"INSERT INTO sys_template_menu(.*?);", sql, re.S)
+          if re.search(r"id IN \(([^)]*)\)", s)))
+```
+
+**实测输出：**
+
+```
+sys_role_menu 33 | 320014 in granted: True
+sys_template_menu 33 | 320014 in granted: True
+320014 真的出现在 sys_template_menu 的 INSERT 里吗: False
+```
+
+⇒ 两张表的 `granted` **完全相同（33 条）**，而 `320014` 从未出现在任何 `sys_template_menu` 的 INSERT 里（`007-iot-data.sql:90-97` 明文"绝不进 sys_template_menu"）。
+⇒ **模板侧检查是假绿**。根因：`split` 切出的 block 跨语句，把 `:96-97` 的 **role** 授权语句也算进了 **template** 的 `granted`。
+
+#### （2）修正版门禁的基线与三个变异
+
+修正点：① 先剥 `--` 注释；② 按 `;` 切语句；③ **只在该语句确实是 `INSERT [IGNORE] INTO <本表>` 时**才取该语句内的 `id IN (...)`（按语句归属，不跨语句）；④ 期望改为"一律要 `sys_role_menu`；`platform_only=0` 时才要 `sys_template_menu`"。
+
+**实测输出：**
+
+```
+== 修正版门禁：语句级归属 + 剥注释 + platform_only 感知 ==
+基线: role缺失=[]   template缺失=[]        (解析菜单 35 条)        ✅ 全绿
+[变异1] 删 3310 的 template 授权（platform_only=0 ⇒ 必须转红）
+   role缺失=[]   template缺失=['3310']                              ✅ 转红
+[变异2] 删 3310/3320 的 role 授权（必须转红）
+   role缺失=['3310', '3320']   template缺失=[]                      ✅ 转红
+[变异3] 把 3320 改成 platform_only=0 但不补 template 授权（必须转红）
+   role缺失=[]   template缺失=['3320']                              ✅ 转红
+```
+
+#### （3）"只修作用域、不改规则"会在正确数据上假红
+
+**实测输出：**
+
+```
+【只修"语句级归属"、仍用"两张表都必须覆盖"的朴素规则】在真实 007 上的结果：
+  sys_template_menu 缺失 = ['320014', '320015']
+  ⇒ 这两条 id 的 platform_only = {'320014': '1', '320015': '1'}
+```
+
+⇒ 两条 `platform_only=1` 的菜单（按既有约定**故意**不进模板）会被朴素规则误报 ⇒ **修作用域与改规则必须同时做**。
+
+#### （4）孤儿自检的迁移前基线（活库实测）
+
+```bash
+ssh ypbin-prod 'docker exec ypbin-mysql bash -c '"'"'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot -N -B -e "
+SELECT rm.role_id, m.id, m.name, m.pid
+FROM sys_role_menu rm
+JOIN sys_menu m ON m.id = rm.menu_id AND m.is_deleted = 0 AND m.status = 1
+LEFT JOIN sys_role_menu pr ON pr.role_id = rm.role_id AND pr.menu_id = m.pid
+WHERE m.pid <> 0 AND pr.menu_id IS NULL ORDER BY rm.role_id, m.id" ypbin_admin'"'"''
+```
+
+**实测输出（5 行，全部是 role 1 = 超管）：**
+
+```
+1	230	SystemMenu	3002
+1	290	SystemClient	3002
+1	5003	AiConfig	5000
+1	5050	AiUsage	5000
+1	270004	SystemPushTest	2700
+```
+
+模板侧同一查询：**0 行**。⇒ §7.1.2 的正确口径是"**不新增**孤儿"，不是"绝对 0 行"。
+
 ## 附录 B · 交付物与 PR
 
 | 交付物 | 仓库 / 路径 | PR |
@@ -983,6 +1193,39 @@ grep -n "system:app:" ypbin-iot/deploy/sql/002-data.sql
 
 ---
 
-## 附：独立复核回执
+## 附：独立复核回执（原文要点，未润色）
 
-> 由独立复核子代理（不同上下文、只读、自行跑命令）填写；复核项清单见 §8。**本节为空 = 复核未完成。**
+**复核者身份与方式**：独立子代理，**不同上下文**、只读、自行跑命令、不继承本文结论；**未修改任何仓内文件**（临时产物只在 `/tmp`）、未 commit/push、生产库仅 `SELECT`、未回显任何口令。
+
+### 总结论（复核者原文）
+
+> **FAIL（有条件）** —— 方向与迁移主干站得住（`mixed-nav` 机制、4 模块划分、reparent+补授 SQL 语义、6 条外部引用全部 200 且引语逐字命中），但有两处实质缺陷能否决"可直接实施"：
+> **(1)** 方案当作核心增值的 K3 分析**实证不成立**；更要命的是它视为"唯一能兜住 K2 盲区"的 `IotMaintenanceAdminGateTest` 的 `sys_template_menu` 覆盖面检查**是假绿** —— 我把方案要求的变异实测跑了一遍：删掉 `3310` 的模板授权，门禁**不转红**。
+> **(2)** `4001 接口文档` 归属在同一份文档内自相矛盾；且 §7.1.2 要求的"期望 0 行"迁移后自检**实测不会是 0**。
+
+### 关键实测摘录（复核者自跑）
+
+- **门禁假绿**：`sql.split("INSERT INTO "+table)` 后**跨语句累积** `id IN (...)`，被另一张表污染；`320014/320015` 在 007 里从未出现在任何 `sys_template_menu` INSERT（按段 grep 计数 0），门禁却报 `granted=true`。
+- **"天真扩到 `33xx` 会假红"不成立**：实测 `MISSING=[]`。
+- **变异实测**：删 `3310` 的模板授权 → `sys_template_menu MISSING=[]`，**不转红**；只有删 `3310/3320` 的角色授权才因 `3320` 消失而红。⇒ 方案推荐的 (a)"沿用既有验证结构"**同样不咬人**，按原方案实施会得到"门禁全绿 + 变异验证也全绿"的**双重假象**。
+- **孤儿自检**：活库现存 **5 条角色孤儿**（`role 1` 缺父 `2700/5000/3002`；子 `270004/5050/5003/290/230`），迁移只补 `3310/3320` 不修 ⇒ 会返 5 行，易被误判为迁移回归（`role 1` 是超管，无可见影响）。
+- **外部引用**：6 条 URL 全 200；抽查 5 条**引语逐字命中**；自我声明诚实（通式标"我方推断"、飞书标未核实，未把二手冒充一手）。
+- **原型**：真零外链；独立统计 **46 项**与 README 表格逐格吻合；route 双向无缺口；`#/dashboard` 确为别名（`HTML:588`）。
+- **`4001` 归属矛盾**（复核者原文）："md:292(基础管理) 与 md:300(运维与监控) 同节两处；§5 mermaid md:406 `ADMIN-->DOC` 与 md:447 `OPS-->DEV` 同时挂；原型只放运维；而 §4.2(A)+§7.1.1 SQL 搬进 3310 基础管理 ⇒ 按 SQL 实施后原型 admin15/ops8 会变 16/7。"
+
+### 复核者未能核实的事项（原文）
+
+| # | 想核实什么 | 为什么核不了 |
+|---|---|---|
+| 1 | 飞书管理后台官方正文 | 帮助中心正文前端渲染，抓回的 HTML 无正文，`/hc/api/*` 探测亦无果 |
+| 2 | 13 / 4-5 项在具体视口下是否触发「更多」折叠 | 需浏览器渲染；代码层机制已确认 |
+| 3 | "没有任何官方文档使用 More""腾讯云是唯一明文写双层结构" | **全称否定/评估断言不可穷尽**（抽查 5 页无 "More"） |
+| 4 | 真实 JUnit 运行 | 为遵守只读未做 Maven 构建，用真实 JDK 逐字复刻其正则与 `split` 语义跑判定（覆盖该测试两条断言的核心） |
+| 5 | 上游 `ypbin-admin` 是否规划 `33xx` | 同本文 U6 |
+| 6 | §3.4 未抽查的次级链接 | 时间与范围所限 |
+
+### 本文对回执的处理
+
+- **全部 12 处问题已整改**（§8.2 的 3 项 + §8.3 的 9 项）；**2 处本文此前的错误结论已明确撤回**（"天真扩法会假红"、"沿用既有验证结构"）。
+- **整改后未再送第二轮独立复核** ⇒ 按 R6，本文**只声明"已按复核意见整改"，不声明"整改已通过独立验收"**（已记为 U10）。
+
