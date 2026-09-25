@@ -718,8 +718,13 @@ SQL 文本门禁 + `executeIgnore` 源码门禁都钉住了这两条约束（`Av
 
 **① 的真库与 CI 证据（本机真跑 2026-09-24；CI 为 2026-09-24 的运行，2026-09-25 经 GitHub API 逐条核对）**：
 - 本机容器真跑（`-Pit`）：`Tests run: 5, Failures: 0, Errors: 0, Skipped: 0`（Docker + `apache/iotdb:2.0.11-standalone`，详见 §5.2.1 ⑤）；
-- CI 两条 IoT 集成 workflow 在 `831ddb2` 上 success：[IoT Integration Tests #36072937429](https://github.com/wenbin-wb/ypbin-iot/actions/runs/36072937429)、
-  [IoT IoTDB Integration Tests #36072937311](https://github.com/wenbin-wb/ypbin-iot/actions/runs/36072937311)（API 返回 `completed/success`，`head_sha=831ddb2`）。
+- **落地内容的 CI**：main `5afdf9d` 是 squash 提交，其 tree（`2eb1697`）与 PR #34 分支头 `803ffc0` **逐字相同**
+  ⇒ 落地内容由 `803ffc0` 上的两条运行覆盖且 success：[IoT Integration Tests #36074866527](https://github.com/wenbin-wb/ypbin-iot/actions/runs/36074866527)、
+  [IoT IoTDB Integration Tests #36074866490](https://github.com/wenbin-wb/ypbin-iot/actions/runs/36074866490)。
+- 同分支更早的 `831ddb2` 上两条运行也 success：[IoT Integration Tests #36072937429](https://github.com/wenbin-wb/ypbin-iot/actions/runs/36072937429)、
+  [IoT IoTDB Integration Tests #36072937311](https://github.com/wenbin-wb/ypbin-iot/actions/runs/36072937311)（`head_sha=831ddb2`）。
+  注意 `831ddb2` **不是**落地提交的祖先（其 tree 为 `7bd3317`），只作过程证据；两条 IoT 集成 workflow **不在 `main` push 触发**，
+  故 `main` 上只有 CI / CodeQL / Upstream Sync Check 三条（`5afdf9d` 上均 success）。
 - **仍未验证（如实声明）**：TTL 越界语义、`start-cli.sh -e` 的 SQL 错退出码、完整 compose 栈的 healthy/unhealthy 迁移、
   `quality=null` 是否会导致整块不落库、前端浏览器渲染。
 
