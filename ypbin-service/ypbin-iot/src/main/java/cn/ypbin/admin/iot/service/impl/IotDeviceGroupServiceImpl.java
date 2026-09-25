@@ -12,9 +12,11 @@ package cn.ypbin.admin.iot.service.impl;
 import cn.ypbin.admin.iot.entity.IotDevice;
 import cn.ypbin.admin.iot.entity.IotDeviceGroup;
 import cn.ypbin.admin.iot.entity.IotDeviceGroupMember;
+import cn.ypbin.admin.iot.entity.IotProduct;
 import cn.ypbin.admin.iot.mapper.IotDeviceGroupMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceGroupMemberMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
+import cn.ypbin.admin.iot.mapper.IotProductMapper;
 import cn.ypbin.admin.iot.model.req.IotDeviceGroupMemberReq;
 import cn.ypbin.admin.iot.model.req.IotDeviceGroupReq;
 import cn.ypbin.admin.iot.model.resp.IotDeviceGroupMemberResp;
@@ -24,8 +26,11 @@ import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.core.exception.GlobalErrorCode;
 import cn.ypbin.starter.crud.service.BaseServiceImpl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.util.stream.Collectors;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -42,11 +47,13 @@ public class IotDeviceGroupServiceImpl extends BaseServiceImpl<IotDeviceGroupMap
 
     private final IotDeviceGroupMemberMapper iotDeviceGroupMemberMapper;
     private final IotDeviceMapper iotDeviceMapper;
+    private final IotProductMapper iotProductMapper;
 
     public IotDeviceGroupServiceImpl(IotDeviceGroupMemberMapper iotDeviceGroupMemberMapper,
-                                     IotDeviceMapper iotDeviceMapper) {
+                                     IotDeviceMapper iotDeviceMapper, IotProductMapper iotProductMapper) {
         this.iotDeviceGroupMemberMapper = iotDeviceGroupMemberMapper;
         this.iotDeviceMapper = iotDeviceMapper;
+        this.iotProductMapper = iotProductMapper;
     }
 
     @Override
@@ -102,6 +109,8 @@ public class IotDeviceGroupServiceImpl extends BaseServiceImpl<IotDeviceGroupMap
             .toList();
         Map<Long, IotDevice> devices = iotDeviceMapper.selectBatchIds(deviceIds).stream()
             .collect(Collectors.toMap(IotDevice::getId, device -> device));
+        // 产品名**一次批量解析**（不是每条成员一次：禁循环内 DB）；成员列表要能直接显示「所属产品」
+        Map<Long, String> productNames = resolveProductNames(devices.values());
         return members.stream().map(member -> {
             IotDeviceGroupMemberResp resp = new IotDeviceGroupMemberResp();
             resp.setId(member.getId());
@@ -112,9 +121,34 @@ public class IotDeviceGroupServiceImpl extends BaseServiceImpl<IotDeviceGroupMap
             if (device != null) {
                 resp.setDeviceCode(device.getDeviceCode());
                 resp.setDeviceName(device.getDeviceName());
+                resp.setProductId(device.getProductId());
+                if (device.getProductId() != null) {
+                    // 产品已删除/跨租户不可见时保持为空，由页面显示「未绑定产品」，不编造名字
+                    resp.setProductName(productNames.get(device.getProductId()));
+                }
             }
             return resp;
         }).toList();
+    }
+
+    /**
+     * 批量解析「设备绑定产品」的名称（成员列表展示用）。
+     *
+     * <p>空集合**短路返回空 Map**：批量 IN 传空集合会拼出非法 SQL（本仓铁律），且没有产品绑定是常态。</p>
+     *
+     * @param devices 本轮成员对应的设备
+     * @return 产品 ID → 产品名；没有可解析的产品时为空 Map
+     */
+    private Map<Long, String> resolveProductNames(Collection<IotDevice> devices) {
+        Set<Long> productIds = devices.stream()
+            .map(IotDevice::getProductId)
+            .filter(Objects::nonNull)
+            .collect(Collectors.toSet());
+        if (productIds.isEmpty()) {
+            return Map.of();
+        }
+        return iotProductMapper.selectBatchIds(productIds).stream()
+            .collect(Collectors.toMap(IotProduct::getId, IotProduct::getProductName));
     }
 
     @Override

@@ -19,14 +19,17 @@ import static org.mockito.Mockito.when;
 import cn.ypbin.admin.iot.entity.IotDevice;
 import cn.ypbin.admin.iot.entity.IotDeviceGroup;
 import cn.ypbin.admin.iot.entity.IotDeviceGroupMember;
+import cn.ypbin.admin.iot.entity.IotProduct;
 import cn.ypbin.admin.iot.mapper.IotDeviceGroupMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceGroupMemberMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
+import cn.ypbin.admin.iot.mapper.IotProductMapper;
 import cn.ypbin.admin.iot.model.resp.IotDeviceGroupMemberResp;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Set;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -48,8 +51,9 @@ class IotDeviceGroupServiceImplTest {
     private final IotDeviceGroupMapper groupMapper = mock(IotDeviceGroupMapper.class);
     private final IotDeviceGroupMemberMapper memberMapper = mock(IotDeviceGroupMemberMapper.class);
     private final IotDeviceMapper deviceMapper = mock(IotDeviceMapper.class);
+    private final IotProductMapper productMapper = mock(IotProductMapper.class);
     private final IotDeviceGroupServiceImpl service =
-        new IotDeviceGroupServiceImpl(memberMapper, deviceMapper);
+        new IotDeviceGroupServiceImpl(memberMapper, deviceMapper, productMapper);
 
     @BeforeAll
     static void initTableInfo() {
@@ -83,21 +87,56 @@ class IotDeviceGroupServiceImplTest {
         dev100.setId(100L);
         dev100.setDeviceCode("DEV-100");
         dev100.setDeviceName("一号表计");
+        dev100.setProductId(500L);
         IotDevice dev101 = new IotDevice();
         dev101.setId(101L);
         dev101.setDeviceCode("DEV-101");
         dev101.setDeviceName("二号表计");
+        dev101.setProductId(500L);
         when(deviceMapper.selectBatchIds(List.of(100L, 101L))).thenReturn(List.of(dev100, dev101));
+        IotProduct product = new IotProduct();
+        product.setId(500L);
+        product.setProductName("温湿度计");
+        when(productMapper.selectBatchIds(Set.of(500L))).thenReturn(List.of(product));
 
         List<IotDeviceGroupMemberResp> resp = service.listMembers(1L);
 
         assertThat(resp).hasSize(2);
         assertThat(resp.get(0).getDeviceCode()).isEqualTo("DEV-100");
         assertThat(resp.get(0).getDeviceName()).isEqualTo("一号表计");
+        assertThat(resp.get(0).getProductId()).isEqualTo(500L);
+        assertThat(resp.get(0).getProductName()).as("成员列表要能直接显示所属产品")
+            .isEqualTo("温湿度计");
         assertThat(resp.get(1).getDeviceCode()).isEqualTo("DEV-101");
         assertThat(resp.get(1).getDeviceName()).isEqualTo("二号表计");
         assertThat(resp.get(0).getCreateTime()).isEqualTo(LocalDateTime.of(2026, 9, 20, 10, 0));
         verify(deviceMapper).selectBatchIds(List.of(100L, 101L));
+        // 产品名解析也必须是**一次**批量查询（两台设备同一个产品 ⇒ 去重后只查一个 id）
+        verify(productMapper).selectBatchIds(Set.of(500L));
+    }
+
+    @Test
+    @DisplayName("成员都没绑定产品：不查产品表（空集合短路，避免非法 IN）")
+    void membersWithoutProductMustNotQueryProducts() {
+        when(groupMapper.selectById(3L)).thenReturn(new IotDeviceGroup());
+        IotDeviceGroupMember member = new IotDeviceGroupMember();
+        member.setId(13L);
+        member.setGroupId(3L);
+        member.setDeviceId(103L);
+        when(memberMapper.selectList(any())).thenReturn(List.of(member));
+        IotDevice device = new IotDevice();
+        device.setId(103L);
+        device.setDeviceCode("DEV-103");
+        device.setDeviceName("三号表计");
+        when(deviceMapper.selectBatchIds(List.of(103L))).thenReturn(List.of(device));
+
+        List<IotDeviceGroupMemberResp> resp = service.listMembers(3L);
+
+        assertThat(resp).singleElement().satisfies(row -> {
+            assertThat(row.getProductId()).isNull();
+            assertThat(row.getProductName()).as("没有产品绑定就留空，页面显示「未绑定产品」，不编造").isNull();
+        });
+        verify(productMapper, never()).selectBatchIds(any());
     }
 
     @Test
