@@ -712,12 +712,25 @@ SQL 文本门禁 + `executeIgnore` 源码门禁都钉住了这两条约束（`Av
 
 | 步骤 | 内容 | 依赖/验证 | 状态 |
 |---|---|---|---|
-| **① IoTDB 表模型** | 建库/建表（含 90 天 TTL，设计见 §5.2.1）+ `TimeSeriesWriter`（JDBC 批量、afterCommit、失败计数不抛）+ 历史查询 `GET /devices/{id}/series` + 容器 IT | 需 IoTDB 实例；本机验 SQL/绑定/类型映射/降级，**真库往返与 TTL 只能由容器 IT/CI 证明**（本机不跑容器） | 🟡 **代码与部署已推送**（PR #34 待复核合并）：写入器 `IotDbTimeSeriesWriter`、查询 `IotDbTimeSeriesStore`、装配（启用即构造真实现 + 表名白名单 + 驱动自检）、`iot:series:get` 权限码/菜单、compose 加 `iotdb`+一次性 `iotdb-init`、Nacos `ypbin.timeseries.enabled: true`、单测 203/0 + 架构 41/0 + **容器 IT 已写但从未真跑**（首次真库验证在 CI）；部署侧与 IT 侧的独立复核进行中 |
+| **① IoTDB 表模型** | 建库/建表（含 90 天 TTL，设计见 §5.2.1）+ `TimeSeriesWriter`（JDBC 批量、afterCommit、失败计数不抛）+ 历史查询 `GET /devices/{id}/series` + 容器 IT | 需 IoTDB 实例；本机验 SQL/绑定/类型映射/降级，真库往返由容器 IT 证明 | ✅ **已合并并真库验证**（PR #34 → main `5afdf9d`）：写入器 `IotDbTimeSeriesWriter`、查询 `IotDbTimeSeriesStore`、装配（启用即构造真实现 + 表名白名单 + 驱动自检）、`iot:series:get` 权限码/菜单、compose 加 `iotdb`+一次性 `iotdb-init`、Nacos `ypbin.timeseries.enabled: true`；单测 iot **212/0** + access **93/0**、架构 **41/0**；**容器 IT 已在本机真跑通过**（`Tests run: 5, Failures: 0, Errors: 0, Skipped: 0`，Docker + `apache/iotdb:2.0.11-standalone`，见 §5.2.1 ⑤）且 CI success（证据见下方专条）；部署侧与 IT 侧已外委复核 PASS |
 | **② EMQX 入站** | EMQX 5.x（内置库认证 + REST provisioning，username 稳定只换口令）+ iot 侧共享订阅消费者；**HTTP 上报通道保留**为降级/自测路径 | 需 EMQX 实例；协议/主题/ACL 约定要写成文档 + 容器 IT | ⏳ 待开始 |
 | **③ M-3 控制面** | 命令下行 + 影子同步 + 在线调试（§6） | 依赖 ①② 的数据面稳定 | ⏳ 待开始 |
 
+**① 的真库与 CI 证据（本机真跑 2026-09-24；CI 为 2026-09-24 的运行，2026-09-25 经 GitHub API 逐条核对）**：
+- 本机容器真跑（`-Pit`）：`Tests run: 5, Failures: 0, Errors: 0, Skipped: 0`（Docker + `apache/iotdb:2.0.11-standalone`，详见 §5.2.1 ⑤）；
+- **落地内容的 CI**：main `5afdf9d` 是 squash 提交，其 tree（`2eb1697`）与 PR #34 分支头 `803ffc0` **逐字相同**
+  ⇒ 落地内容由 `803ffc0` 上的两条运行覆盖且 success：[IoT Integration Tests #36074866527](https://github.com/wenbin-wb/ypbin-iot/actions/runs/36074866527)、
+  [IoT IoTDB Integration Tests #36074866490](https://github.com/wenbin-wb/ypbin-iot/actions/runs/36074866490)。
+- 同分支更早的 `831ddb2` 上两条运行也 success：[IoT Integration Tests #36072937429](https://github.com/wenbin-wb/ypbin-iot/actions/runs/36072937429)、
+  [IoT IoTDB Integration Tests #36072937311](https://github.com/wenbin-wb/ypbin-iot/actions/runs/36072937311)（`head_sha=831ddb2`）。
+  注意 `831ddb2` **不是**落地提交的祖先（其 tree 为 `7bd3317`），只作过程证据；两条 IoT 集成 workflow **不在 `main` push 触发**，
+  故 `main` 上只有 CI / CodeQL / Upstream Sync Check 三条（`5afdf9d` 上均 success）。
+- **仍未验证（如实声明）**：TTL 越界语义、`start-cli.sh -e` 的 SQL 错退出码、完整 compose 栈的 healthy/unhealthy 迁移、
+  `quality=null` 是否会导致整块不落库、前端浏览器渲染。
+
 **纪律不变**：每步按 R6 外委复核后合并；不改继承来的 `ci.yml`（新增 workflow 文件，见四点十八 UP-1）；
-本机不跑容器 IT，真库结论以 CI 为准并如实标注。
+**IoTDB 容器 IT 本机可跑**（Docker + `apache/iotdb:2.0.11-standalone` 已实测），真库结论以**本机真跑 + CI** 双证据为准，
+覆盖不到的部分照上面的「仍未验证」逐条如实标注。
 
 ### 五、替换缝（3a 已备好，3b-2 只需新增自动配置）
 3a 的 `LoggingTenantLinkManager` 已去掉 `@Component`，由 `AccessLeaseConfiguration`（`@AutoConfiguration`

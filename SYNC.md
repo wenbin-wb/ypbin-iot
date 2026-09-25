@@ -26,7 +26,7 @@ mvn -B -ntp -fae clean verify               # 同步后必须重跑门禁
 IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，改动要尽量是「加法一行」。
 **本清单与 `.github/workflows/sync-whitelist.yml` 里的白名单必须保持一致**（改了这里就改那里）。
 
-> **白名单膨胀要记账**：目前 7 个文件。每增加一个都是「以后同步时的潜在冲突点」；
+> **白名单膨胀要记账**：目前 8 个文件。每增加一个都是「以后同步时的潜在冲突点」；
 > 加之前先问：能不能用新文件/新模块实现？只能改既有文件时才加，并在提交信息里写明理由。
 
 | 文件 | 改动 | 说明 |
@@ -38,9 +38,23 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 | `deploy/docker-compose.yml` | 新增 `ypbin-iot` 服务块 | 部署编排 |
 | `deploy/nacos/ypbin-gateway.yaml` | routes 加 `iot` 一段（`Path=/iot/**` + `StripPrefix=1`） | 网关路由（IoT 路由也进仓，便于与其它服务同构） |
 | `deploy/.env.example` | 端口段注释加 18084 | 环境变量示例（纯注释） |
+| `ypbin-architecture-tests/src/test/java/cn/ypbin/admin/arch/SourceConventionTest.java` | `LOOP_DB_EXEMPTIONS` **加一条误报豁免**（类名#接收者.方法 + 理由） | **唯一的上游测试类例外**，理由见下方专条 |
 | `deploy/sql/006-iot-schema.sql`、`007-iot-data.sql` | **新文件** | 全新安装用 |
 | `deploy/sql/migration/*-iot-*.sql` | **新文件**（命名必须含 `-iot-`） | 已上线库用；按文件名排序拼接后与 `006+007` **语句等价**（有 CI 校验）。顺序即结构演进顺序：`device-schema` → `lease-schema` → `menu-data` |
 | `admin-ui`（后续） | 路由/菜单注册 | 前端增量时再补清单 |
+
+> **为什么必须改这个上游测试文件（唯一豁免来源，不可回避）**：该类的 `LOOP_DB_EXEMPTIONS` 是
+> 「循环内 DB/RPC」**误报的唯一出口**——规则按「接收者名以 `Mapper`/`Dao`/`Client`… 结尾」判定，
+> 而 IoT 的 `IotDbTimeSeriesWriter#ReadingValueMapper.map` 是**纯词法映射**（读数文本 → 目标列，
+> 无任何 IO，见其类注释），被规则误命中。豁免只能写在这个类里，而它是本仓**继承自 admin 的既有文件**
+> ⇒ 必然产生一条白名单条目。
+>
+> **代价可控性证据（本次只动白名单，未放宽任何规则）**：规则正则、`loopDbCallsInLoops(...)`、断言与
+> 「豁免消耗检测」（每个豁免键必须真的命中一次循环内调用，否则测试失败）**一行未动**；
+> 且该豁免经消耗检测证实**确实命中**（未被命中的失效条目会让测试转红）。
+> 换言之，改的是「这个文件允许被改」，不是「这类调用不再报错」——任何**真正**的循环内 DB/RPC 调用
+> 仍然照旧转红。要缩小这条特例，只能做真实重构（把映射前置成循环外的纯函数预处理），
+> 不能用「改成 stream/换写法绕开正则」这类利用门禁盲区的做法。
 
 **口径说明（两组数字别混）**：`git diff upstream/main --stat` 的字面数字**包含新增文件**
 （IoT 业务文件 + SYNC.md + 门禁脚本等），而本纪律关心的只有「**改动的既有文件**」——
