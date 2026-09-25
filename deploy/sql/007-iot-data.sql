@@ -230,3 +230,22 @@ WHERE tm.menu_id IN (3004, 3009) AND tm.template_id <> 1;
 -- reparent：子菜单的 path / component / auth_code 一律不动 ⇒ 书签 URL 与权限码不变。
 UPDATE sys_menu SET pid = 3310 WHERE id IN (3001, 3002, 3003, 3005, 3007, 2600, 3008, 4001);
 UPDATE sys_menu SET pid = 3320 WHERE id IN (3004, 3009);
+
+-- =============================================================
+-- G1 设备最新值查询权限（2026-09-27 追加）
+-- 权限码：iot:device:latest（读 Redis 最新值哈希 iot:latest:{tenantId}:{deviceId}；
+--   补的是「最新值只写不读」这个缺口，端点 GET /iot/devices/{deviceId}/latest）
+-- 归设备菜单 3200 下的按钮权限（与影子/标签/可用率/历史曲线同一做法：能力属设备页内，不另立页面）。
+-- 等价性：本文件追加部分与 migration/2026-09-27-iot-latest-value-permission.sql 语句等价。
+-- =============================================================
+
+INSERT INTO sys_menu (id, pid, name, type, platform_only, auth_code, title, sort, create_time, status, is_deleted)
+VALUES (320018, 3200, 'IotDeviceLatest', 'button', 0, 'iot:device:latest', 'page.iot.device.latest', 18, NOW(), 1, 0);
+
+-- 显式授权给平台管理员角色（role 1）：002-data.sql 的批量授权只覆盖 platform_only=1，且在本文件之前执行
+INSERT INTO sys_role_menu (role_id, menu_id)
+SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (320018);
+
+-- 租户可授菜单来自 sys_template_menu（SysAuthTemplateServiceImpl 从它推导），必须一并补授
+INSERT INTO sys_template_menu (template_id, menu_id)
+SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (320018);
