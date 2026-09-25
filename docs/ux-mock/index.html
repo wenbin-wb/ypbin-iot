@@ -764,7 +764,10 @@ function viewProductDetail(){
       <div class="gapbox">⚠️ <b>事件字段缺「事件类型」</b>：原型的 <span class="mono">alert/warn/info</span> 在
         <span class="mono">IotEvent</span> 实体里<b>不存在</b>（字段只有 <span class="mono">identifier/eventName/dataType/maxLength/unit/enumList</span>）；
         阿里云 TSL 事件有 <span class="mono">type: info|alert|error</span>，需新增列 + 接口字段。
-        另外 <span class="mono">IotEvent</span>/<span class="mono">IotProperty</span> <b>都没有 description 字段</b>（命令有），需补齐。</div>`;
+        另外 <span class="mono">IotProperty</span>/<span class="mono">IotEvent</span>/<span class="mono">IotCommand</span>
+        三个<b>实体都没有 description</b>（只有 <span class="mono">IotService</span> 有），需补齐。
+        ⚠️ 注意<b>实体与 TSL DTO 不一致</b>：<span class="mono">TslCommand</span>/<span class="mono">TslEvent</span>/<span class="mono">TslService</span>
+        都有 description，所以<b>导入 TSL 时命令/事件的 description 会被静默丢弃</b>。</div>`;
   }
 
   if (tab === 'overview'){

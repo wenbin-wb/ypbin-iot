@@ -639,7 +639,7 @@ graph TD
 | 事件类型 | **有** `type`：`info` / `alert` / `error` | 官方"不支持自定义事件"（API 层有 slots） | **无** | **缺** |
 | 事件输出参数 | `outputData[]`（多参数，≤50） | — | 单值 `dataType` + `maxLength`/`unit`/`enumList` | **缺**（我方是单值事件） |
 | 点位/协议映射 | 属性/服务/事件的 **Extended Information**（**产品级**） | 编解码插件 / 产品模型 | **独立表 `iot_point_mapping`（设备级）** | **不等价（层级不同）** |
-| 描述字段 | 属性/服务/事件都有 Description | 有 | `IotService.description` 有；**`IotProperty` / `IotEvent` 无 description** | **缺**（不一致） |
+| 描述字段 | 属性/服务/事件都有 Description | 有 | **只有 `IotService.description` 有**；`IotProperty` / `IotEvent` / `IotCommand` 三个**实体都没有** description。⚠️ 更需注意的是**实体与 TSL DTO 不一致**：`TslCommand` / `TslEvent` / `TslService` 三个 DTO **都有** description，`TslProperty` 没有 ⇒ **TSL 导入时命令/事件的 description 无处可落，会被静默丢弃** | **缺**（且实体↔DTO 漂移） |
 | 版本与发布 | draft → 发布，保留最近 10 版，**发布前看差异** | 导出/导入 zip 或 Excel | draft → published + versions，**无 diff** | 部分 |
 
 **支撑材料**：
@@ -1085,7 +1085,7 @@ flowchart TD
 | P1-5 | **运行期事件链路** | 后端·接口 | 新增事件实例表 + 上报写入路径 + `GET /iot/devices/{id}/events` + `GET /iot/events` + 确认状态流转 + 权限码 | 对应 §6.5 / §6.3「事件与断档」上半部 |
 | P1-6 | **在线调试 / 下行通道** | 后端·接口 | 新增命令实例表（`request_id`/状态/超时/回执）+ 经 access 的下行通道 + 下发/回执接口 + 权限码（如 `iot:debug:send`） | **本方案最大的缺口**；不做则「在线调试」页只能占位 |
 | P1-7 | **保留期与清理接口** | 后端·接口 | 读/写保留策略（含校验）+ 手动触发清理 + 查询上次结果（`RetentionCleanupResult` 可复用为响应体）；**并明确 IoTDB 侧保留策略归属** | 对应 §6.5 之外的第 5 组页面 |
-| P1-8 | **物模型字段补齐** | 后端·字段 | `IotEvent` + `eventType`（info/alert/error）+ `description`；`IotProperty` + `description`；`IotService` + `callType`（sync/async） | 由 §5.3 等价性比对得出；**注意 TSL 导入导出需同步**，否则导入的 TSL 会丢字段 |
+| P1-8 | **物模型字段补齐（含实体↔DTO 漂移）** | 后端·字段 | `IotEvent` + `eventType`（info/alert/error）+ `description`；`IotProperty` + `description`；`IotCommand` + `description`；`IotService` + `callType`（sync/async）。**并修实体↔TSL DTO 漂移**：`TslCommand`/`TslEvent`/`TslService` 已有 `description` 而对应实体没有 ⇒ 现在导入 TSL 会**静默丢掉命令/事件的 description**（`TslProperty` 则两边都没有） | 由 §5.3 等价性比对 + 本轮 `grep -c description` 逐类核对得出；**加字段必须实体、DTO、TSL 映射、导入校验四处同步** |
 | P1-9 | **影子 `reported` 写入** | 后端·逻辑 | 在读数上报路径（`AvailabilityServiceImpl` / 内部读数端点）同步刷新 `IotShadow.reported` | G2；同时决定 `shadow_json` 死列的取舍（G12） |
 | P1-10 | **产品级点位模板 + 设备级覆盖** | 后端·新表 + 前端·改 | 新增产品级模板表与 `GET\|PUT /iot/products/{id}/point-template`；设备创建支持 `applyTemplate=true` | G4；直接消除「同型号逐台重复配点位」 |
 | P1-11 | **产品模板中心** | 前端·新页（+后端可选） | 最快：前端内置静态模板 JSON + 逐条调用现有物模型接口；可运营：后端模板表 + API | 对标阿里云「标准品类」（必选/可选功能）与 Azure「featured device templates」 |
@@ -1215,6 +1215,17 @@ flowchart TD
 修正后：**① 接口复用 9/9 一致、② 原型离线可渲染、③ 缺口 G1–G12 12/12 成立、④ 设计取舍无事实性问题**。
 需要读者注意的是：**初稿的失败模式是「辅助计数与厂商细节失真」，不是「设计结论造假」** ——
 这也正是本方案把「事实核验命令与输出」单列为附录 A 的原因：**让每个数字都可被复算**。
+
+### 11.5 关于这次复核本身的一条教训（值得记下）
+
+第一轮复核者**把我那条错误的 3204 结论判为「属实」** —— 因为复核者与作者**读的是同一个过期检出**，
+两边都没有先 `git fetch origin main`。**独立复核能发现「作者自己算错」，但发现不了「作者与复核者共享同一个错误前提」。**
+
+最终纠正它的是**第三个信息源**（仓外读者按 `origin/main` 复核）。
+⇒ 由此得到两条可操作规则：
+
+1. **任何「仓库里不存在 X」的结论，必须写明基线 SHA，并用 `git grep … origin/main -- <path>` 之类与分支无关的方式取证**（已写入 §1.1 与 R10）；
+2. **复核的独立性不仅要求「不同上下文」，还要求「不同基线获取方式」** —— 复核者应被明确要求先 `git fetch` 并对 `origin/main` 取证，否则「独立」只是形式上的。
 
 ---
 
