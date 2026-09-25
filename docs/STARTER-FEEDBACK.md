@@ -207,31 +207,47 @@ import cn.ypbin.starter.security.identity.IdentityContext;
 import cn.ypbin.starter.security.identity.IdentityStpLogic;
 import java.util.concurrent.atomic.AtomicInteger;
 
+/**
+ * SF-4 本地实证：用真实 ypbin-starter-security 3.5.0 制品 + sa-token-core 1.46.0
+ * 复刻 StpLogic.lambda$distUsableToken$2 的判据，走真实 SaStrategy.generateUniqueToken 策略。
+ */
 public class Sf4Repro {
+
     public static void main(String[] args) {
         IdentityStpLogic logic = new IdentityStpLogic();
 
-        IdentityContext.clear();                                   // CASE-1：无身份（auth 登录时）
-        System.out.println("[CASE-1] getLoginIdNotHandle(\"cand-1\") = "
-            + repr(logic.getLoginIdNotHandle("cand-1")));
+        // ---- CASE-1：当前无身份（auth 服务登录时的真实处境） ----
+        IdentityContext.clear();
+        String noIdentity = logic.getLoginIdNotHandle("cand-1");
+        System.out.println("[CASE-1] no identity -> getLoginIdNotHandle(\"cand-1\") = " + repr(noIdentity));
+        System.out.println("[CASE-1] predicate (getLoginIdNotHandle(token) == null) = "
+            + (noIdentity == null));
+
         AtomicInteger calls = new AtomicInteger();
         try {
             String token = SaStrategy.instance.generateUniqueToken.execute(
                 "token", 12,
                 () -> "cand-" + calls.incrementAndGet(),
-                t -> logic.getLoginIdNotHandle(t) == null);        // = StpLogic 的判据
+                t -> logic.getLoginIdNotHandle(t) == null);
             System.out.println("[CASE-1] UNEXPECTED: token generated = " + token);
         } catch (Exception ex) {
             System.out.println("[CASE-1] " + ex.getClass().getName() + ": " + ex.getMessage());
         }
         System.out.println("[CASE-1] supplier invoked times = " + calls.get());
 
-        IdentityContext.setLoginUser(new LoginUser(1001L, "tester")); // CASE-2：有身份
-        System.out.println("[CASE-2] getLoginIdNotHandle(\"1001\") = " + repr(logic.getLoginIdNotHandle("1001")));
-        System.out.println("[CASE-2] getLoginIdNotHandle(\"9999\") = " + repr(logic.getLoginIdNotHandle("9999")));
+        // ---- CASE-2：当前有身份（网关下发身份头后下游服务的处境） ----
+        IdentityContext.setLoginUser(new LoginUser(1001L, "tester"));
+        String matched = logic.getLoginIdNotHandle("1001");
+        String other = logic.getLoginIdNotHandle("9999");
+        System.out.println("[CASE-2] with identity -> getLoginIdNotHandle(\"1001\") = " + repr(matched));
+        System.out.println("[CASE-2] with identity -> getLoginIdNotHandle(\"9999\") = " + repr(other));
+        System.out.println("[CASE-2] predicate on matched token = " + (matched == null));
         IdentityContext.clear();
     }
-    private static String repr(String s) { return s == null ? "null" : "\"" + s + "\""; }
+
+    private static String repr(String s) {
+        return s == null ? "null" : "\"" + s + "\"";
+    }
 }
 ```
 ```bash
@@ -247,7 +263,12 @@ cd /tmp/sf4repro && CP="$HOME/m2repo/cn/ypbin/ypbin-starter-security/3.5.0/ypbin
 [CASE-2] with identity -> getLoginIdNotHandle("9999") = ""
 [CASE-2] predicate on matched token = false
 ```
-**与生产日志逐字一致**（异常类型、文案、次数）。
+> 上述输出是**上方程序原样编译运行的真实输出**（命令即上一代码块；2026-09-25 复核时逐字复现），
+> **与生产日志逐字一致**（异常类型、文案、次数）。
+
+> **一致性纪律（本条曾被独立复核判 FAIL 并整改）**：文档里"程序"与"输出"必须来自同一次运行。
+> 整改前贴的程序是被精简过的版本（少了打印判据的两行 `println`），而输出来自完整版本 ⇒ 属**不实引用**。
+> 复现校验：把上方 java 代码块原样存为 `Sf4Repro.java`，执行上一代码块，输出必须与本代码块**逐行一致**。
 
 **环 6｜403 响应体的来源（同样是 starter 侧）**
 
