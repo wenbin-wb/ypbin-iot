@@ -148,7 +148,10 @@ app: {
 
 - **是否需要重建前端产物：需要。** 偏好默认值编译进 bundle；本仓构建链路是现成的（上一轮已跑通）：
   `pnpm -F @vben/web-antd build` → 产物拷到 `../iot-ui-dist` → `docker compose up -d --no-deps ypbin-iot-ui`（一条命令 `deploy/ui-up.sh`，见 `docs/DEPLOY-UI.md` §1）；CI 侧 `.github/workflows/ci.yml` 的"构建（web-antd）"步骤也会跑同一构建 ⇒ **改错了 CI 会红**。
-  > 生产实测端口（本次 SSH 实测，**不含任何凭据**）：`docker ps` 显示 `ypbin-iot-ui` 映射 `0.0.0.0:19000->80/tcp`；服务器 `deploy/.env` 里是 `IOT_UI_PORT=19000`。而 `docs/DEPLOY-UI.md` 的示例写的是 `IOT_UI_PORT=19001`（还写着"与 `ypbin-admin-ui` 的 19000 并存"）⇒ 这是**文档漂移**，与本次改动无关，但建议顺手校正（否则照文档部署会得到第二个 UI 端口）。
+  > 生产实测端口（本次 SSH 实测，**不含任何凭据**）：`docker ps` 显示 `ypbin-iot-ui` 映射 `0.0.0.0:19000->80/tcp`；服务器 `deploy/.env` 里是 `IOT_UI_PORT=19000`。
+  > **口径已对齐（2026-09-25 修）**：`docs/DEPLOY-UI.md` / `deploy/ui-up.sh` / `deploy/docker-compose.yml` 三处统一为
+  > 「**默认 19001**（与同一 compose 项目里 `ypbin-admin-ui` 的默认 19000 并存；`install.sh` 会全量 `up -d`，
+  > 默认同端口必有一个起不来）+ 生产 `.env` 覆盖为 19000」。此处原「文档漂移」注记已过期。
   > 另：原型 `index.html` 目前被放在 `ypbin-iot-ui` 容器的 `/usr/share/nginx/html/ux-mock/` 下，因此可经 `:19000/ux-mock/` 访问（本次实测 200）。`platform-nav.html` 上线到同一位置即可（`docker cp` 或 `deploy/ui-up.sh` 的产物目录，见该原型 README）。
 - **零构建的验证路径（推荐先做）：** 右上角「偏好设置 → 布局 → 混合垂直」当场可切（渲染入口 `.../preferences-drawer.vue:429-431`，`Layout v-model="appLayout"`），值写进 localStorage。
 

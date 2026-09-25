@@ -88,7 +88,7 @@ class EventLogMapperContractTest {
     }
 
     @Test
-    @DisplayName("★ 迁移脚本必须与全新安装脚本同构（表名、四列幂等唯一键、非空列都在）")
+    @DisplayName("★ 迁移脚本必须与全新安装脚本同构（表名、三列幂等唯一键、关键列都在）")
     void migrationMustMirrorSchema() throws IOException {
         assertThat(Files.exists(MIGRATION)).as("找不到迁移文件 %s", MIGRATION).isTrue();
         String migration = Files.readString(MIGRATION, StandardCharsets.UTF_8);

@@ -46,7 +46,8 @@ public class EventIngestResult {
     /**
      * 全量构造。
      *
-     * @param accepted   新落库条数
+     * @param accepted   被接受的条数（语义与边界见 {@link #accepted} 字段的说明：
+     *                   并发同键投递时多方可能各自计入同一条，唯一保证是库里只有一行）
      * @param duplicated 幂等命中去重条数
      * @param discarded  设备不可用被丢弃条数
      */

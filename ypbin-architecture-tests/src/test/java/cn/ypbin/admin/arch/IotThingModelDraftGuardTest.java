@@ -38,25 +38,38 @@ import org.junit.jupiter.api.Test;
  * <ol>
  *   <li>目标 = 实现 {@code IotThingModelService} 的那个类（按「implements IotThingModelService」
  *       在源码里定位，不写死路径，改名/搬家后规则仍然生效——但必须**恰好命中一个**类，否则转红）；</li>
- *   <li>「写入口」= 该类的 <b>public 方法</b> 中，自身或其（同类的）被调用方**直接/传递地**发生数据库写入的
- *       那些方法（写调用按动词识别：{@code save/updateById/removeById/insert/...}）；</li>
+ *   <li>「写入口」= 该类的 <b>public 或包级私有</b>方法（同包其它类可调用的最低可见性档）中，
+ *       自身或其（同类的）被调用方**直接/传递地**发生数据库写入的那些方法
+ *       （写调用按动词识别，见 {@link #WRITE_CALL}）；</li>
  *   <li>这些方法的方法体里必须出现守卫调用（{@link #GUARD_CALLS}）；</li>
- *   <li>守卫本身也被钉住：{@code requireProductDraft} 必须真的比较 {@code ModelStatus.DRAFT} 并抛异常
- *       （否则把守卫改成空方法即可让上面那条规则形同虚设）。</li>
+ *   <li>守卫本身也被钉住：{@code requireProductDraft} 必须在**同一条「非草稿」分支内**抛异常，
+ *       且该分支的比较是 {@code ModelStatus.DRAFT}（{@link #guardThrowsOnNonDraft}）。</li>
  * </ol>
+ *
+ * <p><b>口径是复核“咬”出来的（2026-09-25 外委复核，本类因此改过三处）</b>：第一版规则自述是
+ * 「唯一防线」，却被三组变异静默放行——① 写入口用裸 {@code baseMapper.update(entity, wrapper)}
+ * （MyBatis-Plus 最常规写法，动词白名单里没有 {@code update}）；② 守卫被弱化成「比对 DRAFT 但只
+ * {@code log.warn}，另放一处不可达 {@code throw} 当装饰」；③ 新增**包级私有**写入口（无
+ * {@code public}）。现已分别修掉：动词白名单补全 + 守卫必须「在非草稿分支内抛」+ 包级私有纳入
+ * 写入口。这三条都有对应的自检用例，改动时不要退回去。</p>
  *
  * <p><b>已知边界（如实声明，避免虚假安心）</b>：</p>
  * <ul>
- *   <li>只查 <b>public</b> 方法与类内调用图。private 辅助方法（如 {@code replaceTsl}）允许不自己校验
- *       ——它们由 public 入口统一守卫；这也是本规则刻意要求的形态：守卫写在入口，review 时一眼可见。</li>
- *   <li>静态识别不到通过别的 Bean 间接打库（{@code someOtherService.write(...)}）——那种形态下
- *       「是不是写入口」无法从本类源码判定；本类当前不存在该形态。</li>
+ *   <li>只查 public / 包级私有 方法与类内调用图。<b>private</b> 辅助方法（如 {@code replaceTsl}）
+ *       允许不自己校验——编译器保证它无法从别的类调用，只能由本类的入口进来，而入口必须带守卫。
+ *       这也是刻意要求的形态：守卫写在入口，review 时一眼可见。</li>
+ *   <li>写动词是**闭集**（{@link #WRITE_CALL}）：用了新命名的写 API（例如自定义
+ *       {@code updateStatus(...)}）必须同步登记，否则会被漏判——本规则靠「已知写入口清单」自检
+ *       兜住「一个都没扫到」，但兜不住「某个新命名写 API 没被识别」。</li>
+ *   <li>接收者不限 ⇒ {@code otherBean.save(x)} 也会被算成写入口（**不会**漏放）；代价是
+ *       「调用别的 Bean 的只读方法但方法名像写」会有误报，需按实际语义调整白名单。</li>
  *   <li>新增守卫方法时必须同步登记进 {@link #GUARD_CALLS}，否则会被判成「缺守卫」（这是有意的：
  *       守卫名字必须收敛，不能人手一套）。</li>
  * </ul>
  *
- * <p><b>变异验证</b>（必须做，见类末的谓词自检用例）：删掉任一写入口的守卫调用、或把
- * {@code requireProductDraft} 的比较改成空实现，本类的用例都会转红。</p>
+ * <p><b>变异验证</b>（本类自带谓词自检；2026-09-25 外委复核另在真源码上做过 5 组）：
+ * 删掉任一写入口的守卫调用、把守卫里的 {@code DRAFT} 改成 {@code PUBLISHED}、把守卫弱化成
+ * 「只比对不抛」、新增用 {@code update(...)} 的无守卫入口、新增包级私有无守卫入口 —— 全部转红。</p>
  *
  * @author wenbin
  * @since 2026-09-28
@@ -83,11 +96,17 @@ class IotThingModelDraftGuardTest {
     /** 方法声明里的可见性修饰符（取最后一个，即紧邻返回类型的那一个）。 */
     private static final Pattern VISIBILITY = Pattern.compile("(?<![\\w$])(public|private|protected)\\s");
 
-    /** 数据库写入动词（接收者不限：{@code save(...)}/{@code baseMapper.insert(...)} 都算）。 */
+    /**
+     * 数据库写入动词（接收者不限：{@code save(...)} / {@code baseMapper.insert(...)} 都算）。
+     *
+     * <p>白名单必须覆盖 MyBatis-Plus 的<b>常规写法</b>：{@code update(entity, wrapper)}（复核变异 B3b
+     * 用的就是它，第一版漏了它 ⇒ 规则静默放行）、{@code saveOrUpdate*}、以及 {@code deleteByXxx} /
+     * {@code updateByXxx} 这类「动词+后缀」命名。新增写 API 命名时同步登记本常量。</p>
+     */
     private static final Pattern WRITE_CALL = Pattern.compile(
-        "\\.?\\b(?:save|saveBatch|updateById|updateBatchById|removeById|removeByIds|remove|removeBatchByIds"
-            + "|insert|insertBatch|delete|deleteById|deleteBatchIds|physicalDeleteByIds"
-            + "|physicalDeleteByServiceIds)\\s*\\(");
+        "\\.?\\b(?:save|saveBatch|saveOrUpdate|saveOrUpdateBatch|update|updateById|updateBatchById"
+            + "|updateBy[A-Z]\\w*|remove|removeById|removeByIds|removeBatchByIds|insert|insertBatch"
+            + "|delete|deleteById|deleteBatchIds|deleteBy[A-Z]\\w*|physicalDelete\\w*)\\s*\\(");
 
     /** Java 关键字/修饰符：出现在「类型」位置说明这条匹配不是方法声明（构造器、调用点、控制语句）。 */
     private static final Set<String> NOT_A_TYPE = Set.of(
@@ -101,19 +120,19 @@ class IotThingModelDraftGuardTest {
         String source = SourceConventionTest.stripCommentsAndLiterals(
             Files.readString(implementationSource(), StandardCharsets.UTF_8));
         List<Method> methods = methods(source);
-        List<Method> mutatingPublic = mutatingPublicMethods(methods);
+        List<Method> writeEntries = writeEntryMethods(methods);
 
-        assertThat(mutatingPublic)
-            .as("一个「会写库的 public 方法」都没扫到 ⇒ 本规则是空跑（教训八：0 违规可能是没跑到）")
+        assertThat(writeEntries)
+            .as("一个「会写库的 public/包级私有方法」都没扫到 ⇒ 本规则是空跑（教训八：0 违规可能是没跑到）")
             .isNotEmpty();
-        assertThat(mutatingPublic).extracting(Method::name)
+        assertThat(writeEntries).extracting(Method::name)
             .as("写入口的识别结果必须包含已知的这几个方法，否则说明提取逻辑已经漂移")
             .contains("createService", "updateService", "removeService", "createProperty",
                 "removeProperty", "createCommand", "removeCommand", "createEvent", "removeEvent",
                 "importTsl");
 
         List<String> violations = new ArrayList<>();
-        for (Method method : mutatingPublic) {
+        for (Method method : writeEntries) {
             if (GUARD_CALLS.stream().noneMatch(method.body()::contains)) {
                 violations.add("IotThingModelServiceImpl#" + method.name()
                     + " → 方法体会写库但没有草稿校验（缺 requireProductDraft/requireDraftByServiceId）");
@@ -137,15 +156,54 @@ class IotThingModelDraftGuardTest {
         Method guard = guards.getFirst();
         assertThat(guard.body()).as("守卫必须比对草稿态 ModelStatus.DRAFT（写成 PUBLISHED 等于把不变量反过来）")
             .containsPattern(DRAFT_COMPARISON);
-        assertThat(guard.body()).as("守卫必须在非草稿态抛业务异常，而不是静默返回")
-            .contains("throw ");
+        assertThat(guardThrowsOnNonDraft(guard.body()))
+            .as("守卫必须在**同一条非草稿分支内**抛异常：只比对不抛（或把 throw 挪到别处当装饰）"
+                + "都等于把不变量拆掉，而门禁必须咬得住这种形态（复核变异 B3c 实证）")
+            .isTrue();
+    }
+
+    /**
+     * 守卫的语义校验：在「比较 {@code ModelStatus.DRAFT} 的否定式 {@code if}」块内必须出现 {@code throw}。
+     *
+     * <p>为什么不能用 {@code contains("throw ")}：复核把守卫改成「比对 DRAFT 但只 {@code log.warn}，
+     * 另放一处不可达的 {@code throw} 当装饰」，两条 {@code contains} 断言全过而门禁全绿——
+     * 声明与实际防线不一致比没有门禁更危险。</p>
+     *
+     * @param guardBody 守卫方法体（已剥离注释与字面量）
+     * @return 存在「非草稿 ⇒ 抛异常」的分支返回 {@code true}
+     */
+    static boolean guardThrowsOnNonDraft(String guardBody) {
+        int cursor = 0;
+        while (cursor < guardBody.length()) {
+            int draft = guardBody.indexOf("ModelStatus.DRAFT", cursor);
+            if (draft < 0) {
+                return false;
+            }
+            int ifStart = guardBody.lastIndexOf("if", draft);
+            int open = guardBody.indexOf('{', draft);
+            if (ifStart < 0 || open < 0) {
+                return false;
+            }
+            int close = closingIndex(guardBody, open, '{', '}');
+            if (close < 0) {
+                return false;
+            }
+            String condition = guardBody.substring(ifStart, open);
+            boolean negated = condition.contains("!");
+            boolean throwsInside = guardBody.substring(open, close + 1).contains("throw ");
+            if (negated && throwsInside) {
+                return true;
+            }
+            cursor = close;
+        }
+        return false;
     }
 
     @Test
     @DisplayName("自检：**直接调用规则所用的谓词**（规则被解除武装时必须被发现）")
     void ruleMustDetectViolationSemantically() {
         // 会写库且没有守卫 ⇒ 必须被判成违规
-        List<Method> writesWithoutGuard = mutatingPublicMethods(methods(syntheticClass(
+        List<Method> writesWithoutGuard = writeEntryMethods(methods(syntheticClass(
             "public Long createThing(ThingReq req) {\n"
                 + "        save(new Thing());\n"
                 + "        return 1L;\n"
@@ -153,7 +211,7 @@ class IotThingModelDraftGuardTest {
         assertThat(writesWithoutGuard).extracting(Method::name).containsExactly("createThing");
 
         // 会写库且有守卫 ⇒ 不是违规（守卫存在即可，具体在哪个位置由人 review）
-        List<Method> writesWithGuard = mutatingPublicMethods(methods(syntheticClass(
+        List<Method> writesWithGuard = writeEntryMethods(methods(syntheticClass(
             "public void updateThing(Long id) {\n"
                 + "        requireProductDraft(id);\n"
                 + "        updateById(new Thing());\n"
@@ -162,7 +220,7 @@ class IotThingModelDraftGuardTest {
         assertThat(GUARD_CALLS.stream().anyMatch(writesWithGuard.getFirst().body()::contains)).isTrue();
 
         // 只读方法（哪怕名字像写）不得被判成写入口：只看方法体，不看名字
-        List<Method> readOnly = mutatingPublicMethods(methods(syntheticClass(
+        List<Method> readOnly = writeEntryMethods(methods(syntheticClass(
             "public List<Thing> listThings(Long id) {\n"
                 + "        return baseMapper.selectList(null);\n"
                 + "    }")));
@@ -176,7 +234,7 @@ class IotThingModelDraftGuardTest {
             + "    private void replaceThings(Long id) {\n"
             + "        baseMapper.deleteById(id);\n"
             + "    }\n";
-        List<Method> transitive = mutatingPublicMethods(methods(syntheticClass(indirect)));
+        List<Method> transitive = writeEntryMethods(methods(syntheticClass(indirect)));
         assertThat(transitive).extracting(Method::name)
             .as("只认直接写调用会漏掉「入口委托给私有写方法」的形态（本仓 importTsl 就是这个形状）")
             .containsExactly("importThings");
@@ -190,6 +248,42 @@ class IotThingModelDraftGuardTest {
             .as("构造器没有返回值，不能算写入口（否则规则会对每个构造器误报）").isEmpty();
         assertThat(methods(syntheticClass("    private static final Pattern P = Pattern.compile(\"x\");\n")))
             .as("字段声明不能被当成方法").isEmpty();
+    }
+
+    @Test
+    @DisplayName("自检：**复核实证过的三类漏放**必须被咬住（写动词闭集 / 装饰性守卫 / 包级私有入口）")
+    void ruleMustCatchTheEscapesFoundByReview() {
+        // 漏放 ①：写入口用 MyBatis-Plus 最常规的裸 update(entity, wrapper)，第一版白名单里没有 update
+        List<Method> bareUpdate = writeEntryMethods(methods(syntheticClass(
+            "public void updateThing(Long id, ThingReq req) {\n"
+                + "        baseMapper.update(new Thing(), Wrappers.<Thing>lambdaQuery().eq(Thing::getId, id));\n"
+                + "    }")));
+        assertThat(bareUpdate).extracting(Method::name)
+            .as("裸 update( 也是写：不在白名单里就会静默放行（复核变异 B3b）")
+            .containsExactly("updateThing");
+
+        // 漏放 ②：守卫弱化成「比对 DRAFT 但只 log.warn」，另放不可达 throw 当装饰
+        String decorativeGuard = "    private void requireProductDraft(Long productId) {\n"
+            + "        Thing product = requireProduct(productId);\n"
+            + "        if (!ModelStatus.DRAFT.getCode().equals(product.getModelStatus())) {\n"
+            + "            log.warn(\"非草稿态，先放过\");\n"
+            + "        }\n"
+            + "        if (product.getId() == null) {\n"
+            + "            throw new IllegalStateException(\"不可达\");\n"
+            + "        }\n"
+            + "    }\n";
+        assertThat(guardThrowsOnNonDraft(methods(syntheticClass(decorativeGuard)).getFirst().body()))
+            .as("只比对不抛（或 throw 在别的分支）= 不变量已被拆掉，门禁必须转红（复核变异 B3c）")
+            .isFalse();
+
+        // 漏放 ③：包级私有（无修饰符）写入口——同包其它 *ServiceImpl 可直接调用
+        List<Method> packagePrivate = writeEntryMethods(methods(syntheticClass(
+            "void writeThing(Thing thing) {\n"
+                + "        updateById(thing);\n"
+                + "    }")));
+        assertThat(packagePrivate).extracting(Method::name)
+            .as("包级私有写入口对外可达（同包可调），只查 public 会漏（复核变异 B3d）")
+            .containsExactly("writeThing");
     }
 
     /** 定位实现类源码文件（唯一命中，否则暴露而不是猜一个）。 */
@@ -206,16 +300,21 @@ class IotThingModelDraftGuardTest {
     }
 
     /**
-     * 「会写库的 public 方法」：直接写，或（同类内传递地）调用到会写库的方法。
+     * 写入口：<b>public 或包级私有</b>、且直接写或（同类内传递地）调用到会写库的方法。
+     *
+     * <p>为什么把包级私有也算进来：包级私有方法在 {@code cn.ypbin.admin.iot.service.impl} 包内
+     * 可被别的 {@code *ServiceImpl} 直接调用（本类已有包级私有的 {@code listServiceEntities}），
+     * 因此它和 public 一样是「外部可达」的入口；只查 public 会静默放行这一类写入口
+     * （复核变异 B3d 实证）。private 不在其列——编译器保证它无法跨类调用。</p>
      *
      * @param methods 类内全部方法
      * @return 写入口
      */
-    static List<Method> mutatingPublicMethods(List<Method> methods) {
+    static List<Method> writeEntryMethods(List<Method> methods) {
         Set<String> mutatingNames = mutatingNames(methods);
         List<Method> result = new ArrayList<>();
         for (Method method : methods) {
-            if (method.isPublic() && mutatingNames.contains(method.name())) {
+            if (method.isEntryPoint() && mutatingNames.contains(method.name())) {
                 result.add(method);
             }
         }
@@ -401,9 +500,13 @@ class IotThingModelDraftGuardTest {
      */
     record Method(String visibility, String name, String body) {
 
-        /** 是否 public。 */
-        boolean isPublic() {
-            return "public".equals(visibility);
+        /**
+         * 是否「外部可达的入口」：public 或包级私有（无修饰符）。
+         *
+         * @return public / 包级私有返回 {@code true}
+         */
+        boolean isEntryPoint() {
+            return "public".equals(visibility) || visibility.isEmpty();
         }
     }
 }

@@ -103,6 +103,9 @@ public class IotEventServiceImpl implements IotEventService {
                 () -> applyDeviceBatch(tenantId, deviceId, deviceItems));
             accepted += one.getAccepted();
             duplicated += one.getDuplicated();
+            // 丢弃也要累加：applyDeviceBatch 在「整批幂等键为空」时会把条数记成 discarded，
+            // 漏加会让 total() 小于实收条数（复核指出：调用方据此对账会少算）
+            discarded += one.getDiscarded();
         }
         if (duplicated > 0 || discarded > 0) {
             log.info("[access→iot] 事件上报（含幂等去重/丢弃）：收到={} 落库={} 幂等命中={} 丢弃={}",
@@ -194,13 +197,11 @@ public class IotEventServiceImpl implements IotEventService {
         if (rows.isEmpty()) {
             return new EventIngestResult(0, duplicated, 0);
         }
-        int affected = eventLogMapper.insertBatch(rows);
-        if (affected < rows.size()) {
-            // 只可能是「并发重投撞上唯一键」：受影响行数小于提交行数（受影响行数口径受 JDBC
-            // useAffectedRows 影响，故这里只用于告警，不用于幂等计数——见 IotEventLogMapper 的说明）
-            log.warn("[access→iot] 事件批量插入的实际影响行数小于提交行数（并发重投？）："
-                + "deviceId={} 提交={} 影响={}", LogSanitizer.sanitize(deviceId), rows.size(), affected);
-        }
+        // 刻意**不用**返回值做任何判断：Connector/J 默认（useAffectedRows=false）会带
+        // CLIENT_FOUND_ROWS，「命中已有行的 no-op upsert」也返回 1，因此返回值无法区分
+        // 「新插入」与「并发重投命中」——外委复核用真 JDBC 实测过（默认 1、useAffectedRows=true 才 0）。
+        // 幂等计数一律以**预查结果**为准；并发场景的保证是「库里只有一行」（唯一键 + 本语句）。
+        eventLogMapper.insertBatch(rows);
         return new EventIngestResult(rows.size(), duplicated, 0);
     }
 

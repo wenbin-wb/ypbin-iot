@@ -66,7 +66,8 @@ public interface IotEventLogMapper extends BaseMapper<IotEventLog> {
      * 批量插入事件实例（幂等：命中 {@code uk_iot_event_log_idem} 的行不改动、不抛异常）。
      *
      * @param list 待插入行（调用方保证非空，且每行的 {@code id}/{@code tenantId} 已赋值）
-     * @return 实际新插入的行数（被幂等跳过的行不计入）
+     * @return 受影响行数；**不得**当作「新插入条数」——见类注释的返回值口径说明
+     *         （Connector/J 默认带 {@code CLIENT_FOUND_ROWS}，命中已有行也返回 1）
      */
     @Insert("<script>INSERT INTO iot_event_log "
         + "(id, tenant_id, device_id, event_code, event_name, level, params, event_ts, idempotent_key, "

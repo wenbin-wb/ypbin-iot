@@ -426,7 +426,10 @@ CREATE TABLE outage_event
 -- 覆盖：iot_event_log —— 物模型 iot_event 是事件的**定义**（挂 service_id），本表是运行期**实例**
 --       （设备上报的一次事件），两者语义不同、不可互相替代（缺口 G6）。
 -- 租户表：含 tenant_id 且**不**进 deploy/nacos/ypbin-iot.yaml 的 ignore-tables
---        （与 iot_device 一致，由租户插件统一追加 tenant_id 条件；门禁用例会拦漏登记）。
+--        （与 iot_device 一致，由租户插件统一追加 tenant_id 条件）。
+-- 门禁口径（如实）：兜住「漏登记」的是 NacosTenantIgnoreConfigTest 的**泛化反向门禁**
+--        （继承 TenantBaseEntity 的表一律不得进 ignore-tables）与「新增租户表须补进
+--        IotTenantIsolationGateTest 的表清单」这条人工约定；后者是清单式门禁，不补就不覆盖。
 -- 幂等：uk_iot_event_log_idem(tenant_id, device_id, idempotent_key) —— 内部上报端点重投
 --       不产生重复行；应用层「先查后插」有竞态窗口，并发重投只有这条唯一键兜得住。
 -- 等价性：本文件追加部分与 migration/2026-09-19-iot-m2-event-log-schema.sql 语句等价。
