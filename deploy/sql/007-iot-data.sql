@@ -249,3 +249,40 @@ SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (320018);
 -- 租户可授菜单来自 sys_template_menu（SysAuthTemplateServiceImpl 从它推导），必须一并补授
 INSERT INTO sys_template_menu (template_id, menu_id)
 SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (320018);
+
+-- =============================================================
+-- F6 接入向导 + F5 租户接入台账 页面菜单（2026-09-29 追加）
+-- 起因：这两个页面此前**没有页面级菜单**（F5 的 320014/320015 只是挂在设备菜单下的按钮权限载体），
+--      于是「页面已实现但左侧点不开」。本次在 IoT 平台目录 3204 下补两条 type='menu' 的页面行。
+--
+-- 3205 接入向导：**人人可见**（platform_only=0、auth_code 为 NULL —— 方案 §6.1「无需权限码，所有角色可见」，
+--   先让用户知道下一步做什么）；sort=5 让它排在设备/产品/分组/维护窗口（6~9）**之前**，与方案的
+--   「起步 → 接入向导放最前」一致。页面内的写动作仍各自受 iot:product:create/publish、iot:device:create 管控。
+-- 3206 租户接入台账：**平台级**（platform_only=1；auth_code 沿用既有 iot:ledger:list，不新造权限码）。
+--   ⇒ 只授平台管理员角色 1，**绝不进 sys_template_menu**（否则任一租户管理员能改别人的租户是否被采集）。
+--
+-- id 占用核对（2026-09-25 实测，两处都查）：
+--   活库 sys_menu：3205/3206 **0 行**（含已删除）；仓内 SQL：3205/3206 在菜单命名空间内**无占用**。
+-- name 唯一性：IotOnboarding / IotTenantLedger 活库与仓内均未占用。
+-- 门禁：IotMaintenanceAdminGateTest 要求「32xx/33xx 菜单一律进 sys_role_menu，platform_only=0 才进
+--   sys_template_menu」——下面两条授权语句按该口径写；IotPermissionCodeGateTest 不受影响（未新增权限码）。
+-- 等价性：本文件追加部分与 migration/2026-09-29-iot-menu-onboarding-ledger.sql 语句等价。
+-- ⚠️ 排序约束：本段在 007 的**最末尾**，因此后续任何 IoT 追加段的迁移文件名必须排在
+--   `2026-09-29-iot-menu-onboarding-ledger.sql` **之后**（等价性脚本按文件名排序拼接）。
+-- =============================================================
+
+INSERT INTO sys_menu (id, pid, name, type, platform_only, path, component, auth_code, title, icon, sort, create_time, status, is_deleted)
+VALUES (3205, 3204, 'IotOnboarding', 'menu', 0, '/iot/onboarding', '/iot/onboarding/index', NULL, 'page.iot.onboarding.title', 'carbon:idea', 5, NOW(), 1, 0);
+
+INSERT INTO sys_menu (id, pid, name, type, platform_only, path, component, auth_code, title, icon, sort, create_time, status, is_deleted)
+VALUES (3206, 3204, 'IotTenantLedger', 'menu', 1, '/iot/tenant-ledger', '/iot/tenant-ledger/index', 'iot:ledger:list', 'page.iot.ledger.pageTitle', 'carbon:data-table', 10, NOW(), 1, 0);
+
+-- 显式授权给平台管理员角色（role 1）：002-data.sql 的批量授权只覆盖 platform_only=1 的**存量**菜单，
+-- 且在本文件之前执行 ⇒ 新增菜单必须自己再授一次
+INSERT INTO sys_role_menu (role_id, menu_id)
+SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (3205, 3206);
+
+-- 租户可授菜单补授：**只含 platform_only=0 的 3205**（3206 是平台级，绝不进租户模板）
+INSERT INTO sys_template_menu (template_id, menu_id)
+SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (3205);
+
