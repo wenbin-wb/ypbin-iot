@@ -721,7 +721,8 @@ private static final Pattern MENU_INSERT = Pattern.compile(
 | 门禁 | 是否受影响 | 处置 |
 |---|---|---|
 | `tools/check-iot-sql-equivalence.sh` | **受影响** | 双写（§7.1.3）；文件名必须含 `-iot-` |
-| `IotMaintenanceAdminGateTest#everyMenuIdMustBeGranted` | **受影响** | 按 (a) 扩（§7.1.4） |
+| `IotMaintenanceAdminGateTest#everyMenuIdMustBeGranted` | **受影响** | 按 (a) 修正（§7.1.4） |
+| CI 的「starter 版本 == 最新 Release」步骤 | **不受本次改动影响，但实测会无端变红** | 该步骤用**未鉴权**的 `curl` 打 `api.github.com/.../releases/latest`（`REQ=$(grep -oP '(?<=<ypbin-starter.version>)[^<]+' pom.xml)` 与之比较）。**本次实测**：同一步骤在上一提交上 `success`，在只有文档改动的下一提交上因 `curl: (22) ... error: 403`（GitHub 对共享 runner IP 的限流）而**失败**，报错信息却是"依赖版本落后，请升级至最新 Release" ⇒ **假红 + 误导性报错**。处置建议：把该 `curl` 改成带 `Authorization` 头（`${{ secrets.GITHUB_TOKEN }}`）+ 失败时重试一次、并把"取不到 LATEST"与"版本真的落后"区分开报错。**与本文方案无关，但会干扰本方案的实施与验收，故记下** |
 | `IotPermissionCodeGateTest` | 不受影响 | 本次**不新增任何 `auth_code`**（两个模块目录的 `auth_code` 为 `NULL`），它扫描的 `iot:*` 权限码集合不变 |
 | `IotTenantIsolationIT` / `ItSchema` | **不受影响** | `ItSchema.ensure` 只执行 `deploy/sql/006-iot-schema.sql`（`it/ItSchema.java:22`、`:47-53`），**不加载 `007` 与任何迁移** ⇒ 菜单数据变更进不了真库 IT |
 | `NacosTenantIgnoreConfigTest` / `DbDictProviderTest` | 不受影响 | 不涉及 `sys_menu` |
