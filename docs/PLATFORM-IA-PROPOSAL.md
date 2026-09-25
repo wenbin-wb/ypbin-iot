@@ -638,6 +638,17 @@ if (id.startsWith("32") && !granted.contains(id)) { missing.add(id); }
 
 > **另注意**：`IotPermissionCodeGateTest` 只校验 `auth_code`（权限码），**不校验目录类菜单的授权表覆盖**；`check-iot-sql-equivalence.sh` 只保证两份脚本一致。**所以"菜单建出来但没人看得见"这个盲区，唯一能兜住的就是 `IotMaintenanceAdminGateTest` 这条门禁**（这正是它 Javadoc 里说的"复核用变异实证：两份 SQL 同时删掉授权后仍全绿"）。**本次必须按 (a) 扩它，并用 §7.1.2 的孤儿自检做第二道网。**
 
+**本次改动会碰到的门禁，逐个过一遍（其余不受影响）：**
+
+| 门禁 | 是否受影响 | 处置 |
+|---|---|---|
+| `tools/check-iot-sql-equivalence.sh` | **受影响** | 双写（§7.1.3）；文件名必须含 `-iot-` |
+| `IotMaintenanceAdminGateTest#everyMenuIdMustBeGranted` | **受影响** | 按 (a) 扩（§7.1.4） |
+| `IotPermissionCodeGateTest` | 不受影响 | 本次**不新增任何 `auth_code`**（两个模块目录的 `auth_code` 为 `NULL`），它扫描的 `iot:*` 权限码集合不变 |
+| `IotTenantIsolationIT` / `ItSchema` | **不受影响** | `ItSchema.ensure` 只执行 `deploy/sql/006-iot-schema.sql`（`it/ItSchema.java:22`、`:47-53`），**不加载 `007` 与任何迁移** ⇒ 菜单数据变更进不了真库 IT |
+| `NacosTenantIgnoreConfigTest` / `DbDictProviderTest` | 不受影响 | 不涉及 `sys_menu` |
+| 前端 CI `check-iot-i18n-keys.mjs` | **不受影响（但也没保护）** | 它只扫 `views/iot` 与 `api/iot` 的 `$t()`，**不扫 `sys_menu.title`** ⇒ 新模块 title 漏加语言包时它不会报，只能靠人工/§7.5 P2-6 |
+
 ### 7.2 id 规划规则
 
 **现有 id 段（活库实测，`GROUP BY FLOOR(id/1000)`）：**
