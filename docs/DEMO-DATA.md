@@ -246,4 +246,4 @@ docker exec -i ypbin-mysql sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot 
 2. **租户级窗口与「进行中」窗口互斥**：平台的不重叠不变量把「进行中（`end_ts=NULL`，覆盖未来任意区间）」视为与任何租户级窗口重叠 ⇒ 二者不能同时存在；因此租户级演示窗口落在**历史区间**，不影响默认 24h 报表。
 3. **演示设备的 `pollIntervalMs` 取 24h**（真接入时由 access 按点位周期上报）：断档由 15s 扫描按 `K×采集周期` 打开，若按真实 1 分钟周期填，所有「无断档」设备几分钟后都会被判成断档。这是为了让演示**稳定约 2 天**的取舍（开断档阈值 = `poll_interval_ms × K` = 24h × 2 = 48h，超过 48h 未上报才会被判成新断档；再往后重跑种子脚本即可刷新）；点位**数据本身的密度**不受影响（温度 1 分钟 1 点）。
 4. **`duration_sec` 列只是展示用**：可用率 SQL 用 `start_ts/end_ts` 现算窗口内秒数，所以造数时 `duration_sec` 必须等于 `end-start`（本仓已按此写入）。
-5. **活库当前 `sys_menu.title`（id=3204）是中文兜底值「IoT 平台」**：因为运行中的前端产物还没有 `page.iot.title` 键；前端产物重建部署后应改回 `page.iot.title`（见 `rollback-menu-title.sql`）。
+5. **「IoT 平台」标题的端到端状态（已收口）**：活库 `sys_menu.id=3204` 的 `title` 是 **i18n 键 `page.iot.title`**（不是中文原文）；运行中的前端产物已用 CI 真构建重建并部署（`/opt/ypbin/ypbin-iot/iot-ui-dist`，旧产物备份为 `iot-ui-dist.bak-*`），产物里含 `page` 命名空间的 `iot.title`（zh-CN「IoT 平台」/ en-US "IoT Platform"）。因此菜单按 i18n 正常渲染，语言切换也生效。若哪天需要把库里的键临时换成中文原文兜底（例如前端回滚到旧产物），回滚/兜底命令见 `/root/iot-demo/rollback-menu-title.sql` 的逆操作。
