@@ -351,6 +351,11 @@ services:
       # 与 admin-ui 共用同一份 nginx 配置：SPA 回退 + /api/ → ypbin-gateway:18080
       - ./nginx-microservice.conf:/etc/nginx/conf.d/default.conf:ro
     ports:
+      # 端口口径（三处一致，详见 docs/DEPLOY-UI.md「端口口径」）：
+      #   默认 19001 = 与同一 compose 项目里 admin-ui 的默认 19000 **并存**（install.sh 会全量 up -d，
+      #                两个前端默认同端口必然有一个启动失败）；
+      #   生产/安装时用 .env 的 IOT_UI_PORT 覆盖（本生产实例为 19000，未部署 admin-ui）。
+      # 改这里时必须同步 deploy/ui-up.sh 的 IOT_UI_PORT 默认值与 docs/DEPLOY-UI.md。
       - "${IOT_UI_PORT:-19001}:80"
     depends_on:
       - ypbin-gateway
