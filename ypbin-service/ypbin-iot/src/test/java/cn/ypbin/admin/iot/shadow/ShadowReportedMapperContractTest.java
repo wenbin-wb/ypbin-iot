@@ -10,6 +10,7 @@
 package cn.ypbin.admin.iot.shadow;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -17,6 +18,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Collections;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
+import org.apache.ibatis.scripting.xmltags.XMLLanguageDriver;
+import org.apache.ibatis.session.Configuration;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -89,6 +92,23 @@ class ShadowReportedMapperContractTest {
             + "JSqlParser 5.2 解析 `INSERT ... VALUES (...) AS new ON DUPLICATE KEY UPDATE` 直接抛 "
             + "ParseException（实测 'Encountered unexpected token: \"AS\"'）⇒ 语句不可用")
             .doesNotContain(" AS new ");
+    }
+
+    @Test
+    @DisplayName("★ 注解本身必须是**合法 XML**：MyBatis 启动时就解析它，缺 </script> 会让应用起不来")
+    void annotationMustBeWellFormedScriptXml() throws IOException {
+        String sql = methodSql("mergeReported", "@Insert");
+
+        assertThat(sql).as("MyBatis 只把以 <script> 开头的注解当 XML 解析").startsWith("<script>");
+        assertThat(sql).as("缺 </script> 时 MyBatis 抛 SAXParseException"
+            + "（XML document structures must start and end within the same entity）⇒ 服务启动即失败。"
+            + "本仓 2026-09-25 生产部署实测就是这个后果（旧镜像回滚才恢复）")
+            .endsWith("</script>");
+        // 真解析一遍：走的就是 MyBatis 启动时那条路径。此前的 renderForParser 会先把 <script>/</script>
+        // strip 掉再交给 JSqlParser，等于把「注解本身不是合法 XML」这个失败模式整段掩盖了（实测漏过）。
+        assertThatCode(() -> new XMLLanguageDriver().createSqlSource(new Configuration(), sql, Object.class))
+            .as("注解字符串必须能被 MyBatis 的 XMLLanguageDriver 解析，否则整个 iot 服务起不来")
+            .doesNotThrowAnyException();
     }
 
     @Test

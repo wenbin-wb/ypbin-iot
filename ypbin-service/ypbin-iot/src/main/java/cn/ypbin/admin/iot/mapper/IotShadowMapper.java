@@ -62,6 +62,7 @@ public interface IotShadowMapper extends BaseMapper<IotShadow> {
         + " reported = CAST(JSON_MERGE_PATCH(COALESCE(NULLIF(iot_shadow.reported, ''), '{}'),"
         + " VALUES(reported)) AS CHAR),"
         + " report_ts = GREATEST(COALESCE(iot_shadow.report_ts, VALUES(report_ts)), VALUES(report_ts)),"
-        + " update_time = NOW(), status = 1, is_deleted = 0")
+        + " update_time = NOW(), status = 1, is_deleted = 0"
+        + "</script>")
     int mergeReported(@Param("rows") List<ShadowReportedRow> rows);
 }
