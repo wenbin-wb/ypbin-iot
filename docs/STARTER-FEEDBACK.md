@@ -607,7 +607,9 @@ LISTEN 0      4096            [::]:18080         [::]:*
 **不改变"身份头被无条件信任"这一事实**：
 
 1. **收窄绑定地址**：生产 `/opt/ypbin/ypbin-iot/deploy/.env:18` 置 `INTERNAL_BIND_ADDR=127.0.0.1`，
-   收窄后仅 `18080`（admin-ui）与 `19000`（IoT 前端）对公网；本次只读复核 `ss -lnt` 已确认
+   收窄后在**端口白名单内**仅 `18080`（**网关 `ypbin-gateway`**；`docker-compose.yml:197` 硬编码）与
+   `19000`（IoT 前端）对外——**全量** `ss -lnt` 另有 `80`/`443`（1Panel openresty）、`20232`（1panel-core）、
+   `22`（sshd）绑 `0.0.0.0`，不在本条处置范围；本次只读复核 `ss -lnt` 已确认
    `18081`/`18082`/`18084`/`3306`/`8848`/`9848`/`6379`/`6667` 全部为回环。
 2. **补齐配置对称性**：在生产 **live Nacos** 的 `ypbin-auth.yaml` 与 `ypbin-common.yaml` 补上
    `ypbin.cloud.feign.trusted-source-token` 与 `ypbin.cloud.feign.require-trusted-source: true`
@@ -628,11 +630,12 @@ LISTEN 0      4096            [::]:18080         [::]:*
 **已核实、原先误标为"未核实"的项（口径升级）**
 
 - **部署实例 token 的长度：已核实为 64 个十六进制字符**：`deploy/install.sh:1094` 用
-  `GATEWAY_SIGN_TOKEN="${GATEWAY_SIGN_TOKEN:-$(rand_hex 32)}"` 生成，而 `rand_hex`（`:1067-1075`）是
+  `GATEWAY_SIGN_TOKEN="${GATEWAY_SIGN_TOKEN:-$(rand_hex 32)}"` 生成，而 `rand_hex`（`:1067-1073`）是
   `openssl rand -hex "$1"` ⇒ 32 字节 = **64 个十六进制字符**；对 live `/opt/ypbin/ypbin-iot/deploy/.env` 的同名键
   **只读测量长度 = 64**（只取长度，不读取、不回显值）。仓内该键一律写成占位符 `${GATEWAY_SIGN_TOKEN}`
   （21 字符，变量名 18 字符 = 16 个大写字母 + 2 个下划线），由 `install.sh:1290-1298` 在导入 Nacos 前用 `.env`
-  实测值 `sed` 替换 ⇒ **真实 token 与其长度都不入库**。
+  实测值 `sed` 替换 ⇒ **真实 token 的「值」不入库**（长度由生成器固定为 64，不是实例机密；
+  本文档记录该长度是刻意的口径说明）。
 - **全量端口暴露面已补测**（原先只跑了带白名单过滤的 `ss`，属"滤过视图当全量"）：见上文生产证据 ② 的
   "全量 `ss -lnt` 的非回环行另有"；`18080` 的归属也已核实为**网关**（原先误记为 admin-ui）。
 
@@ -644,8 +647,8 @@ LISTEN 0      4096            [::]:18080         [::]:*
   ① "两个键已补到 `ypbin-auth.yaml` / `ypbin-common.yaml`"是**由效果演绎**（auth 进程 `Up` 且该告警当前计数为 0），
   未逐 dataId 读到内容；② **live `ypbin-common.yaml` 里 `ypbin.security.identity.enabled` 的实际值也未读取**——
   文中"这个入口在生产在线"的依据是**仓内** `common.yaml` + `ypbin-system` / `ypbin-iot` 容器 `Up`，
-  而 SF-4 已证明 **live 与仓内可以不一致**（auth 就是被服务级覆盖的例子）。就当前状态，生产上确定在线的
-  消费侧是 **`ypbin-system` / `ypbin-iot`**；`ypbin-auth` 已被 SF-4 的临时处置覆盖为 `identity.enabled=false`。
+  而 SF-4 已证明 **live 与仓内可以不一致**（auth 就是被服务级覆盖的例子）。就当前状态，**按仓内配置推定**
+  在线的消费侧是 **`ypbin-system` / `ypbin-iot`**；`ypbin-auth` 已被 SF-4 的临时处置覆盖为 `identity.enabled=false`。
 - **端到端的"伪造头即可越权"未实证**：本条为**机制层已证**（过滤器不校验 + 身份由该头无条件建立 + 租户值直接
   进 SQL 过滤条件 + 从无签名直连路径上没有任何拒绝点），但**利用链未做攻击性实测**（本轮只做只读复核与
   源码/制品核查）。
