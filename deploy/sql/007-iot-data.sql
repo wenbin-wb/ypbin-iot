@@ -251,6 +251,28 @@ INSERT INTO sys_template_menu (template_id, menu_id)
 SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (320018);
 
 -- =============================================================
+-- 菜单图标缺陷修复（2026-09-28 追加）
+-- 缺陷：id=3200「设备台账」与 id=3204「IoT 平台」的 icon 写成 `carbon:iot`，
+--   而 Carbon 图标集**没有** `iot` 这个图标（Iconify API 对 carbon.json?icons=iot 返回
+--   `not_found:["iot"]`，carbon 集合 2618 个图标里只有 `iot-connect` 与 `iot-platform`）。
+--   前端 VbenIcon（packages/@core/ui-kit/shadcn-ui/src/components/icon/icon.vue）对字符串 icon
+--   一律交给 @iconify/vue 的 Icon 渲染，取不到图标即渲染空 svg ⇒ 菜单左侧留白。
+-- 修法：改用同集合中**确实存在**的图标名（逐个用 Iconify API 核验过）：
+--   3200 设备台账 = `carbon:devices`（设备清单/台账语义）
+--   3204 IoT 平台（顶级模块目录）= `carbon:iot-platform`（语义直配）
+-- 只改 icon 一列，不动 path/component/auth_code/sort/pid ⇒ 书签、权限码、菜单顺序均不变。
+-- 前端无需重建：产物里没有内置 Carbon 图标集（dist 中只有 api.iconify.design 运行时取图标），
+--   图标名由 /auth/menu/all 的菜单树在浏览器端解析，刷新页面即生效。
+-- 等价性：本文件追加部分与 migration/2026-09-28-iot-menu-icons.sql 语句等价。
+-- 回滚：deploy/sql/rollback/2026-09-28-iot-menu-icons-rollback.sql（还原为修复前的 carbon:iot）。
+-- 说明：上方 2026-09-19/2026-09-25 两段历史 INSERT 里的 'carbon:iot' 字面量保留不改，
+--   由本段 UPDATE 覆盖，避免改动已应用的历史迁移。全新安装与存量库最终值一致。
+-- =============================================================
+
+UPDATE sys_menu SET icon = 'carbon:devices' WHERE id = 3200;
+
+UPDATE sys_menu SET icon = 'carbon:iot-platform' WHERE id = 3204;
+
 -- F6 接入向导 + F5 租户接入台账 页面菜单（2026-09-29 追加）
 -- 起因：这两个页面此前**没有页面级菜单**（F5 的 320014/320015 只是挂在设备菜单下的按钮权限载体），
 --      于是「页面已实现但左侧点不开」。本次在 IoT 平台目录 3204 下补两条 type='menu' 的页面行。
@@ -285,4 +307,3 @@ SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (3205, 3206);
 -- 租户可授菜单补授：**只含 platform_only=0 的 3205**（3206 是平台级，绝不进租户模板）
 INSERT INTO sys_template_menu (template_id, menu_id)
 SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (3205);
-
