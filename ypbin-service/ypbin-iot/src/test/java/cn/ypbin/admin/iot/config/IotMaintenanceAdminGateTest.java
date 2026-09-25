@@ -200,6 +200,39 @@ class IotMaintenanceAdminGateTest {
             .collect(Collectors.joining(","));
     }
 
+    @Test
+    @DisplayName("★ 反向门禁：platform_only=1 的平台级菜单**绝不得**进 sys_template_menu")
+    void platformOnlyMenusMustNeverEnterTenantTemplate() throws IOException {
+        // 为什么必须有反向检查：正向那条只证明「platform_only=0 的都进模板了」，
+        // 证明不了「platform_only=1 的没进模板」。而 sys_template_menu 是租户侧配角色的白名单
+        // （SysRoleServiceImpl#validateMenus）——一旦平台级菜单进了模板，租户管理员就能把
+        // iot:ledger:list 授给租户用户，而该权限码对应的是「改别的租户是否被采集」⇒ 跨租户越权。
+        String code = sql().replaceAll("--[^\\n]*", "");
+        Map<String, String> menuPlatformOnly = new LinkedHashMap<>();
+        Matcher menuMatcher = MENU_INSERT.matcher(code);
+        while (menuMatcher.find()) {
+            menuPlatformOnly.put(menuMatcher.group(1), menuMatcher.group(5));
+        }
+        assertThat(menuPlatformOnly).as("没扫到任何菜单 id ⇒ 本门禁空跑").isNotEmpty();
+
+        Set<String> templateGranted = grantedMenuIds(code, "sys_template_menu");
+        // 自检：模板授权集合必须非空，否则下面的断言可能恒真（教训二十七）
+        assertThat(templateGranted).as("sys_template_menu 一条授权都没扫到 ⇒ 本门禁无法咬人").isNotEmpty();
+
+        List<String> offenders = new ArrayList<>();
+        for (Map.Entry<String, String> menu : menuPlatformOnly.entrySet()) {
+            String id = menu.getKey();
+            if ((id.startsWith("32") || id.startsWith("33")) && "1".equals(menu.getValue())
+                && templateGranted.contains(id)) {
+                offenders.add(id);
+            }
+        }
+        assertThat(offenders)
+            .as("这些 platform_only=1 的平台级菜单被授进了租户模板 ⇒ 租户管理员可把平台级权限授给租户用户：%s",
+                offenders)
+            .isEmpty();
+    }
+
     /**
      * 按**语句归属**收集某张授权表里的菜单 id。
      *
