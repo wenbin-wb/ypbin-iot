@@ -607,8 +607,8 @@ LISTEN 0      4096            [::]:18080         [::]:*
 **不改变"身份头被无条件信任"这一事实**：
 
 1. **收窄绑定地址**：生产 `/opt/ypbin/ypbin-iot/deploy/.env:18` 置 `INTERNAL_BIND_ADDR=127.0.0.1`，
-   收窄后在**端口白名单内**仅 `18080`（**网关 `ypbin-gateway`**；`docker-compose.yml:197` 硬编码）与
-   `19000`（IoT 前端）对外——**全量** `ss -lnt` 另有 `80`/`443`（1Panel openresty）、`20232`（1panel-core）、
+   收窄后**端口白名单内仅 `18080`（网关 `ypbin-gateway`；`docker-compose.yml:197` 硬编码）对外**，
+   另 `19000`（IoT 前端）对外——**全量** `ss -lnt` 另有 `80`/`443`（1Panel openresty）、`20232`（1panel-core）、
    `22`（sshd）绑 `0.0.0.0`，不在本条处置范围；本次只读复核 `ss -lnt` 已确认
    `18081`/`18082`/`18084`/`3306`/`8848`/`9848`/`6379`/`6667` 全部为回环。
 2. **补齐配置对称性**：在生产 **live Nacos** 的 `ypbin-auth.yaml` 与 `ypbin-common.yaml` 补上
