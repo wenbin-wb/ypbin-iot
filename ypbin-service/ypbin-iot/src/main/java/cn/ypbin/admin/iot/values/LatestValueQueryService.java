@@ -167,13 +167,15 @@ public class LatestValueQueryService {
         Object quality = fields.get(FIELD_QUALITY);
         resp.setQuality(quality == null ? null : String.valueOf(quality));
         Object ts = fields.get(FIELD_TS);
-        if (ts instanceof Number number) {
-            resp.setTs(number.longValue());
-        } else if (ts != null) {
+        if (!(ts instanceof Number number)) {
+            // 写入器**总是**写 ts（见 RedisLatestValueWriter#json）⇒ 缺失与非数字同属不可信数据：
+            // 没有读数时刻的「最新值」无法判新旧（写入器本身只保证批内取新，跨批次靠 ts 判断），
+            // 宁可丢掉并报错，也不返回一个无法判断时效的值。
             log.error("[iot] 最新值缺少合法的读数时刻（ts），已跳过该点位：deviceId={} propertyId={}",
                 deviceId, LogSanitizer.sanitize(propertyId));
             return null;
         }
+        resp.setTs(number.longValue());
         return resp;
     }
 }

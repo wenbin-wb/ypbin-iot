@@ -164,7 +164,7 @@ class LatestValueQueryServiceTest {
     }
 
     @Test
-    @DisplayName("★ 单条损坏 JSON 只丢该点位并计数留痕之外的兄弟点位不受影响（不整台丢数据）")
+    @DisplayName("★ 单条损坏 JSON 只丢该点位，兄弟点位不受影响（不整台丢数据）")
     void mustSkipBrokenEntryOnly() {
         stubDevice();
         stubRedis();
@@ -177,5 +177,22 @@ class LatestValueQueryServiceTest {
 
         assertThat(values).extracting(LatestValueResp::getPropertyId).containsExactly("ok");
         assertThat(values.get(0).getTs()).isEqualTo(123L);
+    }
+
+    @Test
+    @DisplayName("★ 缺 ts（写入器不会这么写，出现即不可信）同样跳过：不返回无法判时效的值")
+    void mustSkipEntryWithoutTs() {
+        stubDevice();
+        stubRedis();
+        Map<Object, Object> hash = new LinkedHashMap<>();
+        // 写入器 json() 恒定输出 v/q/ts 三键 ⇒ 缺 ts 说明这条数据不是本写入器写的（或被人改过）
+        hash.put("noTs", "{\"v\":\"9\",\"q\":\"GOOD\"}");
+        hash.put("nonNumericTs", "{\"v\":\"9\",\"q\":\"GOOD\",\"ts\":\"not-a-number\"}");
+        hash.put("ok", "{\"v\":\"1\",\"q\":\"GOOD\",\"ts\":123}");
+        when(hashOperations.entries(anyString())).thenReturn(hash);
+
+        List<LatestValueResp> values = service.listLatest(DEVICE_ID);
+
+        assertThat(values).extracting(LatestValueResp::getPropertyId).containsExactly("ok");
     }
 }
