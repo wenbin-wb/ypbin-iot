@@ -339,6 +339,7 @@ business 变更台账（产品/设备/点位映射/凭据）
 | 版本号 | `product_version`（语义化 `v{major}.{minor}`）；发布时递增 |
 | 生效语义 | 设备绑定**产品+版本**；采集按绑定版本的点位映射执行；换版本=设备重新部署映射（断链重建按 §2.2③） |
 | 变更纪律 | 版本发布后同版本**不可变**；变更走新版本 ⇒ 与 epoch/影子/历史数据可追溯对齐 |
+| **写守卫（硬性约定）** | 物模型的每个**写入口**（`IotThingModelService` 的 public / 包级私有方法，含委托私有写方法的传递形态）**必须先做草稿校验**（`requireProductDraft` / `requireDraftByServiceId`）。守卫**必须写成唯一形态**：`if (!ModelStatus.DRAFT…) { …; throw …; }` —— 即「非草稿分支的**最后一条语句**是 `throw`（或名字以 `throw` 开头的自建抛异常方法）」。早返回（`if (isDraft) { return; } throw …`）、`else` 收口、委托给不抛异常的辅助方法等形态会被架构门禁 `IotThingModelDraftGuardTest` **fail-closed 拒绝**（宁可要求统一形状，也不放宽到文本启发式判不准的形态）。<br>门禁的**主要**已知边界（完整清单共五条，见 `IotThingModelDraftGuardTest` 类注释的「已知边界」小节）：① `throwXxx(...)` **只判名字、不校验被调方法体**（跨方法语义不在文本启发式射程内）；② 写动词是闭集（`save/update/remove/insert/delete/revive/bump/upsert/batchUpdate/updateBatch/physicalDelete` + 任意大写后缀），新增命名的写 API 需同步登记。 |
 
 ### 3.9 点位映射（PointMapping）
 
