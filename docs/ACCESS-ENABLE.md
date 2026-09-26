@@ -151,7 +151,9 @@ UPDATE iot_device SET endpoint = 'tcp://172.20.0.1:19002' WHERE id = 9300012;
 `ypbin-iot-protocol-tcp` 的会话把**每一帧**都作为 `PointValue` 派发，地址恒取**订阅地址列表的第 0 个**
 （`request.addresses().get(0)`）。因此：
 
-- 一个 TCP 设备**只有第一个点位**会拿到数据，其余点位永远「未映射」（日志 WARN `采集到未映射的地址，已丢弃`）；
+- 一个 TCP 设备**只有第一个点位**会拿到数据；其余点位**根本不会被投递**（因此也**不会**触发
+  `PointMappingDataListener` 的「未映射地址」WARN——独立复核 grep 该 WARN = **0 条**，不要指望用这条日志判断点位漏配）；
+  实测佐证：9300012 的 `humidity`/`serialNo`/`demoBoundary` 在 Redis 里始终停在 09-25 的种子值；
 - 值为**原始 `byte[]`**，access 侧不做解码，最终落库是 `String.valueOf(byte[])` 即 `[B@<hash>`。
 
 ---
@@ -165,7 +167,7 @@ UPDATE iot_device SET endpoint = 'tcp://172.20.0.1:19002' WHERE id = 9300012;
 | ③ | 数据确由 access 产生 | access 日志 + 模拟器日志 + 停止实验 | `订阅成功：deviceId=9300012 点位数=4`；模拟器记录 `连接建立：('172.20.0.26', …)`（**= access 容器 IP**）；停模拟器后 `last_good_at` **冻结**，重启后**恢复前进** |
 | ④ | 业务接口返回新数据 | `GET /iot/devices/9300012/{availability,latest,series}` | `availability`：`availability=0.996470`、`outageCount=2`、两条**当天新开且已闭合**的断档；`latest`：`temperature` `ts=1790418429047`（**当天**）而其余点位仍是 09-25 的种子值；`series`：**0 点（未达成）** |
 | ⑤ | IoTDB 行数增长 | IoTDB CLI | ❌ **未达成**：当天 0 行 |
-| ⑤ | Redis field 数增长 | `redis-cli` | ✅ `iot:latest:*` key 由 10 → 12；`iot:latest:1:9300012` 的 `temperature` 时间戳持续前进 |
+| ⑤ | Redis field 数增长 | `redis-cli` | ✅ `iot:latest:1:9300012` 的 `temperature` 时间戳随采集持续前进（**这是有效判据**）。⚠️ **不要**用 `iot:latest:*` 的 key 总数当判据：实测 12 个 key 里另有 `iot:latest:1:9990001`/`9990002` 两个**台账内不存在的探针设备**（`iot_device` 中 COUNT=0、内嵌 ts 停在 09-25），**与 access 链路无关**；独立复核已据此判该条为错误归因 |
 | ⑥ | 页面侧等价 HTTP 证据 | `curl` | `GET http://127.0.0.1:19000/` → **HTTP 200**、2996 bytes、`<title>Ypbin Admin</title>`；**浏览器渲染仍需人工确认** |
 
 ---
@@ -189,22 +191,61 @@ UPDATE iot_device SET endpoint = 'tcp://172.20.0.1:19002' WHERE id = 9300012;
 - live `ypbin-iot.yaml` 的 `ypbin.iot.timeseries.enabled: true`，启动日志也打 `时序写入已启用`。
 - `AvailabilityServiceImpl.writeDerived` 对时序写入是**各自兜底并 `log.error`** 的；**日志里没有该 ERROR**，
   即这条路径**没有报错也没有落库**——属**静默失败**，本身违反本仓「禁静默降级」。
-- **原因尚未定位**（不做猜测）。**这不构成「数据没来自 access」的反证**：Redis 最新值、`device_liveness`、
-  `outage_event` 三条都由同一次 `/internal/readings` 上报驱动，已证为当天新增。
-- 建议排查顺序：① 用容器内 jar md5 确认线上 iot 版本是否确含 #33 的时序调用点；② 抓 `iot.timeseries.write.failed`
-  指标；③ 直连 IoTDB 手工执行一次同形 INSERT 验连接与库名/`sql_dialect`；④ 在 iot 上开
-  `logging.level.cn.ypbin.admin.iot.timeseries=DEBUG` 复跑一批。
+- **原因尚未定位**（不做猜测，也**不接受**「可能是环境问题」收尾）。**这不构成「数据没来自 access」的反证**：
+  Redis 最新值、`device_liveness`、`outage_event` 三条都由同一次 `/internal/readings` 上报驱动，已证为当天新增。
+- **已用数据排除的项**（2026-09-26 实测）：
 
-### 6.2 租约自 fencing 抖动（**根因已定位，未修**）
-- 现象：`协议栈断链停采 … reason=本地租约已过期（未成功续约）` → 重新领取 → 再抖动，周期约 30–120 s。
+  | 候选原因 | 判据 | 结论 |
+  |---|---|---|
+  | 线上 iot jar 版本落后、没有时序调用点 | 把 `ypbin-iot:/app/app.jar` 取出，用 zipfile 在 `AvailabilityServiceImpl.class` 里搜字符串 | **排除**：`collectSeriesPoints`/`writeDerived`/`writeDerivedAfterCommit`/`TimeSeriesPoint` 全在；`IotDbTimeSeriesWriter.class` 也在 jar 内 |
+  | 写入失败（异常/批次失败） | `GET /actuator/metrics/iot.timeseries.write.failed` | **排除**：`count=0.0`（且该 meter 已注册 ⇒ 写入器 bean 已构造） |
+  | 点位/值在 ingest 侧被拒或落空 | `iot.ingest.latest.failed` / `.regressed` / `.future_rejected` / `propertyid.orphan` / `.rejected` / `.unmapped` / `shadow.failed` | **排除**：全部 `count=0.0` |
+  | 时序写入被关闭 | 启动日志 | **排除**：`时序写入已启用：url=jdbc:iotdb://ypbin-iotdb:6667/iot?sql_dialect=table 表=reading 批量=500` |
+  | IoTDB 表/库不存在或列不符 | `DESC iot.reading` | **排除**：表存在，列为 `tenant_id/device_id/property_id/time/value_double/value_text/quality` |
+
+- **剩余假设（需探针，不做结论）**：① `collectSeriesPoints` 实际返回空集（`isEnabled()` 在运行期取到 false，
+  或与启动日志所见不是同一绑定路径）；② INSERT 被 IoTDB **无异常地丢弃**（JDBC 批量返回 `EXECUTE_FAILED`/0 行
+  而写入器**没有成功侧观测**，因此完全看不见）。
+- **下一步（也是修法的第一步，属本仓「禁静默降级」红线）**：给写入路径补**成功侧可观测**——
+  在 `AvailabilityServiceImpl.writeDerived` 打 `seriesPoints.size()`、在 `IotDbTimeSeriesWriter` 记录
+  「实际写入行数」计数/日志。当前「只有失败计数、没有成功计数」本身就是把该缺陷藏起来的根因，
+  补齐后下一次运行即可自我判定到底是「没收集」还是「收集了没写」。
+- 复核建议的其余查点（仍有效）：③ 在 iot 容器内用**同一** JDBC URL 手工执行同形 INSERT 排除驱动/权限/方言；
+  ⑤ 对「ingest 条数 > 0 而 seriesPoints == 0」与失败计数上告警。
+
+### 6.2 租约自 fencing 抖动（**根因已定位，演示数据侧已修，框架侧待立项**）
+- **现在做的修法（演示数据侧）**：把 9 台不可达 TCP 演示设备的 endpoint 从假 IP
+  `tcp://10.10.0.x:15002` 改为**不可达但快速失败**的 `tcp://127.0.0.1:9`
+  （实测容器内连接被**立即拒绝，0.012 s**，而非 10 s 超时）；`status` 保持 1，页面语义不变。
+  回滚物 `/opt/ypbin/rollback-demo-endpoints.sql`。
+  前后对比见 §4 与下方「修后」。
+- **不要用「调大租约 TTL」糊**：那是语义变更（延长故障接管时间），已被否决。
+- **框架侧待立项**：`DEFAULT_CONNECT_TIMEOUT=10s` 硬编码且宿主不可配 ⇒ 见 §6.6。
+
+- 现象：`协议栈断链停采 … reason=本地租约已过期（未成功续约）` → 重新领取 → 再抖动，**实测周期约 90 s**
+  （独立复核实测：停采→下次成功采集 18:08:28→18:09:58、18:30:36→18:32:06、18:33:16→18:34:46、18:39:16→18:40:46）。
 - 根因（有证据）：租户下 12 台演示设备中 11 台 endpoint 是**不可达假 IP**，而 acquire 后的
-  **同步建链**发生在 `LeaseRenewScheduler` 的**同一个调度线程**上，每台耗时约
+  **同步建链**与续约跑在**同一个单线程调度器**上（`LeaseRenewScheduler.renew()`
+  → `AccessLeaseManager.renewAndSelfCheck()` → `startCollecting()`（`synchronized`）逐设备阻塞；
+  access 模块**没有自定义 TaskScheduler** ⇒ Spring 默认单线程池）。每台耗时
   `ConnectionSpec.DEFAULT_CONNECT_TIMEOUT = 10s`（框架硬编码，access 的 `HttpDeviceSpecSource`
   传 `null` 因而**不可配**）⇒ 单趟约 120 s ≫ 服务端租约 TTL（30 s）⇒ `renew` 被饿死。
-- 反证：把租户临时收窄到 1 台可达设备后，`tenant_node_assignment.lease_expire_at` **持续前进**、
-  `epoch` 不再跳、`自行停采` 计数**冻结**。
-- 可选修法（**需用户决策，本轮未擅自改**）：① 把不可达设备的 endpoint 改成**快速失败**（拒绝而非超时）；
-  ② 调大 iot 侧租约 TTL（会延长故障接管时间，属语义变更）；③ 把建链移出续约调度线程（**代码改动，属修根因**）。
+  最强佐证：`周期重领到租户` 三次都**恰好出现在该趟阻塞结束的同一毫秒**；且 18:30:26 恢复 11 台设备后
+  **18:30:36 立刻复发**（一次自然发生的 A/B）。
+- **修前 / 修后对比（真实输出）**：
+
+  | | 修前（假 IP `10.10.0.x`） | 修后（`tcp://127.0.0.1:9`） |
+  |---|---|---|
+  | 租约 state | `pending_takeover`（无有效持有者） | `active` |
+  | `lease_expire_at` | 冻结在 18:42:26（三次采样不变） | **持续前进** 18:47:15 → 18:47:35 → 18:47:45 |
+  | `epoch` | **9**（每次接管都 +1，抖动） | **10 且稳定**（不再跳） |
+  | `自行停采` | 7 次 | 不再新增 |
+  | access 近 1 分钟 ERROR | 大量 `failed to bind device` | **0** |
+  | 数据 | 断续 | `last_good_at` 与 Redis ts 持续前进 |
+
+  另有一次**自然 A/B**佐证：18:30:26 恢复 11 台设备后，18:30:36 立刻再次 `本地租约已过期`——
+  收窄→稳定、恢复→复发，方向完全一致。
+
 
 ### 6.3 TCP 读数值无语义
 值为 `String.valueOf(byte[])` 的 `[B@<hash>`。**不影响**链路成立与断档/可用率判定（判定只看 `quality` 与时刻），
@@ -218,8 +259,74 @@ UPDATE iot_device SET endpoint = 'tcp://172.20.0.1:19002' WHERE id = 9300012;
 - 新增 **2 条 `outage_event`**（当天开、当天闭），`availability` 由 1.000000 变为 **0.996470**；
 - `iot:latest:*` key 数由 10 变 **12**。
 
-### 6.5 未验证项
-- **浏览器渲染**：本手册只给到 HTTP 层证据（19000 返回 200）；曲线/最新值/在线态在页面上的**实际渲染未经人工确认**。
-- 内存：`available` 长期在 **~0.5–0.75 GB**、**无 swap**、根盘 94%。access 常驻后余量偏薄，**未做压力验证**。
-- 模拟器与真实设备的差异（§3）导致**链路健壮性未被验证**。
-- Nacos 控制台仍是默认口令 `nacos`（仅监听 `127.0.0.1:8080`，但仍是**应轮换的弱凭据**）。
+### 6.6 待立项：连接超时不可配（框架/接入侧缺陷）
+`ypbin-iot-core` 的 `ConnectionSpec.DEFAULT_CONNECT_TIMEOUT = 10s` 是**硬编码常量**，
+`ConnectionSpec.of(...)` 在 `connectTimeout == null` 时套用它；而 access 的 `HttpDeviceSpecSource.findConnection`
+**固定传 `null`** ⇒ **宿主无法配置建链超时**。后果见 §6.2。
+**修法与验收口径**：
+1. 给 access 增加配置项（如 `ypbin.access.connect-timeout`）并透传到 `ConnectionSpec`；
+2. 更根本地，把逐设备同步建链移出续约调度线程（消费已完成的 future / 独立采集线程池），
+   或至少给续约单独一个不与建链共享的单线程调度器；
+3. **回归用例**：租户挂 N 台不可达设备时，`renew` 仍必须在 TTL 内完成（可用 `ApplicationContextRunner`
+   + 假 endpoint 写集成测试）；并补「客户端自认在租约内、服务端已判失效」的偏差指标，
+   避免只能靠事后 `pending_takeover` 发现。
+4. 另需确认 `access_node.last_heartbeat_at` 自启动起冻结（复核实测停在 18:03:28）**是否为设计**。
+
+---
+
+## 7. 凭据卫生：排查与自查方式（**硬规则**）
+
+轮换/排查凭据时，**禁止整段 dump / 回读** Nacos 配置或任何可能含 token 的文件——那会把真值送进
+会话记录、终端回滚缓冲与日志。**一切校验只用元数据**：
+
+```bash
+# 允许：长度 / 指纹 / 计数 / 哈希 / 键名
+printf '%s' "$VAL" | sha256sum | cut -c1-16        # 指纹比对（不打印值）
+grep -c -F "$OLD" config.yaml                      # 旧值出现处数（应为 0）
+grep -c -F "$NEW" config.yaml                      # 新值出现处数（应与替换前旧值处数相同）
+md5sum new.yaml readback.yaml                      # 回读对比只比哈希
+grep -n -F "$NEW" config.yaml | grep -c ':#'       # 真值不得落进注释行（应为 0）
+```
+
+- 需要「像 diff 一样确认没改别的」时：**比 md5**，或比「剥离插入块/替换行后的哈希」。
+- 中间文件一律落在 `umask 077` 的 700 目录、文件 600，用完即删；旧值**受控留存**供一键回滚。
+- 本仓已有两次同类事故（`INTERNAL_TOKEN` 与 `GATEWAY_SIGN_TOKEN` 明文进入会话记录）⇒ 这两个值**均已轮换**。
+- 轮换必须**成对**：`deploy/.env` 与**所有**含该值的 live 配置（`INTERNAL_TOKEN` → `ypbin-common`/`ypbin-access`；
+  `GATEWAY_SIGN_TOKEN` → 7 份配置含 `trusted-source-token`），**漏一处就恒 401/403**；
+  轮换后按依赖顺序重启**全部持有方**（`INTERNAL_TOKEN` 不含 gateway；`GATEWAY_SIGN_TOKEN` 必须含 gateway）。
+- 轮换后判据：`/internal/**` 用**新值 R.code=200 / 旧值 401**（iot 与 system 各验一枚）；各服务 health UP；
+  `19000` 页面 200；错口令登录 `R.code=409`；端口仍仅回环；窗口外 ERROR 0。
+- 轮换脚本可复用：`rotate-secret.py --env-key {INTERNAL_TOKEN|GATEWAY_SIGN_TOKEN} [--apply]`（默认 dry-run）。
+
+---
+
+## 8. 两个容易踩的接线/运维事实（本轮已做对，记录下来）
+
+1. **起 access 的业务前置是「租户可接入」**：`tenant_ledger` 为空时节点持有租户 `[]`、零采集。
+   用**平台自己的管理接口**标记即可（走真实业务路径、带 `config_epoch` 与审计）：
+   `PUT /iot/tenant-ledger/{id}/assignable`，body `{"assignable":true}` → 实测 `change=created`、`configEpoch=1`。
+   回滚：同一接口传 `false`。
+2. **网关路由是 `/iot/**`（`StripPrefix=1`），不是 `/api/iot/**`**：
+   iot 的网关谓词是 `Path=/iot/**` + `StripPrefix=1`，直连网关必须写成
+   `http://127.0.0.1:18080/iot/devices/...`；写成 `/api/iot/devices/...` 会得到
+   `{"code":404,"message":"接口不存在"}`（很容易误判成「接口没实现」）。
+   前端从 `19000` 走的是另一条入口（nginx 侧把 `/api` 前缀转发给网关），所以页面上看到的
+   `/api/iot/...` 与「直连网关」的路径**不是同一个写法**，排查时别混。
+3. **版本判断只认容器内 jar md5，且不能复用服务器上的旧产物**：本部署的源码树停在旧 commit，
+   服务器上那份 access jar 的时间**早于该树自身 HEAD**、缺后续提交 ⇒ 必须**本地从 HEAD 重建再上传**。
+   判据：`docker exec ypbin-access md5sum /app/app.jar` 与本地构建产物 md5 一致。
+
+---
+
+## 9. 未验证项与已知副作用（汇总）
+
+- **浏览器渲染**：只给到 HTTP 层证据（19000 → 200）；曲线/最新值/在线态的页面渲染**未经人工确认**。
+- **IoTDB 时序静默不落库**（§6.1）：未定位，**验收⑤与曲线未达成**。
+- **模拟器与真实设备的差异**（§3）⇒ **链路健壮性未被验证**。
+- **内存与压力**：`available` 长期 0.5–0.75 GB、**无 swap**、根盘 94–96%；未做压力验证。
+  复核期间观测到 load 一度冲到 **86**（滚动重启窗口），说明余量极薄。
+- **Nacos 控制台仍是默认口令 `nacos`**（仅监听 `127.0.0.1:8080`），且回滚脚本里曾把该口令明文写死 ⇒ 应轮换。
+- **验收期间未设变更冻结**：复核窗口内现场被并发改动，导致「只重建了 access」这类断言随时间失效
+  （复核 C3 即如此）。后续验收建议先登记/冻结变更。
+- **演示数据已被真实链路污染**：见 §6.4 与 `DEMO-DATA.md` 顶部声明。
+
