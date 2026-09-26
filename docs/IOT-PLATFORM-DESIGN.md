@@ -775,7 +775,18 @@ UI/OpenAPI → business(core.device)
 | 规则/告警 | `/iot/rules` `/iot/alarms` | 规则 CRUD / 告警列表与处理 |
 | 开放 API | `/openapi/**` | API Key 认证 |
 | 内部 | `/internal/lease/**` | 租约（已落地，仅 access） |
+| 内部（入站适配） | `/internal/mqtt/**` | EMQX 上行入站适配端点（`POST /internal/mqtt/readings`）—— **唯一允许返回真 HTTP 状态码的内部端点**，见下方专条 |
 | 通用 | 统一 HTTP 200 + `R.code`；集合永不 null；分页 `PageResult`；时间 `yyyy-MM-dd HH:mm:ss`（GMT+8）；Long 转字符串 | 母仓铁律 |
+
+> 🔴 **「统一 HTTP 200 + `R.code`」的唯一例外（2026-09-26 用户批准，决策 D2；设计与理由见 `docs/EMQX-INGRESS-DESIGN.md` §1.1/§6.5）**
+>
+> - **作用域（不得扩散）**：**仅** `/internal/mqtt/**` 这类**机器对机器**的入站适配端点可返回**真 HTTP 状态码**（非法报文 4xx、可重试 5xx）。
+>   **浏览器/网关面向的 API 一律维持原惯例**；`/internal/**` 的其余端点（如 `/internal/readings`、`/internal/lease/**`）**也一律维持原惯例**。
+> - **为什么破例**：对端是 EMQX 的 HTTP 动作/连接器，**只看 HTTP 状态码**（官方源码 `emqx_bridge_http_connector.erl:963-986`：2xx → 成功，429/503 → 可重试，其余 → 不可重试）。
+>   若沿用 HTTP 200 信封，**非法报文会被判「投递成功」、不重试、不计入 `dropped.*`** ⇒ 出现「设备以为上报、EMQX 以为送达、平台库里没有」的**静默丢数据**，且三端都不会告警。
+> - **附带硬要求**：① 非法报文必须在**动库之前**整批拒绝；② 端点必须有 `propertyId` 白名单/长度校验与 `requestId` 幂等；③ 破例理由必须写进该端点的 Javadoc；
+>   ④ 认证失败（`X-Internal-Token` 缺失/错误）**同样**必须返回真 `401`（否则同一缺口从「校验」漏到「认证」）。
+> - **门禁/后来者提示**：见到 `/internal/mqtt/**` 返回 4xx/5xx 属**预期行为**，不是「违反统一响应惯例」；除它之外的任何端点返回非 200 仍按违规处理。
 
 ---
 

@@ -740,7 +740,7 @@ SQL 文本门禁 + `executeIgnore` 源码门禁都钉住了这两条约束（`Av
 | 步骤 | 内容 | 依赖/验证 | 状态 |
 |---|---|---|---|
 | **① IoTDB 表模型** | 建库/建表（含 90 天 TTL，设计见 §5.2.1）+ `TimeSeriesWriter`（JDBC 批量、afterCommit、失败计数不抛）+ 历史查询 `GET /devices/{id}/series` + 容器 IT | 需 IoTDB 实例；本机验 SQL/绑定/类型映射/降级，真库往返由容器 IT 证明 | ✅ **已合并并真库验证**（PR #34 → main `5afdf9d`）：写入器 `IotDbTimeSeriesWriter`、查询 `IotDbTimeSeriesStore`、装配（启用即构造真实现 + 表名白名单 + 驱动自检）、`iot:series:get` 权限码/菜单、compose 加 `iotdb`+一次性 `iotdb-init`、Nacos `ypbin.timeseries.enabled: true`；单测 iot **212/0** + access **93/0**、架构 **41/0**；**容器 IT 已在本机真跑通过**（`Tests run: 5, Failures: 0, Errors: 0, Skipped: 0`，Docker + `apache/iotdb:2.0.11-standalone`，见 §5.2.1 ⑤）且 CI success（证据见下方专条）；部署侧与 IT 侧已外委复核 PASS |
-| **② EMQX 入站** | EMQX 5.x（内置库认证 + REST provisioning，username 稳定只换口令）+ iot 侧共享订阅消费者；**HTTP 上报通道保留**为降级/自测路径 | 需 EMQX 实例；协议/主题/ACL 约定要写成文档 + 容器 IT | ⏳ 待开始 |
+| **② EMQX 入站** | ⚠️ **本行已被取代（2026-09-26 决策 D1，见 `docs/EMQX-INGRESS-DESIGN.md` §1.1）**：入站改为 **EMQX Rule Engine + HTTP 动作 → 薄适配端点 `POST /internal/mqtt/readings`**（复用既有落库链路）。原「**iot 侧共享订阅消费者**」**降为备选 A、不实施**（平台宕机时只能靠 broker 持久会话兜，风险更高）；「HTTP 上报通道保留」仍成立，但**不再视为入站的等价替代**（原样复用 `/internal/readings` 会因 HTTP 200 语义错配静默丢报文 ⇒ 已否掉）。**后人在旧文里看到的「共享订阅消费者」不是现行方案。** | 需 EMQX 实例；协议/主题/ACL 约定见 `docs/EMQX-INGRESS-DESIGN.md` §5；**资源实测未过关前只上降级形态**（EMQX 只做认证/ACL + 下行，入站走 HTTP） | ⏳ 待开始（**按新设计**） |
 | **③ M-3 控制面** | 命令下行 + 影子同步 + 在线调试（§6） | 依赖 ①② 的数据面稳定 | ⏳ 待开始 |
 
 **① 的真库与 CI 证据（本机真跑 2026-09-24；CI 为 2026-09-24 的运行，2026-09-25 经 GitHub API 逐条核对）**：
