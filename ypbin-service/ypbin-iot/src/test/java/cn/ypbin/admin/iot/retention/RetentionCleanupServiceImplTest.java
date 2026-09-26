@@ -15,9 +15,11 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 import cn.ypbin.admin.iot.mapper.DeviceLivenessMapper;
+import cn.ypbin.admin.iot.mapper.IotPointMappingMapper;
 import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
 import cn.ypbin.admin.iot.mapper.OutageEventMapper;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -42,12 +44,14 @@ class RetentionCleanupServiceImplTest {
 
     private final DeviceLivenessMapper livenessMapper = mock(DeviceLivenessMapper.class);
 
+    private final IotPointMappingMapper pointMappingMapper = mock(IotPointMappingMapper.class);
+
     private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
 
     private RetentionCleanupServiceImpl service(RetentionProperties properties) {
         when(livenessMapper.selectNow()).thenReturn(DB_NOW);
         return new RetentionCleanupServiceImpl(outageEventMapper, maintenanceWindowMapper, livenessMapper,
-            properties, registry);
+            pointMappingMapper, properties, registry);
     }
 
     private static RetentionProperties days(int outageDays, int windowDays) {
@@ -139,5 +143,56 @@ class RetentionCleanupServiceImplTest {
 
         assertThat(result.skipped()).isFalse();
         assertThat(result.total()).isZero();
+    }
+
+    @Test
+    @DisplayName("★ 孤儿映射巡检：计数写入 iot.pointmapping.orphan gauge，且**不删除映射行**")
+    void mustCountOrphanMappingsWithoutDeleting() {
+        when(pointMappingMapper.countOrphanMappings()).thenReturn(7L);
+
+        service(days(396, 396)).cleanupOnce();
+
+        assertThat(registry.get(RetentionCleanupServiceImpl.METRIC_ORPHAN).gauge().value())
+            .as("存量孤儿映射数必须可观测（生产排障靠它判断要不要清理映射）").isEqualTo(7.0d);
+        // 只读巡检：绝不物理删映射（那会改设备的采集配置）⇒ 除计数外不得有任何其它交互
+        verify(pointMappingMapper).countOrphanMappings();
+        verifyNoMoreInteractions(pointMappingMapper);
+    }
+
+    @Test
+    @DisplayName("★ 启动即巡检一次：gauge 不再在首个巡检周期前恒为初始 0（0 不能既表示「还没测」又表示「没有孤儿」）")
+    void startupMustInspectOrphansImmediately() {
+        when(pointMappingMapper.countOrphanMappings()).thenReturn(3L);
+
+        // 只触发启动钩子（不跑 cleanupOnce）
+        service(days(396, 396)).inspectOrphansOnStartup();
+
+        assertThat(registry.get(RetentionCleanupServiceImpl.METRIC_ORPHAN).gauge().value())
+            .as("启动后 gauge 必须已经是真实值，而不是初值 0").isEqualTo(3.0d);
+    }
+
+    @Test
+    @DisplayName("★ 孤儿巡检**不受清理开关影响**：清理关掉时仍刷新 gauge（只读巡检与不可逆删除解耦）")
+    void orphanInspectionMustRunEvenWhenCleanupDisabled() {
+        RetentionProperties properties = days(396, 396);
+        properties.setEnabled(false);
+        when(pointMappingMapper.countOrphanMappings()).thenReturn(2L);
+
+        service(properties).cleanupOnce();
+
+        assertThat(registry.get(RetentionCleanupServiceImpl.METRIC_ORPHAN).gauge().value()).isEqualTo(2.0d);
+    }
+
+    @Test
+    @DisplayName("★ 孤儿巡检失败不打断清理：只记 ERROR、保留上一次取值")
+    void orphanInspectionFailureMustNotBreakCleanup() {
+        when(pointMappingMapper.countOrphanMappings()).thenThrow(new IllegalStateException("巡检 SQL 挂了"));
+        when(outageEventMapper.deleteStartedBefore(any())).thenReturn(4);
+        when(maintenanceWindowMapper.deleteStartedBefore(any())).thenReturn(0);
+
+        RetentionCleanupResult result = service(days(396, 396)).cleanupOnce();
+
+        assertThat(result.outageEvents()).as("巡检失败不得把不可逆清理拖停").isEqualTo(4);
+        assertThat(result.skipped()).isFalse();
     }
 }

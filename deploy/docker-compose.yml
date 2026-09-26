@@ -298,7 +298,12 @@ services:
       NACOS_ADDR: nacos:8848
       SENTINEL_ADDR: sentinel-dashboard:8858
     ports:
-      - "${INTERNAL_BIND_ADDR:-0.0.0.0}:18084:18084"
+      # ⚠️ 绑定地址**刻意与 INTERNAL_BIND_ADDR 分开**（同 IoTDB 的 IOTDB_BIND_ADDR 先例，2026-09-26）。
+      # 原因：18084 现在暴露 `/actuator/metrics` 与 `/actuator/health`（可观测缺口补齐，见
+      # docs/DEPLOY-BACKEND.md §5），而 INTERNAL_BIND_ADDR 在本仓示例里默认 0.0.0.0 ⇒ 共用会把
+      # **无认证的 Actuator 端点**直接摆到公网。默认回环 ⇒ 只在宿主机内可 curl、公网不可达；
+      # 要让宿主机外的客户端访问，先确认真的需要，再显式设 IOT_BIND_ADDR=0.0.0.0 并承担该暴露面。
+      - "${IOT_BIND_ADDR:-127.0.0.1}:18084:18084"
     depends_on:
       nacos:
         condition: service_healthy

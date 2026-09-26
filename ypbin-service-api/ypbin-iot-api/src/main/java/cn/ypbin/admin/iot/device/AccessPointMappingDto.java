@@ -16,8 +16,10 @@ import lombok.Setter;
 /**
  * 点位映射的内部视图（access 采集用，§3.9）。
  *
- * <p>字段与 {@code iot_point_mapping} 对齐，另带属性标识 {@code identifier} 便于采集侧日志与质量定位
- * （避免为一条日志再回查属性表）。</p>
+ * <p>字段与 {@code iot_point_mapping} 对齐，另带属性标识 {@code identifier}。
+ * <b>{@code identifier} 才是上报坐标（规范坐标）</b>：2026-09-26 坐标统一后，采集侧上报的是它而不是
+ * {@code propertyId}（主键字符串形态）；{@code propertyId} 保留作定位与日志用。
+ * 理由与统一前的读侧后果见 {@code docs/IOT-ROADMAP.md} 四点十七补充段。</p>
  *
  * @author wenbin
  * @since 2026-09-21
@@ -26,10 +28,10 @@ import lombok.Setter;
 @Setter
 public class AccessPointMappingDto {
 
-    /** 属性主键（采集值的归属）。 */
+    /** 属性主键（关联 {@code iot_property.id}；定位/排障用，**不是**上报坐标）。 */
     private String propertyId;
 
-    /** 属性标识（camelCase，用于日志与排障）。 */
+    /** 属性标识（camelCase，规范坐标：采集读数时上报的就是它）。 */
     private String identifier;
 
     /** 协议原始地址（§3.9 raw_address）。 */

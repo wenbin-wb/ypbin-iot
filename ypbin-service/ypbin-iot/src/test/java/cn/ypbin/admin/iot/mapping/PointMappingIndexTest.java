@@ -21,20 +21,24 @@ import cn.ypbin.admin.iot.entity.IotPointMapping;
 import cn.ypbin.admin.iot.entity.IotProperty;
 import cn.ypbin.admin.iot.mapper.IotPointMappingMapper;
 import cn.ypbin.admin.iot.mapper.IotPropertyMapper;
-import java.util.List;
-import java.util.Map;
+import cn.ypbin.admin.iot.mapping.PointMappingIndex.DeviceCoordinates;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import com.baomidou.mybatisplus.core.conditions.Wrapper;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 /**
- * 设备 → 点位坐标集合索引（P0-6c 的成员校验数据源）：批量、判空短路、两种坐标形态并存。
+ * 设备 → 点位坐标索引：批量取数、判空短路、**规范标识与历史主键形态并存**、**孤儿映射收紧**。
  *
- * <p>本类证明的是「取映射」这一半（SQL 形态与集合内容）；「用集合做判定」那一半在
+ * <p>本类证明的是「取映射并算出坐标索引」这一半（SQL 形态与索引内容）；「用索引做判定与归一」那一半在
  * {@code AvailabilityServiceImplTest}（单测）与 {@code IngestPointMappingIT}（真库）里。</p>
  *
  * @author wenbin
@@ -54,7 +58,10 @@ class PointMappingIndexTest {
 
     private final IotPropertyMapper propertyMapper = mock(IotPropertyMapper.class);
 
-    private final PointMappingIndex index = new PointMappingIndex(pointMappingMapper, propertyMapper);
+    private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
+
+    private final PointMappingIndex index =
+        new PointMappingIndex(pointMappingMapper, propertyMapper, registry);
 
     /**
      * 初始化 MyBatis-Plus 实体元信息。
@@ -87,14 +94,14 @@ class PointMappingIndexTest {
     @Test
     @DisplayName("★ 空设备集合 ⇒ 两张表都不查（先判空短路，不做 IN ()）")
     void emptyDeviceIdsMustNotTouchDatabase() {
-        assertThat(index.loadByDeviceIds(Set.of())).isEmpty();
+        assertThat(index.loadCoordinates(Set.of())).isEmpty();
 
         verify(pointMappingMapper, never()).selectList(any());
         verify(propertyMapper, never()).selectList(any());
     }
 
     @Test
-    @DisplayName("★ 批量：两张表各一次查询，与设备数/点位数无关；集合同时含主键形态与属性标识形态")
+    @DisplayName("★ 批量：两张表各一次查询，与设备数/点位数无关；索引同时含规范标识与历史主键形态")
     void mustLoadInTwoRoundedTripsAndExposeBothCoordinateForms() {
         when(pointMappingMapper.selectList(any())).thenReturn(List.of(
             mapping(DEVICE_A, PROP_TEMPERATURE),
@@ -104,15 +111,58 @@ class PointMappingIndexTest {
             property(PROP_TEMPERATURE, "temperature"),
             property(PROP_HUMIDITY, "humidity")));
 
-        Map<Long, Set<String>> mapped = index.loadByDeviceIds(Set.of(DEVICE_A, DEVICE_B));
+        Map<Long, DeviceCoordinates> mapped = index.loadCoordinates(Set.of(DEVICE_A, DEVICE_B));
 
         assertThat(mapped).containsOnlyKeys(DEVICE_A, DEVICE_B);
-        assertThat(mapped.get(DEVICE_A)).as("access 上报的是属性主键字符串；MQTT/前端用的是属性标识")
-            .containsExactlyInAnyOrder(String.valueOf(PROP_TEMPERATURE), "temperature",
-                String.valueOf(PROP_HUMIDITY), "humidity");
-        assertThat(mapped.get(DEVICE_B)).containsExactlyInAnyOrder(String.valueOf(PROP_TEMPERATURE), "temperature");
+        DeviceCoordinates a = mapped.get(DEVICE_A);
+        assertThat(a.canonicalize("temperature")).as("规范标识形如自身").isEqualTo("temperature");
+        assertThat(a.canonicalize(String.valueOf(PROP_TEMPERATURE)))
+            .as("历史主键字符串形态在过渡期仍被接受，并归一到标识").isEqualTo("temperature");
+        assertThat(a.canonicalize("humidity")).isEqualTo("humidity");
+        assertThat(a.legacyFormsByCanonical())
+            .containsEntry("temperature", Set.of(String.valueOf(PROP_TEMPERATURE)))
+            .containsEntry("humidity", Set.of(String.valueOf(PROP_HUMIDITY)));
+        assertThat(a.orphanForms()).as("属性行都在 ⇒ 没有孤儿").isEmpty();
+        assertThat(a.ambiguousForms()).isEmpty();
+        assertThat(a.duplicateIdentifiers()).as("两个点位标识不同 ⇒ 没有坐标级撞名").isEmpty();
+        assertThat(mapped.get(DEVICE_B).canonicalize(String.valueOf(PROP_TEMPERATURE)))
+            .isEqualTo("temperature");
         verify(pointMappingMapper, times(1)).selectList(any());
         verify(propertyMapper, times(1)).selectList(any());
+    }
+
+    @Test
+    @DisplayName("★ 映射查询必须显式 `ORDER BY id`：`aliasesOf` 的「有序」靠它保障（删掉 orderByAsc ⇒ 本用例转红）")
+    void mappingQueryMustOrderByIdSoAliasOrderIsDeterministic() {
+        when(pointMappingMapper.selectList(any())).thenReturn(List.of(mapping(DEVICE_A, PROP_TEMPERATURE)));
+        when(propertyMapper.selectList(any())).thenReturn(List.of(property(PROP_TEMPERATURE, "temperature")));
+
+        index.loadCoordinates(Set.of(DEVICE_A));
+
+        // 说明为什么必须断言 SQL（而不是断言结果集顺序）：无 ORDER BY 时 MySQL 的行序不保证，
+        // 而「行序」正是 legacyFormsByCanonical 的插入顺序 ⇒ 会传到生成的 SQL 谓词里。
+        // mock mapper 看不到真实行序，所以这里钉住的是**查询本身带了排序**这个可验证事实。
+        ArgumentCaptor<Wrapper<IotPointMapping>> captor = ArgumentCaptor.forClass(Wrapper.class);
+        verify(pointMappingMapper).selectList(captor.capture());
+        assertThat(captor.getValue().getSqlSegment())
+            .as("映射查询的 SQL 片段必须含 ORDER BY（否则 aliasesOf 的顺序会跟随不保证的 DB 行序）")
+            .containsIgnoringCase("order by");
+    }
+
+    @Test
+    @DisplayName("★ aliasesOf：读侧要同时查「标识」与「历史主键字符串」两种存储形态")
+    void aliasesOfMustContainBothStorageForms() {
+        when(pointMappingMapper.selectList(any())).thenReturn(List.of(mapping(DEVICE_A, PROP_TEMPERATURE)));
+        when(propertyMapper.selectList(any())).thenReturn(List.of(property(PROP_TEMPERATURE, "temperature")));
+
+        DeviceCoordinates a = index.loadCoordinates(Set.of(DEVICE_A)).get(DEVICE_A);
+
+        assertThat(a.aliasesOf("temperature"))
+            .as("有序：规范标识在首位，其后是历史形态 ⇒ 拼出的 SQL 谓词不随 JVM/哈希顺序变化")
+            .containsExactly("temperature", String.valueOf(PROP_TEMPERATURE));
+        assertThat(a.aliasesOf("unknownPoint"))
+            .as("不是本设备的点位 ⇒ 只返回请求形态自身（调用方据此仍按该形态查一次）")
+            .containsExactly("unknownPoint");
     }
 
     @Test
@@ -120,23 +170,84 @@ class PointMappingIndexTest {
     void emptyMappingsMustShortCircuitBeforePropertyQuery() {
         when(pointMappingMapper.selectList(any())).thenReturn(List.of());
 
-        assertThat(index.loadByDeviceIds(Set.of(DEVICE_A))).isEmpty();
+        assertThat(index.loadCoordinates(Set.of(DEVICE_A))).isEmpty();
 
         verify(propertyMapper, never()).selectList(any());
     }
 
     @Test
-    @DisplayName("★ 属性行缺失/标识为空 ⇒ 该主键只剩主键字符串形态（不抛、不丢点位）")
-    void missingOrBlankIdentifierMustKeepPrimaryKeyForm() {
+    @DisplayName("★ 孤儿映射收紧：属性行缺失/标识为空 ⇒ **不算已映射**，只进 orphanForms（统一前它会被放行）")
+    void missingOrBlankIdentifierMustBecomeOrphanNotMapped() {
         when(pointMappingMapper.selectList(any())).thenReturn(List.of(
             mapping(DEVICE_A, PROP_TEMPERATURE), mapping(DEVICE_A, PROP_HUMIDITY)));
         when(propertyMapper.selectList(any())).thenReturn(List.of(
-            property(PROP_TEMPERATURE, null), property(PROP_HUMIDITY, "  ")));
+            property(PROP_TEMPERATURE, "  ")));
 
-        Map<Long, Set<String>> mapped = index.loadByDeviceIds(Set.of(DEVICE_A));
+        DeviceCoordinates a = index.loadCoordinates(Set.of(DEVICE_A)).get(DEVICE_A);
 
-        assertThat(mapped.get(DEVICE_A)).containsExactlyInAnyOrder(
-            String.valueOf(PROP_TEMPERATURE), String.valueOf(PROP_HUMIDITY));
+        assertThat(a.canonicalize(String.valueOf(PROP_HUMIDITY)))
+            .as("属性行缺失 ⇒ 该映射不再是合法坐标（这正是「孤儿映射仍算已映射」缺口的修复点）").isNull();
+        assertThat(a.orphanForms()).contains(String.valueOf(PROP_HUMIDITY));
+        assertThat(a.canonicalize(String.valueOf(PROP_TEMPERATURE)))
+            .as("标识为空白同样按孤儿处理（拿不到可用坐标）").isNull();
+        assertThat(a.orphanForms()).containsExactlyInAnyOrder(String.valueOf(PROP_TEMPERATURE),
+            String.valueOf(PROP_HUMIDITY));
+        assertThat(a.canonicalize("temperature")).isNull();
+    }
+
+    @Test
+    @DisplayName("★ 形态撞名（A 的历史主键字符串 == B 的属性标识）⇒ 判给标识且记入 ambiguousForms，结果确定")
+    void ambiguousFormMustPreferIdentifierDeterministically() {
+        // PROP_TEMPERATURE 的 identifier 恰好就是另一个点位的历史主键字符串 "9130002"
+        when(pointMappingMapper.selectList(any())).thenReturn(List.of(
+            mapping(DEVICE_A, PROP_TEMPERATURE), mapping(DEVICE_A, PROP_HUMIDITY)));
+        when(propertyMapper.selectList(any())).thenReturn(List.of(
+            property(PROP_TEMPERATURE, "9130002"), property(PROP_HUMIDITY, "humidity")));
+
+        DeviceCoordinates a = index.loadCoordinates(Set.of(DEVICE_A)).get(DEVICE_A);
+
+        assertThat(a.canonicalize("9130002"))
+            .as("撞名时判给**属性标识**（确定性规则，两次调用必须一致）").isEqualTo("9130002");
+        assertThat(a.ambiguousForms()).contains("9130002");
+        assertThat(a.canonicalize("9130002")).isEqualTo("9130002");
+    }
+
+    @Test
+    @DisplayName("★ 坐标级撞名：同设备两条映射的**属性标识相同**（跨 service 重名）⇒ 记入 duplicateIdentifiers + 计数，且历史形态全保留")
+    void duplicateIdentifiersMustBeReportedAndKept() {
+        when(pointMappingMapper.selectList(any())).thenReturn(List.of(
+            mapping(DEVICE_A, PROP_TEMPERATURE), mapping(DEVICE_A, PROP_HUMIDITY)));
+        // 同一产品的两个 service 各有一个 temperature（uk 只保证 service 内唯一）
+        when(propertyMapper.selectList(any())).thenReturn(List.of(
+            property(PROP_TEMPERATURE, "temperature"), property(PROP_HUMIDITY, "temperature")));
+
+        DeviceCoordinates a = index.loadCoordinates(Set.of(DEVICE_A)).get(DEVICE_A);
+
+        assertThat(a.duplicateIdentifiers())
+            .as("必须留痕：两个点位真实共享一个规范坐标，不静默并点").containsExactly("temperature");
+        assertThat(a.aliasesOf("temperature"))
+            .as("读侧要把两个点位的历史形态都查出来，否则其中一个的存量数据凭空消失")
+            .hasSize(3)
+            .contains("temperature", String.valueOf(PROP_TEMPERATURE),
+                String.valueOf(PROP_HUMIDITY));
+        assertThat(registry.get(PointMappingIndex.METRIC_COORDINATE_COLLISION).counter().count())
+            .as("撞名次数必须可观测（否则只能靠翻日志）").isEqualTo(1.0d);
+    }
+
+    @Test
+    @DisplayName("★ 形态级撞名（A 的历史形态 == B 的标识）单独成立时不误报坐标级撞名")
+    void formAndCoordinateCollisionsMustBothBeReported() {
+        when(pointMappingMapper.selectList(any())).thenReturn(List.of(
+            mapping(DEVICE_A, PROP_TEMPERATURE), mapping(DEVICE_A, PROP_HUMIDITY)));
+        // PROP_TEMPERATURE 的 identifier 恰好是 PROP_HUMIDITY 的历史主键字符串（形态撞名），
+        // 同时两者又……不是同一标识 ⇒ 这里只验形态级；坐标级由上一用例覆盖
+        when(propertyMapper.selectList(any())).thenReturn(List.of(
+            property(PROP_TEMPERATURE, String.valueOf(PROP_HUMIDITY)), property(PROP_HUMIDITY, "humidity")));
+
+        DeviceCoordinates a = index.loadCoordinates(Set.of(DEVICE_A)).get(DEVICE_A);
+
+        assertThat(a.ambiguousForms()).contains(String.valueOf(PROP_HUMIDITY));
+        assertThat(a.duplicateIdentifiers()).isEmpty();
     }
 
     @Test
@@ -146,11 +257,11 @@ class PointMappingIndexTest {
             mapping(null, PROP_TEMPERATURE), mapping(DEVICE_A, null), mapping(DEVICE_A, PROP_TEMPERATURE)));
         when(propertyMapper.selectList(any())).thenReturn(List.of(property(PROP_TEMPERATURE, "temperature")));
 
-        Map<Long, Set<String>> mapped = index.loadByDeviceIds(Set.of(DEVICE_A));
+        Map<Long, DeviceCoordinates> mapped = index.loadCoordinates(Set.of(DEVICE_A));
 
         assertThat(mapped).containsOnlyKeys(DEVICE_A);
-        assertThat(mapped.get(DEVICE_A)).containsExactlyInAnyOrder(String.valueOf(PROP_TEMPERATURE),
-            "temperature");
+        assertThat(mapped.get(DEVICE_A).canonicalByForm()).containsOnlyKeys("temperature",
+            String.valueOf(PROP_TEMPERATURE));
     }
 
     @Test
@@ -159,9 +270,10 @@ class PointMappingIndexTest {
         when(pointMappingMapper.selectList(any())).thenReturn(List.of(mapping(DEVICE_A, PROP_TEMPERATURE)));
         when(propertyMapper.selectList(any())).thenReturn(List.of(property(PROP_TEMPERATURE, "temperature")));
 
-        Map<Long, Set<String>> mapped = index.loadByDeviceIds(Set.of(DEVICE_A, DEVICE_B));
+        Map<Long, DeviceCoordinates> mapped = index.loadCoordinates(Set.of(DEVICE_A, DEVICE_B));
 
         assertThat(mapped).containsOnlyKeys(DEVICE_A);
-        assertThat(mapped.getOrDefault(DEVICE_B, Set.of())).as("未映射设备 → 空集合 → 全部丢弃").isEmpty();
+        assertThat(mapped.getOrDefault(DEVICE_B, DeviceCoordinates.empty()).noMapping())
+            .as("未映射设备 → 空索引 → 全部丢弃").isTrue();
     }
 }

@@ -25,6 +25,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 /**
@@ -39,11 +41,17 @@ import org.springframework.stereotype.Service;
  * <p>查询次数与设备数无关：设备 1 次、点位 1 次（按 deviceId 批量 IN）、属性标识 1 次（按主键批量），
  * 空集合一律短路，绝不发空 IN。</p>
  *
+ * <p><b>下发的是属性标识（规范坐标）</b>：{@code AccessPointMappingDto.identifier} 是采集侧上报时用的
+ * 坐标（2026-09-26 统一，见 {@code docs/IOT-ROADMAP.md} 四点十七补充段）；{@code propertyId}
+ * 仍作为定位信息保留在主键字段里，但**不再作为上报坐标**。属性行缺失（孤儿映射）的点位不下发。</p>
+ *
  * @author wenbin
  * @since 2026-09-21
  */
 @Service
 public class DeviceSpecServiceImpl implements DeviceSpecService {
+
+    private static final Logger log = LoggerFactory.getLogger(DeviceSpecServiceImpl.class);
 
     /** 连接标识前缀：{@code t{tenantId}-d{deviceId}}，自带租户信息供连接回调定位。 */
     private static final String CONNECTION_PREFIX_TENANT = "t";
@@ -126,7 +134,25 @@ public class DeviceSpecServiceImpl implements DeviceSpecService {
         spec.setConnectionId(CONNECTION_PREFIX_TENANT + tenantId + CONNECTION_SEPARATOR + deviceId);
         spec.setEndpoint(device.getEndpoint());
         spec.setCredentialRef(device.getCredentialRef());
-        spec.setPoints(mappings.stream().map(m -> toPoint(m, identifierByProperty)).toList());
+        // 孤儿映射不下发：映射行引用的 iot_property 行已被物模型重导入物理删除 ⇒ 没有属性标识可用，
+        // 采集它只会得到一堆必被入站丢弃的读数。**跳过必须留痕**（否则表现为「这个点位不采了」而无人知道）：
+        // 一条聚合 WARN（不是每行一条，避免日志刷屏）+ 入库侧另有 iot.pointmapping.orphan 存量指标。
+        List<AccessPointMappingDto> points = new ArrayList<>(mappings.size());
+        int orphanMappings = 0;
+        for (IotPointMapping mapping : mappings) {
+            AccessPointMappingDto point = toPoint(mapping, identifierByProperty);
+            if (point.getIdentifier() == null || point.getIdentifier().isBlank()) {
+                orphanMappings++;
+                continue;
+            }
+            points.add(point);
+        }
+        if (orphanMappings > 0) {
+            log.warn("[iot] 设备 {} 有 {} 条点位映射引用的物模型属性行已缺失（孤儿映射），本轮**不下发**这些点位；"
+                    + "请重建或清理映射（见 iot.pointmapping.orphan 指标与 docs/IOT-ROADMAP.md 四点十七）",
+                deviceId, orphanMappings);
+        }
+        spec.setPoints(points);
         spec.setPollIntervalMs(minInterval(mappings));
         return spec;
     }

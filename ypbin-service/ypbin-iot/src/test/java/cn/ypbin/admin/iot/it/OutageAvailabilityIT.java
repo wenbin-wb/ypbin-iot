@@ -165,7 +165,7 @@ class OutageAvailabilityIT {
         // IT 里显式给「固定租户」的 provider：等价于真实请求经 IdentityContext 解析出的租户
         pointMappingIndex = new PointMappingIndex(
             sessionTemplate.getMapper(IotPointMappingMapper.class),
-            sessionTemplate.getMapper(IotPropertyMapper.class));
+            sessionTemplate.getMapper(IotPropertyMapper.class), new SimpleMeterRegistry());
         service = new AvailabilityServiceImpl(livenessMapper, outageMapper, maintenanceWindowMapper,
             deviceMapper, new AvailabilityProperties(), () -> java.util.Optional.of(TENANT),
             RECORDED_LATEST::addAll, RECORDED_SERIES::addAll, new TimeSeriesProperties(),

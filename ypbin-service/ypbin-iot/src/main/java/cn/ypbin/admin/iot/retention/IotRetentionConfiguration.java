@@ -10,6 +10,7 @@
 package cn.ypbin.admin.iot.retention;
 
 import cn.ypbin.admin.iot.mapper.DeviceLivenessMapper;
+import cn.ypbin.admin.iot.mapper.IotPointMappingMapper;
 import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
 import cn.ypbin.admin.iot.mapper.OutageEventMapper;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -71,6 +72,7 @@ public class IotRetentionConfiguration implements InitializingBean {
      * @param outageEventMapper      断档事件 Mapper
      * @param maintenanceWindowMapper 维护窗口 Mapper
      * @param livenessMapper         提供数据库时钟
+     * @param pointMappingMapper     孤儿映射巡检（只读计数，不删）
      * @param registry               指标
      * @return 清理服务
      */
@@ -78,8 +80,9 @@ public class IotRetentionConfiguration implements InitializingBean {
     public RetentionCleanupService retentionCleanupService(OutageEventMapper outageEventMapper,
                                                            MaintenanceWindowMapper maintenanceWindowMapper,
                                                            DeviceLivenessMapper livenessMapper,
+                                                           IotPointMappingMapper pointMappingMapper,
                                                            MeterRegistry registry) {
         return new RetentionCleanupServiceImpl(outageEventMapper, maintenanceWindowMapper, livenessMapper,
-            properties, registry);
+            pointMappingMapper, properties, registry);
     }
 }

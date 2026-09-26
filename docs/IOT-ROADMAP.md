@@ -668,21 +668,81 @@ value=紧凑 JSON `{v,q,ts}`），写入时机是**上报事务提交后**（Red
    的**动库前**位置；两类原因分开计数（`iot.ingest.propertyid.rejected` / `…unmapped`），
    被丢弃的条目是**整条**（连活性也不刷新）。
    **仍未做（不要夸大）**：不做「该属性是否属于该产品/服务」的二次校验；`enabled=0`（停采）与
-   `ref_type=command` 的映射也算已映射；**孤儿映射**（TSL 重导入会物理删 `iot_property`
-   —— `IotThingModelServiceImpl#replaceTsl` —— 而 `iot_point_mapping` 行仍在）仍会让该主键字符串形态通过。
-2. **⚠️ 坐标形态未统一（读侧有真实后果，待决策）**：读数里的 `propertyId` 在两条路径上**不是同一种形态**——
-   `access` 采集链路上报的是**属性主键字符串**（`DeviceSpecServiceImpl#toPoint` 把
-   `AccessPointMappingDto.propertyId` 设为 `String.valueOf(mapping.getPropertyId())`），而 EMQX 设计 §6.1 的
-   `up/property` 契约、物模型/前端与**读侧**（`LatestValueQueryService`、`docs/DEMO-DATA.md` 的演示数据）
-   用的是**属性标识**（`iot_property.identifier`）。⇒ 同一个 `iot:latest:{t}:{d}` 会出现两种 field，
-   按标识查询**拿不到 access 来源的数据**。因此成员校验目前把两种形态都算「已映射」（只放一种会误杀
-   另一条活路径）。**坐标形态统一（改 access 发标识，或读侧两种都认）属独立决策**，统一后成员集合应收缩为唯一形态。
+   `ref_type=command` 的映射也算已映射。
+   ~~**孤儿映射**（TSL 重导入会物理删 `iot_property` —— `IotThingModelServiceImpl#replaceTsl`
+   —— 而 `iot_point_mapping` 行仍在）仍会让该主键字符串形态通过。~~
+   ✅ **已闭环（2026-09-26，本轮 Task 2）**：入站改为「属性行必须存在」——`PointMappingIndex` 只把
+   **属性行仍在**的映射算作合法坐标，孤儿映射只进 `orphanForms`，读数被**丢弃并单独计数**
+   `iot.ingest.propertyid.orphan`；另由保留期巡检把**存量**孤儿映射数写成 gauge
+   `iot.pointmapping.orphan`（`IotPointMappingMapper#countOrphanMappings`，一条 LEFT JOIN 计数，
+   **只计数 + 告警、绝不物理删**：删映射行等于改设备采集配置，需人确认；**启动时也立即巡检一次**（否则 gauge 在首个巡检周期前恒为初值 0，与「巡检结果确实是 0」读数相同）。`DeviceSpecServiceImpl`
+   另在**下发采集规格时跳过**孤儿点位（避免采一个必被丢弃的点位）。
+2. ~~**⚠️ 坐标形态未统一（读侧有真实后果，待决策）**~~ ✅ **已统一（2026-09-26，本轮 Task 1）**。
+   原缺口：读数里的 `propertyId` 在两条路径上不是同一种形态——`access` 采集链路上报的是**属性主键
+   字符串**（`DeviceSpecServiceImpl#toPoint` 把 `AccessPointMappingDto.propertyId` 设为主键的字符串），
+   而 EMQX 设计 §6.1 的 `up/property` 契约、物模型/前端与**读侧**用的是**属性标识**
+   （`iot_property.identifier`）⇒ 同一个 `iot:latest:{t}:{d}` 会出现两种 field，按标识查询拿不到
+   access 来源的数据。**统一方案（规范坐标 = 属性标识）**：
+   - **写入侧**：`PointMappingDataListener` 上报 `AccessPointMappingDto.identifier`。**这只是 access→iot
+     的内部契约**，协议栈（设备/适配器）看到的仍是协议地址 ⇒ **没有破坏 access 现网设备协议**。
+   - **入站**：`AvailabilityServiceImpl#canonicalizePropertyIds` 接受两种形态（滚动升级期旧版 access
+     仍发主键字符串，只认标识会整批误杀），**但落库一律改写成标识** ⇒ 新数据不再出现第二种 field；
+     形态撞名（A 的历史主键字符串 == B 的标识）**判给标识**并 WARN（规则确定、可复现）。
+   - **读侧过渡期两种都认**（历史行仍需可见）：最新值 `LatestValueQueryService` 把主键字符串 field
+     归一到标识、同一标识的两种形态按 `ts` 取新，并计数 `iot.latest.coordinate.legacy` + INFO 日志
+     （对外字段名不变）；曲线 `TimeSeriesQueryService` 按「标识 + 历史主键字符串」两种形态**一次**查回
+     （`(property_id = 'a' OR property_id = 'b')`，不用 `IN`——IoTDB 表模型对 `IN` 无一手依据）。
+   - **事件读侧不涉及属性坐标**：`iot_event_log` 存的是 `event_code`/事件级标识，与属性坐标无关
+     ⇒ 「两种都认」在事件路径上**无事可做**，如实说明而不是编一条兼容。
+   - **backfill**：**实测活库（2026-09-26）没有任何历史主键形态数据**（见下表）⇒ 本轮**不需要 backfill**；
+     将来若在别处出现，可回滚方案是：先备份 `iot_point_mapping`/`iot_property`/`iot_device` 三表 →
+     Redis 侧 `HDEL` 旧 field（或让读侧归一后 `HSET` 到标识）→ IoTDB 侧 `DELETE` 旧行；
+     回滚＝恢复备份 + 回退 jar（两个动作都可逆，且读侧兼容使回滚期不丢可见性）。
 3. **最新值超前护栏的作用域（只护最新值）**：`ts > 服务端 now + 5min` 时**不写最新值**并计数
    `iot.ingest.latest.future_rejected`；但**活性 `last_good_at`、断档判定与 IoTDB 时序写入仍按原始 ts 处理**
    （`aggregate` 不钳制 ts）⇒ 超前 ts 仍会让设备显示「刚刚有数据」。两条链路口径差异在此登记。
 4. **「ts 落后」没有护栏**：设备时钟回拨/停滞时，该点位会**长期停在旧值**、不自愈，只能靠
    `iot.ingest.latest.regressed` 观测；要处置需另加「落后超阈值」策略。
-5. **可观测性缺口（登记，本轮不做）**：生产未暴露 `/actuator/metrics`，上述新指标在生产只能靠日志观测。
+5. ~~**可观测性缺口（登记，本轮不做）**：生产未暴露 `/actuator/metrics`，上述新指标在生产只能靠日志观测。~~
+   ✅ **已闭环（2026-09-26，本轮 Task 3）**：`deploy/nacos/ypbin-iot.yaml` 新增 `management` 段，
+   **只开** `health,metrics,info`（绝不用 `*`；`env`/`heapdump`/`threaddump` 等保持未暴露——注意本仓未知路径统一回 `HTTP 200 + code:404` 信封，判据要看响应体），
+   `health` 关掉 `show-details`/`show-components`；`deploy/docker-compose.yml` 把 18084 的宿主绑定改为
+   `${IOT_BIND_ADDR:-127.0.0.1}`（**刻意与 `INTERNAL_BIND_ADDR` 分开**，同 `IOTDB_BIND_ADDR` 先例）
+   ⇒ 回环可达、公网不可达。访问方式、为什么不能用公网访问、验收命令见 **`docs/DEPLOY-BACKEND.md` §5**。
+
+**本轮新登记的残余约束（2026-09-26，独立复核 G1 指出）**：规范坐标 = `iot_property.identifier`，而
+`uk_iot_property(tenant_id, service_id, identifier)` **只在 service 内唯一** ⇒ 同一产品的两个 service 可以
+各有一个同名标识，点位映射侧也只校验「属性所属 service 属于本设备产品」⇒ **一台设备可以映射两个同名属性**。
+此时两个点位必然共享同一个规范坐标（这是「规范坐标 = 标识」的内生结果），本平台无法把它们分开：
+读数会落进同一个 Redis field / 同一个 IoTDB `property_id`，且曲线响应（`TimeSeriesPointResp` 只有
+time/value/quality）无法拆分。**本轮的处理是「不静默」**：`PointMappingIndex` 记入
+`duplicateIdentifiers` → 入站 WARN + 计数 `iot.pointmapping.coordinate_collision`；读侧
+`aliasesOf` 返回该坐标的**全部**历史形态（不让另一个点位的存量数据凭空消失）。
+**彻底解法**（在点位映射写入侧拒绝「同设备同名标识」，把一个静默并点变成可解释的配置错误）属产品/校验策略，
+**本轮未做**，登记在此。
+
+**只读现状核查（2026-09-26，生产 `113.142.217.58`；只读探针，不写业务数据；数字均逐条实测）**：
+
+| 探针 | 实测结果 |
+|---|---|
+| `iot_point_mapping` | **18 行**，全部 `ref_type=property`、`enabled=1`，涉及 **13 台设备**；`property_id` 是**外键主键**（如 `9130001`），不是坐标 |
+| 孤儿映射（`LEFT JOIN iot_property` 后属性行为 NULL） | **0 行**（当前无悬空引用；本轮收紧是为了防 TSL 重导入后的存量累积） |
+| `iot_property` | **10 行**，`identifier` = `temperature`/`humidity`/`switchState`/`serialNo`/`workMode`/`demoBoundary`/`voltage`/`current`/`activePower`/`energy` |
+| Redis `iot:latest:*` | **12 个 key / 18 个 field**；其中 10 个 key 的 **14 个 field 是属性标识形态**（`temperature`/`humidity`/`serialNo`/`demoBoundary`），另 2 个 key（`9990001`/`9990002`）的 **4 个 field 是早期探测遗留**（`it_probe_temp`/`it_probe_hum`/`p_temp`/`p_hum`，见脚注）；**数字型（主键字符串）形态 field = 0** ⇒ 活库**不是混合形态** |
+| IoTDB `iot.reading` | 共 **1396 行**；`COUNT(DISTINCT property_id)` = **8**（`demoBoundary`/`humidity`/`it_probe_hum`/`it_probe_temp`/`p_hum`/`p_temp`/`serialNo`/`temperature`）；`(device_id, property_id)` 组合数 = 18。**8 个取值里没有主键字符串形态**（4 个是规范标识、4 个是早期探测遗留） |
+| 为什么活库看不到主键形态 | 生产**没有 ypbin-access 容器**（`docker ps` 无该服务）⇒ 从未有 access 来源的数据落库；该形态是**代码层的潜在分歧**，一旦部署 access 就会显形（这正是本轮必须先统一的原因） |
+
+> 复现要点（IoTDB 必须 `-h ypbin-iotdb`：`dn_rpc_address` 只绑容器 eth0，用 `127.0.0.1` 连不上）：
+> ```bash
+> docker exec ypbin-iotdb /iotdb/sbin/start-cli.sh -h ypbin-iotdb -p 6667 -u root -pw "$pw" \
+>   -sql_dialect table -e "SELECT COUNT(DISTINCT property_id) FROM iot.reading"
+> ```
+> MySQL/Redis 侧对应探针：`iot_point_mapping` 全表分组计数 + `LEFT JOIN iot_property` 孤儿计数；
+> Redis 用 `--scan --pattern 'iot:latest:*'` 后逐 key `HKEYS` 统计 field 形态（**数字型 = 主键字符串形态**）。
+
+> 残余的 `p_temp`/`p_hum`/`it_probe_temp`/`it_probe_hum`（Redis 4 个 field + IoTDB 4 个取值）属**早期探测设备**
+> 留下的历史数据（对应设备/属性行已不存在），它们**不在 `iot_point_mapping` 里**，因此既不是孤儿映射、
+> 也不受本轮影响；读侧对「不做映射的 field」原样保留（不误伤他人数据），未做清理（清理属独立动作，需单独决策）。
 
 ### 四点十八、反哺 starter 的需求清单（2026-09-24，交接材料）
 

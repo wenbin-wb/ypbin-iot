@@ -146,7 +146,7 @@ class ShadowReportedIT {
         shadowMapper = sessionTemplate.getMapper(IotShadowMapper.class);
         // 入站点位成员校验（P0-6c）走真库：映射/属性表都按真表建，租户插件同生产
         pointMappingIndex = new PointMappingIndex(sessionTemplate.getMapper(IotPointMappingMapper.class),
-            sessionTemplate.getMapper(IotPropertyMapper.class));
+            sessionTemplate.getMapper(IotPropertyMapper.class), new SimpleMeterRegistry());
         writer = new DbShadowReportedWriter(shadowMapper, OBJECT_MAPPER, new SimpleMeterRegistry());
         // 真链路：AvailabilityServiceImpl 用**真写入器**，证明「上报确实驱动了 reported」
         service = new AvailabilityServiceImpl(

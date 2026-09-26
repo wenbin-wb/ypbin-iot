@@ -150,16 +150,17 @@ class AvailabilityServiceImplTest {
             properties, tenantProvider, latestValueWriter, timeSeriesWriter, timeSeriesProperties,
             shadowReportedWriter, pointMappingIndex, meterRegistry);
         // 默认把本类用到的设备/点位视为「已映射」：既有用例（最新值/影子/可用率）不关心成员校验。
-        // 映射成员校验的专项用例会用更具体的桩覆盖它（见下方 unmapped* 用例）。
-        lenient().when(pointMappingIndex.loadByDeviceIds(any())).thenAnswer(invocation -> {
+        // 映射成员校验的专项用例会用更具体的桩覆盖它（见下方 unmapped*/orphan* 用例）。
+        lenient().when(pointMappingIndex.loadCoordinates(any())).thenAnswer(invocation -> {
             Collection<Long> deviceIds = invocation.getArgument(0);
             if (deviceIds == null) {
                 // Mockito 在注册后续桩时会用 null 试调一次本 answer（那不是真实业务调用）
                 return Map.of();
             }
-            Map<Long, Set<String>> mapped = new LinkedHashMap<>();
+            Map<Long, PointMappingIndex.DeviceCoordinates> mapped = new LinkedHashMap<>();
             for (Long deviceId : deviceIds) {
-                mapped.put(deviceId, Set.of("temperature", "humidity", "a", "b", "c", "pressure"));
+                mapped.put(deviceId, coordinates(Set.of("temperature", "humidity", "a", "b", "c",
+                    "pressure")));
             }
             return mapped;
         });
@@ -358,7 +359,7 @@ class AvailabilityServiceImplTest {
         String maxLength = "a".repeat(PropertyIdRules.MAX_LENGTH);
         String tooLong = "a".repeat(PropertyIdRules.MAX_LENGTH + 1);
         // 成员校验单独覆盖；本用例只测长度边界 ⇒ 让 128 位点位在映射里
-        when(pointMappingIndex.loadByDeviceIds(any())).thenReturn(Map.of(DEVICE, Set.of(maxLength)));
+        when(pointMappingIndex.loadCoordinates(any())).thenReturn(Map.of(DEVICE, coordinates(Set.of(maxLength))));
         service.ingest(req(point(DEVICE, maxLength, "1", 1_700_000_000_000L),
             point(DEVICE, tooLong, "2", 1_700_000_000_100L)));
 
@@ -388,8 +389,8 @@ class AvailabilityServiceImplTest {
     @DisplayName("★ P0-6c：已映射点位正常入库（快照/最新值/时序都写），映射查询只发一次")
     void mappedPropertyMustBeAccepted() {
         when(livenessMapper.selectList(any())).thenReturn(List.of());
-        when(pointMappingIndex.loadByDeviceIds(any()))
-            .thenReturn(Map.of(DEVICE, Set.of("temperature")));
+        when(pointMappingIndex.loadCoordinates(any()))
+            .thenReturn(Map.of(DEVICE, coordinates(Set.of("temperature"))));
 
         ReadingObservationDto mapped = point(DEVICE, "temperature", "23.5", 1_700_000_000_000L);
         service.ingest(req(mapped));
@@ -399,15 +400,15 @@ class AvailabilityServiceImplTest {
         assertThat(captor.getValue()).extracting(LatestValue::propertyId).containsExactly("temperature");
         assertThat(meterRegistry.get(AvailabilityServiceImpl.METRIC_UNMAPPED_PROPERTY_ID).counter().count())
             .isZero();
-        verify(pointMappingIndex, times(1)).loadByDeviceIds(any());
+        verify(pointMappingIndex, times(1)).loadCoordinates(any());
     }
 
     @Test
     @DisplayName("★ P0-6c：未映射点位被丢弃 + 计数，且**不进**最新值/影子（同批合法点位照常写入）")
     void unmappedPropertyMustBeDroppedAndCounted() {
         when(livenessMapper.selectList(any())).thenReturn(List.of());
-        when(pointMappingIndex.loadByDeviceIds(any()))
-            .thenReturn(Map.of(DEVICE, Set.of("temperature")));
+        when(pointMappingIndex.loadCoordinates(any()))
+            .thenReturn(Map.of(DEVICE, coordinates(Set.of("temperature"))));
 
         // 一条已映射 + 两条未映射（其中一条是「别的设备的点位」形态：形态合法但不属于本设备）
         service.ingest(req(point(DEVICE, "temperature", "23.5", 1_700_000_000_000L),
@@ -427,9 +428,111 @@ class AvailabilityServiceImplTest {
     }
 
     @Test
+    @DisplayName("★ 坐标统一：属性**主键字符串**形态入站后被**归一为属性标识**再落库（读侧只会有一种 field）")
+    void legacyPrimaryKeyFormMustBeCanonicalizedToIdentifier() {
+        when(livenessMapper.selectList(any())).thenReturn(List.of());
+        // 历史形态：temperature 的主键字符串是 9130001；humidity 的是 9130002
+        when(pointMappingIndex.loadCoordinates(any())).thenReturn(Map.of(DEVICE,
+            new PointMappingIndex.DeviceCoordinates(
+                Map.of("temperature", "temperature", "humidity", "humidity",
+                    "9130001", "temperature", "9130002", "humidity"),
+                Map.of("temperature", Set.of("9130001"), "humidity", Set.of("9130002")),
+                Set.of(), Set.of(), Set.of())));
+
+        service.ingest(req(point(DEVICE, "9130001", "23.5", 1_700_000_000_000L),
+            point(DEVICE, "humidity", "61", 1_700_000_000_100L)));
+
+        ArgumentCaptor<List<LatestValue>> captor = ArgumentCaptor.forClass(List.class);
+        verify(latestValueWriter).writeAll(captor.capture());
+        assertThat(captor.getValue()).extracting(LatestValue::propertyId)
+            .as("历史主键字符串形态必须被改写成属性标识，标识形态原样保留")
+            .containsExactlyInAnyOrder("temperature", "humidity");
+        assertThat(meterRegistry.get(AvailabilityServiceImpl.METRIC_UNMAPPED_PROPERTY_ID).counter().count())
+            .as("历史形态是**被接受**的坐标，不得计入未映射").isZero();
+    }
+
+    @Test
+    @DisplayName("★ 交叉不误伤：同一设备两个点位的历史形态各自归位，不会互相命中")
+    void crossCoordinatesMustNotHitEachOther() {
+        when(livenessMapper.selectList(any())).thenReturn(List.of());
+        when(pointMappingIndex.loadCoordinates(any())).thenReturn(Map.of(DEVICE,
+            new PointMappingIndex.DeviceCoordinates(
+                Map.of("temperature", "temperature", "humidity", "humidity",
+                    "9130001", "temperature", "9130002", "humidity"),
+                Map.of("temperature", Set.of("9130001"), "humidity", Set.of("9130002")),
+                Set.of(), Set.of(), Set.of())));
+
+        service.ingest(req(point(DEVICE, "9130002", "61", 1_700_000_000_000L)));
+
+        ArgumentCaptor<List<LatestValue>> captor = ArgumentCaptor.forClass(List.class);
+        verify(latestValueWriter).writeAll(captor.capture());
+        assertThat(captor.getValue()).singleElement()
+            .satisfies(value -> assertThat(value.propertyId())
+                .as("9130002 是 humidity 的历史形态，绝不能被判成 temperature")
+                .isEqualTo("humidity")
+                .isNotEqualTo("temperature"));
+    }
+
+    @Test
+    @DisplayName("★ 孤儿映射：映射引用的属性行已缺失 ⇒ 读数丢弃 + 计入**孤儿**（与「未映射」分开）")
+    void orphanMappingMustBeDroppedAndCountedSeparately() {
+        when(livenessMapper.selectList(any())).thenReturn(List.of());
+        when(pointMappingIndex.loadCoordinates(any())).thenReturn(Map.of(DEVICE,
+            new PointMappingIndex.DeviceCoordinates(Map.of("temperature", "temperature"),
+                Map.of("temperature", Set.of("9130001")), Set.of("9130099"), Set.of(), Set.of())));
+
+        int processed = service.ingest(req(point(DEVICE, "9130099", "1", 1_700_000_000_000L)));
+
+        assertThat(processed).isZero();
+        assertThat(meterRegistry.get(AvailabilityServiceImpl.METRIC_ORPHAN_PROPERTY_ID).counter().count())
+            .as("孤儿映射必须单独计数").isEqualTo(1.0d);
+        assertThat(meterRegistry.get(AvailabilityServiceImpl.METRIC_UNMAPPED_PROPERTY_ID).counter().count())
+            .as("孤儿不污染「未映射」计数").isZero();
+        verifyNoInteractions(latestValueWriter, shadowReportedWriter, timeSeriesWriter);
+    }
+
+    @Test
+    @DisplayName("★ 形态撞名（历史形态 == 另一个点位的标识）⇒ 判给标识，并记入 ambiguousForms（调用方据此 WARN）")
+    void ambiguousCoordinateFormMustPreferIdentifier() {
+        when(livenessMapper.selectList(any())).thenReturn(List.of());
+        when(pointMappingIndex.loadCoordinates(any())).thenReturn(Map.of(DEVICE,
+            new PointMappingIndex.DeviceCoordinates(Map.of("temperature", "temperature", "9130001",
+                "temperature"), Map.of("temperature", Set.of("9130001")), Set.of(), Set.of("9130001"),
+                Set.of())));
+
+        service.ingest(req(point(DEVICE, "9130001", "1", 1_700_000_000_000L)));
+
+        ArgumentCaptor<List<LatestValue>> captor = ArgumentCaptor.forClass(List.class);
+        verify(latestValueWriter).writeAll(captor.capture());
+        assertThat(captor.getValue()).extracting(LatestValue::propertyId).containsExactly("temperature");
+    }
+
+    @Test
+    @DisplayName("★ 坐标级撞名（同设备两个点位标识相同）⇒ 不阻断入站，读数仍归一到该标识（告警与计数由 PointMappingIndex 承担）")
+    void duplicateIdentifierMustNotBlockIngest() {
+        when(livenessMapper.selectList(any())).thenReturn(List.of());
+        when(pointMappingIndex.loadCoordinates(any())).thenReturn(Map.of(DEVICE,
+            new PointMappingIndex.DeviceCoordinates(
+                Map.of("temperature", "temperature", "9130001", "temperature", "9130002", "temperature"),
+                Map.of("temperature", Set.of("9130001", "9130002")),
+                Set.of(), Set.of(), Set.of("temperature"))));
+
+        service.ingest(req(point(DEVICE, "9130001", "1", 1_700_000_000_000L),
+            point(DEVICE, "temperature", "2", 1_700_000_000_100L)));
+
+        ArgumentCaptor<List<LatestValue>> captor = ArgumentCaptor.forClass(List.class);
+        verify(latestValueWriter).writeAll(captor.capture());
+        assertThat(captor.getValue()).extracting(LatestValue::propertyId)
+            .as("两个点位的形态都归一到同一个规范坐标（这是「规范坐标=标识」的内生结果，已在 ROADMAP 登记）")
+            .containsOnly("temperature");
+        assertThat(meterRegistry.get(AvailabilityServiceImpl.METRIC_UNMAPPED_PROPERTY_ID).counter().count())
+            .isZero();
+    }
+
+    @Test
     @DisplayName("★ P0-6c：设备没有任何映射 ⇒ 该设备读数全丢 + 计数，且不写活性/派生数据")
     void deviceWithoutAnyMappingMustDropEverything() {
-        when(pointMappingIndex.loadByDeviceIds(any())).thenReturn(Map.of());
+        when(pointMappingIndex.loadCoordinates(any())).thenReturn(Map.of());
 
         // 只投放带点位的读数：设备没有任何映射 ⇒ 全部按「未映射」丢弃
         int processed = service.ingest(req(point(DEVICE, "temperature", "23.5", 1_700_000_000_000L)));
@@ -446,7 +549,7 @@ class AvailabilityServiceImplTest {
     @DisplayName("★ P0-6c 边界：设备无映射时，**不带点位**的读数仍照常刷新活性（按点位判定，不按设备整体判死）")
     void livenessOnlyReadingFromUnmappedDeviceStillRefreshesActivity() {
         when(livenessMapper.selectList(any())).thenReturn(List.of());
-        when(pointMappingIndex.loadByDeviceIds(any())).thenReturn(Map.of());
+        when(pointMappingIndex.loadCoordinates(any())).thenReturn(Map.of());
 
         int processed = service.ingest(req(observation(DEVICE, 1000, AvailabilityRules.QUALITY_GOOD, T0)));
 
@@ -462,7 +565,7 @@ class AvailabilityServiceImplTest {
 
         service.ingest(req(observation(DEVICE, 1000, AvailabilityRules.QUALITY_GOOD, T0)));
 
-        verify(pointMappingIndex, never()).loadByDeviceIds(any());
+        verify(pointMappingIndex, never()).loadCoordinates(any());
         verify(latestValueWriter, never()).writeAll(any());
     }
 
@@ -475,7 +578,7 @@ class AvailabilityServiceImplTest {
 
         assertThat(meterRegistry.get(AvailabilityServiceImpl.METRIC_UNMAPPED_PROPERTY_ID).counter().count())
             .isZero();
-        verify(pointMappingIndex, never()).loadByDeviceIds(any());
+        verify(pointMappingIndex, never()).loadCoordinates(any());
     }
 
     @Test
@@ -899,5 +1002,18 @@ class AvailabilityServiceImplTest {
         ReadingIngestReq req = new ReadingIngestReq();
         req.setItems(new ArrayList<>(List.of(observations)));
         return req;
+    }
+
+    /**
+     * 便捷构造「只有规范坐标、无历史形态、无孤儿」的设备坐标索引。
+     *
+     * @param identifiers 该设备的属性标识（规范坐标）
+     * @return 坐标索引（每个标识都是自身的形态）
+     */
+    private static PointMappingIndex.DeviceCoordinates coordinates(Set<String> identifiers) {
+        Map<String, String> canonicalByForm = new LinkedHashMap<>();
+        identifiers.forEach(identifier -> canonicalByForm.put(identifier, identifier));
+        return new PointMappingIndex.DeviceCoordinates(canonicalByForm, Map.of(), Set.of(), Set.of(),
+            Set.of());
     }
 }

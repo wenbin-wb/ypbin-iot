@@ -23,8 +23,8 @@ import java.util.List;
 public class UnavailableTimeSeriesStore implements TimeSeriesStore {
 
     @Override
-    public List<TimeSeriesPointResp> query(Long tenantId, Long deviceId, String propertyId, Long from, Long to,
-                                           int limit) {
+    public List<TimeSeriesPointResp> query(Long tenantId, Long deviceId, List<String> propertyIds, Long from,
+                                           Long to, int limit) {
         // 不可用即报错语义由 service 承担；这里返回空列表仅为满足契约（调用方在 available()=false 时不会走到这）
         return List.of();
     }

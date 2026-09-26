@@ -17,11 +17,15 @@ import java.time.Instant;
  * 一条完成「点位映射」的读数（协议地址已解析为平台属性）。
  *
  * <p>这是 §5.1「协议解析 → 点位映射 → DataSink 入队」中**点位映射之后**的产物：
- * 协议栈按地址回调，本平台把它翻译成「哪个属性、什么值、质量如何、何时采到」。
+ * 协议栈按地址回调，本平台把它翻译成「哪个点位、什么值、质量如何、何时采到」。
  * M-2 的数据面（微批出口 → EMQX → business 落 IoTDB/Redis）从这里接。</p>
  *
+ * <p><b>坐标形态</b>：{@code propertyId} 承载的是**属性标识**（{@code iot_property.identifier}，
+ * 即规范坐标），不是属性主键的字符串形式——2026-09-26 起统一。字段名保持不变（改的是取值语义，
+ * 不是给同一个概念换名字）；理由与统一前的读侧后果见 {@code docs/IOT-ROADMAP.md} 四点十七补充段。</p>
+ *
  * @param deviceId   设备主键（字符串形式，与协议栈一致）
- * @param propertyId 属性主键
+ * @param propertyId 属性标识（规范坐标，{@code iot_property.identifier}）
  * @param value      已应用缩放/偏移后的值（原始类型无法线性变换时保持原样）
  * @param quality    质量码（GOOD 才算「有效数据」，断档判定依赖它）
  * @param timestamp  采集时刻（设备时钟不可信，用框架给出的时刻）

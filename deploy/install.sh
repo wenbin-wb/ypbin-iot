@@ -1278,25 +1278,39 @@ NACOS_TOKEN=$(curl -fsS --connect-timeout 5 --max-time 30 -X POST "$NACOS_CONSOL
 if [ -n "$NACOS_TOKEN" ]; then
   info "导入 Nacos 配置中心（ypbin-common + 5 服务）"
   NACOS_DIR="$ROOT/ypbin-admin/deploy/nacos"
+  # 渲染后的配置含真实凭据：脚本无论正常/异常退出都清掉**本次**产生的临时文件
+  # （只删自己 mktemp 出来的那些，不用通配符，避免误删并发进程的文件）
+  NACOS_TMP_FILES=""
+  # trap 体必须吞掉 rm 的失败：否则一次删不掉就会把「部署成功」变成退出码 1，
+  # 并让上面那个 ERR trap 打出「脚本执行失败于第 N 行」的误导信息（独立复核实测 T7/T8）。
+  trap 'for f in $NACOS_TMP_FILES; do rm -f "$f" 2>/dev/null || true; done' EXIT
   for cfg in ypbin-common ypbin-gateway ypbin-auth ypbin-system ypbin-ai ypbin-iot ypbin-access; do
     if [ -f "$NACOS_DIR/$cfg.yaml" ]; then
       # 占位符替换：仓库 nacos yaml 不提交真实密码/凭证，导入前用 .env 实际值填充
       # （仅 ypbin-common.yaml 使用 ${MYSQL_ROOT_PASSWORD}/${REDIS_PASSWORD}/${INTERNAL_TOKEN}；
       #   替换键名与 yaml 占位符完全一致）
-      TMP_CFG="/tmp/nacos-${cfg}.yaml"
+      #
+      # ⚠️ 只替换**非注释行**（`/^[[:space:]]*#/!s/.../`，2026-09-26 修）：注释里的占位符只是文档写法
+      # （例如 ypbin-iot.yaml 里「本文件里的 ${GATEWAY_SIGN_TOKEN} 正是其中之一」这句说明），
+      # 全局替换会把**真实网关签名标记**写进 Nacos 里保存的配置注释里 ⇒ 凭据落到配置存储，
+      # 而注释里的值对运行没有任何作用。注释行保持占位符原样（人看仍知道该填哪个键），配置行照旧替换。
+      # ⚠️ 用 mktemp（默认 600）而不是固定名 /tmp/nacos-<cfg>.yaml：渲染后的文件**含真实口令/凭证**，
+      # 固定名 + 644 会让同机其它本地用户直接读到；并且用完必须删（含异常退出路径）。
+      TMP_CFG="$(mktemp "/tmp/nacos-${cfg}-XXXXXX.yaml")"
+      NACOS_TMP_FILES="$NACOS_TMP_FILES $TMP_CFG"
       if [ -n "${REDIS_PASSWORD:-}" ]; then
-        sed -e "s/\${MYSQL_ROOT_PASSWORD}/${MYSQL_ROOT_PASSWORD}/g" \
-            -e "s/\${REDIS_PASSWORD}/${REDIS_PASSWORD}/g" \
-            -e "s/\${INTERNAL_TOKEN}/${INTERNAL_TOKEN}/g" \
-            -e "s/\${GATEWAY_SIGN_TOKEN}/${GATEWAY_SIGN_TOKEN}/g" \
+        sed -e "/^[[:space:]]*#/! s/\${MYSQL_ROOT_PASSWORD}/${MYSQL_ROOT_PASSWORD}/g" \
+            -e "/^[[:space:]]*#/! s/\${REDIS_PASSWORD}/${REDIS_PASSWORD}/g" \
+            -e "/^[[:space:]]*#/! s/\${INTERNAL_TOKEN}/${INTERNAL_TOKEN}/g" \
+            -e "/^[[:space:]]*#/! s/\${GATEWAY_SIGN_TOKEN}/${GATEWAY_SIGN_TOKEN}/g" \
             "$NACOS_DIR/$cfg.yaml" > "$TMP_CFG"
       else
         # REDIS_PASSWORD 为空（NO_DOCKER 外部 Redis 不认证）→ 删除 password 行，等价不配置密码；
         # INTERNAL_TOKEN 仍无条件替换（缺失/为空时 system 守卫 fail-closed，见 ypbin.internal.token 注释）
-        sed -e "s/\${MYSQL_ROOT_PASSWORD}/${MYSQL_ROOT_PASSWORD}/g" \
-            -e "s/\${INTERNAL_TOKEN}/${INTERNAL_TOKEN}/g" \
-            -e "s/\${GATEWAY_SIGN_TOKEN}/${GATEWAY_SIGN_TOKEN}/g" \
-            -e "/password: \${REDIS_PASSWORD}/d" \
+        sed -e "/^[[:space:]]*#/! s/\${MYSQL_ROOT_PASSWORD}/${MYSQL_ROOT_PASSWORD}/g" \
+            -e "/^[[:space:]]*#/! s/\${INTERNAL_TOKEN}/${INTERNAL_TOKEN}/g" \
+            -e "/^[[:space:]]*#/! s/\${GATEWAY_SIGN_TOKEN}/${GATEWAY_SIGN_TOKEN}/g" \
+            -e "/^[[:space:]]*#/! /password: \${REDIS_PASSWORD}/d" \
             "$NACOS_DIR/$cfg.yaml" > "$TMP_CFG"
       fi
       curl -fsS --connect-timeout 5 --max-time 60 -X POST "$NACOS_CONSOLE_URL/v3/console/cs/config" \
@@ -1307,6 +1321,8 @@ if [ -n "$NACOS_TOKEN" ]; then
         --data-urlencode "namespaceId=" \
         --data-urlencode "content@$TMP_CFG" \
         >/dev/null 2>&1 && ok "已导入 $cfg.yaml" || warn "$cfg.yaml 导入失败"
+      # 渲染产物含真实凭据 ⇒ 立刻删除，不等脚本结束（异常退出由下方 EXIT trap 兜底）
+      rm -f "$TMP_CFG"
     fi
   done
 else
