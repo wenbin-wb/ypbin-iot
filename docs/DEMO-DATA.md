@@ -198,14 +198,22 @@ HGETALL iot:latest:1:9300012
 > 三步：**IoTDB 行**（顺带 Redis 最新值）→ **业务表行**。清理**只认 `demo-` 前缀**（断档/活性/点位/成员通过「属于 demo 设备」判定），不会碰其它数据。
 
 ```bash
+# ⚠️ 口令前提（2026-09-26 补）：下面 ① 与 §5 的 `start-cli.sh` 调用**必须带裸 `-pw`**（不带值）——
+#    不带 `-pw` 时镜像 wrapper 会注入 `passwd_param="-pw root"`（公开默认口令），既不提示、也不读 stdin 首行；
+#    而按 docs/DEPLOY-TIMESERIES.md §6.1 轮换后，只有「裸 `-pw` + 口令经 stdin 首行」才连得上。
+#    下例已改成这种形式（口令取自 deploy/.env，且不进 argv）。
+
 # 变量：demo 设备 id 列表（由前缀推导）
 IDS=$(docker exec -i ypbin-mysql sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot -N -B \
   -e "SELECT GROUP_CONCAT(id) FROM iot_device WHERE tenant_id=1 AND device_code LIKE '\''demo-%'\'';" ypbin_admin')
 
-# ① IoTDB：按 (tenant_id, device_id) 删时序行
-for id in ${IDS//,/ }; do
-  echo "DELETE FROM iot.reading WHERE tenant_id='1' AND device_id='$id';"
-done | docker exec -i ypbin-iotdb start-cli.sh -h ypbin-iotdb -sql_dialect table
+# ① IoTDB：按 (tenant_id, device_id) 删时序行（stdin 首行 = 当前口令，其余为 SQL）
+{
+  printf '%s\n' "$(sed -n 's/^IOTDB_PASSWORD=//p' /opt/ypbin/ypbin-iot/deploy/.env | head -1)"
+  for id in ${IDS//,/ }; do
+    echo "DELETE FROM iot.reading WHERE tenant_id='1' AND device_id='$id';"
+  done
+} | docker exec -i ypbin-iotdb start-cli.sh -h ypbin-iotdb -p 6667 -u root -pw -sql_dialect table
 
 # ② Redis：删最新值 Hash
 set -a; . /opt/ypbin/ypbin-iot/deploy/.env; set +a
@@ -247,7 +255,10 @@ UNION ALL SELECT \"maintenance\", COUNT(*) FROM maintenance_window WHERE tenant_
 UNION ALL SELECT \"outage\", COUNT(*) FROM outage_event WHERE tenant_id=1
 UNION ALL SELECT \"liveness\", COUNT(*) FROM device_liveness WHERE tenant_id=1
 UNION ALL SELECT \"point_mapping\", COUNT(*) FROM iot_point_mapping WHERE tenant_id=1;" ypbin_admin'
-printf "SELECT count(*) FROM iot.reading;\n" | docker exec -i ypbin-iotdb start-cli.sh -h ypbin-iotdb -sql_dialect table
+# IoTDB 行数核对：stdin 首行 = 当前口令，其余为 SQL；**必须带裸 `-pw`**（不带则 wrapper 注入 `-pw root`，首行会被当 SQL）
+{ printf '%s\n' "$(sed -n 's/^IOTDB_PASSWORD=//p' /opt/ypbin/ypbin-iot/deploy/.env | head -1)"; \
+  printf 'SELECT count(*) FROM iot.reading;\n'; } \
+  | docker exec -i ypbin-iotdb start-cli.sh -h ypbin-iotdb -p 6667 -u root -pw -sql_dialect table
 ```
 
 **重新造数（幂等）**：种子脚本会先按同样的 `demo-` 口径清理（含 IoTDB/Redis）再重建，
