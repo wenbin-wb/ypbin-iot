@@ -1,0 +1,5 @@
+# Redis requirepass 受管配置：由 deploy/redis-auth-conf.sh 从 deploy/.env 生成，**含真实口令**，绝不入库。
+# 用 deploy/ 下的独立 .gitignore（而不是改上游继承的根 .gitignore）：本仓的同步纪律是
+# 「IoT 相关一律新增文件，尽量不改 admin 既有文件」——根 .gitignore 是 admin 既有文件，
+# 改它就要进 Sync Whitelist 白名单（见 SYNC.md 第二节）。
+redis-requirepass.conf
