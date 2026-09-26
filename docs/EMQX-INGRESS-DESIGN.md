@@ -13,7 +13,7 @@
 
 | # | 结论 | 强度 |
 |---|---|---|
-| **C1** | **入站主推：EMQX Rule Engine + HTTP Server 动作 → 复用既有 `POST /internal/readings`。** 规则 SQL 把一条上行消息规格化成 `ReadingIngestReq` 的**单元素 `items`**，**零新端点、零新落库链路**。备选：`ypbin-access` 自建 MQTT 消费者（`$share` 共享订阅）复用既有有界队列微批。 | 已核实（路径/字段/失败语义均有官方依据） |
+| **C1** | **入站主推：EMQX Rule Engine + HTTP Server 动作 → 新增薄适配端点 `POST /internal/mqtt/readings`（同 `X-Internal-Token` 守卫）→ 复用既有 `AvailabilityService.ingest` 及其后的最新值/时序/活性链路。** 规则 SQL 把一条上行消息规格化成 `ReadingIngestReq` 的**单元素 `items`**。**新增的只有一个薄适配控制器**（职责只有两件：契约适配 + **非法报文返回非 2xx**，见 §6.5/C9/H10），**不新增任何落库链路**，既有 `ingest()` 与 `POST /internal/readings` 的契约与语义**一行不改**。备选 A：`ypbin-access` 自建 MQTT 消费者复用既有有界队列微批；备选 B：**零 Java 改动**（原样复用 `/internal/readings`），代价是非法报文被 EMQX 判成功而静默丢弃，只能在规则 SQL 里做有限前置校验（§6.5 方案 B）。 | 已核实（官方文档 + 官方源码 + 仓内代码） |
 | **C2** | **下行主推：`ypbin-iot` → `POST /api/v5/publish`（API Key Basic 认证，`qos=1`、`retain=false`）→ 设备。** 定向靠**主题**；官方**没有**「按 clientid 定向发布」的端点（`clientid` 字段已 `deprecated`）。 | 已核实 |
 | **C3** | 🔴 **红线：EMQX 5.8 的授权默认是 `allow`，不是 deny-by-default。** `authorization.no_match` 默认 `allow` ⇒ **不显式设 `no_match = deny` 就等于「ACL 没配对时全放行」**。上线前硬条件。 | 已核实（官方原文） |
 | **C4** | 🔴 **生产机内存余量不足以「默认配置」直接上 EMQX**：实测 **8 vCPU / 7939MB / swap=0 / available ≈ 904MB**，已有容器占 ~6.2GiB。**官方未给出最低内存/CPU 要求** ⇒ 不给官方数字，给**分阶段 + 可回滚**方案（§8.3）。 | 实测 + 否定性核实 |
@@ -61,10 +61,12 @@
 > **访问日期统一 2026-09-25（UTC）**；**独立复核日期 2026-09-26（UTC）**。
 >
 > **复核状态口径（避免把「子代理转述」当一手）**：
-> - **【R6 已逐字复核】** = 独立复核者**亲自取回**官方页面/原始 HTML/官方源码并逐字比对；本文档中带此标注的条目共 19 条官方事实 + F1/F3/F5/F7/F9/F10(部分)/F15/F16/F17/F18/F19/F20/F21/F23/F24/F27/F30/F32/F33/F34/F38/F39 + F40–F45 的实测量。
-> - **【仅子代理一手核实】** = 引文与 URL 来自子代理，独立复核者**本轮未逐条重取**（F22、F25、F26、F28、F29、F31、F35、F36、F37，以及 F10 的 pbkdf2 默认值）。**这些条目的结论强度弱于上一类**，落地前应按下表链接自行复核。
-> - **【本机实测】** = 命令与输出见附录 B。
+> - 本文档**不集中列举**「哪些条已被独立复核」——集中列举会与行级标注漂移（首版曾出现「声称 19 条、实列 22 项」且与行内标注冲突的问题，已删除）。**一律以每条目的行内标注为准**：
+>   - 行内写 **（独立复核 2026-09-26 逐字确认）** 或含「**独立复核**」字样的 ⇒ 已被第二轮外委复核者亲自取回官方原文/原始 HTML/官方源码逐字确认；
+>   - 行内只写 **（子代理一手核实）** 的 ⇒ 引文与 URL 来自子代理，**独立复核者本轮未逐条重取**（已知未重取：F22、F25、F26、F28、F29、F31、F35、F36、F37，以及 F10 的 pbkdf2 默认值）⇒ **结论强度弱一档**，落地前请自行复核链接；
+>   - 行内写 **【本机实测】** 的 ⇒ 命令与输出见附录 B。
 > - 任何**无出处**或**推断性**表述都不进本文档的结论；查不到的一律进 §10.2。
+> - **第二轮复核的独立发现（已采纳并写入本文档）**：① EMQX 只看 HTTP 状态码有官方**源码**级依据（`emqx_bridge_http_connector.erl`：`StatusCode >= 200 andalso StatusCode < 300 -> ok`，429/503 归 `recoverable_error`，其余 `unrecoverable_error`）；② `api_key.bootstrap_file` 为官方明载（F39b）；③ OSS 无角色凭据（C10/F39）；④ 官方 rule SQL 页对 `nth` **已载越界约束**（见 U19）。
 
 ### 3.1 镜像与版本
 
@@ -79,17 +81,17 @@
 
 | # | 事实 | 原文/证据 | 出处 |
 |---|---|---|---|
-| F5 | 默认端口：`1883` MQTT/TCP、`8883` MQTT/TLS、`8083` MQTT/WS、`8084` MQTT/WSS、`18083` Dashboard **与 REST API**、`4370` Erlang distribution（`BasePort+Offset`）、`5370` 集群 RPC（**Docker 环境为 5369**） | 官方 "Port Usage" 表逐字（子代理一手核实）；集群页补充 *`5370` or `5369` if EMQX is deployed via Docker* | [deploy/install.html](https://docs.emqx.com/en/emqx/v5.8/get-started/deploy/install.html)、[cluster/security.html](https://docs.emqx.com/en/emqx/v5.8/guides/cluster/security.html) |
+| F5 | 默认端口：`1883` MQTT/TCP、`8883` MQTT/TLS、`8083` MQTT/WS、`8084` MQTT/WSS、`18083` Dashboard **与 REST API**、`4370` Erlang distribution（`BasePort+Offset`）、`5370` 集群 RPC（**Docker 环境为 5369**） | 官方 "Port Usage" 表逐字（子代理一手核实）；集群页补充 *`5370` or `5369` if EMQX is deployed via Docker* | [deploy/install.html](https://docs.emqx.com/en/emqx/v5.8/get-started/deploy/install.html)、[cluster/security.html](https://docs.emqx.com/en/emqx/v5.8/guides/cluster/security.html) （**独立复核 2026-09-26 逐字确认**） |
 | F6 | 必须持久化 `/opt/emqx/data` 与 `/opt/emqx/log`；节点名必须**稳定**（`EMQX_NODE_NAME=emqx@<host>`），且容器 hostname 要与之一致 | v5.8 原文：*It's crucial to choose a stable identifier, such as a hostname or Fully Qualified Domain Name (FQDN), to serve as the node name*、*use the `EMQX_NODE_NAME` environment variable with the format `emqx@hostname`. You should also set the container hostname to match* | [install-docker-ce.html](https://docs.emqx.com/en/emqx/v5.8/get-started/deploy/install-docker-ce.html)、[install-docker.html](https://docs.emqx.com/en/emqx/v5.8/get-started/deploy/install-docker.html)（一手，2026-09-25；独立复核 2026-09-26 确认 v5.8 页**没有**「不能短主机名」的说法） |
 | F6b | ⚠️ **但 6.x 官方明确短主机名不可用**：*The `<host>` part must be an IP address or a fully qualified domain name (FQDN), such as node1.emqx.com. EMQX runs its Erlang node in long-name mode, so you cannot use a short hostname without dots, such as `node1`.* | v5.8 与 6.x 口径不一致（v5.8 宽松、6.x 严格）⇒ **本设计按严格口径取带点 FQDN**，不赌 5.8 的宽松描述 | [install-docker.html（latest = 6.3.1）](https://docs.emqx.com/en/emqx/latest/get-started/deploy/install-docker.html)（一手，2026-09-25） |
 | F7 | 容器健康检查官方做法：`["CMD", "/opt/emqx/bin/emqx", "ctl", "status"]` | 官方 compose 示例里的 healthcheck | [install-docker.html](https://docs.emqx.com/en/emqx/v5.8/get-started/deploy/install-docker.html)、[install-docker-ce.html](https://docs.emqx.com/en/emqx/v5.8/get-started/deploy/install-docker-ce.html) |
-| F8 | **官方未给出 Docker 部署的最低内存/CPU 要求** | 否定性核实：v5.8 `install.html` **渲染内容与原始 HTML 中均无**硬件规格表（全文无 `Hardware Specification`、无注释块含 hardware/memory/cpu/ram）；`install-docker-ce.html` 全文 `memory`/`cpu` **0 命中**；Docker Hub 仓库描述亦无（子代理一手核实 + **独立复核用原始 HTML 逐字复核，2026-09-26**）。⚠️ 首版曾写「该段在 HTML 源码里被注释」，**该机制描述经复核不成立，已删除**；否定性结论本身成立 | [deploy/install.html](https://docs.emqx.com/en/emqx/v5.8/get-started/deploy/install.html)、[install-docker-ce.html](https://docs.emqx.com/en/emqx/v5.8/get-started/deploy/install-docker-ce.html) |
+| F8 | **官方未给出 Docker 部署的最低内存/CPU 要求** | 否定性核实：v5.8 `install.html` **无硬件规格章节/表格**（章节仅 Supported OS / Installation Environment / Port Usage / Files and Directories；正文 `memory`/`cpu` **0 命中**；447 个 HTML 注释中无 hardware/memory/cpu 命中）—— 注意导语里有一句 *the minimum hardware specification* 的**承诺**，但正文并未给出该表，故「官方未给出最低要求」成立；`install-docker-ce.html` 全文 `memory`/`cpu` **0 命中**；Docker Hub 仓库描述亦无（子代理一手核实 + **独立复核用原始 HTML 逐字复核，2026-09-26**）。⚠️ 首版曾写「该段在 HTML 源码里被注释」，**该机制描述经复核不成立，已删除**；否定性结论本身成立 | [deploy/install.html](https://docs.emqx.com/en/emqx/v5.8/get-started/deploy/install.html)、[install-docker-ce.html](https://docs.emqx.com/en/emqx/v5.8/get-started/deploy/install-docker-ce.html) |
 
 ### 3.3 内置数据库认证与用户管理
 
 | # | 事实 | 原文/证据 | 出处 |
 |---|---|---|---|
-| F9 | 认证 HOCON：`{backend="built_in_database", mechanism="password_based", password_hash_algorithm{name="sha256", salt_position="suffix"}, user_id_type="username", bootstrap_file="${EMQX_ETC_DIR}/auth-built-in-db-bootstrap.csv", bootstrap_type="plain"}` | 官方 "Configure with Configuration Items" 原文 | [authn/mnesia.html](https://docs.emqx.com/en/emqx/v5.8/guides/access-control/authn/mnesia.html) |
+| F9 | 认证 HOCON：`{backend="built_in_database", mechanism="password_based", password_hash_algorithm{name="sha256", salt_position="suffix"}, user_id_type="username", bootstrap_file="${EMQX_ETC_DIR}/auth-built-in-db-bootstrap.csv", bootstrap_type="plain"}` | 官方 "Configure with Configuration Items" 原文 | [authn/mnesia.html](https://docs.emqx.com/en/emqx/v5.8/guides/access-control/authn/mnesia.html) （**独立复核 2026-09-26 逐字确认**） |
 | F10 | 口令算法可选 `plain / md5 / sha / sha256 / sha512 / bcrypt / pbkdf2`；`salt_position` 可选 `suffix / prefix / disable`；bcrypt `salt_rounds` 默认 10（允许 5–10）。**sha 系的结果按十六进制串比较、大小写不敏感**。⚠️ pbkdf2 `iteration_count` 默认 4096 为**子代理核实，独立复核未能重取（其取到的页面在该处被截断）** ⇒ 见 §10.2 U17 | 官方原文（独立复核逐字确认了算法枚举、`salt_position` 枚举、bcrypt 默认值与范围、大小写不敏感） | [authn/mnesia.html](https://docs.emqx.com/en/emqx/v5.8/guides/access-control/authn/mnesia.html) |
 | F11 | 用户管理 REST：全局链 `POST/GET /api/v5/authentication/{id}/users`（`{id}` 形如 `password_based%3Abuilt_in_database`）；导入 `POST /api/v5/authentication/{id}/import_users`（`multipart/form-data`，`user_id` 必填 + `password_hash` 必填 + `salt` 选填 + `is_superuser` 选填） | 官方 "User Management API Endpoints" 与 "Import Users" 原文 | [authn/user_management.html](https://docs.emqx.com/en/emqx/v5.8/guides/access-control/authn/user_management.html) |
 | F12 | `bootstrap_file` 只在**创建认证器时**读取一次、`override=false`（不覆盖既有用户）、**读文件出错只告警不致失败** | 官方 "Runtime Behavior" 原文 | 同上 |
@@ -99,37 +101,37 @@
 
 | # | 事实 | 原文/证据 | 出处 |
 |---|---|---|---|
-| F14 | 源配置键是 `authorization.sources`（有序数组），每项用 **`type`**（`file` / `built_in_database` / …）标识；**`backend` 是 authentication 的键，不是 authorization 的键** | 官方原文 + HOCON 手册字段表（子代理一手核实） | [authz/authz.html](https://docs.emqx.com/en/emqx/v5.8/guides/access-control/authz/authz.html)、[hocon CE v5.8.7](https://docs.emqx.com/en/emqx/v5.8.7/hocon/) |
-| F15 | 🔴 **`no_match` 默认 `allow`**（`deny_action` 默认 `ignore`）⇒ 默认非拒绝 | 官方原文：*`no_match` … default: `allow`*（子代理一手核实） | [authz/authz.html](https://docs.emqx.com/en/emqx/v5.8/guides/access-control/authz/authz.html) |
-| F16 | 内置库规则字段：`topic`(必填)、`action`(必填 `publish`/`subscribe`/`all`)、`permission`(必填 `allow`/`deny`)、`qos`(选填，默认全 QoS)、`retain`(选填，默认允许)；`username`/`clientid` 是**外层分组键**，不在规则对象里 | 官方原文 + OpenAPI `emqx_authz_api_mnesia.rule_item`（子代理一手核实） | [authz/mnesia.html](https://docs.emqx.com/en/emqx/v5.8/guides/access-control/authz/mnesia.html)、[api-docs](https://docs.emqx.com/en/emqx/v5.8/admin/api-docs.html) |
-| F17 | 规则 REST 路径（基址 `/api/v5`）：`/authorization/sources/built_in_database/rules/{all\|clients\|users}`，单项 `.../rules/users/{username}`（DELETE/GET/PUT）；改完建议 `DELETE /api/v5/authorization/cache` | OpenAPI 路径清单（子代理一手核实）；⚠️ 官方 mnesia.html 的 curl 示例用的是**旧路径** `.../built_in_database/clientid`，与 API 参考冲突（未核实旧路径是否仍作别名） | [api-docs](https://docs.emqx.com/en/emqx/v5.8/admin/api-docs.html)、[authz/mnesia.html](https://docs.emqx.com/en/emqx/v5.8/guides/access-control/authz/mnesia.html) |
+| F14 | 源配置键是 `authorization.sources`（有序数组），每项用 **`type`**（`file` / `built_in_database` / …）标识；**`backend` 是 authentication 的键，不是 authorization 的键** | 官方原文 + HOCON 手册字段表（子代理一手核实） | [authz/authz.html](https://docs.emqx.com/en/emqx/v5.8/guides/access-control/authz/authz.html)、[hocon CE v5.8.7](https://docs.emqx.com/en/emqx/v5.8.7/hocon/) （**独立复核 2026-09-26 逐字确认**） |
+| F15 | 🔴 **`no_match` 默认 `allow`**（`deny_action` 默认 `ignore`）⇒ 默认非拒绝 | 官方原文：*`no_match` … default: `allow`*（子代理一手核实） | [authz/authz.html](https://docs.emqx.com/en/emqx/v5.8/guides/access-control/authz/authz.html) （**独立复核 2026-09-26 逐字确认**） |
+| F16 | 内置库规则字段：`topic`(必填)、`action`(必填 `publish`/`subscribe`/`all`)、`permission`(必填 `allow`/`deny`)、`qos`(选填，默认全 QoS)、`retain`(选填，默认允许)；`username`/`clientid` 是**外层分组键**，不在规则对象里 | 官方原文 + OpenAPI `emqx_authz_api_mnesia.rule_item`（子代理一手核实） | [authz/mnesia.html](https://docs.emqx.com/en/emqx/v5.8/guides/access-control/authz/mnesia.html)、[api-docs](https://docs.emqx.com/en/emqx/v5.8/admin/api-docs.html) （**独立复核 2026-09-26 逐字确认**） |
+| F17 | 规则 REST 路径（基址 `/api/v5`）：`/authorization/sources/built_in_database/rules/{all\|clients\|users}`，单项 `.../rules/users/{username}`（DELETE/GET/PUT）；改完建议 `DELETE /api/v5/authorization/cache` | OpenAPI 路径清单（子代理一手核实）；⚠️ 官方 mnesia.html 的 curl 示例用的是**旧路径** `.../built_in_database/clientid`，与 API 参考冲突（未核实旧路径是否仍作别名） | [api-docs](https://docs.emqx.com/en/emqx/v5.8/admin/api-docs.html)、[authz/mnesia.html](https://docs.emqx.com/en/emqx/v5.8/guides/access-control/authz/mnesia.html) （**独立复核 2026-09-26 逐字确认**） |
 | F18 | `built_in_database` 默认 `max_rules = 100` | HOCON 手册 `builtin_db` 子结构（子代理一手核实） | [hocon CE v5.8.7](https://docs.emqx.com/en/emqx/v5.8.7/hocon/) |
-| F19 | 主题占位符为 `${username}` / `${clientid}` / `${client_attrs.NAME}`，且**可以只占主题的一段**：*Placeholders can be used as topic segments, like `a/b/${username}/c/d`*。**本轮未检索到 `%u`/`%c` 语法** | 官方原文（子代理一手核实） | [authz/authz.html](https://docs.emqx.com/en/emqx/v5.8/guides/access-control/authz/authz.html) |
-| F20 | 两级动态主题（每设备只能收发自己的 up/down）需要 `client_attrs`：`mqtt.client_attrs_init = [{expression="nth(1, tokens(username, '.'))", set_as_attr=...}, …]`；官方示例正是 `up/${client_attrs.productId}/${client_attrs.deviceId}` | 官方原文（子代理一手核实；表达式函数 `nth`/`tokens` 逐字来自官方示例） | [client-attributes.html](https://docs.emqx.com/en/emqx/v5.8/develop/client-attributes/client-attributes.html) |
-| F21 | 🔴 官方安全要求：ACL 主题模板里用 `${clientid}`/`${username}`/`${client_attrs.X}` 时**必须校验这些身份值不含 MQTT 通配符 `+`/`#` 与主题分隔符 `/`** | 官方原文（子代理一手核实） | [security-checklist.html](https://docs.emqx.com/en/emqx/v5.8/guides/access-control/security-checklist.html) |
+| F19 | 主题占位符为 `${username}` / `${clientid}` / `${client_attrs.NAME}`，且**可以只占主题的一段**：*Placeholders can be used as topic segments, like `a/b/${username}/c/d`*。**本轮未检索到 `%u`/`%c` 语法** | 官方原文（子代理一手核实） | [authz/authz.html](https://docs.emqx.com/en/emqx/v5.8/guides/access-control/authz/authz.html) （**独立复核 2026-09-26 逐字确认**） |
+| F20 | 两级动态主题（每设备只能收发自己的 up/down）需要 `client_attrs`：`mqtt.client_attrs_init = [{expression="nth(1, tokens(username, '.'))", set_as_attr=...}, …]`；官方示例正是 `up/${client_attrs.productId}/${client_attrs.deviceId}` | 官方原文（子代理一手核实；表达式函数 `nth`/`tokens` 逐字来自官方示例） | [client-attributes.html](https://docs.emqx.com/en/emqx/v5.8/develop/client-attributes/client-attributes.html) （**独立复核 2026-09-26 逐字确认**） |
+| F21 | 🔴 官方安全要求：ACL 主题模板里用 `${clientid}`/`${username}`/`${client_attrs.X}` 时**必须校验这些身份值不含 MQTT 通配符 `+`/`#` 与主题分隔符 `/`** | 官方原文（子代理一手核实） | [security-checklist.html](https://docs.emqx.com/en/emqx/v5.8/guides/access-control/security-checklist.html) （**独立复核 2026-09-26 逐字确认**） |
 | F22 | acl.conf 是「以句点结尾的 Erlang tuple 列表」；**5.8 无 acl.conf 专用重载 CLI**，官方口径是「可从 Dashboard 编辑并重载」，编辑后的规则存 `data/authz/acl.conf`、**原 `path` 文件不再被加载**；CLI 只有 `authz cache-clean` | 官方原文（子代理一手核实） | [authz/file.html](https://docs.emqx.com/en/emqx/v5.8/guides/access-control/authz/file.html)、[guides/cli.html](https://docs.emqx.com/en/emqx/v5.8/guides/cli.html) |
 
 ### 3.5 入站（设备 → 平台）
 
 | # | 事实 | 原文/证据 | 出处 |
 |---|---|---|---|
-| F23 | 官方入站路径有三条：**Rule Engine + HTTP Server 动作**（= 常说的 Data Bridge to Webhook）、**简化版 Webhook**（Dashboard 触发器，不写 SQL）、**自建 MQTT 订阅者**（官方仅有 Client SDK 页，**未检索到「官方推荐自建订阅者」的措辞**） | 官方原文：*For users who need to integrate with HTTP services but do not require data processing using rules, we recommend using Webhook as it is simpler and easier to use.*（子代理一手核实） | [data-bridge-webhook.html](https://docs.emqx.com/en/emqx/v5.8/develop/data-integration/data-bridge-webhook.html)、[data-integration/webhook.html](https://docs.emqx.com/en/emqx/v5.8/develop/data-integration/webhook.html) |
-| F24 | 规则 SQL 例：`SELECT * FROM "t/#"`；HTTP 动作字段 `method`(默认 `post`，可为模板)、`headers`(默认含 `content-type: application/json`，可为模板)、`body`(*If not provided, the body will be a JSON object of all the available fields*)、`url`（**path 可用模板，scheme/host/port 不可**）、`max_retries`(默认 `2`) | 官方 OpenAPI `bridge_http.*` 原文（子代理一手核实） | [api-docs](https://docs.emqx.com/en/emqx/v5.8/admin/api-docs.html)、[data-bridge-webhook.html](https://docs.emqx.com/en/emqx/v5.8/develop/data-integration/data-bridge-webhook.html) |
+| F23 | 官方入站路径有三条：**Rule Engine + HTTP Server 动作**（= 常说的 Data Bridge to Webhook）、**简化版 Webhook**（Dashboard 触发器，不写 SQL）、**自建 MQTT 订阅者**（官方仅有 Client SDK 页，**未检索到「官方推荐自建订阅者」的措辞**） | 官方原文：*For users who need to integrate with HTTP services but do not require data processing using rules, we recommend using Webhook as it is simpler and easier to use.*（子代理一手核实） | [data-bridge-webhook.html](https://docs.emqx.com/en/emqx/v5.8/develop/data-integration/data-bridge-webhook.html)、[data-integration/webhook.html](https://docs.emqx.com/en/emqx/v5.8/develop/data-integration/webhook.html) （**独立复核 2026-09-26 逐字确认**） |
+| F24 | 规则 SQL 例：`SELECT * FROM "t/#"`；HTTP 动作字段 `method`(默认 `post`，可为模板)、`headers`(默认含 `content-type: application/json`，可为模板)、`body`(*If not provided, the body will be a JSON object of all the available fields*)、`url`（**path 可用模板，scheme/host/port 不可**）、`max_retries`(默认 `2`) | 官方 OpenAPI `bridge_http.*` 原文（子代理一手核实） | [api-docs](https://docs.emqx.com/en/emqx/v5.8/admin/api-docs.html)、[data-bridge-webhook.html](https://docs.emqx.com/en/emqx/v5.8/develop/data-integration/data-bridge-webhook.html) （**独立复核 2026-09-26 逐字确认**） |
 | F25 | body 模板语法 `${var}` / `${payload.temp}` / `${.}`；规则可用字段含 `clientid, username, payload, topic, qos, timestamp, publish_received_at, node, client_attrs` | 官方原文（子代理一手核实） | [data-bridges.html](https://docs.emqx.com/en/emqx/v5.8/develop/data-integration/data-bridges.html)、[rule-sql-events-and-fields.html](https://docs.emqx.com/en/emqx/v5.8/develop/data-integration/rule-sql-events-and-fields.html) |
 | F26 | 创建桥接/动作的 REST：v1 `POST /api/v5/bridges`（`type` ∈ `["webhook","http"]`，源码注释 *`webhook` is kept for backward compatibility*）；v2 `POST /api/v5/connectors` + `POST /api/v5/actions`（`type=http`） | OpenAPI + 官方 GitHub v5.8.0 源码（子代理一手核实） | [api-docs](https://docs.emqx.com/en/emqx/v5.8/admin/api-docs.html)、`emqx/emqx` tag v5.8.0 |
-| F27 | 投递语义键与默认值：`query_mode` 默认 `async`；`request_ttl` 默认 `45s`（进入缓冲起算，超时即过期）；`max_buffer_bytes` 默认 **`256MB`**；`worker_pool_size` 默认 16；`inflight_window` 默认 100；`health_check_interval` 默认 15s；`enable_queue` 默认 `false`（且 deprecated，*messages will be buffered on disk when the bridge connection is down. When disabled the messages are buffered in RAM only*）；`buffer_mode` 默认 `memory_only`；非 Kafka 的磁盘缓存目录为 `data/resource_worker` | 官方 OpenAPI + 官方 GitHub v5.8.0 schema 原文（子代理一手核实） | [data-bridges.html](https://docs.emqx.com/en/emqx/v5.8/develop/data-integration/data-bridges.html)、[api-docs](https://docs.emqx.com/en/emqx/v5.8/admin/api-docs.html) |
+| F27 | 投递语义键与默认值：`query_mode` 默认 `async`；`request_ttl` 默认 `45s`（进入缓冲起算，超时即过期）；`max_buffer_bytes` 默认 **`256MB`**；`worker_pool_size` 默认 16；`inflight_window` 默认 100；`health_check_interval` 默认 15s；`enable_queue` 默认 `false`（且 deprecated，*messages will be buffered on disk when the bridge connection is down. When disabled the messages are buffered in RAM only*）；`buffer_mode` 默认 `memory_only`；非 Kafka 的磁盘缓存目录为 `data/resource_worker` | 官方 OpenAPI + 官方 GitHub v5.8.0 schema 原文（子代理一手核实） | [data-bridges.html](https://docs.emqx.com/en/emqx/v5.8/develop/data-integration/data-bridges.html)、[api-docs](https://docs.emqx.com/en/emqx/v5.8/admin/api-docs.html) （**独立复核 2026-09-26 逐字确认**） |
 | F28 | **缓冲区溢出按 FIFO 丢弃**，且 `dropped = dropped.expired + dropped.queue_full + dropped.resource_stopped + dropped.resource_not_found`；异步模式下**订阅方可能已收到而外部系统尚未写入** | 官方原文（子代理一手核实） | [data-bridges.html](https://docs.emqx.com/en/emqx/v5.8/develop/data-integration/data-bridges.html) |
 | F29 | **官方未对 HTTP 桥接给出 "at least once / at most once" 明文** ⇒ 重复投递由 `max_retries`+`request_ttl` 重发机制与 `retried.success` 指标佐证存在，但**语义无官方表述** | 否定性核实（子代理一手核实） | 同上 |
-| F30 | 共享订阅：`$share/<group>/<topic>` 与 `$queue/<topic>`；*only one client within each subscription group receives the message at a time*；策略 `mqtt.shared_subscription_strategy` 默认 `round_robin`；官方建议共享订阅用 `clean_session=true` | 官方原文（子代理一手核实） | [mqtt-shared-subscription.html](https://docs.emqx.com/en/emqx/v5.8/get-started/messaging/mqtt-shared-subscription.html) |
+| F30 | 共享订阅：`$share/<group>/<topic>` 与 `$queue/<topic>`；*only one client within each subscription group receives the message at a time*；策略 `mqtt.shared_subscription_strategy` 默认 `round_robin`；官方建议共享订阅用 `clean_session=true` | 官方原文（子代理一手核实） | [mqtt-shared-subscription.html](https://docs.emqx.com/en/emqx/v5.8/get-started/messaging/mqtt-shared-subscription.html) （**独立复核 2026-09-26 逐字确认**） |
 | F31 | 官方 **HTTP 认证源**（v5.8.0 起响应可带 `acl` 字段）与 **HTTP 授权源**（请求模板含 `${username} ${clientid} ${topic} ${action} ${qos} ${retain}`；响应 `result` = `allow`/`deny`/`ignore`，`204` 视作 allow） | 官方原文（子代理一手核实） | [authn/http.html](https://docs.emqx.com/en/emqx/v5.8/guides/access-control/authn/http.html)、[authz/http.html](https://docs.emqx.com/en/emqx/v5.8/guides/access-control/authz/http.html) |
 
 ### 3.6 下行（平台 → 设备）
 
 | # | 事实 | 原文/证据 | 出处 |
 |---|---|---|---|
-| F32 | `POST /api/v5/publish`（summary "Publish a message"），Basic(API Key)/Bearer；字段 `topic`(必填)、`payload`(必填)、`qos`(默认 0，0–2)、`retain`(默认 false)、`payload_encoding`(默认 `plain`，可 `base64`)、`properties`、`clientid`(**`deprecated: true`**)；批量 `POST /api/v5/publish/bulk` | 官方 OpenAPI 原文（子代理一手核实）；⚠️ OpenAPI **未给整体 JSON 示例**，只有字段级 example | [api-docs](https://docs.emqx.com/en/emqx/v5.8/admin/api-docs.html) |
-| F33 | 响应码：`200` *delivered to at least one subscriber*；**`202` *No matched subscribers***；`400` invalid；`503` 投递失败 | 官方 OpenAPI 原文（子代理一手核实） | 同上 |
-| F34 | 🔴 **没有「按 clientid 定向发布」的端点**（OpenAPI 193 条路径中无此端点；`clientid` 字段已 deprecated） | 否定性核实（子代理一手核实） | 同上 |
+| F32 | `POST /api/v5/publish`（summary "Publish a message"），Basic(API Key)/Bearer；字段 `topic`(必填)、`payload`(必填)、`qos`(默认 0，0–2)、`retain`(默认 false)、`payload_encoding`(默认 `plain`，可 `base64`)、`properties`、`clientid`(**`deprecated: true`**)；批量 `POST /api/v5/publish/bulk` | 官方 OpenAPI 原文（子代理一手核实）；⚠️ OpenAPI **未给整体 JSON 示例**，只有字段级 example | [api-docs](https://docs.emqx.com/en/emqx/v5.8/admin/api-docs.html) （**独立复核 2026-09-26 逐字确认**） |
+| F33 | 响应码：`200` *delivered to at least one subscriber*；**`202` *No matched subscribers***；`400` invalid；`503` 投递失败 | 官方 OpenAPI 原文（子代理一手核实） | 同上 （**独立复核 2026-09-26 逐字确认**） |
+| F34 | 🔴 **没有「按 clientid 定向发布」的端点**（OpenAPI 193 条路径中无此端点；`clientid` 字段已 deprecated） | 否定性核实（子代理一手核实） | 同上 （**独立复核 2026-09-26 逐字确认**） |
 | F35 | QoS：0 至多一次可能丢；1 **至少一次、可能重复**；2 恰好一次 | 官方原文（子代理一手核实） | [mqtt-concepts.html](https://docs.emqx.com/en/emqx/v5.8/get-started/messaging/mqtt-concepts.html) |
 | F36 | Retain：订阅时立刻收到该主题的保留消息；**默认永不过期**（需手动删） | 官方原文（子代理一手核实） | [mqtt-retained-message.html](https://docs.emqx.com/en/emqx/v5.8/get-started/messaging/mqtt-retained-message.html) |
 | F37 | 离线投递：**取决于订阅端是否维持会话**。内有非零 `expiry interval` 的会话在断开后被保留，*Messages sent to the topics while the client was offline are delivered*（重连后在有效期内投递）；**Durable Sessions 默认关闭**（`durable_sessions.enable` 默认 false，v5.7.0 起，企业版功能，且*does not yet support the persistence of shared subscription sessions*）。内存队列相关默认：`max_mqueue_len = 1000`、`mqueue_store_qos0 = true`、`max_inflight = 32`、`session_expiry_interval = 2h`（仅非 MQTT 5.0 客户端） | 官方原文（子代理一手核实） | [durability_introduction.html](https://docs.emqx.com/en/emqx/v5.8/develop/durability_introduction.html)、[inflight-window-and-message-queue.html](https://docs.emqx.com/en/emqx/v5.8/develop/design/inflight-window-and-message-queue.html)、[configuration/mqtt.html](https://docs.emqx.com/en/emqx/v5.8/guides/configuration/mqtt.html) |
@@ -138,7 +140,7 @@
 
 | # | 事实 | 原文/证据 | 出处 |
 |---|---|---|---|
-| F38 | Dashboard 默认 `admin`/`public`，**首次登录强制改密**；生产前必须改密 | 官方原文 | [dashboard/introduction.html](https://docs.emqx.com/en/emqx/v5.8/guides/dashboard/introduction.html)、[security-checklist.html](https://docs.emqx.com/en/emqx/v5.8/guides/access-control/security-checklist.html) |
+| F38 | Dashboard 默认 `admin`/`public`，**首次登录强制改密**；生产前必须改密 | 官方原文 | [dashboard/introduction.html](https://docs.emqx.com/en/emqx/v5.8/guides/dashboard/introduction.html)、[security-checklist.html](https://docs.emqx.com/en/emqx/v5.8/guides/access-control/security-checklist.html) （**独立复核 2026-09-26 逐字确认**） |
 | F39 | REST 鉴权两种：**API Key/Secret 作 Basic**、Bearer Token；**5.0.0 起不能用 Dashboard 用户凭据**；所有路径自 `/api/v5` 起。⚠️ 同页原文：*Note that role-based API credentials are available **only in the EMQX Enterprise edition*** ⇒ **OSS 版的 API Key 无法按角色收窄**（见 C10/RK12） | 官方原文，**本文档亲自取回该页全文**（API 页 Bearer 示例里的端口 `8483` 疑为 `18083` 笔误，**不采信该端口**） | [guides/api.html](https://docs.emqx.com/en/emqx/v5.8/guides/api.html) |
 | F39b | ✅ **API Key 可以预置、无需人工**：官方原文 *You can also create API keys using the bootstrap file method. Add the following configuration to the `emqx.conf` file … `api_key = { bootstrap_file = "etc/default_api_key.conf" }`*；文件格式 `{API Key}:{Secret Key}:{?Role}`（每行一条，Role 仅企业版），*API keys created this way are valid indefinitely*、*Each time EMQX starts, it will add the data set in the file to the API key list. If an API key already exists, its Secret Key and Role will be updated* | 官方原文，**本文档亲自取回**（首版曾把这条写成「未核实 ⇒ 必须人工」，属漏检，已改正；⚠️ 但该键在 **OSS 5.8.9** 是否同样生效**需实测**，见 U18） | [guides/api.html](https://docs.emqx.com/en/emqx/v5.8/guides/api.html) |
 | F39c | REST 冲突语义：`409 Conflict. The object already exists or the number limit is exceeded`，错误码 `ALREADY_EXISTS` / `CONFLICT` | 官方原文（**本文档亲自取回**）—— 用于修正初始化脚本「重复 POST 授权源」的自相矛盾（§8.5） | [guides/api.html](https://docs.emqx.com/en/emqx/v5.8/guides/api.html) |
@@ -176,7 +178,7 @@ flowchart TB
     end
 
     subgraph PLAT["平台（ypbin-net）"]
-        IOT["ypbin-iot :18084<br/>POST /internal/readings<br/>（既有端点，复用）"]
+        IOT["ypbin-iot :18084<br/>POST /internal/mqtt/readings<br/>（新增薄适配端点：契约适配 + 非法即 4xx）"]
         AVAIL["AvailabilityServiceImpl.ingest<br/>① 活性/断档 ② 最新值(Redis) ③ 时序(IoTDB)"]
         CMD["命令实例服务<br/>iot_command_instance<br/>状态机 + 超时扫描"]
         SHD["影子 iot_shadow<br/>desired / reported"]
@@ -223,7 +225,7 @@ flowchart TB
 
 | 维度 | 主推：Rule Engine + HTTP 动作 | 备选：`ypbin-access` 自建 MQTT 消费者 |
 |---|---|---|
-| 平台代码量 | **近零**（规则 + 桥接配置；服务端零改动，直接复用 `/internal/readings`） | 需在 access 增加 MQTT 客户端 + 租约联动订阅/退订 + 断线重连 + 测试 |
+| 平台代码量 | **很小**：规则 + 桥接配置 + **1 个薄适配控制器**（契约适配 + 非法即 4xx，复用既有 `ingest` 与全部落库链路） | 较大：需在 access 增加 MQTT 客户端 + 租约联动订阅/退订 + 断线重连 + 测试 |
 | 失败语义（平台宕机） | **较好**：EMQX 侧有重试与内存缓冲（`max_retries=2`、`request_ttl=45s`、`max_buffer_bytes`），宕机窗口内的消息保留在 broker | 较差：QoS1 只保证「投给订阅者」；订阅者不在线时只有**持久会话**才入队（`max_mqueue_len` 默认 1000） |
 | 批量/背压 | **较弱**：一条 MQTT 消息 → 一次 HTTP 请求（`ReadingIngestReq.items` 只有 1 个元素）；官方未给出 HTTP 动作的批量聚合语义 | **强**：沿用既有「有界队列 → 微批 200/1s → 一次 HTTP」纪律（`HttpAccessReadingSink.java:72,83,99-101`） |
 | 与租约模型一致性 | 不耦合租约（EMQX 推给平台，与哪个节点拥有租户无关） | 强耦合：可为每个已租约租户订阅其主题，退租即退订 —— 正好套用既有 `TenantLinkManager` 缝 |
@@ -390,13 +392,15 @@ ALTER TABLE iot_device
 
 ## 6. 入站实现方案
 
-### 6.1 主推路径（P0）：Rule Engine + HTTP 动作 → 复用 `POST /internal/readings`
+### 6.1 主推路径（P0）：Rule Engine + HTTP 动作 → 薄适配端点 + 复用既有落库链路
 
-**不新增端点。** 既有端点与守卫（已核实）：
+**新增内容只有「一个薄适配控制器」**：`POST /internal/mqtt/readings`（与既有端点同在 `/internal/**` 守卫下、同一凭证）。**落库链路完全复用**——控制器只做契约适配，然后调用既有 `AvailabilityService.ingest(req)`，其后的活性/断档、最新值、时序一行不改。**为什么不直接复用 `/internal/readings` 这个端点本身**：因为本仓全局异常统一 HTTP 200，而 EMQX 只看 HTTP status（官方源码判据：`emqx_bridge_http_connector.erl` 的 `StatusCode >= 200 andalso StatusCode < 300 -> ok`，其余按 `recoverable/unrecoverable_error` 处理），若沿用 HTTP 200 信封，非法报文会被判「投递成功」而静默丢弃 —— 详见 §6.5。
+
+既有可复用部分（已核实）：
 
 - `InternalReadingController` 路径 `/internal/readings`、方法 `POST`、返回 `R<Integer>` —— `ypbin-service/ypbin-iot/.../controller/InternalReadingController.java:36,48-51`
 - 守卫：`registry.addInterceptor(...).addPathPatterns("/internal/**")`，请求头 `X-Internal-Token`，**凭证未配置即拒绝**（fail-closed），常量时间比较 —— `.../config/InternalTokenGuardWebConfig.java:31-33`、`InternalTokenGuardInterceptor.java:54,62-63`
-- 服务侧：`AvailabilityServiceImpl.ingest`（`@Transactional(rollbackFor = Exception.class)`）→ 活性/断档 + `afterCommit` 写最新值/时序 —— `.../service/impl/AvailabilityServiceImpl.java:120-146`（`writeDerivedAfterCommit` 在 `:220`，实际写库在 `:243`）
+- 服务侧：`AvailabilityServiceImpl.ingest`（`@Transactional(rollbackFor = Exception.class)`）→ 活性/断档 + `afterCommit` 写最新值/时序 —— `.../service/impl/AvailabilityServiceImpl.java:120-146`（`writeDerivedAfterCommit` 在 `:220`，实际写调用在 `:246`）
 
 **规则（P0 合约：一条上行消息 = 一个点位）**
 
@@ -432,7 +436,7 @@ WHERE
   "ts": 1758768000000, "pollIntervalMs": 30000 }
 ```
 
-- `ts` 为 **epoch 毫秒**，与既有 `ReadingObservationDto.ts`（`Long`）一致；`quality` 取值沿用既有枚举名（`GOOD|UNCERTAIN|BAD|STALE|NOT_CONNECTED|CONFIG_ERROR`，见 `ReadingObservationDto.java:73`）。
+- `ts` 为 **epoch 毫秒**，与既有 `ReadingObservationDto.ts`（`Long`）一致；`quality` 取值沿用既有枚举名（`GOOD|UNCERTAIN|BAD|STALE|NOT_CONNECTED|CONFIG_ERROR`，见 `ReadingObservationDto.java:71` 的注释；`:73` 是字段本身）。
 - `deviceId` 在模板里是字符串（规则引擎取出的主题段是字符串），由 Jackson 反序列化到 `Long` —— **这是本设计的假设，列入待实测**（§10.2 U8）；若不成立，改成在规则 SQL 里做数值转换。
 - **多属性一条消息不在 P0**：`items` 的展开需要服务端或规则引擎做循环，而 HTTP 动作的 body 模板**不支持数组展开** ⇒ 多属性请发多条，或等 P1 走备选路径（自建消费者可自行展开数组）。这是主推路径的真实代价，写在这里而不是留给实施者踩。
 
@@ -440,9 +444,9 @@ WHERE
 
 | 键 | 建议值 | 依据 |
 |---|---|---|
-| `url` | `http://ypbin-iot:18084/internal/readings` | 同 `ypbin-net`，容器名即服务名（`docker-compose.yml` 中 ypbin-iot 有固定 IP `172.20.0.24` 与网络别名）；`url` 的 scheme/host/port 不能用模板（F24） |
+| `url` | `http://ypbin-iot:18084/internal/mqtt/readings` | 同 `ypbin-net`，容器名即服务名（`docker-compose.yml` 中 ypbin-iot 有固定 IP `172.20.0.24` 与网络别名）；`url` 的 scheme/host/port 不能用模板（F24） |
 | `method` | `post`（默认） | F24 |
-| `headers` | `content-type: application/json` + `X-Internal-Token: <deploy/.env 的 INTERNAL_TOKEN 实际值>` | 守卫头名见 `InternalTokenGuardInterceptor.java:62`；header 支持模板（F24）。⚠️ **取值来源**：`deploy/nacos/ypbin-common.yaml:75-76` 的 `ypbin.internal.token: ${INTERNAL_TOKEN}` 由 `deploy/install.sh:1093` 在导入 Nacos 前替换为 `deploy/.env` 的实际值 ⇒ 桥接里**必须填替换后的同一个值**，不能写字面量 `${INTERNAL_TOKEN}` |
+| `headers` | `content-type: application/json` + `X-Internal-Token: <deploy/.env 的 INTERNAL_TOKEN 实际值>` | 守卫头名见 `InternalTokenGuardInterceptor.java:62`；header 支持模板（F24）。⚠️ **取值来源**：`deploy/nacos/ypbin-common.yaml:75-76` 的 `ypbin.internal.token: ${INTERNAL_TOKEN}` 由 `deploy/install.sh` 在导入 Nacos 前替换为 `deploy/.env` 的实际值（**生成值**在 `:1093`，**Nacos 占位符替换的 sed** 在 `:1288-1291`） ⇒ 桥接里**必须填替换后的同一个值**，不能写字面量 `${INTERNAL_TOKEN}` |
 | `body` | 上面的模板 | 官方：不提供 body 则默认发**全部字段**（F24）——那会把 `username`/`clientid` 一起发给平台，反而更好？**不**：服务端契约是 `ReadingIngestReq`，多余字段会被 Jackson 忽略，但**显式 body 更小更可控**，且避免把内部身份面暴露给未来的契约演化 |
 | `max_retries` | `2`（默认）或按压测调 | F24；重试是**重复投递的来源**，与 §6.4 直接相关 |
 | `request_ttl` | `30s`（默认 `45s`） | F27；缩短可减少「迟到重放」触发 §6.4 的窗口 |
@@ -802,7 +806,7 @@ docker exec ypbin-emqx /opt/emqx/bin/emqx ctl status
 | 选项 | 做法 | 代价/风险 |
 |---|---|---|
 | **① 腾内存** | 下调 Nacos / IoTDB 的内存上限（IoTDB 已有 `MEMORY_SIZE=768M` 覆盖先例） | 影响**已在跑的业务**（nacos 1.46GiB 是注册中心 + 配置中心，压缩它可能影响现有服务）；需逐个实测，风险外溢到别的容器 ⇒ 需用户批准 |
-| **② 另机部署 EMQX** | EMQX 放到另一台机器，平台侧通过内网/公网连 broker | 最稳（不动现有栈）；代价：跨机网络抖动与延迟进入数据面、需要新的部署与监控、`/internal/readings` 的调用要从 EMQX 跨机回平台（**要么平台内网可达（需评估公网暴露）**，要么改用备选路径由 access 主动外连 broker）；成本与运维面上升 |
+| **② 另机部署 EMQX** | EMQX 放到另一台机器，平台侧通过内网/公网连 broker | 最稳（不动现有栈）；代价：跨机网络抖动与延迟进入数据面、需要新的部署与监控、入站端点的调用要从 EMQX 跨机回平台（**要么平台内网可达（需评估公网暴露）**，要么改用备选路径由 access 主动外连 broker）；成本与运维面上升 |
 | **③ 暂缓入站、先做下行** | ⚠️ **不成立**：EMQX 是下行的前置（没有 broker 就没有设备连接）。真正可「暂缓」的是**入站路径的切换**——保持现有 HTTP 上报兜底（`/internal/readings` 已上线），只上 EMQX + 认证/ACL + **下行**，入站仍走 HTTP，直到内存问题解决 | 设备要同时走 HTTP 上报 + MQTT 下行（双通道），设备侧复杂度上升；但**平台侧风险最低**，是内存不达标时最现实的选择 |
 
 > 明确表态（R4）：**在拿到阶段 2 的实测数据之前，本方案不建议把 EMQX 与其入站链路一起上生产。** 若必须推进，选 **③ 的降级形态**（EMQX 只做下行 + 认证/ACL，入站继续 HTTP）。
@@ -880,7 +884,7 @@ ypbin:
 ## 9. 改造清单与排期
 
 > 标注：**[前端]** / **[后端]** / **[中间件]** / **[数据]**
-> 每项都给**验收口径**（状态码 / 行数 / 可复现步骤）。SQL 一律**双写**（`006/007` 全新安装 + `migration/*-iot-*.sql` 增量），否则 `tools/check-iot-sql-equivalence.sh` 会红。
+> 每项都给**验收口径**（状态码 / 行数 / 可复现步骤）。SQL 一律**双写**：等价语句追加到 **`007-iot-data.sql` 末尾**（❌ 不是 `006`）+ `migration/2026-09-28-iot-emqx-ingress.sql`（文件名须含 `-iot-`），否则 `tools/check-iot-sql-equivalence.sh` 会红（理由见附录 A）。
 
 ### P0（本轮之后的第一批实施）
 
@@ -890,7 +894,7 @@ ypbin:
 | P0-2 | **资源实测与调参**（§8.3 阶段 1/2） | [中间件] | 100/500 连接两档压测下 `available≥200MB`、`OOMKilled=false`、`RestartCount` 不增长、`MemUsage<85%×limit`；把实测数字回填本文档 |
 | P0-3 | **凭据签发/查看/吊销/接入信息 4 端点 + `iot_device` 3 列** | [后端][数据] | `POST /iot/devices/{id}/credential` 返回 200 且**响应含一次性明文**、库中 `credential_ref='emqx:password_based:built_in_database:{t}.{d}'`、`credential_version=1`；`GET` 返回 200 且**响应绝不含明文**（断言 JSON 里无 password 字段）；`DELETE` 后设备原凭据连接失败；重复 `DELETE` 返回 200（幂等）。行数：`SELECT count(*) FROM iot_device WHERE credential_ref IS NOT NULL` = 已签发设备数 |
 | P0-4 | **ACL/REST 客户端**（签发用户、发布消息；显式 connect/read 超时；错误码映射） | [后端] | 单测覆盖：EMQX 返回 4xx/5xx/超时 → 平台抛出**可区分**错误（`EMQX_ERROR`），**不静默降级**；`202` 映射为 `NO_SUBSCRIBER` |
-| P0-5 | **入站：规则 + HTTP 动作 → `/internal/readings`**（配置，无 Java 改动）+ `up/property` 契约 | [中间件] | 端到端：用测试设备发 1 条 `up/property` → `GET /iot/devices/{id}/latest` 返回该点位（HTTP 200）；`SELECT count(*) FROM device_liveness WHERE device_id=?` = 1；IoTDB `reading` 表新增 1 行 |
+| P0-5 | **入站：规则 + HTTP 动作 → `POST /internal/mqtt/readings`**（薄适配控制器 + 中间件配置）+ `up/property` 契约 | [中间件][后端] | 端到端：用测试设备发 1 条 `up/property` → `GET /iot/devices/{id}/latest` 返回该点位（HTTP 200）；`SELECT count(*) FROM device_liveness WHERE device_id=?` = 1；IoTDB `reading` 表新增 1 行 |
 | P0-6 | 🔴 **最新值乱序防护（§6.4）** —— **单列、独立批次**（仓内已登记边界，入站后变高频） | [后端] | §6.4「验收口径」1/2/3 全过；**变异验证**：注掉 ts 比较后新用例必须转红 |
 | P0-6b | 🔴 **入站失败语义：非法报文必须让 EMQX 看见非 2xx（§6.5 / H10）** | [后端] | 缺 `quality` 的上行 → 平台 **400**；平台最新值/时序/活性**零写入**（前后 `count(*)` 相等）；EMQX 侧重试/丢弃计数增长 |
 | P0-6c | 🔴 **`propertyId` 白名单校验（物模型属性 × 该设备点位映射）** | [后端] | 上报未映射 `propertyId` → 被拒且计数；`HGETALL iot:latest:{t}:{d}` 的 field 集合 ⊆ 该设备映射点位集合 |
@@ -964,7 +968,7 @@ ypbin:
 | **U10** | ~~是否存在 HOCON 预置 API Key 的手段~~ **已核实（本项已关闭）**：官方 5.8 文档明载 `api_key = { bootstrap_file = "etc/default_api_key.conf" }`，格式 `{API Key}:{Secret Key}:{?Role}`（F39b）。**首版把它写成「未核实 ⇒ 必须人工」属漏检，经独立复核指出并已改正** | 已核实（本文档亲自取回官方 REST API 页全文） | 见 U18（OSS 是否生效） |
 | **U17** | pbkdf2 `iteration_count` 默认 **4096**（F10） | 子代理核实，**独立复核未能重取**（其取到的页面在该处被截断） | 若将来改用 pbkdf2，须自行复核；本设计用 sha256，不受影响 |
 | **U18** | `api_key.bootstrap_file` 在 **OSS `emqx/emqx:5.8.9`** 是否同样生效 | 官方 5.8 **开源文档**已明载；但独立复核在 OSS 源码树中未能定位该键的 schema 落点 ⇒ **OSS 侧未核实** | 决定 §8.5 走 A（自动预置）还是 B（人工建 Key）；**上线前必须实测** |
-| **U19** | 规则 SQL 里 `nth`/`tokens` 对**越界索引**的行为（服务账号 `svc-ingress` 的 username 无点 ⇒ `nth(2, …)` 取空） | 未实测。✅ 已核实 `nth(N: integer, Array: array)` 与 `tokens` **确实存在于官方 rule SQL 内置函数表**（[rule-sql-builtin-functions.html](https://docs.emqx.com/en/emqx/v5.8/develop/data-integration/rule-sql-builtin-functions.html)，独立复核 2026-09-26）；但**越界返回值**未核实 | §5.2 的安全性推理依赖「越界 ⇒ 不展开成真实主题 ⇒ 不匹配 ⇒ `no_match=deny`」；必须并入 U6 的必测项一起验 |
+| **U19** | 规则 SQL 里 `nth`/`tokens` 对**越界索引**的**具体返回形式**（服务账号 `svc-ingress` 的 username 无点 ⇒ `nth(2, …)` 越界） | ✅ 官方已载（**独立复核取回**）：`nth(N: integer, Array: array) -> any` 且原文 *"`N` should not be larger than the length of `Array`"*；页首并载 *"if the provided argument exceeds the stipulated range … it will result in the current SQL execution failing, incrementing the failure count by one"* ⇒ **越界不是「返回空」而是「本次规则执行失败并计数」**。**仍然未实测**的是：该失败在 5.8.9 容器里的实际表现（是否只影响该条消息、失败计数落在哪个指标、是否会让**整条规则**被停用） | §5.2 的安全性推理方向不变（越界失败同样不会展开成真实主题），但**运维后果不同**：服务账号若走进这条规则会持续累加失败计数，因此 §5.2 的设计（服务账号的 username 无点、只命中 `rules/users`）**必须在真实容器里验证**；见 [rule-sql-builtin-functions.html](https://docs.emqx.com/en/emqx/v5.8/develop/data-integration/rule-sql-builtin-functions.html)（一手，2026-09-26） |
 | **U11** | 内置数据库（Mnesia）在**集群**下的规则/用户复制语义 | 未核实（D0.6 的 ⚠️ 已提示） | 本轮**单节点**，不涉集群；集群化前必须重核 |
 | **U12** | 生成 Docker 镜像的**默认容量上限**（`max_mqueue_len=1000` 等）在多租户下的叠加影响 | 部分核实（默认值来自官方配置页），叠加影响未算 | 备选路径（§6.3）的容量规划需实测 |
 | **U13** | EMQX 侧 `limiter`（限流）的**确切配置键** | 未核实（只确认有该文档页） | §6.2 不写具体键 |
@@ -1029,7 +1033,8 @@ CREATE TABLE iot_command_instance
 --    UNIQUE KEY 带 tenant_id ⇒ 所有按 request_id 的更新都必须同时带 tenant_id（§7.1 第 2 条）。
 
 -- ============ 3) 权限码与菜单（P0-8；按 007 + migration 双写）============
--- 沿用既有 id 段：3200 设备菜单下挂按钮；3210 段留给"数据与调试"分组（IA 方案 3240/3250 尚未落地，
+-- 沿用既有 id 段：3200 设备菜单下挂按钮；**3240 段**是 IA 方案的「④ 数据与调试」分组（见
+-- docs/PLATFORM-IA-PROPOSAL.md：3210=① 接入配置 / 3240=④ 数据与调试），该分组菜单尚未落地，
 -- 故本批先挂 3200 与 3204（IoT 平台 catalog），待 IA 模块化迁移落地后再调 pid —— 这一点必须与
 -- docs/PLATFORM-IA-PROPOSAL.md §3240 的实施批次对齐，避免两批同时改 pid 造成菜单漂移。
 INSERT INTO sys_menu (id, pid, name, type, platform_only, auth_code, title, sort, create_time, status, is_deleted)
