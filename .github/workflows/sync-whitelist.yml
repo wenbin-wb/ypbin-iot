@@ -2,7 +2,7 @@ name: Sync Whitelist
 
 # 把「与 admin 基座的同步纪律」变成机器检查：
 #   1) 改动的**既有 admin 文件**必须落在白名单内（新增文件不受限——IoT 业务一律加新文件/新模块）；
-#      白名单当前 **8 个文件**（见 SYNC.md 第二节，两边必须一致）；
+#      白名单当前 **9 个文件**（见 SYNC.md 第二节，两边必须一致）；
 #   2) IoT 的 SQL 迁移脚本必须与全新安装脚本语句等价。
 # 注意：`git diff upstream/main --stat` 的字面数字包含**新增文件**，比白名单口径大得多；
 #      本工作流检查的是「改动的既有文件」（--diff-filter=MDR），别把两者混为一谈。
@@ -43,6 +43,7 @@ jobs:
           ALLOWED+='deploy/docker-compose\.yml|'
           ALLOWED+='deploy/nacos/ypbin-gateway\.yaml|'
           ALLOWED+='deploy/\.env\.example|'
+          ALLOWED+='docs/microservice-deployment\.md|'
           ALLOWED+='ypbin-architecture-tests/src/test/java/cn/ypbin/admin/arch/SourceConventionTest\.java'
           ALLOWED+=')$'
           echo "当前白名单正则：$ALLOWED"

@@ -26,7 +26,7 @@ mvn -B -ntp -fae clean verify               # 同步后必须重跑门禁
 IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，改动要尽量是「加法一行」。
 **本清单与 `.github/workflows/sync-whitelist.yml` 里的白名单必须保持一致**（改了这里就改那里）。
 
-> **白名单膨胀要记账**：目前 8 个文件。每增加一个都是「以后同步时的潜在冲突点」；
+> **白名单膨胀要记账**：目前 9 个文件。每增加一个都是「以后同步时的潜在冲突点」；
 > 加之前先问：能不能用新文件/新模块实现？只能改既有文件时才加，并在提交信息里写明理由。
 
 | 文件 | 改动 | 说明 |
@@ -39,6 +39,7 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 | `deploy/nacos/ypbin-gateway.yaml` | routes 加 `iot` 一段（`Path=/iot/**` + `StripPrefix=1`） | 网关路由（IoT 路由也进仓，便于与其它服务同构） |
 | `deploy/.env.example` | 端口段注释加 18084 | 环境变量示例（纯注释） |
 | `ypbin-architecture-tests/src/test/java/cn/ypbin/admin/arch/SourceConventionTest.java` | `LOOP_DB_EXEMPTIONS` **加一条误报豁免**（类名#接收者.方法 + 理由） | **唯一的上游测试类例外**，理由见下方专条 |
+| `docs/microservice-deployment.md` | 「初始口令」一句话更正 | **2026-09-26 加**：该句原写「Nacos 控制台默认 `nacos/nacos`」，而本仓已改为随机口令 + 开 auth（`NACOS-AUTH.md`）。留着一句**已不成立**的口令说明会误导运维，故只能改既有文件（无法用新文件表达「原句作废」） |
 | `deploy/sql/006-iot-schema.sql`、`007-iot-data.sql` | **新文件** | 全新安装用 |
 | `deploy/sql/migration/*-iot-*.sql` | **新文件**（命名必须含 `-iot-`） | 已上线库用；按文件名排序拼接后与 `006+007` **语句等价**（有 CI 校验）。顺序即结构演进顺序：`device-schema` → `lease-schema` → `menu-data` |
 | `admin-ui`（后续） | 路由/菜单注册 | 前端增量时再补清单 |
