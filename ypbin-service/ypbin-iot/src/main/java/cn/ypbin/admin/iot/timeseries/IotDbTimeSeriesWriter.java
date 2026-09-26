@@ -58,10 +58,14 @@ import org.slf4j.LoggerFactory;
  * ① {@link Statement#SUCCESS_NO_INFO} 的语义是「语句成功、但**受影响行数未知**」⇒ {@code rows} 不能叫
  *   「实际落库行数」；
  * ② 更进一步——**钉死的运行时驱动 {@code iotdb-jdbc:2.0.1-beta} 返回的根本不是 JDBC 行数**：其
- *   {@code executeBatchSQL()} 把**RPC 状态码**（成功 = 200）逐条塞进返回的 {@code int[]}
- *   （一手核实：{@code javap -p -c org.apache.iotdb.jdbc.IoTDBStatement#executeBatchSQL}，2026-09-26）⇒
- *   {@code rows} 在生产上恒等于「本批受理条数」、缺口恒为 0、{@code rows.noinfo} 恒为 0，而且
- *   **连非 200 的错误状态码也会被当成 1 行计入**（这一事实由 {@link #METRIC_ROWS_NONSTANDARD} 显式暴露）。
+ *   {@code executeBatchSQL()} 把**RPC 状态码**逐条塞进返回的 {@code int[]}
+ *   （一手核实：{@code javap -p -c org.apache.iotdb.jdbc.IoTDBStatement#executeBatchSQL}，2026-09-26）——
+ *   数组里只可能出现**成功类**状态码（{@code SUCCESS_STATUS=200}，以及驱动同样视为成功的
+ *   {@code REDIRECTION_RECOMMEND=400}）；**任一子状态非成功时驱动直接抛 {@code BatchUpdateException}**
+ *   （同方法字节码 {@code if (!isSuccess) throw new BatchUpdateException(...)}）⇒ 行级错误
+ *   **不会**进 {@code rows}，而是以「整批」形式落到批次级 {@link #METRIC_FAILED}（+1/批）并丢掉该批的
+ *   {@code rows} 计数。因此 {@code rows} 在生产上恒等于「本批受理条数」、缺口恒为 0、
+ *   {@code rows.noinfo} 恒为 0，而 {@code rows.nonstandard} 恒等于 {@code rows}。
  * 能测到库内真值的只有低频对账探针 {@link IotDbRowCountProbe}（{@code iot.timeseries.db.rows}）。</p>
  *
  * @author wenbin
@@ -82,7 +86,7 @@ public class IotDbTimeSeriesWriter implements TimeSeriesWriter {
      *
      * <p>⚠️ <b>它不是「实际落库行数」，甚至不是「驱动确认的行数」</b>（这是两轮复核修正的过度声称）：
      * 本值只是回执里「不等于 {@link Statement#EXECUTE_FAILED}」的条数。钉死的驱动
-     * {@code iotdb-jdbc:2.0.1-beta} 回的是 **RPC 状态码**（成功 200、失败 6xx 等，见类注释的一手依据），
+     * {@code iotdb-jdbc:2.0.1-beta} 回的是 **RPC 成功类状态码**（见类注释的一手依据），
      * 因此本值在生产上恒等于 {@code attempted}、缺口恒为 0，**无法**发现「0 行落库但 0 失败」。</p>
      *
      * <p>口径边界：想要「驱动确认了行数」的部分应看
@@ -113,11 +117,14 @@ public class IotDbTimeSeriesWriter implements TimeSeriesWriter {
     /**
      * **非 JDBC 标准**回执的条数（既不是 {@code -3}/{@code -2}，也不是经典行数 {@code 0}/{@code 1}）。
      *
-     * <p>为什么必须单独计量（2026-09-26 复核发现）：钉死的驱动回的是 **RPC 状态码**
-     * （成功 = 200，失败 = 6xx），于是 {@code rows} 把「状态码 200」当成「1 行」、把「状态码 6xx」
-     * 也当成「1 行」——既高估，又**把行级错误算成成功**。本指标把这件事摆到台面上：
-     * 当 {@code rows.nonstandard == rows}（本驱动下的常态）时，说明 {@code rows} 只是「受理条数」，
-     * 任何「成功行数」的解读都不成立。</p>
+     * <p>为什么必须单独计量（2026-09-26 复核发现）：钉死的驱动回的是 **RPC 成功类状态码**
+     * （{@code 200}/{@code 400}），于是 {@code rows} 把「状态码 200」当成「1 行」——**高估**。
+     * 本指标把这件事摆到台面上：当 {@code rows.nonstandard == rows}（本驱动下的常态）时，
+     * 说明 {@code rows} 只是「受理条数」，任何「成功行数」的解读都不成立。</p>
+     *
+     * <p>⚠️ 别把它读成「行级错误被算成成功」：同方法字节码在**任一子状态非成功**时直接抛
+     * {@code BatchUpdateException} ⇒ 那些错误根本进不了回执数组，而是整批落到
+     * {@link #METRIC_FAILED}（见类注释②）。</p>
      */
     public static final String METRIC_ROWS_NONSTANDARD = "iot.timeseries.write.rows.nonstandard";
 
@@ -289,8 +296,9 @@ public class IotDbTimeSeriesWriter implements TimeSeriesWriter {
                     noInfo++;
                 } else if (result != ROW_COUNT_ONE && result != ROW_COUNT_NONE) {
                     // 既不是「1 行/0 行」这类经典行数，也不是 JDBC 的哨兵值 ⇒ 非标准回执。
-                    // 本仓钉死的驱动就落在这一类（返回 RPC 状态码，成功 200、失败 6xx）——
-                    // 注意：非 200 的错误码在下面也走了 succeeded++，这正是本指标要暴露的事实。
+                    // 本仓钉死的驱动就落在这一类（回 RPC 成功类状态码 200/400）。
+                    // ⚠️ 回执数组里只会出现成功类状态码：任一子状态非成功时驱动已抛
+                    //    BatchUpdateException（见类注释②），所以这里不存在「错误码被算成成功」。
                     nonStandard++;
                 }
             }

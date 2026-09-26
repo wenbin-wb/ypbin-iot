@@ -29,6 +29,7 @@ import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.sql.BatchUpdateException;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
@@ -553,8 +554,38 @@ class IotDbTimeSeriesWriterTest {
     }
 
     @Test
-    @DisplayName("★★ 非 200 的 RPC 状态码（行级错误）不会被算成失败——它落进 rows 与 nonstandard，必须看得见")
-    void mustExposeErrorStatusCodeAsNonStandardReceipt() throws SQLException {
+    @DisplayName("★★ 本仓钉死驱动的真实失败形态：任一子状态非成功 ⇒ executeBatch 抛 BatchUpdateException，整批计入批次级失败")
+    void mustCountWholeBatchAsFailedWhenDriverThrowsBatchUpdateException() throws SQLException {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        Connection connection = mock(Connection.class);
+        PreparedStatement statement = mock(PreparedStatement.class);
+        // 一手核实（javap -p -c IoTDBStatement#executeBatchSQL，offset 367~385）：
+        //   if (!isSuccess) throw new BatchUpdateException(msg, int[])
+        // ⇒ 行级错误**不会**以「非成功状态码」出现在回执数组里，而是整批抛出。
+        BatchUpdateException rejection =
+            new BatchUpdateException("第 2 条被拒", new int[] {200, 600});
+        try (MockedStatic<DriverManager> driverManager = mockStatic(DriverManager.class)) {
+            driverManager.when(() -> DriverManager.getConnection(anyString(), any(Properties.class)))
+                .thenReturn(connection);
+            when(connection.prepareStatement(anyString())).thenReturn(statement);
+            when(statement.executeBatch()).thenThrow(rejection);
+
+            assertThatCode(() -> new IotDbTimeSeriesWriter(properties(10), registry)
+                .writeAll(points(2, "23.5")))
+                .as("契约：抛异常也只计数不抛，绝不让上报事务回滚")
+                .doesNotThrowAnyException();
+
+            assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_FAILED).counter().count())
+                .as("行级错误以**整批**形式落到批次级失败计数（这是本驱动下它唯一可见的地方）").isEqualTo(1d);
+            assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_ROWS).counter().count())
+                .as("该批一行都不计入 rows —— 所以 rows 不会把被拒的行算成成功").isZero();
+            assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_ROWS_NONSTANDARD).counter().count()).isZero();
+        }
+    }
+
+    @Test
+    @DisplayName("★ 假设驱动违约直接回非成功状态码（本仓钉死驱动不是这种形态）⇒ 必须落进 nonstandard 而不是「确认行数」")
+    void mustExposeNonStandardReceiptForContractViolatingErrorCode() throws SQLException {
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         Connection connection = mock(Connection.class);
         PreparedStatement statement = mock(PreparedStatement.class);
@@ -562,17 +593,17 @@ class IotDbTimeSeriesWriterTest {
             driverManager.when(() -> DriverManager.getConnection(anyString(), any(Properties.class)))
                 .thenReturn(connection);
             when(connection.prepareStatement(anyString())).thenReturn(statement);
-            // 一条成功（200）、一条服务端错误状态码；驱动**不抛异常**（行级错误只体现在状态码里）
-            when(statement.executeBatch()).thenReturn(new int[] {200, 617});
+            // 违约形态（真实驱动会抛异常，见上一条用例）：一条成功（200）、一条错误状态码（600=GENERAL_ERROR）
+            when(statement.executeBatch()).thenReturn(new int[] {200, 600});
 
             new IotDbTimeSeriesWriter(properties(10), registry).writeAll(points(2, "23.5"));
 
             assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_ROWS).counter().count())
                 .as("口径如此：非 -3 即计入 rows —— 这正是必须用 nonstandard 暴露它的原因").isEqualTo(2d);
             assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_ROWS_NONSTANDARD).counter().count())
-                .as("两条都是非标准回执（含那条错误状态码）").isEqualTo(2d);
+                .as("两条都是非标准回执（含那条违约的错误状态码）").isEqualTo(2d);
             assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_FAILED).counter().count())
-                .as("批次级失败计数不因此变化（行级错误不抛异常）").isZero();
+                .as("本用例是违约形态：驱动没抛异常 ⇒ 批次级失败计数不增加").isZero();
         }
     }
 
