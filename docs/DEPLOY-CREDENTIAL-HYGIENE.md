@@ -37,8 +37,11 @@ compose 在解析期就把 `${REDIS_PASSWORD}` 替换成真值 ⇒ **明文口�
 
 - **持久**：`docker inspect ypbin-redis -f '{{json .Config.Cmd}}'` —— 明文常驻容器配置；
 - **瞬态**：健康检查每次 exec 出一个 `redis-cli -a <口令> ping` 进程（默认 10s 一次），
-  这个**子进程**的 argv 会出现在 `docker top` / 宿主 `ps` 的采样窗口里，并被 `docker events`
-  的 `exec_create`/`exec_start` 记录（Action 字段内嵌命令行）。
+  其 argv 会被 `docker events` 的 `exec_create`/`exec_start` **完整记录**（Action 字段内嵌命令行）；
+  在 `docker top` / 宿主 `ps` 里则是**偶发可见**——探针进程生存期只有毫秒级，靠采样撞上。
+  **实测命中率（复核者紧循环采样，只输出计数）**：mysql 3207 次采样命中 **1** 次；redis 3236 次命中 **0** 次；
+  而同期 `docker events` 是 **38/38**。⇒ **可靠证据只有 `docker events`**，「采样 `docker top` 命中 0」
+  **不能**单独当作「argv 干净」的判据。
 
 > ⚠️ **反例（实测，2026-09-26）**：`docker top ypbin-redis -eo pid,args` 里**看不到** `requirepass`，
 > 宿主 `ps` 也是 —— redis 启动后会把进程标题改写成 `redis-server *:6379`，原始 argv 不再可见。
@@ -61,7 +64,11 @@ volumes:
 - **文件权限**：`deploy/redis-auth-conf.sh` 生成 600 并把属主改成 `999:1000`
   （镜像内 `id redis` 实测 `uid=999(redis) gid=1000(redis)`）。redis 是**降权之后**才解析配置文件的，
   所以文件必须对 uid 999 可读；600 + 该属主是「除 root 与容器内 redis 外无人可读」。
-- **首次部署顺序**：bind 挂载的源不存在时 docker 会把它建成**目录** ⇒ redis 启动期报错。
+  ⚠️ 该 uid 在**宿主机**上是系统账号 `lxd`（复核者实测）⇒ 宿主上的 `lxd` 用户也能读该文件；
+  这是「让容器内 redis 读得到」的必然代价，如实登记（如不接受可改用其它降权方案，本轮未实施）。
+- **首次部署顺序**：bind 挂载的源不存在时 docker 会把**源路径**建成空目录
+  ⇒ redis 启动期报错，而且**生成器随后会以 `Is a directory` 失败**（`printf > "$OUT"` 写不进目录）
+  ⇒ 恢复动作是**先 `rmdir <源路径>` 再重跑生成器**，别只看「redis 起不来」就以为口令不对。
   故 `install.sh` 在 `up -d nacos redis mysql` **之前**调用生成器；手工部署见 §6。
 - 生成器拒绝含空白/引号/反斜杠的口令（`requirepass` 是单行指令，这类字符会让解析歧义），
   失败即退出，**不静默写出坏配置**。
@@ -177,11 +184,12 @@ volumes:
 # ① 健康检查配置里没有凭据（持久面）
 docker inspect -f '{{json .Config.Healthcheck.Test}}' ypbin-mysql ypbin-redis
 docker inspect -f '{{json .Config.Cmd}}' ypbin-redis      # 期望 ["redis-server","/usr/local/…conf","--appendonly","yes"]
-# ② 瞬态 argv：改后**采样覆盖 ≥6 个健康检查周期**（60s+），期间不得再出现带凭据的探针进程
-#    —— 判据用「计数 + 形态」，绝不打印口令值，也不用 --format '{{json .}}' 整段落盘回读
+# ② 瞬态 argv 的**辅助**观察（**非决定性**）：探针进程生存期毫秒级，采样极易漏捕
 for i in $(seq 1 12); do docker top ypbin-mysql -eo pid,args | grep -c -- '-p'; docker top ypbin-redis -eo pid,args | grep -c -- '-a '; sleep 5; done
-#    期望：全部 0（改前每 10s 会命中一次；redis 主进程因进程标题改写**一直**是 0，见 §2 反例）
-# ③ docker events 审计（**只输出计数**；Action 字段内嵌命令行，禁止打印）
+#    ⚠️ 实测（复核者紧循环采样）：改前 mysql 3207 次采样只命中 1 次、redis 3236 次命中 0 次
+#    ⇒ 「全 0」既可能真干净、也可能只是没撞上（false-green）⇒ **不作为判据**；
+#    redis 主进程因进程标题改写**一直**是 0（§2 反例），更没有判别力。决定性证据看 ③。
+# ③ 【决定性】docker events 审计（**只输出计数**；Action 字段内嵌命令行，禁止打印，禁止 --format '{{json .}}' 落盘回读）
 timeout 90 docker events > /tmp/ev.$$  2>&1
 grep -c 'exec_create: mysqladmin ping -h 127.0.0.1' /tmp/ev.$$   # 期望 >0（新探针真的在跑）
 grep -c -F "$MYSQL_ROOT_PASSWORD" /tmp/ev.$$                    # 期望 0
@@ -191,10 +199,10 @@ rm -f /tmp/ev.$$
 docker inspect -f '{{.State.Health.Status}}' ypbin-mysql ypbin-redis   # 期望 healthy
 ```
 
-> ⚠️ 判据②不用「grep 口令值」当主判据：那需要把口令放进命令行（反过来制造一次 argv 泄露），
-> 且在 redis 上**本来就不成立**（§2 反例）。判据③才是决定性的瞬态证据来源：
-> 它同时证明「新探针在跑」与「事件里不再出现口令」。若确要用口令值做一次负向验证，
-> 只允许 `grep -c`（计数）而**不得**打印匹配行。
+> ⚠️ 判据②只是辅助：不用「grep 口令值」当主判据（那需要把口令放进命令行，反过来制造一次 argv 泄露），
+> 且在 redis 上**本来就不成立**（§2 反例）；更要紧的是它**没有判别力**（命中率约 1/3200，见上）。
+> **判据③（`docker events` 计数）才是决定性的瞬态证据**：它同时证明「新探针真的在跑」与
+> 「事件里不再出现口令」。若确要用口令值做一次负向验证，只允许 `grep -c`（计数），**不得**打印匹配行。
 
 ## 7. 回滚
 
