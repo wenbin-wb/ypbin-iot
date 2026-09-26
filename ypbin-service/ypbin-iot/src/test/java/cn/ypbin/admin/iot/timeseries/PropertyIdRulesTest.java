@@ -63,8 +63,14 @@ class PropertyIdRulesTest {
     }
 
     @Test
-    @DisplayName("★ 入站判定与查询侧 propertyIdLiteral 对每个样例的结论、拒因**完全一致**")
-    void inboundAndQuerySideMustAgreeOnEverySample() {
+    @DisplayName("★ 同一条规则的两个使用点（规则本身 vs 查询侧 propertyIdLiteral）对每个样例结论、拒因一致")
+    void ruleAndQuerySideLiteralMustAgreeOnEverySample() {
+        // ⚠️ 本用例证明的是「**规则**与查询侧字面量」一致（两者引用同一个 PropertyIdRules，见覆盖自证里的
+        // accepted/rejected 计数）。它**不**覆盖服务层入站判据的空白旁路——入站对空白/null 是**放行**的
+        // （见 AvailabilityServiceImpl#dropInvalidPropertyIds 的边界说明，以及
+        // AvailabilityServiceImplTest#blankPropertyIdMustStayLivenessOnlyAndNotBeRejected）。
+        // 独立复核 2026-09-26 指出：原 @DisplayName 写「入站判定与查询侧完全一致」属**声明过度**，
+        // 因为它比的是同一函数（恒等）。此处按事实改名，并把真正的分歧登记在下面这条断言里。
         int accepted = 0;
         int rejected = 0;
         for (String sample : SAMPLES) {
@@ -79,7 +85,7 @@ class PropertyIdRulesTest {
                 message = ex.getMessage();
             }
             assertThat(rulesAccept)
-                .as("入站与查询侧判定必须一致：样例=%s", LogSanitizer.sanitize(sample))
+                .as("规则与查询侧字面量判定必须一致：样例=%s", LogSanitizer.sanitize(sample))
                 .isEqualTo(literalAccept);
             if (rulesAccept) {
                 accepted++;

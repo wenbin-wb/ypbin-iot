@@ -196,8 +196,9 @@ class ShadowReportedIT {
         service.ingest(req(observation(DEVICE, "temperature", "20.0", base.minusMinutes(5))));
 
         assertThat(reportTsOf(DEVICE)).as("GREATEST(...) 保证「最近上报」不倒退").isEqualTo(base.plusMinutes(5));
-        // ⚠️ 如实记录边界：值本身是**后到者覆盖**（没有逐点位时刻），与 LatestValueWriter 的跨批次
-        // 乱序限制同源（见 ROADMAP 四点十七）；此处断言的是「当前真实行为」，不是理想语义。
+        // ⚠️ 如实记录边界：影子 reported 的**值**是后到者覆盖（它只存「最近一次上报的点位快照」，
+        // 没有逐点位时刻可比较）。这与最新值写入器**不同**：后者自 2026-09-26 起对每个 field 按 ts
+        // 比较后写入（跨批不回退，见 ROADMAP 四点十七「已闭环」）。此处断言的是影子层的当前真实行为。
         assertThat(reportedOf(DEVICE)).containsEntry("temperature", "20.0");
     }
 

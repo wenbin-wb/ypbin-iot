@@ -52,12 +52,20 @@ import org.junit.jupiter.api.Test;
  *
  * <p><b>为什么读字节码而不是扫源码</b>：源码正则挡不住「注解值由常量拼接」「文本块」「续行」等写法，
  * 也容易把注释里的示例算进来；字节码里是 MyBatis 真正看到的注解值。模块 {@code target/classes}
- * 缺失时**显式失败**而不是缩水扫描（禁静默降级）——所以本门禁必须在「先建业务模块」之后跑
- * （命令见 {@code docs/DEPLOY-BACKEND.md} 的门禁清单）。</p>
+ * 缺失时**显式失败**而不是缩水扫描（禁静默降级）——所以本门禁必须在「先建业务模块」之后跑（独立跑本模块时
+ * `-am` **不包含** {@code ypbin-iot}，因为前者不是后者的 Maven 依赖）：</p>
+ * <pre>{@code
+ * # ① 先建业务模块（产出 ypbin-service/ypbin-iot/target/classes）
+ * mvn -pl ypbin-service/ypbin-iot -am test
+ * # ② 再跑本门禁
+ * mvn -pl ypbin-architecture-tests -am test
+ * }</pre>
+ * <p>全反应堆 {@code mvn clean verify} 里两者顺序由聚合 pom 保证（{@code ypbin-service} 在
+ * {@code dev-only} profile 的 {@code ypbin-architecture-tests} 之前），无需手工两步。</p>
  *
- * <p><b>覆盖范围的自证</b>：① 断言扫到的 Mapper 数与解析出的语句数不低于实测下界（防「0 违规 = 没跑到」，
- * 本仓教训七/八）；② 另有一条源码级断言证明「iot 模块所有 MyBatis SQL 注解都落在 {@code mapper} 包内」
- * ⇒ 字节码扫描范围不会因文件搬家而静默漏掉目标。</p>
+ * <p><b>覆盖范围的自证</b>：① 断言扫到的 Mapper 数不低于下界，且字节码里带 SQL 注解的方法数**等于**源码
+ * 注解数、每个都产出了语句（自校准，防「0 违规 = 没跑到」，本仓教训七/八）；② 另有一条源码级断言证明
+ * 「iot 模块所有 MyBatis SQL 注解都落在 {@code mapper} 包内」⇒ 字节码扫描范围不会因文件搬家而静默漏掉目标。</p>
  *
  * @author wenbin
  * @since 2026-09-26
