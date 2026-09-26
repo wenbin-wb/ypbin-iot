@@ -46,7 +46,7 @@ def login() -> str:
     out = subprocess.run(
         ["curl", "-sS", "-m", "15", "-X", "POST", f"{CONSOLE}/v3/auth/user/login",
          "-H", "Content-Type: application/x-www-form-urlencoded",
-         "--data-urlencode", "username=nacos", "--data-urlencode", "password=nacos"],
+         "--data-urlencode", "username=" + os.environ.get("NACOS_ADMIN_USERNAME", "nacos") + r"", "--data-urlencode", "password=" + _nacos_password() + r""],
         capture_output=True, check=True)
     body = json.loads(out.stdout.decode("utf-8"))
     token = body.get("accessToken")
@@ -80,6 +80,16 @@ def build_block(token: str) -> list:
         f"      {KEY}: {token}",
         f"      {REQUIRE_KEY}: true",
     ]
+
+
+def _nacos_password():
+    """从 deploy/.env 取 Nacos 控制台口令；脚本内不留值。"""
+    if os.environ.get("NACOS_ADMIN_PASSWORD"):
+        return _nacos_password()
+    for line in open("/opt/ypbin/ypbin-iot/deploy/.env", encoding="utf-8"):
+        if line.startswith("NACOS_ADMIN_PASSWORD="):
+            return line.split("=", 1)[1].strip()
+    raise SystemExit("!! 未配置 NACOS_ADMIN_PASSWORD")
 
 
 def main() -> int:
@@ -153,7 +163,7 @@ def main() -> int:
 set -euo pipefail
 T=$(curl -sS -m 15 -X POST http://127.0.0.1:8080/v3/auth/user/login \\
     -H "Content-Type: application/x-www-form-urlencoded" \\
-    --data-urlencode "username=nacos" --data-urlencode "password=nacos" \\
+    --data-urlencode "username=${NACOS_ADMIN_USERNAME:-nacos}" --data-urlencode "password=$NACOS_ADMIN_PASSWORD" \\
   | sed -n 's/.*"accessToken":"\\([^"]*\\)".*/\\1/p')
 [ -n "$T" ] || {{ echo "!! nacos 登录失败"; exit 1; }}
 curl -fsS -m 60 -X POST "http://127.0.0.1:8080/v3/console/cs/config" \\
