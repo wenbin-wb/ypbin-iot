@@ -18,6 +18,8 @@ Nacos 凭据来源（与 `tools/rotate-internal-token.py` / `rotate-secret.py` �
   `NACOS_AUTH_*`），所以生产上要么 export 这两个变量、要么把它们写进 `.env`。
 
 用法（部署机上，`$W` = 700 工作目录，内含 600 的 `.new-pw`）：
+  ⚠️ 新口令长度必须 **<= 32 字符**（IoTDB 上限，一手实测 820）且只含 `A-Za-z0-9._~-`；
+     生成用 `openssl rand -hex 12`（24 字符）。
     W=/opt/ypbin/iotdb-rotation-$(date +%Y%m%d-%H%M%S); install -d -m 700 "$W"
     printf '%s' "$NEW" > "$W/.new-pw" && chmod 600 "$W/.new-pw"
     python3 tools/rotate-iotdb-password.py "$W"            # dry-run：只 dump + 断言
@@ -42,6 +44,8 @@ DATA_ID = "ypbin-iot.yaml"
 GROUP = "DEFAULT_GROUP"
 # 允许的字符集：口令会写进 YAML 标量与 .env，`#`/引号/空格/换行都会改变解析结果 ⇒ 只收安全字符集
 PASSWORD_PATTERN = re.compile(r"[A-Za-z0-9._~-]+")
+#: IoTDB 的口令长度上限（一手实测：活服务端 `<PASSWORD> 48 字符` ⇒ `820: ... <= 32`）
+MAX_PASSWORD_LENGTH = 32
 
 
 def fp(value):
@@ -107,6 +111,11 @@ def main():
     if not PASSWORD_PATTERN.fullmatch(new_pw):
         # 含 `#`/引号/空格/换行会让 YAML 或 .env 解析出**另一个**值（假成功），直接拒绝
         raise SystemExit("!! 新口令含不安全字符（只允许 A-Za-z0-9 . _ ~ -）；拒绝写入配置")
+    if len(new_pw) > MAX_PASSWORD_LENGTH:
+        # 一手实测：IoTDB 对 48 字符口令返回 `820: The length of password must be less than or equal to 32`
+        # ⇒ 超长会在 ALTER 阶段失败；这里提前挡掉，避免「IoTDB 没改成、Nacos/.env 却改成了」
+        raise SystemExit("!! 新口令长度 %d 超过 IoTDB 上限 %d（实测 820）"
+                         % (len(new_pw), MAX_PASSWORD_LENGTH))
 
     user = nacos_env("NACOS_ADMIN_USERNAME", "nacos")
     admin_pw = nacos_env("NACOS_ADMIN_PASSWORD")
@@ -157,7 +166,9 @@ def main():
     publish(args.nacos, token, out)
     live_after = fetch_live(args.nacos, token)
     live_line = [ln for ln in live_after.split("\n") if re.match(r"^\s+password:\s", ln)][0]
-    assert live_line.strip().endswith(new_pw), "!! 发布后回读：live 里不是新值"
+    assert live_line.strip().endswith(new_pw), (
+        "!! 发布后回读：live 里不是新值（Nacos 可能已写入新值而回读滞后）——"
+        "请手工把 deploy/.env 的 IOTDB_PASSWORD 改成新值后再重启 ypbin-iot，或重跑本脚本")
     assert not live_line.strip().endswith(old_pw), "!! 发布后回读：live 里仍是旧值"
     assert strip_password_lines(live_after) == strip_password_lines(src), "!! 除值外被改动"
     print("[3] 发布后回读：新值命中=True 旧值命中=False 除值外未变=True")
