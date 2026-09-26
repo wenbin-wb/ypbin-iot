@@ -257,6 +257,9 @@ root-only；`deploy/.env` 是**刻意的凭据源**，已由 `! -name ".env"` �
 
 #### 5.6.1 完整性：这两枚值一共有几处（漏一处就是 401/403）
 
+> 下表是**服务器 live 现状**（**不是模板全集**：`ypbin-access.yaml` 的模板另有签名键，见 §5.6.6）。
+> live 现状的布尔复核：7 份全部「旧值 0 命中、新值命中」。
+
 | 键 | 位置 | 角色 |
 |---|---|---|
 | `GATEWAY_SIGN_TOKEN` | Nacos `ypbin-gateway.yaml` → `ypbin.gateway.auth.trusted-source-token` | **签发侧**：网关在写身份头的同时写 `X-Gateway-Signed` |
@@ -273,8 +276,11 @@ root-only；`deploy/.env` 是**刻意的凭据源**，已由 `! -name ".env"` �
      `ypbin-auth.yaml` 的 `ypbin.security.identity.enabled: false` **只在 live 有**，
      模板里没有（已与 `origin/main` 的 `deploy/nacos/` 逐份核对）——整份覆盖会**抹掉它们**。
    - 反向的 drift 见 §5.6.6。
-2. 仓库 `deploy/nacos/*.yaml` 一律用 `${...}` 占位符 ⇒ **不用改仓库模板**；改完 `.env` 后
-   重跑 `install.sh` 会自然带上新值。
+2. 仓库 `deploy/nacos/*.yaml` 一律用 `${...}` 占位符 ⇒ **不用改仓库模板**。但**别指望
+   「重跑 `install.sh` 就自动生效」**：`install.sh:1280` 写的是
+   `NACOS_DIR="$ROOT/ypbin-admin/deploy/nacos"`，它假设**本仓被检出为名为 `ypbin-admin` 的目录**
+   （`SYNC.md` 第二节的部署约定）；本部署目录是 `/opt/ypbin/ypbin-iot` ⇒ 该路径不存在，
+   脚本只会拿**旧 admin 仓**的模板渲染。要补 access 的模板键，走 §5.6.6 的显式渲染 + POST。
 3. Java 侧只读配置（`InternalProperties` / `FeignProperties` / `GatewayProperties`），**无硬编码**；
    4 个运行中容器 jar 内 `BOOT-INF/classes` 配置经解包逐份核对**不含真值**。
 4. 改了 live 之后**除 token 值以外逐字未变**（把两代值都归一化再 diff，7 份全部一致）⇒
@@ -290,9 +296,11 @@ install -d -m 700 "$W/before/nacos" "$W/after/nacos"
 
 # 活配置 dump（Nacos 3 Console API；accessToken 只进 600 的 curl 配置文件，不进命令行）
 NACOS=http://127.0.0.1:8080
+NACOS_USERNAME="${NACOS_USERNAME:?Nacos 控制台用户名}"
+NACOS_PASSWORD="${NACOS_PASSWORD:?Nacos 控制台口令——显式提供，不要写进文档/命令行}"
 T=$(curl -fsS -X POST "$NACOS/v3/auth/user/login" \
       -H 'Content-Type: application/x-www-form-urlencoded' \
-      --data-urlencode username=nacos --data-urlencode password=nacos \
+      --data-urlencode "username=$NACOS_USERNAME" --data-urlencode "password=$NACOS_PASSWORD" \
     | sed -n 's/.*"accessToken":"\([^"]*\)".*/\1/p')
 printf 'header = "accessToken: %s"\n' "$T" > "$W/.hdr"; chmod 600 "$W/.hdr"; unset T
 for c in ypbin-common ypbin-gateway ypbin-auth ypbin-system ypbin-ai ypbin-iot ypbin-access; do
@@ -384,8 +392,10 @@ system 旧 `401`/新 `200`（`data:"6"`）；⑤ `code 200`、信任链告警 `0
      ⇒ 运行时该值的唯一来源是 Nacos 活配置；
   2. **Nacos 活配置已不含旧值、且含新值**（重 dump 后逐份 boolean 复核：7 份全部 旧 `no`、新 `YES`）；
   3. **除 token 值外逐字未变**（见 §5.6.1 第 4 条）；
-  4. gateway/auth/system/iot **在改后成功重启**，而 `require-trusted-source=true` 是 fail-fast
-     （token 缺失即拒绝启动）⇒ 运行时确实读到了非空的新值；
+  4. auth/system/iot（及未运行的 ai）**在改后成功重启**，而 `ypbin.cloud.feign.require-trusted-source=true`
+     是 fail-fast（token 缺失即拒绝启动）⇒ 这几个服务运行时确实读到了非空的新值。
+     **gateway 不在此列**：它是 WebFlux，live `ypbin-gateway.yaml` 里 `require-trusted-source`
+     实测 0 命中、`GatewayProperties$Auth` 也无 fail-fast ⇒ 它的**签发侧**新值只能由第 2 条佐证；
   5. 旧值在服务器上**除受控回滚目录（700/600）外已无任何落盘位置**（`grep -rl` 只列路径）。
   ⇒ 结论只能表述为「**旧值已不在任何生效路径上**」；待 starter 补上入站校验（SF-5）后，
   旧值才会变成「**可被直接证伪**」。
@@ -410,8 +420,23 @@ system 旧 `401`/新 `200`（`data:"6"`）；⑤ `code 200`、信任链告警 `0
 「access 不引 `ypbin-common.yaml`，拿不到共享键 ⇒ 必须在本 Data ID 显式声明」；
 但**服务器 live 的 `ypbin-access.yaml` 里没有这两键**（服务器源码树停在旧 commit，导入的是旧模板）。
 后果：access 现在若被拉起，`require-trusted-source` 缺失 ⇒ 走「未配置即恒可信」的兼容默认，
-**身份头透传没有来源门**。修法是把 main 模板重导一次（`install.sh` 会用新的 `.env` 渲染），
+**身份头透传没有来源门**。修法**不能靠「重跑 install.sh」**（见 §5.6.1 条 2 的 `NACOS_DIR` 问题），
+要用本仓模板**显式渲染后单独发**：
+
+```bash
+set -a; . /opt/ypbin/ypbin-iot/deploy/.env; set +a
+TMP=$(mktemp); trap 'rm -f "$TMP"' EXIT          # mktemp 默认 600（见 §5.5）
+sed -e "s|\${GATEWAY_SIGN_TOKEN}|$GATEWAY_SIGN_TOKEN|g" \
+    -e "s|\${INTERNAL_TOKEN}|$INTERNAL_TOKEN|g" \
+    /opt/ypbin/ypbin-iot/deploy/nacos/ypbin-access.yaml > "$TMP"
+# ⚠️ 发之前先 diff live，别整份覆盖（会带丢 live-only 键，见 §5.6.1 条 1）
+```
+
 属**独立动作**，本轮不动（不在轮换范围内，且 access 未运行）。
+
+> ⚠️ 同批实测发现的**另一处加固项**（同样不在轮换范围）：Nacos 控制台仍是**内置默认口令**
+> （`deploy/.env` 无覆盖键、`install.sh` 的默认值即默认口令，实测可用它登录 `127.0.0.1:8080`）。
+> 8080/8848 只绑回环，但它握着全部服务配置 ⇒ 建议下一轮把它纳入加固清单（换口令 + 写入 `.env`）。
 
 #### 5.6.7 回滚（一键）
 
