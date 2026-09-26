@@ -61,6 +61,14 @@ public class IotTimeSeriesConfiguration implements InitializingBean {
         if (properties.getConnectTimeoutMs() <= 0) {
             throw new IllegalStateException(TimeSeriesProperties.PREFIX + ".connect-timeout-ms 必须为正数");
         }
+        if (properties.getDbRowsProbeIntervalMs() <= 0) {
+            // 间隔非正会让调度器拒绝注册或退化成忙轮询（真值对账本身是全表聚合，不能高频）
+            throw new IllegalStateException(TimeSeriesProperties.PREFIX + ".db-rows-probe-interval-ms 必须为正数");
+        }
+        if (properties.getDbRowsProbeQueryTimeoutSeconds() <= 0) {
+            throw new IllegalStateException(TimeSeriesProperties.PREFIX
+                + ".db-rows-probe-query-timeout-seconds 必须为正数");
+        }
         if (!properties.getTableName().matches(TABLE_NAME_PATTERN)) {
             // 表名会被拼进 SQL：只允许普通标识符（配置注入防护）
             throw new IllegalStateException(TimeSeriesProperties.PREFIX + ".table-name 只允许字母/数字/下划线");
@@ -79,8 +87,8 @@ public class IotTimeSeriesConfiguration implements InitializingBean {
         }
         // JDBC 的登录超时是全局设置（驱动层面无逐连接参数）：启动时设一次并记录
         DriverManager.setLoginTimeout(Math.max(1, properties.getConnectTimeoutMs() / 1000));
-        log.info("[iot] 时序写入已启用：url={} 表={} 批量={}", properties.getUrl(),
-            properties.getTableName(), properties.getBatchSize());
+        log.info("[iot] 时序写入已启用：url={} 表={} 批量={} 真值对账间隔={}ms", properties.getUrl(),
+            properties.getTableName(), properties.getBatchSize(), properties.getDbRowsProbeIntervalMs());
     }
 
     /**

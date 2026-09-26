@@ -10,6 +10,7 @@
 package cn.ypbin.admin.iot.service.impl;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
@@ -42,6 +43,8 @@ import cn.ypbin.admin.iot.mapping.PointMappingIndex;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.tenant.core.TenantContext;
 import cn.ypbin.starter.tenant.core.TenantProvider;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Meter;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
@@ -264,6 +267,100 @@ class AvailabilityServiceImplTest {
             assertThat(point.value()).isEqualTo("23.5");
             assertThat(point.ts()).isEqualTo(1_700_000_000_000L);
         });
+    }
+
+    @Test
+    @DisplayName("★ 成功侧观测：交给时序出口的点数必须计入 iot.timeseries.points.collected（上一轮零断言）")
+    void mustCountCollectedSeriesPoints() {
+        timeSeriesProperties.setEnabled(true);
+        when(livenessMapper.selectList(any())).thenReturn(List.of());
+
+        service.ingest(req(
+            point(DEVICE, "temperature", "23.5", 1_700_000_000_000L),
+            point(DEVICE, "humidity", "40", 1_700_000_000_100L)));
+
+        assertThat(pointCaptorValues()).as("2 个点位 ⇒ 出口收到 2 点").hasSize(2);
+        assertThat(meterRegistry.get(AvailabilityServiceImpl.METRIC_SERIES_COLLECTED).counter().count())
+            .as("points.collected 必须等于交给出口的点数（否则「没收集」与「收集了没写」无法区分）")
+            .isEqualTo(2d);
+    }
+
+    @Test
+    @DisplayName("★ 观测与写入同 try：时序写入器抛异常时不得逃逸，且点数照常计入（结构性保证）")
+    void seriesWriterFailureMustNotEscapeIngest() {
+        timeSeriesProperties.setEnabled(true);
+        when(livenessMapper.selectList(any())).thenReturn(List.of());
+        doThrow(new IllegalStateException("writer 挂了")).when(timeSeriesWriter).writeAll(any());
+
+        assertThatCode(() -> service.ingest(req(point(DEVICE, "temperature", "23.5", 1_700_000_000_000L))))
+            .as("afterCommit 绝不外抛：库已提交、接口却报错会让调用方误判整批失败")
+            .doesNotThrowAnyException();
+        assertThat(meterRegistry.get(AvailabilityServiceImpl.METRIC_SERIES_COLLECTED).counter().count())
+            .as("计数在写入之前，必须已经记上").isEqualTo(1d);
+    }
+
+    @Test
+    @DisplayName("★★ 结构性：计数器自身抛异常也不得逃逸（上一轮计数语句在 try 之外 ⇒ 这条曾会失败）")
+    void failingCounterMustNotEscapeIngest() {
+        timeSeriesProperties.setEnabled(true);
+        when(livenessMapper.selectList(any())).thenReturn(List.of());
+        ExplodingMeterRegistry exploding =
+            new ExplodingMeterRegistry(AvailabilityServiceImpl.METRIC_SERIES_COLLECTED);
+        AvailabilityServiceImpl fragileService = new AvailabilityServiceImpl(livenessMapper, outageMapper,
+            maintenanceWindowMapper, deviceMapper, properties, tenantProvider, latestValueWriter,
+            timeSeriesWriter, timeSeriesProperties, shadowReportedWriter, pointMappingIndex, exploding);
+
+        assertThatCode(() -> fragileService.ingest(
+            req(point(DEVICE, "temperature", "23.5", 1_700_000_000_000L))))
+            .as("观测设施故障不得把异常带出 afterCommit——「绝不外抛」必须是结构性的，不是「但愿不抛」")
+            .doesNotThrowAnyException();
+    }
+
+    /** 取回交给时序写入器的点位（断言用）。 */
+    @SuppressWarnings("unchecked")
+    private List<TimeSeriesPoint> pointCaptorValues() {
+        ArgumentCaptor<List<TimeSeriesPoint>> captor = ArgumentCaptor.forClass(List.class);
+        verify(timeSeriesWriter).writeAll(captor.capture());
+        return captor.getValue();
+    }
+
+    /**
+     * 只让**某一个**指标名在 {@code increment} 时抛异常的注册表：其余指标照常工作。
+     *
+     * <p>用途：证明 {@code writeDerived} 里的观测语句与写入语句在同一个 {@code try} 内
+     * （计数器抛出也不得逃逸到 afterCommit）。</p>
+     */
+    private static final class ExplodingMeterRegistry extends SimpleMeterRegistry {
+
+        private final String explodingName;
+
+        ExplodingMeterRegistry(String explodingName) {
+            this.explodingName = explodingName;
+        }
+
+        @Override
+        protected Counter newCounter(Meter.Id id) {
+            Counter registered = super.newCounter(id);
+            if (!explodingName.equals(id.getName())) {
+                return registered;
+            }
+            return new Counter() {
+                @Override
+                public Meter.Id getId() {
+                    return registered.getId();
+                }
+
+                @Override
+                public void increment(double amount) {
+                    throw new IllegalStateException("指标后端故障");
+                }
+
+                @Override
+                public double count() {
+                    return registered.count();
+                }
+            };
+        }
     }
 
     @Test

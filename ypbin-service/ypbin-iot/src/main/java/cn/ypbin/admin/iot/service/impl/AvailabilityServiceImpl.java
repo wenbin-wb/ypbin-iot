@@ -632,14 +632,16 @@ public class AvailabilityServiceImpl implements AvailabilityService {
             }
         }
         if (!seriesPoints.isEmpty()) {
-            // 成功侧观测：先记「打算写多少点」。它与写入器的 attempted/rows 三者比对，
-            // 即可判定断点是在「没收集」还是「收集了没写」——不要再让这条路径静默。
-            seriesCollectedCounter.increment(seriesPoints.size());
-            if (log.isDebugEnabled()) {
-                log.debug("[iot] 时序出口收到待写点数：{}（启用={}）", seriesPoints.size(),
-                    timeSeriesProperties.isEnabled());
-            }
+            // 观测与写入必须在**同一个 try 里**：否则「afterCommit 绝不外抛」就从结构性保证退化成
+            // 「依赖这两条语句永不抛」（计数器/日志一旦抛出就会逃逸到调用方：库已提交、接口却报错）。
             try {
+                // 成功侧观测：先记「打算写多少点」。它与写入器的 attempted/rows 三者比对，
+                // 即可判定断点是在「没收集」还是「收集了没写」——不要再让这条路径静默。
+                seriesCollectedCounter.increment(seriesPoints.size());
+                if (log.isDebugEnabled()) {
+                    log.debug("[iot] 时序出口收到待写点数：{}（启用={}）", seriesPoints.size(),
+                        timeSeriesProperties.isEnabled());
+                }
                 timeSeriesWriter.writeAll(seriesPoints);
             } catch (RuntimeException ex) {
                 log.error("[iot] 时序写入器抛出异常（已忽略，历史曲线缺失但上报已落库）：条数={}",

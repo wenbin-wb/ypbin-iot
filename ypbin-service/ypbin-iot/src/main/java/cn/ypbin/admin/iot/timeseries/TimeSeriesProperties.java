@@ -47,6 +47,16 @@ public class TimeSeriesProperties {
     /** 连接超时（毫秒，远程调用必须显式超时：本仓铁律）。 */
     private int connectTimeoutMs = 3_000;
 
+    /**
+     * 「库内真值对账」探针的间隔（毫秒，默认 10 分钟，见 {@link IotDbRowCountProbe}）。
+     *
+     * <p>低频是刻意设计：它是一次全表聚合，属额外负载；调成高频会把观测设施变成压力来源。</p>
+     */
+    private long dbRowsProbeIntervalMs = IotDbRowCountProbe.DEFAULT_PROBE_INTERVAL_MS;
+
+    /** 「库内真值对账」查询的超时（秒）：远程调用必须显式超时（下推到 IoTDB RPC，见探针类注释）。 */
+    private int dbRowsProbeQueryTimeoutSeconds = 5;
+
     public boolean isEnabled() {
         return enabled;
     }
@@ -101,5 +111,21 @@ public class TimeSeriesProperties {
 
     public void setConnectTimeoutMs(int connectTimeoutMs) {
         this.connectTimeoutMs = connectTimeoutMs;
+    }
+
+    public long getDbRowsProbeIntervalMs() {
+        return dbRowsProbeIntervalMs;
+    }
+
+    public void setDbRowsProbeIntervalMs(long dbRowsProbeIntervalMs) {
+        this.dbRowsProbeIntervalMs = dbRowsProbeIntervalMs;
+    }
+
+    public int getDbRowsProbeQueryTimeoutSeconds() {
+        return dbRowsProbeQueryTimeoutSeconds;
+    }
+
+    public void setDbRowsProbeQueryTimeoutSeconds(int dbRowsProbeQueryTimeoutSeconds) {
+        this.dbRowsProbeQueryTimeoutSeconds = dbRowsProbeQueryTimeoutSeconds;
     }
 }
