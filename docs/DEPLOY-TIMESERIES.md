@@ -51,8 +51,8 @@
 | 固定 IP | `172.20.0.13` | `ypbin-net` 内既有占用：.10/.11/.12/.20-.24/.26/.30/.40/.41，.13 空闲 |
 | 客户端 RPC 口 | `6667` → 宿主 `${IOTDB_BIND_ADDR:-127.0.0.1}:6667` | JDBC 走这个口；⚠️ 用**独立**变量而非 `INTERNAL_BIND_ADDR`（后者在 `.env.example` 里是 `0.0.0.0`，共用会把公开默认口令的 6667 暴露到全网） |
 | 内部端口 | 10710/10720/10730/10740/10750/10760 | ConfigNode/DataNode 内部通信，**不发布到宿主**（仅容器网络内） |
-| 数据 / 日志卷 | `ypbin-iotdb-data` → `/iotdb/data`、`ypbin-iotdb-logs` → `/iotdb/logs` | 具名卷，`down` 不删；`down -v` 会删**全部时序数据** |
-| 健康检查 | `start-cli.sh -h ypbin-iotdb … -e "SHOW DATABASES"` | **自建**探针（官方无 Docker 健康检查方案，§7），30s 间隔 / 90s 启动宽限。⚠️ **必须带 `-h ypbin-iotdb`**：`dn_rpc_address=ypbin-iotdb` 是**绑定地址**（只绑容器 eth0），`-h 127.0.0.1`（CLI 默认）**必然连不上**——本机实测见 §7 |
+| 数据 / 日志卷 | `deploy_ypbin-iotdb-data` → `/iotdb/data`、`deploy_ypbin-iotdb-logs` → `/iotdb/logs`（⚠️ compose 会给卷名加**项目前缀**，实测卷名是 `deploy_` 开头，不是 compose 文件里的裸名） | 具名卷，`down` 不删；`down -v` 会删**全部时序数据** |
+| 健康检查 | `["CMD-SHELL", "timeout 5 bash -c '</dev/tcp/ypbin-iotdb/6667' || exit 1"]`（**不带任何凭据**） | **自建**探针（官方无 Docker 健康检查方案，§7），30s 间隔 / 20s 超时 / 10 次重试 / 90s 启动宽限。⚠️ 它**只证 6667 可连、不校验凭据**（凭据维度看 §6.1 的应用侧探针 `iot.timeseries.db.rows`/`probe.failed`）。⚠️ **必须连 `ypbin-iotdb`**：`dn_rpc_address=ypbin-iotdb` 是**绑定地址**（只绑容器 eth0），`127.0.0.1` **必然连不上**——本机实测见 §7。📌 2026-09-26 前用的是 `start-cli.sh … -pw <口令> -e "SHOW DATABASES"`，**口令明文进 argv**，已废弃（§6.1） |
 | 资源下限 | 2–4 核 / 2–4G 内存（≤10 万测点，standalone） | 官方 Database Resources 给出的 standalone 档位（§8） |
 
 ## 2. 一次性初始化（`iotdb-init`）
@@ -63,12 +63,16 @@
   `start-cli.sh -e "<语句>"` 逐条执行 → 回读 `SHOW TABLES FROM iot`。
 - 两者以只读方式挂进 `iotdb-init` 容器（`/init/…`）。该容器 `restart: "no"`，跑完即退出：
   **退出码 0 = 成功，非 0 = 失败**（`docker compose ps -a` 可见）。
-- **不会静默通过**（四道显式失败）：① `/init/iotdb-init.sql` 缺失或为空 → 立即 `exit 1`；
-  ② 文件里**一条可执行语句都没有**（只有空行/注释）→ `exit 1`（否则主循环零次执行会"顺利成功"）；
-  ③ 任一语句执行失败 → 整体重试 30×6s 后 `exit 1`；④ 末尾 `SHOW TABLES FROM iot` 回读失败 → `exit 1`。
-  （脚本行为已用桩 `start-cli.sh` 实跑覆盖：正常/持续失败/仅回读失败/全注释/文件缺失/末行无换行 六种路径。）
-- **口令**：`iotdb-init` 用 `IOTDB_USER`/`IOTDB_PASSWORD`（compose 里注入，默认 `root`/`root`）。
-  这是口令的**第三处**，改口令时三处必须一起改，见 §6。
+- **不会静默通过**（**五道**显式失败）：① **没给 `IOTDB_PASSWORD`（缺失或空）→ 立即 `exit 1`**
+  （**没有默认值、拒绝回退到官方公开默认口令 `root`**，消息含修复指引；2026-09-26 起）；
+  ② `/init/iotdb-init.sql` 缺失或为空 → `exit 1`；
+  ③ 文件里**一条可执行语句都没有**（只有空行/注释）→ `exit 1`（否则主循环零次执行会"顺利成功"）；
+  ④ 任一语句执行失败 → 整体重试 30×6s 后 `exit 1`；⑤ 末尾 `SHOW TABLES FROM iot` 回读失败 → `exit 1`。
+  （脚本行为已用桩 `start-cli.sh` 实跑覆盖：正常/持续失败/仅回读失败/全注释/文件缺失/末行无换行 六种路径；
+  第 ① 道在生产实测过：`env -u IOTDB_PASSWORD bash deploy/iotdb-init.sh` ⇒ 明确指引 + `exit 1`。）
+- **口令**：`iotdb-init` 用 `IOTDB_USER: root` + `IOTDB_PASSWORD: ${IOTDB_PASSWORD:-}`（compose 注入，
+  **没有默认值**；缺失即为空 ⇒ 上一段的第 ① 道 `exit 1`）。这是口令的**第三处**，
+  改口令时三处必须一起改，见 §6.1；口令值只在 `deploy/.env`（600）里，**不进 argv**（脚本用 stdin 投递，见 §6.1 表格）。
 - 为什么不用 `install.sh` 而是放 compose：`install.sh` 的 Nacos 占位符替换键是**固定 4 个**
   （`MYSQL_ROOT_PASSWORD` / `REDIS_PASSWORD` / `INTERNAL_TOKEN` / `GATEWAY_SIGN_TOKEN`），时序初始化与它无耦合；
   放 compose 则 `up -d` 一条命令可复现，不需要动那个 96KB 的脚本。
@@ -196,8 +200,9 @@ docker exec ypbin-iotdb start-cli.sh -h ypbin-iotdb -sql_dialect table -e "ALTER
 > 显式安装 curl，注释写明 `curl required for historical reasons`；IoTDB 的 Dockerfile 未删任何包。
 > ⚠️ **未在容器内 `command -v curl` 实测**，因此这只是"按 Dockerfile 推断"），**没有 `nc`**。
 > 但 6667 是 Thrift RPC 口，**curl 对它没有意义**（不是 HTTP）⇒ 探活请用
-> §3.2 的 CLI 查询，或最轻量的 bash TCP 探活
-> `docker exec ypbin-iotdb bash -c 'exec 3<>/dev/tcp/ypbin-iotdb/6667'`。
+> §3.2 的 CLI 查询（⚠️ 轮换后要按 §3 开头的 `iot()` 形式，否则会吃 wrapper 默认口令），
+> 或最轻量的 bash TCP 探活 `docker exec ypbin-iotdb bash -c 'exec 3<>/dev/tcp/ypbin-iotdb/6667'`
+> ——**compose 的健康检查现在用的就是这条**（不带凭据，§6.1）。
 > ⚠️ **必须连 `ypbin-iotdb` 而不要用 `127.0.0.1`**：`dn_rpc_address` 是**绑定地址**，设成主机名后服务端
 > 只绑容器 eth0，loopback 无监听 ⇒ 探 `127.0.0.1:6667` 会**永远失败**（本机实测：同一容器
 > `ypbin-iotdb` → 0、`127.0.0.1` → `Connection refused`）。这与 §3.2 用 CLI 时**必须带 `-h ypbin-iotdb`**
@@ -251,7 +256,9 @@ cd /opt/ypbin/ypbin-iot
 
 # ⓪ 快照 + 700 工作目录（回滚物；口令值只落 600 文件，输出只给长度/指纹）
 TS=$(date +%Y%m%d-%H%M%S); W=/opt/ypbin/iotdb-rotation-$TS; install -d -m 700 "$W"
-docker tag ypbin/ypbin-iot:local ypbin/ypbin-iot:rollback-rot-$TS
+# ⚠️ 这里**不要** `docker tag ... rollback-rot-$TS`：轮换不产生新镜像，此刻 `:local` 就是**当前线上**镜像，
+#    这样打出来的 tag 回滚时等于回滚到"同样的镜像"（实测踩过）。镜像回滚 tag 由**部署**步骤负责
+#    （见 docs/DEPLOY-BACKEND.md §2：`ypbin/ypbin-iot:rollback-<部署TS>`）；口令轮换只需要下面前 4 个快照。
 cp -a deploy/.env "$W/before-deploy.env"; cp -a deploy/docker-compose.yml "$W/before-compose.yml"
 cp -a deploy/iotdb-init.sh "$W/before-iotdb-init.sh"; chmod 600 "$W"/before-*
 # ⚠️ override 文件是**部署机本地**的（本仓不带）：有就一并快照，后面 up -d 也要带上它
@@ -259,7 +266,10 @@ if [ -f deploy/docker-compose.override.yml ]; then
   cp -a deploy/docker-compose.override.yml "$W/before-compose.override.yml"; chmod 600 "$W"/before-*
 fi
 OLD=$(sed -n 's/^IOTDB_PASSWORD=//p' deploy/.env | head -1)     # 当前口令（只进 shell 变量，不进 argv）
-NEW=$(openssl rand -hex 24); printf '%s' "$NEW" > "$W/.new-pw"; chmod 600 "$W/.new-pw"
+# ⚠️ 口令长度上限 **32 字符**（一手实测：活服务端对 48 字符返回
+#    `820: The length of password must be less than or equal to 32`）⇒ 用 `-hex 12`（24 字符，96 bit）；
+#    `-hex 24`（48 字符）**必然被拒**（2026-09-26 实测：硬门正确中止，Nacos/.env 未被改动）。
+NEW=$(openssl rand -hex 12); printf '%s' "$NEW" > "$W/.new-pw"; chmod 600 "$W/.new-pw"
 printf '新口令长度=%s sha256=%s\n' "${#NEW}" "$(printf %s "$NEW" | sha256sum | cut -c1-16)"
 [ -n "$OLD" ] || { echo "!! deploy/.env 没有 IOTDB_PASSWORD（当前口令未知）——先补齐再轮换"; exit 1; }
 
@@ -326,7 +336,6 @@ curl -s http://127.0.0.1:18084/actuator/metrics/iot.timeseries.db.probe.failed  
 ```bash
 # 从轮换工作目录名反推 TS，并确认目录存在（§6.1 里打印过 W/TS）
 W=$(ls -dt /opt/ypbin/iotdb-rotation-* 2>/dev/null | head -1); [ -n "$W" ] || { echo "找不到轮换工作目录"; exit 1; }
-TS=${W##*/iotdb-rotation-}
 cd /opt/ypbin/ypbin-iot
 COMPOSE_FILES="-f deploy/docker-compose.yml"
 [ -f deploy/docker-compose.override.yml ] && COMPOSE_FILES="$COMPOSE_FILES -f deploy/docker-compose.override.yml"
@@ -334,7 +343,8 @@ COMPOSE_FILES="-f deploy/docker-compose.yml"
 # 形态回滚（**不回滚口令**，保留新口令）：只还原 compose / iotdb-init.sh 与镜像
 cp -a "$W/before-compose.yml" deploy/docker-compose.yml
 cp -a "$W/before-iotdb-init.sh" deploy/iotdb-init.sh
-docker tag ypbin/ypbin-iot:rollback-rot-$TS ypbin/ypbin-iot:local
+# 镜像回滚（仅当本轮**部署过新 jar** 时才需要）：tag 用部署时打的 `ypbin/ypbin-iot:rollback-<部署TS>`
+# （见 docs/DEPLOY-BACKEND.md §2）。口令轮换本身不换镜像 ⇒ 默认**不做**这一步。
 docker compose $COMPOSE_FILES up -d --no-deps ypbin-iot
 ```
 
@@ -347,6 +357,25 @@ Nacos live 换回 dump 的最小做法：`python3 tools/rotate-iotdb-password.py
 
 **结论：回滚方案 = 「形态/镜像可回滚（上面一段）+ 口令单向（要么用新口令 ALTER 回旧值，
 要么接受不回滚）」**，两者必须在变更票里写清楚，不能只写「可回滚」。
+
+### 6.3 轮换实测回执（2026-09-26，生产；**不含任何口令值**）
+
+> 按 §6.1 在本生产实例上执行。记录口径：只写判据与计数/指纹，不写口令。
+
+| 步骤 | 实测结果 |
+|---|---|
+| 硬门**真的会拦**（第一次尝试） | 用 `openssl rand -hex 24`（48 字符）生成 ⇒ ALTER 被服务端拒：`820: The length of password must be less than or equal to 32`；`run_cli "$NEW"` 返回 1 ⇒ **硬门中止**，Nacos live 与 `deploy/.env` **未被改动**，旧口令改前/改后均可连（`OLD=0`）。✅ 这条是本轮唯一"设计时就希望它生效"的失败路径 |
+| 合法口令改口令 | 改用 `openssl rand -hex 12`（24 字符）：`Msg: The statement is executed successfully.`；`run_cli "$NEW"` ⇒ **0**；`run_cli "$OLD"` ⇒ **1** 且输出命中 `801/用户名或口令错` |
+| Nacos live + `.env` | 工具 dry-run → `--apply`：值级替换「旧 len=4 → 新 len=24」、回读 `新值命中=True 旧值命中=False 除值外未变=True`；`.env` 中 `IOTDB_PASSWORD` 恰好 1 行、600 |
+| 落盘而非只在内存 | `docker restart ypbin-iotdb` 后：新口令 `=0`、旧口令仍 `801`；数据卷未动（`deploy_ypbin-iotdb-data` 仍挂在 `/iotdb/data`） |
+| `iotdb-init` 的 stdin 投递**在生产真能认证** | `docker compose up -d --force-recreate --no-deps iotdb-init` ⇒ `ypbin-iotdb-init` **Exited (0)**（DDL 幂等重跑成功） |
+| 健康检查不再带口令 | `docker inspect .Config.Healthcheck.Test` = `["CMD-SHELL","timeout 5 bash -c '</dev/tcp/ypbin-iotdb/6667' || exit 1"]`；容器 26s 后 `healthy` |
+| argv / events 里无 `-pw <值>` | 60s 采样（覆盖 ~2 个健康检查周期）`docker top ypbin-iotdb` 命中 **0**；宿主 `ps`（排除自身）**0**；`docker events` 审计窗口内 ypbin-iot/ypbin-iotdb 的**非健康**事件 **0** |
+| 业务仍通 + 真值对账 | 探针（新指标）历次测量：`22:43:34 → 7566`、`22:47:13 → 7643`、`22:57:14 → 7943`；紧随其后（22:58:13）库内 `count(*)` = **7973**，即 `7943 + 窗口内写入(~30 行/59s)` ✅ 量级一致；`iot.timeseries.db.probe.failed = 0`、`write.failed = 0`（应用重启后） |
+| 生产实证的 `rows` 口径 | `write.rows = write.rows.nonstandard = 353`、`noinfo = 0`、`unknown = 0` ⇒ **正是"rows 只是受理条数"的形态**（与 writer 类注释②一致） |
+| ⚠️ 轮换的**已知代价** | Nacos 改值到应用重启之间有约 60s 的 801 窗口：8 个批次被计入 `write.failed`（日志可见 8 条 `时序写入失败`），**这批读数未落 IoTDB**。要缩短窗口就把 §6.1 的 ③→④ 连着做（本次实测约 60s） |
+| 回滚物 | 轮换工作目录 `/opt/ypbin/iotdb-rotation-<TS>/`（700；内含 600 的 `before-deploy.env` / `before-compose.yml` / `before-compose.override.yml` / `before-iotdb-init.sh` / `before-ypbin-iot.yaml`）；本次部署的旧镜像 tag 与旧 jar 由**部署**步骤留（`ypbin/ypbin-iot:rollback-<部署TS>` + `/opt/ypbin/l3-pw-*/ypbin-iot-old.jar`） |
+
 
 ⚠️ `deploy/nacos/ypbin-iot.yaml` **也过** `install.sh` 的同一段 `sed`（7 个 nacos 配置一起处理），
 但可替换键**只有 4 个**：`MYSQL_ROOT_PASSWORD` / `REDIS_PASSWORD` / `INTERNAL_TOKEN` / `GATEWAY_SIGN_TOKEN`
@@ -368,7 +397,7 @@ Nacos live 换回 dump 的最小做法：`python3 tools/rotate-iotdb-password.py
   （`ypbin-iot`）用服务名直连，不经宿主端口。
 - **磁盘**：TTL 过期是异步物理删除，容量规划按「保留期内的写入量」算，不要假设过期即释放。
   官方换算公式：`测点数 × 频率(Hz) × 单点字节 × 保留秒数 / 压缩比`（standalone 副本因子 1）。
-- **备份**：时序数据在具名卷 `ypbin-iotdb-data` 里；`docker compose down -v` 会**删除**它。
+- **备份**：时序数据在具名卷 `deploy_ypbin-iotdb-data` 里（`docker volume ls` 确认，compose 会加项目前缀）；`docker compose down -v` 会**删除**它。
   官方提供全量备份工具与数据导入导出（Tools System），需要时按官方文档做，别直接拷卷目录。
 
 ## 7. 核实状态清单（已核实 / 未能核实，部署前请留意）
@@ -385,6 +414,7 @@ Nacos live 换回 dump 的最小做法：`python3 tools/rotate-iotdb-password.py
 | `iotdb` 的 `hostname: ypbin-iotdb` 自解析 | ⚠️ 官方 standalone compose 同样把 hostname 设为内部地址同名，但**未在容器内验证**服务端自解析/绑定行为 | 若启动异常，先按官方 compose 的写法核查；容器名 `ypbin-iotdb` 在自定义网络内可解析属 Docker 文档化行为 |
 | **驱动是否被注册**（不是"是否在类路径"） | ✅ 已核实前提：`iotdb-jdbc:2.0.1-beta` 的 jar **无** `META-INF/services/java.sql.Driver` ⇒ 必须显式注册（§0.6）；✅ 注册代码已在主线（`IotDbDriverRegistrar.ensureRegistered()` 在 `IotTimeSeriesConfiguration.afterPropertiesSet()` 与两个实现类的构造器里各调一次，本机实测启动自检通过） | 部署前仍建议 grep 一次部署提交：`git grep -n "IotDbDriverRegistrar" <部署提交>`；没有就把 `enabled` 改回 `false` |
 | `start-cli.sh -e` 的退出码语义 | ✅ **已实测**（2026-09-24 连接类 + 2026-09-26 补测 SQL 类，本机容器）：语句成功 `exit 0`；连接失败 `exit 1`；**口令错 `exit 1`**；**SQL 语义错（`SHOW TABLES FROM no_such_db`）`exit 1`**。⚠️ **交互模式（不带 `-e`，语句经 stdin）无论语句成败都退 0** —— 不得用它跑初始化脚本 | 这是 `iotdb-init` 重试判定与失败判定的共同前提；因此 `iotdb-init` **坚持用 `-e`**，只把口令改走 stdin（§6.1） |
+| IoTDB 口令**长度上限** | ✅ **已核实**（2026-09-26，活服务端）：48 字符口令执行 `ALTER USER` 返回 `820: The length of password must be less than or equal to 32` | 生成口令用 `openssl rand -hex 12`（24 字符 ≤32）；`tools/rotate-iotdb-password.py` 已在任何写入前拒绝 >32 的口令 |
 | `start-cli.sh` 是否支持配置文件/环境变量传口令 | ✅ **已核实不支持**（2026-09-26，读镜像内 `/iotdb/sbin/start-cli.sh` 原文）：口令只有命令行 `-pw <值>` 一条路；其 `checkEnvVariables` 只识别 `-D IOTDB_INCLUDE` / `-D IOTDB_CLI_CONF` | 健康检查改「不发口令的 TCP 探活」；需要认证的一次性任务把口令经 **stdin** 送入（裸 `-pw` 触发 `please input your password:`） |
 
 ## 8. 来源（官方一手文档 + 访问日期 2026-09-24）
