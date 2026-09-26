@@ -245,6 +245,180 @@ root-only；`deploy/.env` 是**刻意的凭据源**，已由 `! -name ".env"` �
 
 > 历史轮次的部署曾在服务器 `/tmp` 留下若干 **644** 的渲染配置（含当时的网关签名标记与内部 token）。
 > 2026-09-26 已清理干净（删除 **22** 个文件，复核残留 **0**）。
-> **这些标记曾以明文出现在本机 `/tmp`，建议择期轮换**——轮换是跨服务联动
+> **这些标记曾以明文出现在本机 `/tmp`**——轮换是跨服务联动
 > （`.env` 改值 → 重导 `ypbin-common.yaml` 与各服务配置 → 全量重启并复验登录/内部调用），
-> 属需要维护窗口的独立动作，**本轮未做**。
+> 属需要维护窗口的独立动作。**已于 2026-09-26 执行完毕，处置面/命令/判据/回滚见 §5.6。**
+
+### 5.6 凭据轮换实测：`GATEWAY_SIGN_TOKEN` / `INTERNAL_TOKEN`（2026-09-26 已执行）
+
+> §5.5 末尾记的「**这些标记曾以明文出现在 `/tmp`，建议择期轮换**」于 **2026-09-26 执行完毕**，
+> 本节是它的落地记录（处置面、命令、判据、回滚）。
+> **命令里一律写占位符；真值只允许存在于 `deploy/.env`、Nacos 活配置，以及 700 目录 + 600 文件的回滚目录。**
+
+#### 5.6.1 完整性：这两枚值一共有几处（漏一处就是 401/403）
+
+| 键 | 位置 | 角色 |
+|---|---|---|
+| `GATEWAY_SIGN_TOKEN` | Nacos `ypbin-gateway.yaml` → `ypbin.gateway.auth.trusted-source-token` | **签发侧**：网关在写身份头的同时写 `X-Gateway-Signed` |
+| 同上 | Nacos `ypbin-common.yaml` / `ypbin-auth.yaml` / `ypbin-system.yaml` / `ypbin-ai.yaml` / `ypbin-iot.yaml` → `ypbin.cloud.feign.trusted-source-token` | **消费侧**：入站请求带对标记才允许把身份头经 Feign 二次透传 |
+| 同上 | `deploy/.env` → `GATEWAY_SIGN_TOKEN` | 渲染源（`install.sh` 替换模板里的 `${GATEWAY_SIGN_TOKEN}`） |
+| `INTERNAL_TOKEN` | Nacos `ypbin-common.yaml` → `ypbin.internal.token` | 共享值：auth/system/iot 的携带侧 + system 的 `/internal/**` 守卫侧 |
+| 同上 | Nacos `ypbin-access.yaml` → `ypbin.internal.token` | access 出站凭证（**access 没在跑也要改**） |
+| 同上 | `deploy/.env` → `INTERNAL_TOKEN` | 渲染源 + compose 直接注入 `ypbin-access` |
+
+四条口径（2026-09-26 逐条实测/核对，不是推断）：
+
+1. **必须「先 dump live 再在 live 内容上改」，不能拿仓库副本整份覆盖。**
+   - `ypbin-common.yaml` 的 `ypbin.cloud.feign.trusted-source-token` 块与
+     `ypbin-auth.yaml` 的 `ypbin.security.identity.enabled: false` **只在 live 有**，
+     模板里没有（已与 `origin/main` 的 `deploy/nacos/` 逐份核对）——整份覆盖会**抹掉它们**。
+   - 反向的 drift 见 §5.6.6。
+2. 仓库 `deploy/nacos/*.yaml` 一律用 `${...}` 占位符 ⇒ **不用改仓库模板**；改完 `.env` 后
+   重跑 `install.sh` 会自然带上新值。
+3. Java 侧只读配置（`InternalProperties` / `FeignProperties` / `GatewayProperties`），**无硬编码**；
+   4 个运行中容器 jar 内 `BOOT-INF/classes` 配置经解包逐份核对**不含真值**。
+4. 改了 live 之后**除 token 值以外逐字未变**（把两代值都归一化再 diff，7 份全部一致）⇒
+   没有顺带改坏别的键，也没有把 live-only 键带丢。
+
+#### 5.6.2 处置步骤（顺序不可换）
+
+```bash
+# ---- ⓪ 工作目录（700）+ 只读备份：先 dump 再改 ----
+cd /opt/ypbin/ypbin-iot
+TS=$(date +%Y%m%d-%H%M%S); W=/opt/ypbin/token-rotation-$TS
+install -d -m 700 "$W/before/nacos" "$W/after/nacos"
+
+# 活配置 dump（Nacos 3 Console API；accessToken 只进 600 的 curl 配置文件，不进命令行）
+NACOS=http://127.0.0.1:8080
+T=$(curl -fsS -X POST "$NACOS/v3/auth/user/login" \
+      -H 'Content-Type: application/x-www-form-urlencoded' \
+      --data-urlencode username=nacos --data-urlencode password=nacos \
+    | sed -n 's/.*"accessToken":"\([^"]*\)".*/\1/p')
+printf 'header = "accessToken: %s"\n' "$T" > "$W/.hdr"; chmod 600 "$W/.hdr"; unset T
+for c in ypbin-common ypbin-gateway ypbin-auth ypbin-system ypbin-ai ypbin-iot ypbin-access; do
+  curl -sS -K "$W/.hdr" -o "$W/live-$c.json" \
+    "$NACOS/v3/console/cs/config?dataId=$c.yaml&groupName=DEFAULT_GROUP&namespaceId="
+  python3 -c 'import json,sys;open(sys.argv[2],"w").write(json.load(open(sys.argv[1]))["data"]["content"])' \
+    "$W/live-$c.json" "$W/before/nacos/$c.yaml"
+  chmod 600 "$W/live-$c.json" "$W/before/nacos/$c.yaml"
+done
+cp -a deploy/.env "$W/before/deploy.env.bak-$TS"     # 600
+
+# ---- ① 生成新值（只落 600 文件；输出只给 长度+md5）----
+openssl rand -hex 32 > "$W/.new-gateway"; openssl rand -hex 32 > "$W/.new-internal"
+chmod 600 "$W/.new-gateway" "$W/.new-internal"
+
+# ---- ② 在 live 内容上只替换「值」（保留 live-only 键），再发布 ----
+#      OLD_G/OLD_I/NEW_G/NEW_I 从文件读入环境变量（不进程命令行）
+for c in ypbin-common ypbin-gateway ypbin-auth ypbin-system ypbin-ai ypbin-iot ypbin-access; do
+  python3 - "$W/before/nacos/$c.yaml" "$W/after/nacos/$c.yaml" <<'PY'
+import os, sys
+src = open(sys.argv[1]).read()
+for old, new in ((os.environ["OLD_G"], os.environ["NEW_G"]), (os.environ["OLD_I"], os.environ["NEW_I"])):
+    src = src.replace(old, new)          # 值级替换：不碰任何键名与结构
+open(sys.argv[2], "w").write(src)
+PY
+  curl -sS -K "$W/.hdr" -X POST "$NACOS/v3/console/cs/config" \
+    --data-urlencode "dataId=$c.yaml" --data-urlencode groupName=DEFAULT_GROUP \
+    --data-urlencode type=yaml --data-urlencode namespaceId= \
+    --data-urlencode "content@$W/after/nacos/$c.yaml"
+done
+
+# ---- ③ 改 deploy/.env 的两行（用 python 改，值不进 argv）----
+# ---- ④ 逐个重启（不可并行；每步确认起来再看内存）----
+docker restart ypbin-nacos && \
+  until curl -fsS -m5 "$NACOS/v3/console/health/readiness" >/dev/null; do sleep 3; done
+for c in ypbin-gateway:18080 ypbin-auth:18081 ypbin-system:18082 ypbin-iot:18084; do
+  docker restart "${c%%:*}"; sleep 20
+  curl -s "http://127.0.0.1:${c##*:}/actuator/health"; free -m | sed -n 2p
+done
+```
+
+> - **禁止在服务器上 `mvn`**（源码树停滞，见第 1 节）；本轮**只改配置**，故无需重建镜像。
+> - 重启用 `docker restart` 即可（配置从 Nacos 重新拉取）；**绝不** `down -v`。
+> - `.env` 里这两枚对 gateway/auth/system/iot 只作渲染源（它们从 Nacos 取值）；只有
+>   `ypbin-access` 由 compose 直接注入 `INTERNAL_TOKEN`，改 `.env` 后**需要重建**该容器才生效
+>   （本轮 access 未运行，故未做）。
+
+#### 5.6.3 联动验证（每条都要真实输出；**不得打印任何 token**）
+
+```bash
+# ① health：只有 iot 暴露 actuator（gateway/auth/system 回的是 404 业务信封，HTTP 仍是 200）
+curl -s http://127.0.0.1:18084/actuator/health        # 期望 {"groups":["liveness","readiness"],"status":"UP"}
+# ② 前端 + 反代：19000 是 nginx（/api/ → 网关，剥 /api）
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:19000/          # 200
+# ③ 登录链路（错口令；不要用正确口令、也别连试以免触发锁定）
+curl -s -X POST http://127.0.0.1:19000/api/auth/login -H 'Content-Type: application/json' \
+  -d '{"username":"__no_such_user__","password":"__wrong__"}'             # 期望 code 409（不是 403/401）
+# ④ 内部凭证链路：新值 200、旧值必须 401
+curl -s -H "X-Internal-Token: $NEW_I" http://127.0.0.1:18084/internal/lease/epochs   # code 200
+curl -s -H "X-Internal-Token: $OLD_I" http://127.0.0.1:18084/internal/lease/epochs   # code 401
+curl -s -H "X-Internal-Token: $NEW_I" http://127.0.0.1:18082/internal/user-count      # code 200
+curl -s -H "X-Internal-Token: $OLD_I" http://127.0.0.1:18082/internal/user-count      # code 401
+# ⑤ 下游信任链：直连 18084 带身份头
+curl -s -H 'X-User-Id: 1' -H 'X-User-Name: admin' -H 'X-Tenant-Id: 1' \
+     -H 'X-Dept-Id: 1' -H 'X-Roles: admin' http://127.0.0.1:18084/devices            # code 200
+docker logs --tail=100 ypbin-auth ypbin-system ypbin-iot 2>&1 | grep -ci 'trusted-source\|签名'   # 期望 0
+# ⑥ 真实 ERROR：**必须在重启窗口之外量**（重启 nacos 会刷出一批 Nacos gRPC 重连 ERROR，属噪声）
+docker logs --since 90s ypbin-iot 2>&1 | grep -cE '(^|[^A-Za-z])ERROR([^A-Za-z]|$)'  # 期望 0
+# ⑦ 端口仍只绑回环
+ss -lntp | grep -E ':(18081|18082|18084|3306|8848)\b'
+```
+
+**2026-09-26 实测结果**：① `status:UP`；② `200`；③ `code 409`（`用户名或密码错误`，
+说明网关→auth 仍通且鉴权模式可用）；④ iot 旧 `401`/新 `200`（`{"items":[],"readAt":...}`）、
+system 旧 `401`/新 `200`（`data:"6"`）；⑤ `code 200`、信任链告警 `0`；
+⑥ 重启窗口外四服务 `ERROR=0`（窗口内有 Nacos gRPC 重连噪声 48–53 行/服务，属重启副作用）；
+⑦ 五个端口全部 `127.0.0.1`（`0.0.0.0` 只有 18080 网关与 19000 前端，属既有暴露面）。
+
+#### 5.6.4 「旧值失效」怎么证（诚实口径，别写成「已失效」了事）
+
+- **`INTERNAL_TOKEN`：有直接判据。** 旧值打 `/internal/**` ⇒ `code 401`
+  （`内部调用凭证校验失败`），新值 ⇒ `code 200`；iot 与 system 各测一枚端点。
+- **`GATEWAY_SIGN_TOKEN`：没有直接判据。** 实测（直连 18084 `/devices` 带身份头，标记头分别给
+  正确值 / 伪造值 / 不带）**三者都 `code 200`** ⇒ 下游**没有入站校验**——该键当前只决定
+  「身份头是否经 Feign 二次透传」（`FeignHeaderInterceptor#isIdentitySourceTrusted`；
+  且入站无校验时 `isIdentitySourceTrusted` 在未配置 token 的情况下**恒为 true**）。
+  因此只能用**等价证据链**：
+  1. **取值路径唯一**：容器 env 无该键、jar 内 classpath 配置无该键/无真值、Java 只读 Environment
+     ⇒ 运行时该值的唯一来源是 Nacos 活配置；
+  2. **Nacos 活配置已不含旧值、且含新值**（重 dump 后逐份 boolean 复核：7 份全部 旧 `no`、新 `YES`）；
+  3. **除 token 值外逐字未变**（见 §5.6.1 第 4 条）；
+  4. gateway/auth/system/iot **在改后成功重启**，而 `require-trusted-source=true` 是 fail-fast
+     （token 缺失即拒绝启动）⇒ 运行时确实读到了非空的新值；
+  5. 旧值在服务器上**除受控回滚目录（700/600）外已无任何落盘位置**（`grep -rl` 只列路径）。
+  ⇒ 结论只能表述为「**旧值已不在任何生效路径上**」；待 starter 补上入站校验（SF-5）后，
+  旧值才会变成「**可被直接证伪**」。
+- **已知设计缺口（登记）**：标记头值经 `String.equals` 比较（非常量时间），且下游不校验入站标记头。
+
+#### 5.6.5 轮换后的就地清理（清理账目，别只写「已清理」）
+
+- **删除**（`600` 遗留备份，删除前逐份确认命中）：`nacos-ypbin-{iot,gateway,system,ai}.yaml.bak-20260925-013857`
+  （含旧 `GATEWAY_SIGN_TOKEN`）、`nacos-ypbin-common.yaml.bak-20260925-013857`（不含两枚 token，
+  但含 `redis`/`mysql` 口令）、`deploy/.env.bak-20260925-013857`（含两枚 token + 库/缓存口令）。
+- **改值而非删除**：`_rollback-20260925-003947/admin-deploy.env.bak` 与
+  `/opt/ypbin/main/ypbin-admin/deploy/.env`（不运行的旧 admin 栈）——按「保持新值一致、
+  但不删别人的回滚材料」处置，两枚键都改成新值（**改前各自 600 备份**）。
+- **保留**：`$W/before/`（回滚原料，也是旧值**唯一**受控留存点）、
+  `nacos-ypbin-{auth,access}.yaml.bak-*`（实测不含两枚旧值）、`rollback-20260925-013857.sh`。
+- **清理后复核**：`grep -rl` 旧值只命中 `$W/` 之内；新值在 `/tmp` **零命中**。
+
+#### 5.6.6 本轮新发现的 drift（登记，本轮**未**改）
+
+`origin/main` 的 `deploy/nacos/ypbin-access.yaml`（commit `1af9f4c`，#38）**有**
+`ypbin.cloud.feign.trusted-source-token` + `require-trusted-source: true`，理由写着
+「access 不引 `ypbin-common.yaml`，拿不到共享键 ⇒ 必须在本 Data ID 显式声明」；
+但**服务器 live 的 `ypbin-access.yaml` 里没有这两键**（服务器源码树停在旧 commit，导入的是旧模板）。
+后果：access 现在若被拉起，`require-trusted-source` 缺失 ⇒ 走「未配置即恒可信」的兼容默认，
+**身份头透传没有来源门**。修法是把 main 模板重导一次（`install.sh` 会用新的 `.env` 渲染），
+属**独立动作**，本轮不动（不在轮换范围内，且 access 未运行）。
+
+#### 5.6.7 回滚（一键）
+
+```bash
+bash /opt/ypbin/token-rotation-<TS>/rollback-<TS>.sh
+```
+
+脚本做四件事：① 还原 `deploy/.env`（轮换后版本留档）；② 还原两处**非运行 admin 旧栈**的 `.env`；
+③ 把 7 份「轮换前」的 live 快照原样重发到 Nacos；④ 按 `nacos → gateway → auth → system → iot`
+逐个重启并等就绪。**前提是 `$W/before/` 未被删除**——它就是回滚原料。
