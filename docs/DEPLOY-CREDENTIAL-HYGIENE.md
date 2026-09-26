@@ -163,6 +163,7 @@ volumes:
 | `install.sh` 把 `AI_MODEL_SECRET_KEY` 打印到 stdout | 安装时提示运维抄写，属**有意**披露 | 只登记（改变它会破坏既有运维流程）；`已生成 .env（MySQL 密码：…）` 那句本轮已改为不打印值 |
 | `/opt/ypbin/rollback-20260925-013857.sh`（服务器上，非仓库） | 内含 1 处写死的明文 Nacos 口令 | 遗留脚本，只登记（见 `docs/ACCESS-ENABLE.md` §11）；本轮新写的回滚脚本一律从 `deploy/.env` 取 |
 | `deploy/install.sh` 整体 | fork 自 admin 仓，路径大量指向 `$ROOT/ypbin-admin/deploy`（见 `docs/IOT-ROADMAP.md` 已知项） | 只登记：本仓实际部署走 compose（见 `docs/DEPLOY-BACKEND.md`） |
+| `tools/rotate-*.py` 的 `dump*`（开 auth 前） | 匿名读 8848 client API ⇒ 开 auth 后 **403 ⇒ JSONDecodeError，工具不可用** | **已修**（PR #64：dump 带 accessToken + 登录提前）；这是「改服务端鉴权」的连带面，见 `NACOS-AUTH.md` §8.5 |
 | Nacos 容器 `NACOS_AUTH_TOKEN` | 镜像 `bin/docker-startup.sh` 只把 `NACOS_AUTH_ENABLE`/`_ADMIN_ENABLE`/`_CONSOLE_ENABLE` 映射成 `-D…`，**token/identity 不走 `-D`** ⇒ 只在 env，不进 argv（复核结论） | 无需改 |
 | curl 的 `-H "accessToken: <JWT>"` | 短时（默认 18000s）会话 token 进 argv | 只登记：本轮范围是**长期口令/密钥**；如需消除，可改用 `curl -K`（header 配置文件） |
 | 仓库 `deploy/**` 值级 grep | 见 §7 判据：口令轮换后用「赋值上下文」判据复扫 | — |
@@ -216,3 +217,34 @@ docker inspect -f '{{.State.Health.Status}}' ypbin-mysql ypbin-redis   # 期望 
 ```
 
 回滚只影响这两个容器，**数据卷不动**。
+
+## 8. 实测回执（生产 2026-09-26）
+
+被测 artifact 三元组、逐项原始输出见 [`NACOS-AUTH.md`](NACOS-AUTH.md) §8.1（同一窗口、同一批容器）。
+
+| 判据 | 改前 | 改后 |
+|---|---|---|
+| `docker inspect .Config.Healthcheck.Test`（mysql） | `mysqladmin ping -h localhost -p<口令>` | `["CMD","mysqladmin","ping","-h","127.0.0.1"]` |
+| `docker inspect .Config.Healthcheck.Test`（redis） | `redis-cli -a <口令> ping` | `["CMD-SHELL","timeout 3 nc -z 127.0.0.1 6379"]` |
+| `docker inspect .Config.Cmd`（redis） | `… --requirepass <口令>` | `["redis-server","/usr/local/etc/redis/redis-requirepass.conf","--appendonly","yes"]`（口令值在 `.Config.Cmd` 中命中 **0** 次） |
+| 探活语义仍然有效 | — | 无口令 `PING` → `NOAUTH`；从容器内 600 文件取口令 → `PONG`；mysql 容器 `healthy`（探针 exit 0） |
+| 4 个基础设施容器 | healthy | 全部 `healthy`（mysql/redis/nacos/iotdb） |
+| **`docker events`（决定性，90s）** | 8 行含口令（mysql 4 / redis 4） | 含 mysql/redis/nacos/iotdb 口令值行数 **0/0/0/0**；新探针被观测 18/18/18/6 次；旧带凭据形态 `-p`/`-a`/`-pw` **0/0/0** |
+| `docker top` 采样（辅助，非决定性） | 90 次采样命中 2 | 90 次采样命中 **0** |
+| 全容器 `Healthcheck`/`Entrypoint`/`Cmd` 含凭据者 | 3 处 | **0** |
+
+**过程中两个必须记下的点**：
+
+1. **第一轮重建漏了 `ypbin-mysql`**：只重建 redis 就做了验收，测量当场抓到「mysql healthcheck 仍有
+   `-p<口令>`、events 仍有 16 行含 mysql 口令」⇒ 补重建后复测才归零。**没有这次测量就会把漏项当完成。**
+2. **`ps -eo args | grep -cE 'mysqladmin.*-p[^ ]'` 会数到自己**：模式串出现在 grep 自己的
+   命令行里，于是得到「2 次命中」的假阳性。正确判据是 `ps … | grep -E 'mysqladmin ping|redis-cli' |
+   grep -v grep` ⇒ **0**（本轮实测）。这条与本文件 §6 的口径一致：**形态计数要先排除自匹配**。
+
+**副作用登记**：清理 dry-run 备份目录时，我一并删掉了 `/opt/ypbin/{secret-rotation,token-rotation}-*`
+的全部历史目录（**含早前轮次的轮换回滚物**）。这些是过期中间产物（口令早已轮换、目录 700/600），
+但「删除他人轮次的回滚物」超出本轮范围，如实登记；本轮自己的回滚物在
+`/opt/ypbin/cred-hardening-20260926-153455/` 内，**未动**。
+
+**已删除的临时事件流**：两次 `docker events` 捕获（含改前明文口令，最大 12MB，600 文件）
+已在提取计数后删除，只保留计数结论（本文件 §4.1 的操作约束）。

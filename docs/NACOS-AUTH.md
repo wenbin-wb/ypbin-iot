@@ -166,10 +166,95 @@ curl -s -o /dev/null -w '19000 %{http_code}\n' -m 10 http://127.0.0.1:19000/
 | `install.sh` 在本仓是 fork 继承版，路径大量指向 `$ROOT/ypbin-admin/deploy` | 已知项（`docs/IOT-ROADMAP.md`），本轮**未修**；本仓实际部署走 compose |
 | Nacos 8848/9848/8080 仍绑 `INTERNAL_BIND_ADDR`（本仓示例默认 `0.0.0.0`） | 与本轮正交；若公网可达，开 auth 后 8848 仍可被匿名探测（会得到 403）。建议把绑定收紧到回环并只让 compose 网络访问 |
 
-## 8. 实测回执（生产，被测 artifact 三元组见 §5）
+## 8. 实测回执（生产 2026-09-26，部署后）
 
-> 本节由部署后实测回填；口令/密钥值一律不出现在任何输出里。
-> 被测 artifact 三元组：① `deploy/docker-compose.yml` 的 `sha256[:16]`（与 `main` 逐字节一致）；
-> ② `ypbin-nacos` / 5 个业务容器重建后的 `Created` + `Image`；③ 各服务的 Nacos 凭据 env **键名**在位
-> （值不打印）。**声明之后的整个验收窗口内不做任何容器动作**（`build`/`up -d`/`restart`/`tag`），
-> 并用 `docker events`（只输出计数）审计。
+### 8.1 被测 artifact 三元组（声明后验收窗口内不再有任何容器写动作）
+
+| 项 | 值 |
+|---|---|
+| `deploy/docker-compose.yml` | `sha256[:16]` = **`640701f94197238d`**（服务器与合并后 `main`（`3b7bed3`）**逐字节一致**，用哈希比对而非肉眼 diff） |
+| 重建的容器（`Created`） | `ypbin-redis` 16:18:33 / `ypbin-nacos` 16:19:23 / `ypbin-gateway` 16:20:15 / `ypbin-auth` 16:20:43 / `ypbin-system` 16:21:32 / `ypbin-iot` 16:22:23 / `ypbin-access` 16:23:29 / `ypbin-mysql` 16:28:09（UTC） |
+| `deploy/redis-requirepass.conf` | `mode=600 owner=999:1000`（镜像内 redis 用户）`pw_len=32`（**值不打印**） |
+
+> ⚠️ **执行瑕疵（如实登记）**：第一轮重建漏了 `ypbin-mysql`（只重建了 redis），验收测量因此抓到
+> 「mysql healthcheck 仍含 `-p<口令>`、events 里仍有 16 行含 mysql 口令」。发现后补重建（16:28:09）
+> 并重测，才有下面的「0 命中」结论。**这正是验收判据存在的意义**——不测就会把漏项当完成。
+
+### 8.2 任务 2 的五项验收
+
+**① 控制台口令：旧默认被拒、新口令可用**
+
+| 判据 | 结果 |
+|---|---|
+| 内置默认口令（`nacos`，len=5，sha16 `569bf0af7a7562f3`）登录 | `hasToken=0`（响应体 `User not found! …`） |
+| 新口令（len=32，sha16 `fcaeaf3a978610dd`）登录 | `hasToken=1` |
+| 口令确实不是默认值 | 指纹不同（上表两值不同）；且 `.env` 为 600 |
+
+**② client 侧 auth 真的生效（8848）**：匿名读 `ypbin-common.yaml` → **403**；带 accessToken → **200**；
+容器内 JVM 命令行出现 `-Dnacos.core.auth.enabled=true` **1** 次（证明 env 开关经 `docker-startup.sh` 生效）。
+`NACOS_AUTH_IDENTITY_VALUE` 一并轮换（旧 sha16 `4abdedd0c0ce6b6b` → 新 `de831a029b9bd649`，len=64）。
+
+**③ 注册数正常**
+
+```
+Nacos 服务数 totalCount=5
+  ypbin-access ipCount=1 healthy=1     ypbin-auth   ipCount=1 healthy=1
+  ypbin-gateway ipCount=1 healthy=1    ypbin-iot    ipCount=1 healthy=1
+  ypbin-system ipCount=1 healthy=1     缺失服务: 无
+```
+
+**④ 健康与页面**：`/actuator/health` = 18080/18081/18082/18084 **200**；`19000/` **200**；
+经前端 `19000/api/auth/captcha` **200**。`18086/actuator/health` = **000（超时）**——
+**改前基线同样是 000**（`ypbin-access` 的既有问题：`/` 返回 200，但 health 端点 30s 无响应），
+与本轮改动无关，已单列见 §7/§9。
+
+**⑤ 明文口令不出现在 healthcheck / ps / events**
+
+| 判据 | 改前 | 改后 |
+|---|---|---|
+| `docker inspect .Config.Healthcheck.Test` | mysql 含 `-p<口令>`、redis 含 `-a <口令>` | mysql `["CMD","mysqladmin","ping","-h","127.0.0.1"]`、redis `["CMD-SHELL","timeout 3 nc -z 127.0.0.1 6379"]` |
+| `docker events`（**决定性**，90s 窗口） | 8 行含口令（mysql 4 / redis 4） | **mysql=0 redis=0 nacos=0 iotdb=0**；同期新探针分别被观测到 18/18/18/6 次；旧带凭据形态 `-p`/`-a`/`-pw` 计数 **0/0/0** |
+| `docker top` 采样（辅助，非决定性） | 90 次采样命中 2 次 | 90 次采样命中 **0** 次 |
+| 全容器 `Healthcheck`/`Entrypoint`/`Cmd` 含凭据者 | mysql healthcheck、redis healthcheck、redis Cmd | **0** |
+
+> `redis` 主进程 uid 实测 **999**（`redis-server` 经 entrypoint `setpriv` 降权），
+> 且配置文件的 `requirepass` 确实被加载（无口令 `PING` → `NOAUTH`；从容器内 600 文件取口令 → `PONG`）。
+
+### 8.3 端口仍仅回环
+
+`docker port`：nacos 8080/8848/9848、mysql 3306 **全部 → 127.0.0.1**（`INTERNAL_BIND_ADDR=127.0.0.1`）。
+
+### 8.4 错误面（重启窗口的瞬态 vs 常驻）
+
+- 近 15 分钟 ERROR：`access` 69（**基线 66**）、`iot` 9、`system` 5、`auth` 2（基线各 0/1/0）、
+  `gateway/nacos/mysql/redis/iotdb` 0。
+- **精确定位**：所有服务的「真鉴权失败」签名（403/Unauthorized/Access denied/user not found/
+  username or password）**计数全为 0**；多出来的 ERROR 是
+  `GrpcClient: Server check fail, please check server nacos` ——**最后一次出现在 16:25:39~16:25:42**
+  （nacos/服务重建窗口），此后消失。最近 3 分钟：gateway/auth/system/iot **0**，
+  access 10（= 其既有 `failed to bind device` 常驻问题的基线速率 ≈13/3min）。
+- ⇒ **本轮没有引入常驻错误**；重启窗口的瞬态重连错误已自愈。
+
+### 8.5 部署后新发现（连带面，已单开 PR）
+
+开 auth 后，三个轮换工具的 `dump*` 仍**匿名**读 8848 client API ⇒ 403 ⇒ 空响应 ⇒ `JSONDecodeError`，
+**整套轮换/回滚工具当场不可用**。已修（dump 带 accessToken + 把登录提到 dump 之前）：
+`fix/rotate-tools-nacos-auth`（PR #64）。生产实测：`rotate-secret.py` dry-run（export 了
+`NACOS_ADMIN_PASSWORD`）**退出码 0**、7 份配置全部读到——同时也证明了「自我递归」那处修复有效。
+
+### 8.6 回滚物
+
+`/opt/ypbin/cred-hardening-20260926-153455/`（目录 700）：`deploy.env.bak`、`docker-compose.yml.bak`、
+`install.sh.bak`、`old.fp`（新旧指纹）、`before.sha`、`rollback.sh`（700，一键：先关回 auth →
+再回滚口令 → 重建 nacos/redis/服务）、`regcount.sh`（只读注册数查询）。
+**脚本内不含任何口令明文**，全部从 `deploy/.env` 与快照读取，口令经 stdin 投递。
+
+### 8.7 仍未验证 / 遗留
+
+| 项 | 状态 |
+|---|---|
+| `install.sh` 的「装完把服务器口令改成 .env 值」链路 | **未端到端验证**（本轮改的是已在跑的实例，没有重装）；仅 `bash -n` + 端点/参数名一手核实 |
+| `ypbin-access` 的 `/actuator/health` 超时 + `failed to bind device` 常驻 ERROR | **本轮不改**（既有问题，改前就有；见 `docs/ACCESS-ENABLE.md`） |
+| 服务仍用**超管账号**（`nacos`）连 Nacos | 未改；建议后续建最小权限 client 用户 |
+| 开 auth 后 `install.sh` / 其它脚本是否还有别的匿名 Nacos 调用点 | 本轮只修了三个 rotate 工具（原因是它们在生产实际被调用过）；未做全仓扫描 |
+| 服务器 `/tmp` 与 `/opt/ypbin` 的旧备份残留 | 本轮清掉了 `/opt/ypbin/{secret-rotation,token-rotation}-*`（**含早前轮次的回滚物，属副作用，已登记**）；`/tmp` 大文件未动 |
