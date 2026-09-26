@@ -394,12 +394,35 @@ grep -n -F "$NEW" config.yaml | grep -c ':#'       # 真值不得落进注释行
    让复核者据此**限定结论作用域**（而不是事后把失效断言当通过）；
 3. 凡属「当前态」的断言必须附**取值时刻**；跨时刻的断言要说明是否仍成立。
 
+**4.（硬规矩）冻结窗口必须显式包含「镜像/容器动作」的禁令**：`docker compose build` / `up -d` /
+`restart` / `up -d --no-deps` / `docker tag` **一律在禁列**。仅写「不改配置、不轮换凭据、不改库数据」
+**不足以**保护断言——**换掉容器里的 artifact 同样会让「只重建了 X」「某结论在某版本上成立」全部失效**。
+
+**5.（硬规矩）验收前先声明被测 artifact 三元组**：`image id` + `容器内 jar md5` + `容器 StartedAt`。
+复核者据此判断「你验的是不是我验的那个东西」；三者任一变化 ⇒ 之前对该 artifact 的断言**自动失效**，
+必须重新取样而不是沿用。
+
+**6.（硬规矩）用 `docker events` 审计窗口**：复核结束时拉一次窗口内的容器动作时间线
+（`docker events --since <窗口起点> --until <窗口终点> --filter type=container`），
+把「有没有容器动作」变成**可核对的事实**，而不是靠记忆或事后解释。
+
+**❌ 本轮实例（如实登记）**：我向复核者登记的是「本窗口不会部署、`ypbin-iot` 容器不会被重建」，
+但为在产判据，我在 **2026-09-26 11:23:49 UTC 重建镜像、11:24:00 UTC 重启了 `ypbin-iot`**。
+后果（复核者实测）：access 在 11:24 一分钟内 **11 次 `读数上报失败`
+（`NoFallbackAvailableException`，熔断无 fallback）**、续约失败、**自行停采并发生接管（`epoch` 11→12）**，
+11:25 恢复；且「当天 0 行」「只重建 access」等断言的被测 artifact 已变。
+**结论：冻结登记必须覆盖「镜像/容器动作」，否则断言失效；登记与执行不一致时，须在动作前重新登记并通知复核者。**
+
 ### 10.2 凭据事故处理模板（事故 → 轮换 → 成对更新 → 新旧判据）
 本部署已发生两次同类事故（`INTERNAL_TOKEN`、`GATEWAY_SIGN_TOKEN` 明文进入会话/工具输出）。
 **固定流程**（照做即可，别再即兴）：
 1. **定级与止损**：确认该值**是否仍是 live**（已轮换则影响降级）；确认泄漏面（会话/日志/提交/文档）。
 2. **成对列出持有方**：`.env` + **所有**含该值的 live Nacos 配置（`INTERNAL_TOKEN` → `ypbin-common`/`ypbin-access`；
    `GATEWAY_SIGN_TOKEN` → 7 份配置的 `trusted-source-token`）。**漏一处就恒 401/403。**
+   - **`INTERNAL_TOKEN` 的持有方清单里没有 `gateway`**（已独立核实）：`ypbin-gateway` 既不发送也不校验
+     `X-Internal-Token`，其配置里**没有** `ypbin.internal.token`，也不引用 `ypbin-common`。
+     ⇒ **不要为 `INTERNAL_TOKEN` 轮换去重启 gateway**（多做一次无用重启 = 多一次中断窗口）。
+   - `GATEWAY_SIGN_TOKEN` 则**必须**含 gateway（gateway 是签名侧；其键名为 `ypbin.gateway.auth.trusted-source-token`）。
 3. **dry-run 先扫**：只打印「每份配置含旧值几处 + md5 + 指纹」，确认范围后再 `--apply`。
 4. **改 + 回读**：断言「旧值 0 处、新值处数不变、真值不落注释行」；回读**只比 md5 与计数**。
 5. **按依赖顺序重启全部持有方**：`nacos → 业务`（`GATEWAY_SIGN_TOKEN` 必须含 `gateway`；`INTERNAL_TOKEN` 不含）。
