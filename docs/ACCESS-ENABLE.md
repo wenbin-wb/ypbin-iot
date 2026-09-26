@@ -186,7 +186,44 @@ UPDATE iot_device SET endpoint = 'tcp://172.20.0.1:19002' WHERE id = 9300012;
 
 ## 6. 已知缺陷与未验证项（**如实声明**）
 
-### 6.1 IoTDB 时序静默不落库（**未定位，未达成验收⑤/曲线**）
+### 6.1 IoTDB 时序静默不落库（**已答复：当前构建下「没收集/没写」皆不成立；验收⑤与曲线已达成**）
+
+> **2026-09-26 19:24–19:30 更新（部署「成功侧可观测」后的在产判据）**
+>
+> 部署 new jar（容器内 md5 `df221c25aa65527a88cb00ec8857b4a8`，含 `iot.timeseries.write.rows`）后
+> **真实采集立刻落库**：
+>
+> | 指标 | 真值（两次采样） |
+> |---|---|
+> | `iot.timeseries.points.collected` | **47 → 76**（持续增长） |
+> | `iot.timeseries.write.attempted` | **47 → 76** |
+> | `iot.timeseries.write.rows` | **47 → 76**（= collected = attempted） |
+> | `iot.timeseries.write.failed` | **0** |
+>
+> 日志：`[iot] 时序写入首次落库成功：表=reading 本批行数=1`。
+> IoTDB：`WHERE time > 2026-09-26T03:00:00` 由 **0 → 274 行**；9300012 新行时间戳 `19:27:26–19:27:30`，
+> `value_text='[B@…'`（与 §6.3 一致）。
+> **曲线接口已可取数**：`GET /iot/devices/9300012/series?propertyId=temperature`（今天窗口）
+> → `R.code=200`、**311 点**，末点 `ts=1790422050845`。
+>
+> **⇒ 对「没收集 / 收集了没写」两分支的答复：当前构建下二者皆不成立**（collected = attempted = rows > 0），
+> 该症状**已无法复现**。
+>
+> **⚠️ 同时纠正本手册两处先前的错误结论**：
+> 1. **先前「版本落后已排除」的判据太弱**：我只在线上 jar 的 `AvailabilityServiceImpl.class` 里
+>    **搜到方法名字符串** `collectSeriesPoints` 就判「排除」。**方法名存在 ≠ 该代码路径可用**，这是不充分的排除。
+>    实测：同一份「只加观测、不改语义」的补丁，在原 artifact 上 0 行、在「当前 main + 补丁」上 47→76 行
+>    ⇒ 缺陷在**原 artifact 侧（版本漂移）**，或是一次重启治愈的**卡死态**。二者判别需
+>    「回滚旧 jar 观察是否停写」——**该实验未做**。
+> 2. **先前「`/series` 返回 0 点」部分是我自己的参数错误**：该接口的 `propertyId` 取**标识符**
+>    （`temperature`），我填的是数值主键 `9130001`；IoTDB 里存的 `property_id` 同样是标识符。
+>    **验收④的「曲线」一项此前被我误判为未达成。**
+>
+> **仍未核实**：原 artifact 具体缺哪个上游修复（其构建 commit 未知）⇒「版本漂移 vs 重启治愈」的
+> 最终归因**未完成**（判别实验见上）。
+>
+> **回滚物**：旧 jar `/opt/ypbin/ypbin-iot-jar-backup-20260926-112302.jar`（md5 `3e1f3fb0dbf87dfa7550657d45dc57b3`）
+> + 镜像 tag `ypbin/ypbin-iot:rollback-timeseriesobs-20260926-112302`。
 - 事实：`iot.reading` 当天 **0 行**；`/series?propertyId=9130001` 当天返回 **0 点**；`latest` 与 `device_liveness` 却在更新。
 - live `ypbin-iot.yaml` 的 `ypbin.iot.timeseries.enabled: true`，启动日志也打 `时序写入已启用`。
 - `AvailabilityServiceImpl.writeDerived` 对时序写入是**各自兜底并 `log.error`** 的；**日志里没有该 ERROR**，
