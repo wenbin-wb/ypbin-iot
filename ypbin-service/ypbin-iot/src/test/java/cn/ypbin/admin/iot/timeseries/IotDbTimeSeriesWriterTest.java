@@ -24,6 +24,10 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -31,14 +35,19 @@ import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Timestamp;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
+import java.util.concurrent.atomic.AtomicLong;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
+import org.slf4j.LoggerFactory;
 
 /**
  * 写入器的 SQL 文本、分块、列绑定与失败语义（§5.2.1 写入路径）。
@@ -52,6 +61,10 @@ import org.mockito.MockedStatic;
  * （{@code SQLException: The parameter cannot be null}），第一版因此真库全丢数据而单测全绿；
  * ② 插入路径的 {@code ?} 参数在真库可用，故写入侧仍用 {@link PreparedStatement}（只有查询侧不能用）。</p>
  *
+ * <p><b>WARN 必须被断言</b>（2026-09-26 L2 复核的整改点）：上一轮的用例只断言指标，删掉两处 WARN 后
+ * 18 个用例仍然全绿——「必须告警而不是静默」这条契约等于没有门禁。本类现在用 logback
+ * {@link ListAppender} 捕获 WARN 并逐条断言：**删掉任一 WARN，对应用例必然转红**。</p>
+ *
  * @author wenbin
  * @since 2026-09-24
  */
@@ -62,6 +75,31 @@ class IotDbTimeSeriesWriterTest {
 
     /** 固定读数时刻（epoch 毫秒），避免用「当前时间」导致断言不稳定。 */
     private static final long TS = 1_700_000_000_000L;
+
+    private ListAppender<ILoggingEvent> logAppender;
+
+    private Logger writerLogger;
+
+    @BeforeEach
+    void attachLogCapture() {
+        writerLogger = (Logger) LoggerFactory.getLogger(IotDbTimeSeriesWriter.class);
+        logAppender = new ListAppender<>();
+        logAppender.start();
+        writerLogger.addAppender(logAppender);
+    }
+
+    @AfterEach
+    void detachLogCapture() {
+        writerLogger.detachAppender(logAppender);
+    }
+
+    /** 捕获到的 WARN 文本（只要 WARN，避免「首次落库成功」的 INFO 干扰）。 */
+    private List<String> warnMessages() {
+        return logAppender.list.stream()
+            .filter(event -> event.getLevel() == Level.WARN)
+            .map(ILoggingEvent::getFormattedMessage)
+            .toList();
+    }
 
     /** 数值行语句：只带 value_double（不含 value_text）。 */
     private static final String NUMERIC_SQL =
@@ -449,7 +487,106 @@ class IotDbTimeSeriesWriterTest {
                 .as("实际只写进 1 行——缺口必须从指标上看得见").isEqualTo(1d);
             assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_FAILED).counter().count())
                 .as("失败计数是**批次级**语义，行级吞行不得改它的口径").isZero();
+            assertThat(warnMessages())
+                .as("回执与提交数不符必须 WARN：删掉这条 WARN 本用例必须转红（上一轮的整改点）")
+                .anySatisfy(message -> assertThat(message).contains("回执与提交数不符"));
         }
+    }
+
+    @Test
+    @DisplayName("★★ 全 SUCCESS_NO_INFO：rows == attempted、缺口恒为 0 —— 故 rows 不能声称「实际落库」，真值只认库内对账")
+    void mustCountNoInfoReceiptsAndExposeTheBlindSpot() throws SQLException {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        Connection connection = mock(Connection.class);
+        PreparedStatement statement = mock(PreparedStatement.class);
+        try (MockedStatic<DriverManager> driverManager = mockStatic(DriverManager.class)) {
+            driverManager.when(() -> DriverManager.getConnection(anyString(), any(Properties.class)))
+                .thenReturn(connection);
+            when(connection.prepareStatement(anyString())).thenReturn(statement);
+            // 探针实证的生产形状：驱动全部回 SUCCESS_NO_INFO（「语句成功、受影响行数未知」）
+            when(statement.executeBatch())
+                .thenReturn(new int[] {Statement.SUCCESS_NO_INFO, Statement.SUCCESS_NO_INFO});
+
+            new IotDbTimeSeriesWriter(properties(10), registry).writeAll(points(2, "23.5"));
+
+            double rows = registry.get(IotDbTimeSeriesWriter.METRIC_ROWS).counter().count();
+            double noInfo = registry.get(IotDbTimeSeriesWriter.METRIC_ROWS_NO_INFO).counter().count();
+            assertThat(rows).as("回执里非失败的行数").isEqualTo(2d);
+            assertThat(noInfo).as("两行全是「受影响行数未知」").isEqualTo(2d);
+            assertThat(rows - noInfo)
+                .as("确认了行数的部分为 0：所以 rows 只说「驱动认了」，不等于「库里真有」")
+                .isZero();
+            assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_ROWS_UNKNOWN).counter().count())
+                .as("不是 null 回执，未知行计数不得被计入").isZero();
+            assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_FAILED).counter().count()).isZero();
+            assertThat(warnMessages())
+                .as("全 SUCCESS_NO_INFO 不是「回执与提交数不符」（回执行数相同），不得误报")
+                .isEmpty();
+        }
+    }
+
+    @Test
+    @DisplayName("★ rows 上界钳制：回执条数多于本批条数时不得放大（2 行批 + 4 条回执 ⇒ rows=2）并告警")
+    void mustClampRowsToBatchSize() throws SQLException {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        Connection connection = mock(Connection.class);
+        PreparedStatement statement = mock(PreparedStatement.class);
+        try (MockedStatic<DriverManager> driverManager = mockStatic(DriverManager.class)) {
+            driverManager.when(() -> DriverManager.getConnection(anyString(), any(Properties.class)))
+                .thenReturn(connection);
+            when(connection.prepareStatement(anyString())).thenReturn(statement);
+            when(statement.executeBatch()).thenReturn(new int[] {1, 1, 1, 1});
+
+            new IotDbTimeSeriesWriter(properties(10), registry).writeAll(points(2, "23.5"));
+
+            assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_ATTEMPTED).counter().count())
+                .as("待写 2 行").isEqualTo(2d);
+            assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_ROWS).counter().count())
+                .as("2 行的一批不可能写进 4 行：上界钳制到本批条数").isEqualTo(2d);
+            assertThat(warnMessages())
+                .as("回执长度 > 提交数同属「回执与提交数不符」，必须 WARN")
+                .anySatisfy(message -> assertThat(message).contains("回执与提交数不符"));
+        }
+    }
+
+    @Test
+    @DisplayName("★ rows.noinfo 同样受上界钳制：不得出现 noinfo > rows（2 行批 + 3 条 SUCCESS_NO_INFO）")
+    void mustClampNoInfoToAccountedRows() throws SQLException {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        Connection connection = mock(Connection.class);
+        PreparedStatement statement = mock(PreparedStatement.class);
+        try (MockedStatic<DriverManager> driverManager = mockStatic(DriverManager.class)) {
+            driverManager.when(() -> DriverManager.getConnection(anyString(), any(Properties.class)))
+                .thenReturn(connection);
+            when(connection.prepareStatement(anyString())).thenReturn(statement);
+            when(statement.executeBatch()).thenReturn(new int[] {Statement.SUCCESS_NO_INFO,
+                Statement.SUCCESS_NO_INFO, Statement.SUCCESS_NO_INFO});
+
+            new IotDbTimeSeriesWriter(properties(10), registry).writeAll(points(2, "23.5"));
+
+            double rows = registry.get(IotDbTimeSeriesWriter.METRIC_ROWS).counter().count();
+            double noInfo = registry.get(IotDbTimeSeriesWriter.METRIC_ROWS_NO_INFO).counter().count();
+            assertThat(rows).isEqualTo(2d);
+            assertThat(noInfo).as("noinfo 不得超过 rows").isEqualTo(2d);
+        }
+    }
+
+    @Test
+    @DisplayName("★ WARN 限流：窗口内只放行一条并累计被抑制数（长期违约 ≈30 条/分，不刷屏也不丢账）")
+    void mustThrottleWarnWithinWindow() {
+        AtomicLong clock = new AtomicLong(0L);
+        IotDbTimeSeriesWriter.LogThrottle throttle = new IotDbTimeSeriesWriter.LogThrottle(
+            IotDbTimeSeriesWriter.WARN_MIN_INTERVAL_MS, clock::get);
+
+        assertThat(throttle.tryAcquire()).as("首条放行").isTrue();
+        assertThat(throttle.tryAcquire()).as("窗口内第二条被抑制").isFalse();
+        clock.addAndGet(Duration.ofMillis(IotDbTimeSeriesWriter.WARN_MIN_INTERVAL_MS).toNanos() - 1L);
+        assertThat(throttle.tryAcquire()).as("窗口未满仍抑制").isFalse();
+        assertThat(throttle.drainSuppressed()).as("被抑制的条数不得丢失").isEqualTo(2L);
+
+        clock.addAndGet(1L);
+        assertThat(throttle.tryAcquire()).as("窗口到期放行").isTrue();
+        assertThat(throttle.drainSuppressed()).as("刚放行过，无新抑制").isZero();
     }
 
     @Test
@@ -469,6 +606,13 @@ class IotDbTimeSeriesWriterTest {
                 .doesNotThrowAnyException();
             assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_ROWS).counter().count())
                 .as("驱动违约时保持既有的「未抛即成功」语义").isEqualTo(2d);
+            assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_ROWS_UNKNOWN).counter().count())
+                .as("但这两行必须单列为「落库情况未知」，不得与驱动确认过的行混为一谈").isEqualTo(2d);
+            assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_ROWS_NO_INFO).counter().count())
+                .as("null 回执不是 SUCCESS_NO_INFO，不得计入 noinfo").isZero();
+            assertThat(warnMessages())
+                .as("驱动违约必须 WARN：删掉这条 WARN 本用例必须转红（上一轮的整改点）")
+                .anySatisfy(message -> assertThat(message).contains("未按 JDBC 契约返回"));
         }
     }
 }

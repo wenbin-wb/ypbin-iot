@@ -197,7 +197,7 @@ UPDATE iot_device SET endpoint = 'tcp://172.20.0.1:19002' WHERE id = 9300012;
 > |---|---|
 > | `iot.timeseries.points.collected` | **47 → 76**（持续增长） |
 > | `iot.timeseries.write.attempted` | **47 → 76** |
-> | `iot.timeseries.write.rows` | **47 → 76**（= collected = attempted） |
+> | `iot.timeseries.write.rows` | **47 → 76**（= collected = attempted；⚠️ 这是**驱动回执**口径，见 §6.1b） |
 > | `iot.timeseries.write.failed` | **0** |
 >
 > 日志：`[iot] 时序写入首次落库成功：表=reading 本批行数=1`。
@@ -257,6 +257,30 @@ UPDATE iot_device SET endpoint = 'tcp://172.20.0.1:19002' WHERE id = 9300012;
   补齐后下一次运行即可自我判定到底是「没收集」还是「收集了没写」。
 - 复核建议的其余查点（仍有效）：③ 在 iot 容器内用**同一** JDBC URL 手工执行同形 INSERT 排除驱动/权限/方言；
   ⑤ 对「ingest 条数 > 0 而 seriesPoints == 0」与失败计数上告警。
+
+### 6.1b 「成功侧可观测」的第二轮整改：口径修正 + 库内真值对账（2026-09-26，R6 L2 复核）
+
+> **结论**：上一轮把 `iot.timeseries.write.rows` 的描述写成「实际成功行数」是**过度声称**，已修正；
+> 并补了唯一能测到「库内真值」的低频对账指标 `iot.timeseries.db.rows`。
+
+- **错在哪**：JDBC `Statement.SUCCESS_NO_INFO`（`-2`）的语义是「语句成功、但**受影响行数未知**」。
+  生产驱动的回执**正是全 `SUCCESS_NO_INFO`** ⇒ `rows == attempted`、缺口恒为 0：
+  上一轮本来要消除的「0 行落库但 0 失败」在旧口径下**并没被消除**（`rows - noinfo == 0` 才是真实情况）。
+- **现在的口径**（都有单测钉住）：
+  - `iot.timeseries.write.rows`：**驱动回执中非失败的行数**（上界钳制到本批条数），**不是**落库行数；
+  - `iot.timeseries.write.rows.noinfo`：回执为 `SUCCESS_NO_INFO`（受影响行数未知）的条数——
+    `noinfo == rows` 即「成功侧一个行数都没确认」；
+  - `iot.timeseries.write.rows.unknown`：驱动违约（`executeBatch()` 返回 `null`）时按整批计入的**未知**行数；
+  - 真正确认了行数的部分 ≈ `rows - noinfo - unknown`（仍只是「回执说确认」，不是「库里真有」）。
+- **唯一能证伪「ack 了但没落库」的手段**：`iot.timeseries.db.rows` ——
+  低频（默认 10 分钟、可配、**绝不高频**）执行一次 `SELECT COUNT(*) FROM reading` 的真值对账；
+  未测得之前是哨兵 `-1`（**不是 0**，否则「没测」会被读成「空库」）；查询失败只计数
+  （`iot.timeseries.db.probe.failed`）+ ERROR 全堆栈、保留上一次取值、**绝不外抛**。
+  ⇒ 判据：`db.rows` 与 `write.rows` 同步增长，且 `db.rows` 等于库内实际 `count(*)`；
+  若 `write.rows` 涨而 `db.rows` 不动，就是「ack 了但没落库」的**实证**。
+- **WARN 覆盖（上一轮 L2 的整改点）**：上一轮删掉两处 WARN（回执与提交数不符、`null` 回执）后
+  18 个用例仍全绿 ⇒ 本轮用 logback `ListAppender` 逐条断言 WARN，删掉任一 WARN 必然转红；
+  并给这两处告警加了**限流**（同一告警点 ≈30 条/分，被抑制的条数在下一条告警里报出，不静默丢账）。
 
 ### 6.2 租约自 fencing 抖动（**根因已定位，演示数据侧已修，框架侧待立项**）
 - **现在做的修法（演示数据侧）**：把 9 台不可达 TCP 演示设备的 endpoint 从假 IP
