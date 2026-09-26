@@ -30,6 +30,7 @@ import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
 import cn.ypbin.admin.iot.mapper.OutageEventMapper;
 import cn.ypbin.admin.iot.service.impl.AvailabilityServiceImpl;
+import cn.ypbin.admin.iot.shadow.ShadowReportedUpdate;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesPoint;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesProperties;
 import cn.ypbin.admin.iot.values.LatestValue;
@@ -105,6 +106,10 @@ class OutageAvailabilityIT {
     private static final List<LatestValue> RECORDED_LATEST =
         java.util.Collections.synchronizedList(new java.util.ArrayList<>());
 
+    /** 记录影子 reported 增量（G2）：这一层没有真影子写入需求，但要证明「上报确实驱动了 reported」。 */
+    private static final List<ShadowReportedUpdate> RECORDED_SHADOW =
+        java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+
     @BeforeAll
     static void setUp() throws Exception {
         Map<String, String> properties = MySqlIntegrationTestSupport.springProperties();
@@ -146,7 +151,8 @@ class OutageAvailabilityIT {
         // IT 里显式给「固定租户」的 provider：等价于真实请求经 IdentityContext 解析出的租户
         service = new AvailabilityServiceImpl(livenessMapper, outageMapper, maintenanceWindowMapper,
             deviceMapper, new AvailabilityProperties(), () -> java.util.Optional.of(TENANT),
-            RECORDED_LATEST::addAll, RECORDED_SERIES::addAll, new TimeSeriesProperties());
+            RECORDED_LATEST::addAll, RECORDED_SERIES::addAll, new TimeSeriesProperties(),
+            RECORDED_SHADOW::addAll);
         cleanup();
         seedDevices();
     }
@@ -288,7 +294,8 @@ class OutageAvailabilityIT {
         oneByOne.setScanBatchSize(1);
         AvailabilityServiceImpl tightScan = new AvailabilityServiceImpl(livenessMapper, outageMapper,
             maintenanceWindowMapper, deviceMapper, oneByOne, () -> java.util.Optional.of(TENANT),
-            RECORDED_LATEST::addAll, RECORDED_SERIES::addAll, new TimeSeriesProperties());
+            RECORDED_LATEST::addAll, RECORDED_SERIES::addAll, new TimeSeriesProperties(),
+            RECORDED_SHADOW::addAll);
         // 两个「设备不存在」的垃圾活性行（id 更小 ⇒ 优先被候选查询选中）+ 一个真断档设备
         insertOrphanLiveness(1L, 999_998L, dbNow.minusHours(1));
         insertOrphanLiveness(2L, 999_999L, dbNow.minusHours(1));
@@ -476,6 +483,27 @@ class OutageAvailabilityIT {
             maintenanceWindowMapper.insert(row);
             return 1;
         });
+    }
+
+    @Test
+    @DisplayName("★ G2：上报必须同时产出影子 reported 增量（设备/租户/点位/值/时刻都要对）")
+    void ingestMustProduceShadowReportedUpdate() {
+        RECORDED_SHADOW.clear();
+        LocalDateTime dbNow = livenessMapper.selectNow().withNano(0);
+
+        ReadingObservationDto withPoint = observation(DEVICE, 5_000, AvailabilityRules.QUALITY_GOOD,
+            dbNow.minusMinutes(1));
+        withPoint.setPropertyId("temperature");
+        withPoint.setValue("23.5");
+        service.ingest(req(withPoint));
+
+        assertThat(RECORDED_SHADOW).as("带点位与值的读数必须驱动影子 reported（G2）").singleElement()
+            .satisfies(update -> {
+                assertThat(update.tenantId()).as("租户来自真库 iot_device 的解析结果").isEqualTo(TENANT);
+                assertThat(update.deviceId()).isEqualTo(DEVICE);
+                assertThat(update.reported()).containsEntry("temperature", "23.5");
+                assertThat(update.reportTs()).isEqualTo(dbNow.minusMinutes(1));
+            });
     }
 
     @Test

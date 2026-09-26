@@ -38,6 +38,12 @@ public class IotDeviceGroupMemberResp {
     /** 设备名称（快照）。 */
     private String deviceName;
 
+    /** 所属产品 ID（设备未绑定产品时为空）。 */
+    private Long productId;
+
+    /** 所属产品名称（由产品表批量解析；设备未绑定产品或产品已不存在时为空）。 */
+    private String productName;
+
     /** 创建时间。 */
     private LocalDateTime createTime;
 }
