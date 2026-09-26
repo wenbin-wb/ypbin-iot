@@ -438,7 +438,7 @@ WHERE
 
 - `ts` 为 **epoch 毫秒**，与既有 `ReadingObservationDto.ts`（`Long`）一致；`quality` 取值沿用既有枚举名（`GOOD|UNCERTAIN|BAD|STALE|NOT_CONNECTED|CONFIG_ERROR`，见 `ReadingObservationDto.java:71` 的注释；`:73` 是字段本身）。
 - `deviceId` 在模板里是字符串（规则引擎取出的主题段是字符串），由 Jackson 反序列化到 `Long` —— **这是本设计的假设，列入待实测**（§10.2 U8）；若不成立，改成在规则 SQL 里做数值转换。
-- **多属性一条消息不在 P0**：`items` 的展开需要服务端或规则引擎做循环，而 HTTP 动作的 body 模板**不支持数组展开** ⇒ 多属性请发多条，或等 P1 走备选路径（自建消费者可自行展开数组）。这是主推路径的真实代价，写在这里而不是留给实施者踩。
+- **多属性一条消息不在 P0**：`items` 的展开需要服务端或规则引擎做循环，而 HTTP 动作的 body 模板**不支持数组展开**（**该点未核实**，见 §10.2 U24；此处按最保守假设设计） ⇒ 多属性请发多条，或等 P1 走备选路径（自建消费者可自行展开数组）。这是主推路径的真实代价，写在这里而不是留给实施者踩。
 
 **桥接配置要点（每一条都有事实依据）**
 
@@ -540,7 +540,7 @@ WHERE
 
 **⚠️ 「400 到底怎么出」必须写死，否则会静默失效**：不要用 `@Valid @RequestBody`（`MethodArgumentNotValidException` 会被全局异常处理器转成 **HTTP 200 + `R.code`**，等于没做）。**做法**：控制器方法签名直接接 `ReadingIngestReq` 与 `HttpServletResponse`，**自己做校验**；不合法时 `response.setStatus(400)` + 写一个最小 JSON 错误体 + `return null`（或返回 `void`），**完全不经过 `R` 信封**；合法时才调用 `AvailabilityService.ingest(req)` 并返回 `R.ok(...)`。**验收**：单测直接用 `MockMvc` 断言 `status().isBadRequest()`（断言的是**原始 HTTP 状态**，不是 `R.code`）——这条单测就是「破例真的生效」的证明（照教训七/八：门禁必须验证「真的执行了」，否则假绿）。
 
-**⚠️ 守卫失败路径也必须一并破例（否则同一缺口从「校验」漏到「认证」）**：`X-Internal-Token` 缺失/错误时，`InternalTokenGuardInterceptor` 抛 `BusinessException` → 全局异常处理器 → **HTTP 200 + `R.code=401`**（该 Javadoc 自证：`InternalTokenGuardInterceptor.java:30`「失败转统一响应（由全局异常处理器转 HTTP 200 + `R.code=401`）」）⇒ EMQX 同样判「投递成功」而**静默丢数据**。因此入站端点的网关前置校验（或桥接侧对凭证正确性的自检）**必须同样让 EMQX 看到非 2xx**：做法是在该端点的路径上把守卫的失败也输出为原始 `401`（例如为本端点单独注册一个返回 `HttpStatus.UNAUTHORIZED` 的 `@RestControllerAdvice`，或在桥接创建后立即做一次**凭证自检**并纳入巡检 H5/P1-8）。**验收**：故意用错误 token 调该端点 → 原始 HTTP 状态必须是 `401`（而非 200）。
+**⚠️ 守卫失败路径也必须一并破例（否则同一缺口从「校验」漏到「认证」）**：`X-Internal-Token` 缺失/错误时，`InternalTokenGuardInterceptor` 抛 `BusinessException` → 全局异常处理器 → **HTTP 200 + `R.code=401`**（该 Javadoc 自证：`InternalTokenGuardInterceptor.java:30`「失败转统一响应（由全局异常处理器转 HTTP 200 + `R.code=401`）」）⇒ EMQX 同样判「投递成功」而**静默丢数据**。因此入站端点的网关前置校验（或桥接侧对凭证正确性的自检）**必须同样让 EMQX 看到非 2xx**：做法是在该端点的路径上把守卫的失败也输出为原始 `401`。三条可选路径，**优先级从高到低**：① **最稳**——把守卫从 `HandlerInterceptor` 换成只作用于该端点的 `Filter`（或在该端点单独挂一个 `Filter`），直接 `response.setStatus(401)` 并 `return`，**完全不进入异常处理链**；② 为该端点单独注册返回 `HttpStatus.UNAUTHORIZED` 的 `@RestControllerAdvice(assignableTypes = …)`，但 **必须显式标 `@Order(Ordered.HIGHEST_PRECEDENCE)`** —— 全局 `GlobalExceptionHandler` 未标 `@Order`（即 `LOWEST_PRECEDENCE`），若新 advice 也不标，则「哪个 advice 胜出」**不确定**，会**静默失效**（正是本文反复强调的假绿形态）（该顺序语义由独立复核依 Spring `ExceptionHandlerExceptionResolver` 机制推演，**未运行期实测**，见 U25）；③ 折中——不做端点级破例，改为在桥接创建后立即做一次**凭证自检**并纳入巡检 H5/P1-8（成本最低，但只在创建时刻校验，凭证后来被改坏不会被发现）。**验收**：故意用错误 token 调该端点 → 原始 HTTP 状态必须是 `401`（而非 200）。
 
 **⚠️ `propertyId` 白名单的落点（避免与「`ingest` 一行不改」冲突）**：白名单校验放在**入站适配层**（上述控制器内，一次批量取该设备的点位映射做 `Set` 包含判断，**不查库的第二遍、不在循环里查库**），**不改 `AvailabilityService.ingest` 的语义**。代价要说清：**既有 HTTP 通道 `POST /internal/readings` 不受该校验保护**——它只由 `access`（受 `X-Internal-Token` 保护的内部调用方）使用，且 `access` 自己按点位映射采集，视为可信。若要对 HTTP 通道也做同等防护，属**独立决策**（登记为 P2-7），不在 P0。
 
@@ -981,6 +981,7 @@ ypbin:
 | **U22** | 「EMQX HTTP 动作**没有**任何『读取响应体业务码』的机制」（§6.5） | **否定性结论，仅由官方源码支撑**：`emqx/emqx` tag v5.8.9 的 `apps/emqx_bridge_http/src/emqx_bridge_http_connector.erl:963-986` 只按 HTTP 状态码分支、未解析响应体（独立复核 2026-09-26 取回该文件核对）；**官方文档页未见明文** | 结论方向保守（按「只认状态码」设计不会有坏处）；若将来 EMQX 引入响应体判据，需重新评估 |
 | **U23** | 「关闭 EMQX 不需要的插件/功能」的**确切手段**（§8.3 阶段 1） | 未核实（未取回 5.x 的插件/功能开关名原文） | **因此不作为阶段 1 的必需步骤**，只在实测内存仍紧时再查文档 |
 | **U24** | HTTP 动作的**批量聚合**语义与 body 模板是否支持**数组展开**（§4.2/§6.1「P0 一条消息只能一个点位」的依据） | 未核实（官方 HTTP Server 页未给批量/数组语义；官方仅给 `${var}`/`${.}` 通用模板语法） | 它是「P0 单点位契约」的立论前提之一；若实际支持数组展开，P0 可减少 HTTP 请求数 ⇒ 属**优化空间**而非正确性问题 |
+| **U25** | §6.5 S1 路径② 的「端点级 `@RestControllerAdvice` 必须显式 `@Order(HIGHEST_PRECEDENCE)`」这一**顺序依赖** | **未运行期实测**（依 Spring `ExceptionHandlerExceptionResolver` 机制推演） | 路径①（`Filter` 直写 401）**不依赖**该顺序 ⇒ 文档已把它列为**最稳的首选**；若实施者选②，必须补一条「故意用错 token ⇒ 原始 401」的用例来证明没有被静默顶掉 |
 | **U11** | 内置数据库（Mnesia）在**集群**下的规则/用户复制语义 | 未核实（D0.6 的 ⚠️ 已提示） | 本轮**单节点**，不涉集群；集群化前必须重核 |
 | **U12** | 生成 Docker 镜像的**默认容量上限**（`max_mqueue_len=1000` 等）在多租户下的叠加影响 | 部分核实（默认值来自官方配置页），叠加影响未算 | 备选路径（§6.3）的容量规划需实测 |
 | **U13** | EMQX 侧 `limiter`（限流）的**确切配置键** | 未核实（只确认有该文档页） | §6.2 不写具体键 |
