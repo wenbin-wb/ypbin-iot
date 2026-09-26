@@ -38,6 +38,7 @@ import cn.ypbin.admin.iot.mapper.DeviceLivenessMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
 import cn.ypbin.admin.iot.mapper.OutageEventMapper;
+import cn.ypbin.admin.iot.mapping.PointMappingIndex;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.tenant.core.TenantContext;
 import cn.ypbin.starter.tenant.core.TenantProvider;
@@ -47,6 +48,8 @@ import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashMap;
 import cn.ypbin.admin.iot.shadow.ShadowReportedUpdate;
 import cn.ypbin.admin.iot.shadow.ShadowReportedWriter;
 import cn.ypbin.admin.iot.timeseries.PropertyIdRules;
@@ -57,6 +60,7 @@ import cn.ypbin.admin.iot.values.LatestValue;
 import cn.ypbin.admin.iot.values.LatestValueWriter;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -102,6 +106,7 @@ class AvailabilityServiceImplTest {
     private IotDeviceMapper deviceMapper;
     private AvailabilityProperties properties;
     private SimpleMeterRegistry meterRegistry;
+    private PointMappingIndex pointMappingIndex;
     private AvailabilityServiceImpl service;
 
     /**
@@ -140,9 +145,24 @@ class AvailabilityServiceImplTest {
         deviceMapper = mock(IotDeviceMapper.class);
         properties = new AvailabilityProperties();
         meterRegistry = new SimpleMeterRegistry();
+        pointMappingIndex = mock(PointMappingIndex.class);
         service = new AvailabilityServiceImpl(livenessMapper, outageMapper, maintenanceWindowMapper, deviceMapper,
             properties, tenantProvider, latestValueWriter, timeSeriesWriter, timeSeriesProperties,
-            shadowReportedWriter, meterRegistry);
+            shadowReportedWriter, pointMappingIndex, meterRegistry);
+        // 默认把本类用到的设备/点位视为「已映射」：既有用例（最新值/影子/可用率）不关心成员校验。
+        // 映射成员校验的专项用例会用更具体的桩覆盖它（见下方 unmapped* 用例）。
+        lenient().when(pointMappingIndex.loadByDeviceIds(any())).thenAnswer(invocation -> {
+            Collection<Long> deviceIds = invocation.getArgument(0);
+            if (deviceIds == null) {
+                // Mockito 在注册后续桩时会用 null 试调一次本 answer（那不是真实业务调用）
+                return Map.of();
+            }
+            Map<Long, Set<String>> mapped = new LinkedHashMap<>();
+            for (Long deviceId : deviceIds) {
+                mapped.put(deviceId, Set.of("temperature", "humidity", "a", "b", "c", "pressure"));
+            }
+            return mapped;
+        });
         when(livenessMapper.selectNow()).thenReturn(T0.plusHours(10));
         when(deviceMapper.selectBatchIds(any())).thenReturn(List.of(device()));
     }
@@ -337,6 +357,8 @@ class AvailabilityServiceImplTest {
 
         String maxLength = "a".repeat(PropertyIdRules.MAX_LENGTH);
         String tooLong = "a".repeat(PropertyIdRules.MAX_LENGTH + 1);
+        // 成员校验单独覆盖；本用例只测长度边界 ⇒ 让 128 位点位在映射里
+        when(pointMappingIndex.loadByDeviceIds(any())).thenReturn(Map.of(DEVICE, Set.of(maxLength)));
         service.ingest(req(point(DEVICE, maxLength, "1", 1_700_000_000_000L),
             point(DEVICE, tooLong, "2", 1_700_000_000_100L)));
 
@@ -360,6 +382,100 @@ class AvailabilityServiceImplTest {
         assertThat(meterRegistry.get(AvailabilityServiceImpl.METRIC_INVALID_PROPERTY_ID).counter().count())
             .as("空白点位不是「非法点位」，不得计入拒绝指标").isZero();
         verify(latestValueWriter, never()).writeAll(any());
+    }
+
+    @Test
+    @DisplayName("★ P0-6c：已映射点位正常入库（快照/最新值/时序都写），映射查询只发一次")
+    void mappedPropertyMustBeAccepted() {
+        when(livenessMapper.selectList(any())).thenReturn(List.of());
+        when(pointMappingIndex.loadByDeviceIds(any()))
+            .thenReturn(Map.of(DEVICE, Set.of("temperature")));
+
+        ReadingObservationDto mapped = point(DEVICE, "temperature", "23.5", 1_700_000_000_000L);
+        service.ingest(req(mapped));
+
+        ArgumentCaptor<List<LatestValue>> captor = ArgumentCaptor.forClass(List.class);
+        verify(latestValueWriter).writeAll(captor.capture());
+        assertThat(captor.getValue()).extracting(LatestValue::propertyId).containsExactly("temperature");
+        assertThat(meterRegistry.get(AvailabilityServiceImpl.METRIC_UNMAPPED_PROPERTY_ID).counter().count())
+            .isZero();
+        verify(pointMappingIndex, times(1)).loadByDeviceIds(any());
+    }
+
+    @Test
+    @DisplayName("★ P0-6c：未映射点位被丢弃 + 计数，且**不进**最新值/影子（同批合法点位照常写入）")
+    void unmappedPropertyMustBeDroppedAndCounted() {
+        when(livenessMapper.selectList(any())).thenReturn(List.of());
+        when(pointMappingIndex.loadByDeviceIds(any()))
+            .thenReturn(Map.of(DEVICE, Set.of("temperature")));
+
+        // 一条已映射 + 两条未映射（其中一条是「别的设备的点位」形态：形态合法但不属于本设备）
+        service.ingest(req(point(DEVICE, "temperature", "23.5", 1_700_000_000_000L),
+            point(DEVICE, "notMapped", "1", 1_700_000_000_100L),
+            point(DEVICE, "humidity", "61", 1_700_000_000_200L)));
+
+        ArgumentCaptor<List<LatestValue>> latestCaptor = ArgumentCaptor.forClass(List.class);
+        verify(latestValueWriter).writeAll(latestCaptor.capture());
+        assertThat(latestCaptor.getValue()).extracting(LatestValue::propertyId)
+            .as("只丢未映射的那两条，合法点位必须落库").containsExactly("temperature");
+        ArgumentCaptor<List<ShadowReportedUpdate>> shadowCaptor = ArgumentCaptor.forClass(List.class);
+        verify(shadowReportedWriter).writeAll(shadowCaptor.capture());
+        assertThat(shadowCaptor.getValue()).singleElement()
+            .satisfies(update -> assertThat(update.reported()).containsOnlyKeys("temperature"));
+        assertThat(meterRegistry.get(AvailabilityServiceImpl.METRIC_UNMAPPED_PROPERTY_ID).counter().count())
+            .as("两条未映射各计一次").isEqualTo(2.0d);
+    }
+
+    @Test
+    @DisplayName("★ P0-6c：设备没有任何映射 ⇒ 该设备读数全丢 + 计数，且不写活性/派生数据")
+    void deviceWithoutAnyMappingMustDropEverything() {
+        when(pointMappingIndex.loadByDeviceIds(any())).thenReturn(Map.of());
+
+        // 只投放带点位的读数：设备没有任何映射 ⇒ 全部按「未映射」丢弃
+        int processed = service.ingest(req(point(DEVICE, "temperature", "23.5", 1_700_000_000_000L)));
+
+        assertThat(processed).as("被丢弃的条目不计入 processed").isZero();
+        assertThat(meterRegistry.get(AvailabilityServiceImpl.METRIC_UNMAPPED_PROPERTY_ID).counter().count())
+            .isEqualTo(1.0d);
+        verifyNoInteractions(latestValueWriter, shadowReportedWriter, timeSeriesWriter);
+        verify(livenessMapper, never()).selectByDeviceIncludingDeleted(any(), any());
+        verify(livenessMapper, never()).insert(any(DeviceLiveness.class));
+    }
+
+    @Test
+    @DisplayName("★ P0-6c 边界：设备无映射时，**不带点位**的读数仍照常刷新活性（按点位判定，不按设备整体判死）")
+    void livenessOnlyReadingFromUnmappedDeviceStillRefreshesActivity() {
+        when(livenessMapper.selectList(any())).thenReturn(List.of());
+        when(pointMappingIndex.loadByDeviceIds(any())).thenReturn(Map.of());
+
+        int processed = service.ingest(req(observation(DEVICE, 1000, AvailabilityRules.QUALITY_GOOD, T0)));
+
+        assertThat(processed).as("只报时刻+质量的读数没有点位可判，必须照常参与可用率").isEqualTo(1);
+        assertThat(meterRegistry.get(AvailabilityServiceImpl.METRIC_UNMAPPED_PROPERTY_ID).counter().count())
+            .isZero();
+    }
+
+    @Test
+    @DisplayName("★ P0-6c：纯「只报时刻+质量」的批次**不做任何映射查询**（没点位就没必要查）")
+    void livenessOnlyBatchMustNotQueryMappings() {
+        when(livenessMapper.selectList(any())).thenReturn(List.of());
+
+        service.ingest(req(observation(DEVICE, 1000, AvailabilityRules.QUALITY_GOOD, T0)));
+
+        verify(pointMappingIndex, never()).loadByDeviceIds(any());
+        verify(latestValueWriter, never()).writeAll(any());
+    }
+
+    @Test
+    @DisplayName("★ P0-6c：设备不存在时按既有「设备不存在」处理，不报成「未映射」（两种原因必须可分辨）")
+    void unknownDeviceMustNotBeCountedAsUnmapped() {
+        when(deviceMapper.selectBatchIds(any())).thenReturn(List.of());
+
+        service.ingest(req(point(DEVICE, "temperature", "23.5", 1_700_000_000_000L)));
+
+        assertThat(meterRegistry.get(AvailabilityServiceImpl.METRIC_UNMAPPED_PROPERTY_ID).counter().count())
+            .isZero();
+        verify(pointMappingIndex, never()).loadByDeviceIds(any());
     }
 
     @Test

@@ -273,6 +273,62 @@ class RedisLatestValueWriterIT {
     }
 
     @Test
+    @DisplayName("★ 超前护栏：ts 超过「服务端 now + 偏移」⇒ 不写入 + 计数（防单位错/时钟错冻结点位）")
+    void futureTimestampMustBeRejectedAndNotFreezePoint() {
+        long deviceId = DEVICE_ID + 500;
+        long now = System.currentTimeMillis();
+        RedisLatestValueWriter zeroSkew = new RedisLatestValueWriter(template, registry, 0L);
+
+        // 先写一条正常读数（会被写入）
+        zeroSkew.writeAll(List.of(value(deviceId, now - 1_000L, "NORMAL")));
+        assertThat(storedTs(stored(deviceId, FIELD))).isEqualTo(now - 1_000L);
+
+        // 再写一条「未来 1 小时」的读数：必须**不被写入**，已有值不被它污染
+        zeroSkew.writeAll(List.of(value(deviceId, now + 3_600_000L, "FUTURE")));
+
+        assertThat(storedTs(stored(deviceId, FIELD)))
+            .as("超前 ts 不得写入（否则该点位会被永久冻结到出现更大 ts 为止）").isEqualTo(now - 1_000L);
+        assertThat(stored(deviceId, FIELD)).contains("NORMAL");
+        assertThat((long) registry.get(RedisLatestValueWriter.METRIC_FUTURE_REJECTED).counter().count())
+            .isEqualTo(1L);
+        assertThat(regressedCount()).as("超前拒绝不算「旧 ts 后到」").isZero();
+    }
+
+    @Test
+    @DisplayName("★ 超前护栏是**逐点位**的：同批里合法点位照写、只有超前的那个被拒")
+    void futureGuardMustBePerField() {
+        long deviceId = DEVICE_ID + 501;
+        long now = System.currentTimeMillis();
+        RedisLatestValueWriter zeroSkew = new RedisLatestValueWriter(template, registry, 0L);
+
+        zeroSkew.writeAll(List.of(point(deviceId, "ok", now - 1_000L, "OK"),
+            point(deviceId, "future", now + 3_600_000L, "FUTURE")));
+
+        assertThat(storedTs(stored(deviceId, "ok"))).isEqualTo(now - 1_000L);
+        assertThat(stored(deviceId, "future")).as("超前点位不落库").isNull();
+        assertThat((long) registry.get(RedisLatestValueWriter.METRIC_FUTURE_REJECTED).counter().count())
+            .isEqualTo(1L);
+    }
+
+    @Test
+    @DisplayName("★ 负 ts：存量值为负 ts 时 CAS 仍生效（正则 `-?%d+`；改回 `%d+` 时本用例转红）")
+    void negativeTimestampStoredValueMustStillBeCompared() {
+        long deviceId = DEVICE_ID + 600;
+        // 外部写入的负 ts 存量值（本写入器自己不会产出，但解析必须认得）
+        template.opsForHash().put(deviceKey(deviceId), FIELD, "{\"v\":\"NEG\",\"q\":\"GOOD\",\"ts\":-5}");
+
+        // -1 > -5 ⇒ 允许写入（说明脚本正确解析了负 ts，而不是「解析不出 ⇒ 无条件覆盖」）
+        writer.writeAll(List.of(value(deviceId, -1L, "NEWER")));
+        assertThat(storedTs(stored(deviceId, FIELD))).isEqualTo(-1L);
+        assertThat(stored(deviceId, FIELD)).contains("NEWER");
+
+        // -9 < -1 ⇒ 必须被抑制（CAS 生效）
+        writer.writeAll(List.of(value(deviceId, -9L, "OLDER")));
+        assertThat(storedTs(stored(deviceId, FIELD))).as("负 ts 下 CAS 不得失效").isEqualTo(-1L);
+        assertThat(regressedCount()).isEqualTo(1L);
+    }
+
+    @Test
     @DisplayName("★ ④失败路径：Redis 不可达时只计数 + 不抛（最新值不得回滚上报事务）")
     void unreachableRedisMustOnlyCountAndNotThrow() throws Exception {
         RedisStandaloneConfiguration standalone =

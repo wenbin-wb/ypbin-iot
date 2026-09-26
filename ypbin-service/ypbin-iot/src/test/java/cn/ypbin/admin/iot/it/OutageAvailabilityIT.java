@@ -25,10 +25,15 @@ import cn.ypbin.admin.iot.entity.DeviceLiveness;
 import cn.ypbin.admin.iot.entity.IotDevice;
 import cn.ypbin.admin.iot.entity.MaintenanceWindow;
 import cn.ypbin.admin.iot.entity.OutageEvent;
+import cn.ypbin.admin.iot.entity.IotPointMapping;
+import cn.ypbin.admin.iot.entity.IotProperty;
 import cn.ypbin.admin.iot.mapper.DeviceLivenessMapper;
+import cn.ypbin.admin.iot.mapper.IotPointMappingMapper;
+import cn.ypbin.admin.iot.mapper.IotPropertyMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
 import cn.ypbin.admin.iot.mapper.OutageEventMapper;
+import cn.ypbin.admin.iot.mapping.PointMappingIndex;
 import cn.ypbin.admin.iot.service.impl.AvailabilityServiceImpl;
 import cn.ypbin.admin.iot.shadow.ShadowReportedUpdate;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesPoint;
@@ -85,6 +90,9 @@ class OutageAvailabilityIT {
     private static final Long TENANT = 920001L;
     private static final Long DEVICE = 920101L;
     private static final Long OTHER_DEVICE = 920102L;
+
+    /** 物模型属性主键（让点位映射有可解析的属性标识）。 */
+    private static final Long PROP_TEMPERATURE = 920201L;
     /** 原生 SQL 里的 DATETIME 字面量格式（LocalDateTime.toString() 带 `T`，MySQL 不认——CI 实测过）。 */
     private static final DateTimeFormatter SQL_DATE_TIME =
         DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
@@ -98,6 +106,7 @@ class OutageAvailabilityIT {
     private static MaintenanceWindowMapper maintenanceWindowMapper;
     private static IotDeviceMapper deviceMapper;
     private static AvailabilityServiceImpl service;
+    private static PointMappingIndex pointMappingIndex;
 
     /** 记录最新值写入（Q8）：IT 环境没有 Redis，但能证明「上报 → 提交后写最新值」的值是对的 */
     /** 记录时序写入（§5.2.1）：IT 环境没有 IoTDB，但能证明「启用后确实按批把点位写到这里」。 */
@@ -135,11 +144,15 @@ class OutageAvailabilityIT {
         configuration.addMapper(OutageEventMapper.class);
         configuration.addMapper(MaintenanceWindowMapper.class);
         configuration.addMapper(IotDeviceMapper.class);
+        configuration.addMapper(IotPointMappingMapper.class);
+        configuration.addMapper(IotPropertyMapper.class);
         MapperBuilderAssistant assistant = new MapperBuilderAssistant(configuration, "");
         TableInfoHelper.initTableInfo(assistant, DeviceLiveness.class);
         TableInfoHelper.initTableInfo(assistant, OutageEvent.class);
         TableInfoHelper.initTableInfo(assistant, MaintenanceWindow.class);
         TableInfoHelper.initTableInfo(assistant, IotDevice.class);
+        TableInfoHelper.initTableInfo(assistant, IotPointMapping.class);
+        TableInfoHelper.initTableInfo(assistant, IotProperty.class);
         MybatisSqlSessionFactoryBean factoryBean = new MybatisSqlSessionFactoryBean();
         factoryBean.setDataSource(dataSource);
         factoryBean.setConfiguration(configuration);
@@ -150,10 +163,13 @@ class OutageAvailabilityIT {
         deviceMapper = sessionTemplate.getMapper(IotDeviceMapper.class);
         maintenanceWindowMapper = sessionTemplate.getMapper(MaintenanceWindowMapper.class);
         // IT 里显式给「固定租户」的 provider：等价于真实请求经 IdentityContext 解析出的租户
+        pointMappingIndex = new PointMappingIndex(
+            sessionTemplate.getMapper(IotPointMappingMapper.class),
+            sessionTemplate.getMapper(IotPropertyMapper.class));
         service = new AvailabilityServiceImpl(livenessMapper, outageMapper, maintenanceWindowMapper,
             deviceMapper, new AvailabilityProperties(), () -> java.util.Optional.of(TENANT),
             RECORDED_LATEST::addAll, RECORDED_SERIES::addAll, new TimeSeriesProperties(),
-            RECORDED_SHADOW::addAll, new SimpleMeterRegistry());
+            RECORDED_SHADOW::addAll, pointMappingIndex, new SimpleMeterRegistry());
         cleanup();
         seedDevices();
     }
@@ -296,7 +312,7 @@ class OutageAvailabilityIT {
         AvailabilityServiceImpl tightScan = new AvailabilityServiceImpl(livenessMapper, outageMapper,
             maintenanceWindowMapper, deviceMapper, oneByOne, () -> java.util.Optional.of(TENANT),
             RECORDED_LATEST::addAll, RECORDED_SERIES::addAll, new TimeSeriesProperties(),
-            RECORDED_SHADOW::addAll, new SimpleMeterRegistry());
+            RECORDED_SHADOW::addAll, pointMappingIndex, new SimpleMeterRegistry());
         // 两个「设备不存在」的垃圾活性行（id 更小 ⇒ 优先被候选查询选中）+ 一个真断档设备
         insertOrphanLiveness(1L, 999_998L, dbNow.minusHours(1));
         insertOrphanLiveness(2L, 999_999L, dbNow.minusHours(1));
@@ -554,6 +570,22 @@ class OutageAvailabilityIT {
     private static void seedDevices() {
         insertDevice(DEVICE, "IT-OUTAGE-1");
         insertDevice(OTHER_DEVICE, "IT-OUTAGE-2");
+        // 入站点位成员校验（P0-6c）：本 IT 有一处带点位（temperature）的上报，必须先在映射里配上
+        insertProperty(PROP_TEMPERATURE, "temperature");
+        insertPointMapping(DEVICE, PROP_TEMPERATURE);
+    }
+
+    private static void insertProperty(Long id, String identifier) {
+        execute("INSERT INTO iot_property (id, tenant_id, service_id, identifier, property_name, data_type, "
+            + "create_time, update_time) VALUES (" + id + ", " + TENANT + ", 941301, '" + identifier
+            + "', '" + identifier + "', 'decimal', NOW(), NOW())");
+    }
+
+    private static void insertPointMapping(Long deviceId, Long propertyId) {
+        execute("INSERT INTO iot_point_mapping (id, tenant_id, device_id, property_id, ref_type, raw_address, "
+            + "address_type, create_time, update_time) VALUES (" + (deviceId * 10 + propertyId % 100) + ", "
+            + TENANT + ", " + deviceId + ", " + propertyId + ", 'property', 'r-" + propertyId
+            + "', 'holding', NOW(), NOW())");
     }
 
     private static void insertDevice(Long id, String code) {
@@ -567,6 +599,8 @@ class OutageAvailabilityIT {
         execute("DELETE FROM outage_event WHERE tenant_id = " + TENANT);
         execute("DELETE FROM device_liveness WHERE tenant_id = " + TENANT);
         execute("DELETE FROM iot_device WHERE tenant_id = " + TENANT);
+        execute("DELETE FROM iot_point_mapping WHERE tenant_id = " + TENANT);
+        execute("DELETE FROM iot_property WHERE tenant_id = " + TENANT);
     }
 
     private static long rawRowCount(Long deviceId) {

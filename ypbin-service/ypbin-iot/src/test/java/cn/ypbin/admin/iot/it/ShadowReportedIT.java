@@ -17,14 +17,19 @@ import cn.ypbin.admin.iot.availability.ReadingIngestReq;
 import cn.ypbin.admin.iot.availability.ReadingObservationDto;
 import cn.ypbin.admin.iot.entity.DeviceLiveness;
 import cn.ypbin.admin.iot.entity.IotDevice;
+import cn.ypbin.admin.iot.entity.IotPointMapping;
+import cn.ypbin.admin.iot.entity.IotProperty;
 import cn.ypbin.admin.iot.entity.IotShadow;
 import cn.ypbin.admin.iot.entity.MaintenanceWindow;
 import cn.ypbin.admin.iot.entity.OutageEvent;
 import cn.ypbin.admin.iot.mapper.DeviceLivenessMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
+import cn.ypbin.admin.iot.mapper.IotPointMappingMapper;
+import cn.ypbin.admin.iot.mapper.IotPropertyMapper;
 import cn.ypbin.admin.iot.mapper.IotShadowMapper;
 import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
 import cn.ypbin.admin.iot.mapper.OutageEventMapper;
+import cn.ypbin.admin.iot.mapping.PointMappingIndex;
 import cn.ypbin.admin.iot.service.impl.AvailabilityServiceImpl;
 import cn.ypbin.admin.iot.shadow.DbShadowReportedWriter;
 import cn.ypbin.admin.iot.shadow.ShadowReportedUpdate;
@@ -85,6 +90,10 @@ class ShadowReportedIT {
     private static final Long TENANT = 940001L;
     private static final Long DEVICE = 940101L;
     private static final Long OTHER_DEVICE = 940102L;
+
+    /** 物模型属性主键（本 IT 只用来让「点位映射」有可解析的属性标识）。 */
+    private static final Long PROP_TEMPERATURE = 940201L;
+    private static final Long PROP_HUMIDITY = 940202L;
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     private static final Path REPO_ROOT = Path.of("..", "..").toAbsolutePath().normalize();
@@ -93,6 +102,7 @@ class ShadowReportedIT {
     private static IotShadowMapper shadowMapper;
     private static DbShadowReportedWriter writer;
     private static AvailabilityServiceImpl service;
+    private static PointMappingIndex pointMappingIndex;
 
     @BeforeAll
     static void setUp() throws Exception {
@@ -118,18 +128,25 @@ class ShadowReportedIT {
         configuration.addMapper(MaintenanceWindowMapper.class);
         configuration.addMapper(IotDeviceMapper.class);
         configuration.addMapper(IotShadowMapper.class);
+        configuration.addMapper(IotPointMappingMapper.class);
+        configuration.addMapper(IotPropertyMapper.class);
         MapperBuilderAssistant assistant = new MapperBuilderAssistant(configuration, "");
         TableInfoHelper.initTableInfo(assistant, DeviceLiveness.class);
         TableInfoHelper.initTableInfo(assistant, OutageEvent.class);
         TableInfoHelper.initTableInfo(assistant, MaintenanceWindow.class);
         TableInfoHelper.initTableInfo(assistant, IotDevice.class);
         TableInfoHelper.initTableInfo(assistant, IotShadow.class);
+        TableInfoHelper.initTableInfo(assistant, IotPointMapping.class);
+        TableInfoHelper.initTableInfo(assistant, IotProperty.class);
         MybatisSqlSessionFactoryBean factoryBean = new MybatisSqlSessionFactoryBean();
         factoryBean.setDataSource(dataSource);
         factoryBean.setConfiguration(configuration);
         SqlSessionFactory factory = factoryBean.getObject();
         SqlSessionTemplate sessionTemplate = new SqlSessionTemplate(factory);
         shadowMapper = sessionTemplate.getMapper(IotShadowMapper.class);
+        // 入站点位成员校验（P0-6c）走真库：映射/属性表都按真表建，租户插件同生产
+        pointMappingIndex = new PointMappingIndex(sessionTemplate.getMapper(IotPointMappingMapper.class),
+            sessionTemplate.getMapper(IotPropertyMapper.class));
         writer = new DbShadowReportedWriter(shadowMapper, OBJECT_MAPPER, new SimpleMeterRegistry());
         // 真链路：AvailabilityServiceImpl 用**真写入器**，证明「上报确实驱动了 reported」
         service = new AvailabilityServiceImpl(
@@ -138,7 +155,7 @@ class ShadowReportedIT {
             sessionTemplate.getMapper(MaintenanceWindowMapper.class),
             sessionTemplate.getMapper(IotDeviceMapper.class), new AvailabilityProperties(),
             () -> Optional.of(TENANT), values -> { }, points -> { }, new TimeSeriesProperties(), writer,
-            new SimpleMeterRegistry());
+            pointMappingIndex, new SimpleMeterRegistry());
         cleanup();
         seedDevices();
     }
@@ -365,6 +382,30 @@ class ShadowReportedIT {
     private static void seedDevices() {
         insertDevice(DEVICE, "IT-SHADOW-1");
         insertDevice(OTHER_DEVICE, "IT-SHADOW-2");
+        // 入站点位成员校验（P0-6c）：DEVICE 配了 temperature/humidity 两个点位；
+        // OTHER_DEVICE 刻意不配任何映射（对照：该设备上报的点位应被判「未映射」丢弃）
+        seedPointMappings();
+    }
+
+    /** 物模型属性 + 点位映射（读数上的 propertyId 与属性标识一致，见 PointMappingIndex 的口径说明）。 */
+    private static void seedPointMappings() {
+        insertProperty(PROP_TEMPERATURE, "temperature");
+        insertProperty(PROP_HUMIDITY, "humidity");
+        insertPointMapping(DEVICE, PROP_TEMPERATURE);
+        insertPointMapping(DEVICE, PROP_HUMIDITY);
+    }
+
+    private static void insertProperty(Long id, String identifier) {
+        execute("INSERT INTO iot_property (id, tenant_id, service_id, identifier, property_name, data_type, "
+            + "create_time, update_time) VALUES (" + id + ", " + TENANT + ", 940301, '" + identifier
+            + "', '" + identifier + "', 'decimal', NOW(), NOW())");
+    }
+
+    private static void insertPointMapping(Long deviceId, Long propertyId) {
+        execute("INSERT INTO iot_point_mapping (id, tenant_id, device_id, property_id, ref_type, raw_address, "
+            + "address_type, create_time, update_time) VALUES (" + (deviceId * 10 + propertyId % 100) + ", "
+            + TENANT + ", " + deviceId + ", " + propertyId + ", 'property', 'r-" + propertyId
+            + "', 'holding', NOW(), NOW())");
     }
 
     private static void insertDevice(Long id, String code) {
@@ -379,6 +420,8 @@ class ShadowReportedIT {
         execute("DELETE FROM outage_event WHERE tenant_id = " + TENANT);
         execute("DELETE FROM maintenance_window WHERE tenant_id = " + TENANT);
         execute("DELETE FROM iot_device WHERE tenant_id = " + TENANT);
+        execute("DELETE FROM iot_point_mapping WHERE tenant_id = " + TENANT);
+        execute("DELETE FROM iot_property WHERE tenant_id = " + TENANT);
     }
 
     private static void execute(String sql) {
