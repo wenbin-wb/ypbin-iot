@@ -18,6 +18,7 @@
    即使渲染出来也不会被 shell 展开。回归：`test_rollback_templates_*`（结构断言 + 渲染期抓格式说明）。
 """
 import ast
+import contextlib
 import importlib.util
 import io
 import os
@@ -30,6 +31,7 @@ from unittest import mock
 from unittest.mock import MagicMock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+FIX_ACCESS = os.path.join(HERE, "fix-access-trusted-source.py")
 TOOLS = [
     os.path.join(HERE, "rotate-secret.py"),
     os.path.join(HERE, "rotate-internal-token.py"),
@@ -206,6 +208,81 @@ class NacosPasswordRegressionTest(unittest.TestCase):
                 self.assertFalse("--data-urlencode 'username=" in source,
                                  "%s 回滚模板的 username 被单引号包住 ⇒ shell 不展开 ⇒ 回滚半途 exit 3" % name)
                 self.assertTrue('if [ -z "${{NACOS_ADMIN_PASSWORD:-}}" ]' in source, name)
+
+
+class CredentialSeparationTest(unittest.TestCase):
+    """两个凭据必须是**两个名字/两个值**：`GATEWAY_SIGN_TOKEN`（要写进配置）与 Nacos accessToken（JWT）。
+
+    回归的缺陷（PR #64 引入、独立复核者桩化实证）：`fix-access-trusted-source.py` 的 main() 里
+    两个凭据都叫 `token`，`token = login()` 覆盖了 `GATEWAY_SIGN_TOKEN` ⇒ `build_block(token)`
+    会把 **JWT 写进 ypbin-access.yaml 的 cloud.feign.trusted-source-token**；而其后的
+    `assert got == token` 变成**自比自、恒真**，还会打印「与 .env 的 GATEWAY_SIGN_TOKEN 一致」的假绿。
+    ⇒ 本用例**不依赖工具自己的断言**，直接检查「传给 build_block 的实参」与「写出的配置内容」。
+    """
+
+    # 必须满足工具自身后续断言：恰好两个 `${...}` 占位符 + 唯一锚点行 + 尚无该键
+    LIVE = (
+        "server:\n"
+        "  port: 18086\n"
+        "spring:\n"
+        "  cloud:\n"
+        "    nacos:\n"
+        "      server-addr: ${NACOS_ADDR:localhost:8848}\n"
+        "  autoconfigure:\n"
+        "    exclude:\n"
+        "      - a.b.C\n"
+        "  # access 是下游服务\n"
+        "ypbin:\n"
+        "  access:\n"
+        "    node-id: ${ACCESS_NODE_ID:access-1}\n"
+    )
+
+    def _run_main_with_sentinels(self):
+        mod = load_module(FIX_ACCESS)
+        gst_sentinel = "GST_SENTINEL_should_be_written"
+        jwt_sentinel = "JWT_SENTINEL_nacos_access_token"
+        seen = {}
+        real_build = mod.build_block
+
+        def spy_build(value):
+            seen["build_block_arg"] = value
+            return real_build(value)
+
+        handles = []
+        real_open = open
+
+        def fake_open(path, mode="r", *a, **k):
+            handle = mock.mock_open()(path, mode, *a, **k)
+            handle.name = str(path)
+            handles.append(handle)
+            return handle
+
+        with mock.patch.dict(os.environ, {"GATEWAY_SIGN_TOKEN": gst_sentinel,
+                                          "NACOS_ADMIN_PASSWORD": "probe-not-a-secret"}):
+            with mock.patch.object(mod, "login", return_value=jwt_sentinel), \
+                 mock.patch.object(mod, "dump_live", return_value=self.LIVE), \
+                 mock.patch.object(mod, "build_block", spy_build), \
+                 mock.patch.object(mod, "APPLY", False), \
+                 mock.patch.object(mod.os, "chmod"), \
+                 mock.patch("builtins.open", fake_open), \
+                 contextlib.redirect_stdout(io.StringIO()), \
+                 contextlib.redirect_stderr(io.StringIO()):
+                mod.main()
+        written = "".join(str(c.args[0]) for h in handles for c in h.write.call_args_list if c.args)
+        return gst_sentinel, jwt_sentinel, seen, written
+
+    def test_build_block_receives_gateway_sign_token_not_jwt(self):
+        gst, jwt, seen, _ = self._run_main_with_sentinels()
+        self.assertIn("build_block_arg", seen, "没走到 build_block，用例失去意义")
+        self.assertEqual(gst, seen["build_block_arg"],
+                         "传给 build_block 的不是 GATEWAY_SIGN_TOKEN（很可能被 login() 的 JWT 覆盖）")
+        self.assertNotEqual(jwt, seen["build_block_arg"])
+
+    def test_written_config_contains_gateway_token_only(self):
+        gst, jwt, _, written = self._run_main_with_sentinels()
+        self.assertTrue(written, "没抓到写文件调用，用例失去意义")
+        self.assertIn(gst, written)
+        self.assertNotIn(jwt, written, "Nacos JWT 被写进了要 POST 的配置内容")
 
 
 if __name__ == "__main__":

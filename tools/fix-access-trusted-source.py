@@ -104,13 +104,18 @@ def _nacos_password():
 
 
 def main() -> int:
-    token = os.environ.get("GATEWAY_SIGN_TOKEN", "")
-    assert token and "${" not in token, "GATEWAY_SIGN_TOKEN 未设置或是占位符，拒绝继续"
+    # ⚠️ 两个凭据**必须分别命名**：gst = 要写入配置的网关签名密钥；jwt = Nacos 控制台 accessToken。
+    # 2026-09-26 事故（独立复核者用桩化实证）：本文件曾在同一函数里把二者都叫 `token` ——
+    # 登录赋值覆盖了 GATEWAY_SIGN_TOKEN ⇒ `build_block(token)` 会把 **Nacos JWT 写进
+    # ypbin-access.yaml 的 cloud.feign.trusted-source-token**（同时 JWT 残留在配置里），
+    # 而第 3b 步的断言 `got == token` 变成**自比自、恒真**，还会打印「与 .env 的 GATEWAY_SIGN_TOKEN 一致」的假绿。
+    gst = os.environ.get("GATEWAY_SIGN_TOKEN", "")
+    assert gst and "${" not in gst, "GATEWAY_SIGN_TOKEN 未设置或是占位符，拒绝继续"
 
     ts = time.strftime("%Y%m%d-%H%M%S")
     print(f"=== 1) dump live {DATA_ID} (TS={ts}) ===")
-    token = login()
-    live = dump_live(token)
+    jwt = login()
+    live = dump_live(jwt)
     live_path = f"/tmp/access-live-{ts}.yaml"
     open(live_path, "w", encoding="utf-8").write(live)
     live_sha = sha(live)
@@ -129,7 +134,7 @@ def main() -> int:
         return 0
     idx = [i for i, line in enumerate(lines) if line.startswith(ANCHOR)]
     assert len(idx) == 1, f"锚点不唯一/未找到：{idx}"
-    block = build_block(token)
+    block = build_block(gst)
     new_lines = lines[:idx[0]] + block + lines[idx[0]:]
     new = "\n".join(new_lines)
 
@@ -147,7 +152,7 @@ def main() -> int:
     val_lines = [l for l in new_lines if l.startswith(f"      {KEY}: ")]
     assert len(val_lines) == 1, f"!! {KEY} 行数异常: {len(val_lines)}"
     got = val_lines[0].split(": ", 1)[1]
-    assert got == token, "!! 写入值与 .env 不一致"
+    assert got == gst, "!! 写入值与 .env 的 GATEWAY_SIGN_TOKEN 不一致（拒绝对比自比自：比的是 env 真值）"
     assert "${" not in got, "!! 写入的仍是占位符"
     require_lines = [l for l in new_lines if l.startswith(f"      {REQUIRE_KEY}: ")]
     assert require_lines == [f"      {REQUIRE_KEY}: true"], f"!! {REQUIRE_KEY} 异常: {require_lines}"
@@ -155,7 +160,7 @@ def main() -> int:
     print(f"    [OK] {REQUIRE_KEY}: true")
 
     # 3c 真值只出现在 value 行，绝不落进注释
-    hits = [l for l in new_lines if token in l]
+    hits = [l for l in new_lines if gst in l]
     assert len(hits) == 1 and hits[0].startswith(f"      {KEY}: "), \
         f"!! 真值出现在 {len(hits)} 行（含注释行），拒绝 POST"
     print("    [OK] 真值仅出现 1 次，且是 value 行（未污染注释）")
@@ -194,17 +199,17 @@ echo "注意：access 需重启（或等 Nacos 推送）才会重新加载；未
         return 0
 
     print("=== 5) POST 到 Nacos ===")
-    publish_via_stdin(token, new, new_path)
+    publish_via_stdin(jwt, new, new_path)
 
     print("=== 6) 回读校验 ===")
-    back = dump_live(token)
+    back = dump_live(jwt)
     back_sha = sha(back)
     print(f"    回读 sha256[:16]={back_sha}")
     b_lines = back.split("\n")
     assert back == new, "!! 回读内容与提交内容不一致"
     print("    [OK] 回读与提交逐字一致")
     b_val = [l for l in b_lines if l.startswith(f"      {KEY}: ")]
-    assert len(b_val) == 1 and b_val[0].split(": ", 1)[1] == token, "!! 回读值不符"
+    assert len(b_val) == 1 and b_val[0].split(": ", 1)[1] == gst, "!! 回读值不符（同样只比 env 真值）"
     assert [l for l in b_lines if l.startswith(f"      {REQUIRE_KEY}: ")] == \
         [f"      {REQUIRE_KEY}: true"], "!! 回读 require 键不符"
     print(f"    [OK] 两键在位；{KEY} 非占位符且与 .env 一致")
