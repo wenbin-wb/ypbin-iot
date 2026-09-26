@@ -47,13 +47,6 @@ public class IotDbTimeSeriesStore implements TimeSeriesStore {
     /** 时间范围缺省哨兵（与 §5.2.1 的「from 可空」对应）。 */
     static final long MIN_TS = 0L;
 
-    /**
-     * 点位标识的合法形态：它会被拼进 SQL 字面量，故用白名单 + 长度上限（1~128）做最外层防线。
-     *
-     * <p>不合法即**报业务错误**（而不是静默过滤/替换——静默过滤会让"查不到"看起来像"没数据"）。</p>
-     */
-    static final String PROPERTY_ID_PATTERN = "[A-Za-z0-9_.:-]{1,128}";
-
     /** 查询列（与 §5.2.1 的 DDL 一致）。 */
     private static final String SELECT_COLUMNS = "time, value_double, value_text, quality";
 
@@ -107,8 +100,9 @@ public class IotDbTimeSeriesStore implements TimeSeriesStore {
      * @throws BusinessException 形态不合法（含 null / 超长 / 白名单外字符）
      */
     static String propertyIdLiteral(String propertyId) {
-        if (propertyId == null || !propertyId.matches(PROPERTY_ID_PATTERN)) {
-            throw new BusinessException("点位标识不合法（只允许字母、数字、下划线、点、冒号、连字符，长度 1~128）");
+        if (!PropertyIdRules.isValid(propertyId)) {
+            // 话术与入站过滤共用同一常量：两条路径的拒绝原因必须逐字一致
+            throw new BusinessException(PropertyIdRules.INVALID_MESSAGE);
         }
         // 白名单已排除单引号；这里仍按 SQL 字面量规则转义，做到「校验 + 转义」双保险
         return "'" + propertyId.replace("'", "''") + "'";

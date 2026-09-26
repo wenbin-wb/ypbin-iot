@@ -21,6 +21,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import cn.ypbin.admin.iot.availability.AvailabilityProperties;
@@ -40,6 +41,7 @@ import cn.ypbin.admin.iot.mapper.OutageEventMapper;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.tenant.core.TenantContext;
 import cn.ypbin.starter.tenant.core.TenantProvider;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import java.math.BigDecimal;
@@ -47,6 +49,7 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import cn.ypbin.admin.iot.shadow.ShadowReportedUpdate;
 import cn.ypbin.admin.iot.shadow.ShadowReportedWriter;
+import cn.ypbin.admin.iot.timeseries.PropertyIdRules;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesPoint;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesProperties;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesWriter;
@@ -98,6 +101,7 @@ class AvailabilityServiceImplTest {
     private TimeSeriesProperties timeSeriesProperties;
     private IotDeviceMapper deviceMapper;
     private AvailabilityProperties properties;
+    private SimpleMeterRegistry meterRegistry;
     private AvailabilityServiceImpl service;
 
     /**
@@ -135,9 +139,10 @@ class AvailabilityServiceImplTest {
             anyInt())).thenReturn(List.of());
         deviceMapper = mock(IotDeviceMapper.class);
         properties = new AvailabilityProperties();
+        meterRegistry = new SimpleMeterRegistry();
         service = new AvailabilityServiceImpl(livenessMapper, outageMapper, maintenanceWindowMapper, deviceMapper,
             properties, tenantProvider, latestValueWriter, timeSeriesWriter, timeSeriesProperties,
-            shadowReportedWriter);
+            shadowReportedWriter, meterRegistry);
         when(livenessMapper.selectNow()).thenReturn(T0.plusHours(10));
         when(deviceMapper.selectBatchIds(any())).thenReturn(List.of(device()));
     }
@@ -283,6 +288,78 @@ class AvailabilityServiceImplTest {
                 assertThat(update.reportTs())
                     .isEqualTo(AvailabilityRules.toLocalDateTime(1_700_000_000_200L));
             });
+    }
+
+    @Test
+    @DisplayName("★ P0-6c：非法点位标识的读数被**逐条丢弃 + 计数**，同批合法读数照常写最新值/影子")
+    void invalidPropertyIdMustBeDroppedAndCounted() {
+        when(deviceMapper.selectBatchIds(any())).thenReturn(List.of(device()));
+        when(livenessMapper.selectList(any())).thenReturn(List.of());
+
+        ReadingObservationDto ok = point(DEVICE, "temperature", "23.5", 1_700_000_000_000L);
+        // 注入形态（会被拼进 IoTDB 字面量）与含空格形态：都属白名单外，必须被拒
+        ReadingObservationDto injection = point(DEVICE, "temp'; DROP TABLE reading; --", "1",
+            1_700_000_000_100L);
+        ReadingObservationDto spaced = point(DEVICE, "temp id", "2", 1_700_000_000_200L);
+        ReadingObservationDto ok2 = point(DEVICE, "humidity", "61", 1_700_000_000_300L);
+
+        service.ingest(req(ok, injection, spaced, ok2));
+
+        ArgumentCaptor<List<LatestValue>> latestCaptor = ArgumentCaptor.forClass(List.class);
+        verify(latestValueWriter).writeAll(latestCaptor.capture());
+        assertThat(latestCaptor.getValue()).extracting(LatestValue::propertyId)
+            .as("只有合法点位进最新值；非法点位一条都不许落 Redis（否则查询侧的字面量防线会被绕过）")
+            .containsExactlyInAnyOrder("temperature", "humidity");
+        ArgumentCaptor<List<ShadowReportedUpdate>> shadowCaptor = ArgumentCaptor.forClass(List.class);
+        verify(shadowReportedWriter).writeAll(shadowCaptor.capture());
+        assertThat(shadowCaptor.getValue()).singleElement()
+            .satisfies(update -> assertThat(update.reported()).containsOnlyKeys("temperature", "humidity"));
+        assertThat(meterRegistry.get(AvailabilityServiceImpl.METRIC_INVALID_PROPERTY_ID).counter().count())
+            .as("两条非法点位各计一次（可观测出口）").isEqualTo(2.0d);
+    }
+
+    @Test
+    @DisplayName("★ P0-6c：整批都非法时**动库之前**就返回 0，且不碰任何 Mapper/写入器")
+    void allInvalidBatchMustReturnBeforeAnyDatabaseAccess() {
+        service.ingest(req(point(DEVICE, "temp id", "1", 1_700_000_000_000L)));
+
+        assertThat(meterRegistry.get(AvailabilityServiceImpl.METRIC_INVALID_PROPERTY_ID).counter().count())
+            .isEqualTo(1.0d);
+        verifyNoInteractions(deviceMapper, livenessMapper, outageMapper, maintenanceWindowMapper,
+            latestValueWriter, shadowReportedWriter, timeSeriesWriter);
+    }
+
+    @Test
+    @DisplayName("★ P0-6c：长度上限 128（128 收、129 拒），与查询侧同一口径")
+    void propertyIdLengthBoundaryMustBeEnforced() {
+        when(deviceMapper.selectBatchIds(any())).thenReturn(List.of(device()));
+        when(livenessMapper.selectList(any())).thenReturn(List.of());
+
+        String maxLength = "a".repeat(PropertyIdRules.MAX_LENGTH);
+        String tooLong = "a".repeat(PropertyIdRules.MAX_LENGTH + 1);
+        service.ingest(req(point(DEVICE, maxLength, "1", 1_700_000_000_000L),
+            point(DEVICE, tooLong, "2", 1_700_000_000_100L)));
+
+        ArgumentCaptor<List<LatestValue>> captor = ArgumentCaptor.forClass(List.class);
+        verify(latestValueWriter).writeAll(captor.capture());
+        assertThat(captor.getValue()).extracting(LatestValue::propertyId).containsExactly(maxLength);
+        assertThat(meterRegistry.get(AvailabilityServiceImpl.METRIC_INVALID_PROPERTY_ID).counter().count())
+            .isEqualTo(1.0d);
+    }
+
+    @Test
+    @DisplayName("★ P0-6c 边界：propertyId 为 null/空白仍按「只报时刻+质量」的合法形态处理（不拒绝、不计数）")
+    void blankPropertyIdMustStayLivenessOnlyAndNotBeRejected() {
+        when(deviceMapper.selectBatchIds(any())).thenReturn(List.of(device()));
+        when(livenessMapper.selectList(any())).thenReturn(List.of());
+        ReadingObservationDto blank = point(DEVICE, "   ", "9", 1_700_000_000_000L);
+
+        int processed = service.ingest(req(observation(DEVICE, 1000, AvailabilityRules.QUALITY_GOOD, T0), blank));
+
+        assertThat(processed).as("两条都参与可用率（不是 0）").isEqualTo(2);
+        assertThat(meterRegistry.get(AvailabilityServiceImpl.METRIC_INVALID_PROPERTY_ID).counter().count())
+            .as("空白点位不是「非法点位」，不得计入拒绝指标").isZero();
+        verify(latestValueWriter, never()).writeAll(any());
     }
 
     @Test
