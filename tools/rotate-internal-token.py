@@ -76,9 +76,12 @@ def read_env_token():
     raise SystemExit("!! .env 里没有 INTERNAL_TOKEN")
 
 
-def dump_config(cfg, dest):
+def dump_config(cfg, dest, token):
+    # ⚠️ 开 auth 之后（2026-09-26 起）client API 也要求身份：**必须带 accessToken**，
+    # 否则 403 ⇒ curl -f 失败 ⇒ 空响应 ⇒ JSONDecodeError（本轮实测踩到）。
+    # token 是短时 JWT（非长期口令），沿用本文件既有做法经 -H 传递。
     url = f"{NACOS_CLIENT}?dataId={cfg}.yaml&groupName={GROUP}&namespaceId="
-    out = run(["curl", "-fsS", "-m", "25", url])
+    out = run(["curl", "-fsS", "-m", "25", "-H", f"accessToken: {token}", url])
     if out.returncode != 0:
         raise SystemExit(f"!! dump {cfg} 失败")
     body = json.loads(out.stdout)
@@ -154,11 +157,12 @@ def main():
         os.makedirs(d, exist_ok=True)
         os.chmod(d, stat.S_IRWXU)
     say(f"\n[1] 备份到 {W}（700）")
+    token = nacos_login()  # 开 auth 后 dump 也要凭据 ⇒ 必须先登录
     shutil.copy2(ENV_FILE, f"{W}/before/deploy.env.bak-{TS}")
     os.chmod(f"{W}/before/deploy.env.bak-{TS}", 0o600)
     say(f"    deploy/.env -> before/deploy.env.bak-{TS} (600)")
     for cfg in CFGS:
-        p = dump_config(cfg, f"{BEFORE}/{cfg}.yaml")
+        p = dump_config(cfg, f"{BEFORE}/{cfg}.yaml", token)
         os.chmod(p, 0o600)
 
     say("\n[2] 旧值在哪些配置里（只看计数，不打印内容）")
@@ -190,7 +194,6 @@ def main():
     say(f"    .env: old_hits=0 new_hits=1  md5={md5(ENV_FILE)}")
 
     say("\n[4] 替换 live 配置并 POST")
-    token = nacos_login()
     changed = []
     for cfg, hits in targets:
         src, dst = f"{BEFORE}/{cfg}.yaml", f"{AFTER}/{cfg}.yaml"
@@ -218,7 +221,7 @@ def main():
     for cfg in changed:
         rb = f"{AFTER}/{cfg}.readback.yaml"
         time.sleep(2)
-        dump_config(cfg, rb)
+        dump_config(cfg, rb, token)
         os.chmod(rb, 0o600)
         same = md5(rb) == md5(f"{AFTER}/{cfg}.yaml")
         o, n = count_hits(rb, old), count_hits(rb, new)

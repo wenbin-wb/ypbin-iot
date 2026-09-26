@@ -74,8 +74,12 @@ def read_env(key):
     raise SystemExit(f"!! .env 缺 {key}")
 
 
-def dump(cfg, dest):
+def dump(cfg, dest, tok):
+    # ⚠️ 开 auth 之后（2026-09-26 起）client API 也要求身份：**必须带 accessToken**，
+    # 否则 403 ⇒ curl -f 失败 ⇒ 空响应 ⇒ JSONDecodeError（本轮实测踩到）。
+    # token 是短时 JWT（非长期口令），沿用本文件既有做法经 -H 传递。
     out = run(["curl", "-fsS", "-m", "25",
+               "-H", f"accessToken: {tok}",
                f"{NACOS_CLIENT}?dataId={cfg}.yaml&groupName={GROUP}&namespaceId="])
     body = json.loads(out.stdout)
     if body.get("code") != 0:
@@ -151,11 +155,13 @@ def main():
     say(f"old len={len(old)} sha256[:16]={fp(old)}")
     say(f"new len={len(new)} sha256[:16]={fp(new)}")
 
+    # 开 auth 后 client API 也要身份 ⇒ dump 之前必须先登录（token 是短时 JWT）
+    tok = login()
     shutil.copy2(ENV_FILE, f"{before}/deploy.env.bak-{TS}")
     os.chmod(f"{before}/deploy.env.bak-{TS}", 0o600)
     for c in CFGS:
         p = f"{before}/{c}.yaml"
-        dump(c, p)
+        dump(c, p, tok)
         os.chmod(p, 0o600)
     say(f"\n[1] 备份 {W}（旧值受控留存，700/600）")
 
@@ -183,7 +189,6 @@ def main():
     say(f"    .env old=0 new=1 md5={md5(ENV_FILE)}")
 
     say("\n[4] 替换 + POST")
-    tok = login()
     changed = []
     for c, n in targets:
         src, dst = f"{before}/{c}.yaml", f"{after}/{c}.yaml"
@@ -206,7 +211,7 @@ def main():
     for c in changed:
         rb = f"{after}/{c}.readback.yaml"
         time.sleep(2)
-        dump(c, rb)
+        dump(c, rb, tok)
         os.chmod(rb, 0o600)
         same, o, n = md5(rb) == md5(f"{after}/{c}.yaml"), hits(rb, old), hits(rb, new)
         say(f"    {c:<16} md5_match={same} old={o} new={n}")
