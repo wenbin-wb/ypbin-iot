@@ -1,0 +1,37 @@
+=== A/B 冻结窗口 · 被测 artifact 三元组（2026-09-26）===
+窗口开始: 2026-09-26T18:56:26Z
+
+[1] 镜像（两腿必须同一 imageID；凭据无关）
+    imageID=sha256:8f6c37bbb338d24985eca31a1ab4912d807eb2dd9451313dca2886605e89c89e
+repo=ypbin/ypbin-iot tag=local digest=sha256:8f6c37bbb338d24985eca31a1ab4912d807eb2dd9451313dca2886605e89c89e id=sha256:8f6c37bbb338d24985eca31a1ab4912d807eb2dd9451313dca2886605e89c89e
+
+[2] 容器（每次 --force-recreate 后重记）
+    id=0c07f1500d11b2ee217435865256ace9980435bb310d36258f3c261e556d7161 created=2026-09-26T17:17:31.823912889Z pid1=2425730
+
+[3] 有效配置（只列键名与数值，凭据不列值）
+    HostConfig.Memory=1342177280 MemorySwap=2684354560 RestartPolicy=unless-stopped
+    env键: NACOS_ADDR
+    env键: SENTINEL_ADDR
+    env键: SPRING_CLOUD_NACOS_PASSWORD
+    env键: SPRING_CLOUD_NACOS_USERNAME
+    env键: JAVA_OPTS
+    env键: PATH
+    env键: JAVA_HOME
+    env键: LANG
+    env键: LANGUAGE
+    env键: LC_ALL
+    env键: JAVA_VERSION
+    env键: TZ
+    env键: 
+    JAVA_OPTS=-XX:+UseZGC -XX:+ZGenerational -Xms128m -Xmx384m
+    （SPRING_CLOUD_NACOS_PASSWORD 等凭据按纪律只记键名，不记值）
+
+[4] 审计方式
+    docker events --filter type=container，全窗口落盘 /root/mem-round2-20260926/events.log
+    断言：窗口内除 ypbin-iot 外不得出现任何容器 create/start/stop/die/destroy/kill
+LegA 容器: id=158860be864cc056a216aced232b0aa3af05a563b3481ebe593f01138e9d61b3 created=2026-09-26T18:56:45.107596556Z
+LegA imageID=sha256:8f6c37bbb338d24985eca31a1ab4912d807eb2dd9451313dca2886605e89c89e
+LegA MALLOC_ARENA_MAX=UNSET
+LegB 容器: id=1a9c24ce1fe1e60eb6a4938aa1308a6842b9a6a0024f4e0bbfb446dfcd64f43e created=2026-09-26T19:12:13.626320141Z
+LegB imageID=sha256:8f6c37bbb338d24985eca31a1ab4912d807eb2dd9451313dca2886605e89c89e
+LegB MALLOC_ARENA_MAX=2

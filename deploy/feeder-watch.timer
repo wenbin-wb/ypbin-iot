@@ -1,0 +1,25 @@
+[Unit]
+Description=每 5 分钟触发一次「喂数停摆」判据
+Documentation=file:///opt/ypbin/ypbin-iot/deploy/access-tcp-simulator.md
+
+[Timer]
+# 用户要求的日历式粒度
+OnCalendar=*:0/5
+# 宕机/关机错过的触发在开机后补跑一次
+Persistent=true
+Unit=feeder-watch.service
+# 精确到秒的随机抖动，避免与其它定时任务同一秒撞车
+RandomizedDelaySec=15
+
+[Install]
+WantedBy=timers.target
+
+# ⚠️ 关于"每 5 分钟"的实际含义（必须知道，否则会误判"监控没在工作"）：
+#   `feeder-watch.sh` 单次运行 = L1 窗口 120s + L2 窗口 900s ≈ **17 分钟**。
+#   systemd 不会并发启动同一个 unit ⇒ 落在"上一次还在跑"里的触发会被**跳过**，
+#   因此**实际告警检查周期 ≈ 17–20 分钟**，而不是严格 5 分钟。
+#   若需要严格 5 分钟粒度，二选一：
+#     (a) 把本 timer 改成 `OnCalendar=*:0/20`（与真实耗时对齐，语义诚实）；或
+#     (b) 给脚本加一个 `--quick`（只跑 L1+L3，约 1–2 分钟）供 5 分钟 timer 用，
+#         另留一个 20 分钟的 timer 跑完整四级判据。
+#   本轮按用户指令保持默认四级判据与 `*:0/5`，并在此如实登记该差异。

@@ -1,0 +1,13 @@
+### leg=B warmup=300s sample=600s interval=60s t0=2026-09-26T19:12:24Z
+leg	ts	elapsed_s	smaps	avail_mb	cg_mem_mb	nonheap_committed_mb	direct_mb	heap_used_mb	threads	write_rows_failed	write_rows
+B	2026-09-26T19:17:24Z	360	pid=2498615 maps=412 anon_maps=225 anon_mb=338 big1mb_n=37 big1mb_mb=320 biggest_anon_mb=68 pss_mb=694 rss_mb=712	1156	727	164	17	148	99	0	127
+B	2026-09-26T19:18:25Z	420	pid=2498615 maps=489 anon_maps=225 anon_mb=339 big1mb_n=37 big1mb_mb=320 biggest_anon_mb=68 pss_mb=566 rss_mb=584	1311	577	164	17	126	99	0	157
+B	2026-09-26T19:19:26Z	480	pid=2498615 maps=497 anon_maps=225 anon_mb=339 big1mb_n=37 big1mb_mb=320 biggest_anon_mb=68 pss_mb=510 rss_mb=528	1366	521	164	17	114	99	0	187
+B	2026-09-26T19:20:26Z	540	pid=2498615 maps=497 anon_maps=225 anon_mb=339 big1mb_n=37 big1mb_mb=321 biggest_anon_mb=68 pss_mb=511 rss_mb=528	1358	521	165	17	116	99	0	217
+B	2026-09-26T19:21:27Z	600	pid=2498615 maps=497 anon_maps=225 anon_mb=339 big1mb_n=37 big1mb_mb=321 biggest_anon_mb=68 pss_mb=511 rss_mb=529	1347	522	165	17	120	99	0	248
+B	2026-09-26T19:22:27Z	660	pid=2498615 maps=497 anon_maps=225 anon_mb=339 big1mb_n=37 big1mb_mb=321 biggest_anon_mb=68 pss_mb=511 rss_mb=529	1340	522	165	17	116	99	0	278
+B	2026-09-26T19:23:28Z	720	pid=2498615 maps=498 anon_maps=225 anon_mb=340 big1mb_n=37 big1mb_mb=321 biggest_anon_mb=68 pss_mb=499 rss_mb=517	1336	508	165	17	146	99	0	308
+B	2026-09-26T19:24:28Z	780	pid=2498615 maps=498 anon_maps=225 anon_mb=340 big1mb_n=37 big1mb_mb=322 biggest_anon_mb=68 pss_mb=499 rss_mb=517	1310	508	166	17	134	99	0	338
+B	2026-09-26T19:25:29Z	840	pid=2498615 maps=498 anon_maps=225 anon_mb=340 big1mb_n=37 big1mb_mb=322 biggest_anon_mb=68 pss_mb=499 rss_mb=517	1306	508	166	17	142	99	0	368
+B	2026-09-26T19:26:29Z	900	pid=2498615 maps=497 anon_maps=225 anon_mb=340 big1mb_n=37 big1mb_mb=322 biggest_anon_mb=68 pss_mb=502 rss_mb=519	1274	515	166	17	138	99	0	399
+### leg=B DONE 2026-09-26T19:27:30Z

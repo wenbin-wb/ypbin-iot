@@ -1,0 +1,28 @@
+##### lat_ab.sh 开始 2026-09-26T19:54:23Z（对称 n=300 延迟 A/B）
+### Leg C override 已还原为 bak-before-B（无 MALLOC_ARENA_MAX），md5=f5c8fead681f7bd488ce10b7963bb0d0
+ Container ypbin-iot Recreate 
+ Container ypbin-iot Recreated 
+ Container ypbin-iot Starting 
+ Container ypbin-iot Started 
+### leg=C-noenv recreate_at=2026-09-26T19:54:35Z
+container: id=278d37f7e62aa82a67275fa6cbe9de846662e33d30d1f9095fb0b4946e6512ab created=2026-09-26T19:54:24.212005715Z image=sha256:8f6c37bbb338d24985eca31a1ab4912d807eb2dd9451313dca2886605e89c89e mem=1342177280
+arena: MALLOC_ARENA_MAX=UNSET
+javaopts: JAVA_OPTS=-XX:+UseZGC -XX:+ZGenerational -Xms128m -Xmx384m
+http://127.0.0.1:18084/actuator/health n=300 p50=16.7ms p95=21.4ms max=1189.2ms
+http://127.0.0.1:18080/ n=300 p50=5.9ms p95=8.1ms max=1347.2ms
+http://127.0.0.1:19000/ n=300 p50=1.3ms p95=1.9ms max=4.3ms
+smaps: pid=24266 maps=527 anon_maps=284 anon_mb=458 big1mb_n=57 big1mb_mb=435 biggest_anon_mb=47 pss_mb=814 rss_mb=828
+OK: 已写入 MALLOC_ARENA_MAX=2
+ Container ypbin-iot Recreate 
+ Container ypbin-iot Recreated 
+ Container ypbin-iot Starting 
+ Container ypbin-iot Started 
+### leg=D-arena2 recreate_at=2026-09-26T20:00:08Z
+container: id=545adee493e17ecbcd6b668db0a9b01fe58f04bf0998af17148ea864a088bbd5 created=2026-09-26T19:59:57.680602147Z image=sha256:8f6c37bbb338d24985eca31a1ab4912d807eb2dd9451313dca2886605e89c89e mem=1342177280
+arena: MALLOC_ARENA_MAX=2
+javaopts: JAVA_OPTS=-XX:+UseZGC -XX:+ZGenerational -Xms128m -Xmx384m
+http://127.0.0.1:18084/actuator/health n=300 p50=15.8ms p95=21.3ms max=1151.3ms
+http://127.0.0.1:18080/ n=300 p50=5.0ms p95=6.9ms max=13.0ms
+http://127.0.0.1:19000/ n=300 p50=1.4ms p95=3.7ms max=18.8ms
+smaps: pid=27889 maps=406 anon_maps=222 anon_mb=383 big1mb_n=39 big1mb_mb=366 biggest_anon_mb=63 pss_mb=741 rss_mb=755
+##### lat_ab.sh ALL DONE 2026-09-26T20:05:30Z（最终状态 = Leg D = MALLOC_ARENA_MAX=2）

@@ -1,0 +1,128 @@
+##### MALLOC_ARENA_MAX 推广 · 基线（4 个服务当前均**未设**该 env） 开始 2026-09-26T20:29:47Z
+### [BASE] ypbin-system @ 2026-09-26T20:29:47Z
+  identity: id=df4bf7d1348263cccc23b90f4ace27c3ad25b1098eb3456b1d3ae9279545d7b3 created=2026-09-26T17:18:35.212432769Z image=sha256:ea4633c14b95f6ac08dc8c40ad945b6b290848e370293af089a1ce9290aa4471 mem=1342177280
+  arena: MALLOC_ARENA_MAX=UNSET
+  smaps[1]: pid=8388 maps=599 anon_maps=281 anon_mb=511 big1mb_n=62 big1mb_mb=486 biggest_anon_mb=46 pss_mb=690 rss_mb=703
+  smaps[2]: pid=8388 maps=599 anon_maps=281 anon_mb=511 big1mb_n=62 big1mb_mb=486 biggest_anon_mb=46 pss_mb=690 rss_mb=703
+  smaps[3]: pid=8388 maps=599 anon_maps=281 anon_mb=511 big1mb_n=62 big1mb_mb=486 biggest_anon_mb=46 pss_mb=690 rss_mb=703
+  latency: http://127.0.0.1:18082/ n=200 p50=5.2ms p95=6.8ms max=11.4ms
+  avail_mb=1804
+### [BASE] ypbin-auth @ 2026-09-26T20:30:51Z
+  identity: id=50f8a45a9e9f5c36ca5a7bc4fcda022f9bed8b57783f1406624600e35a380ea5 created=2026-09-26T17:19:19.301715941Z image=sha256:16591906c547237b0af2940f08c80a2ad3eb7622fa359736030b07dc2446c835 mem=1342177280
+  arena: MALLOC_ARENA_MAX=UNSET
+  smaps[1]: pid=9124 maps=556 anon_maps=258 anon_mb=413 big1mb_n=47 big1mb_mb=392 biggest_anon_mb=36 pss_mb=591 rss_mb=604
+  smaps[2]: pid=9124 maps=556 anon_maps=258 anon_mb=413 big1mb_n=47 big1mb_mb=392 biggest_anon_mb=36 pss_mb=591 rss_mb=604
+  smaps[3]: pid=9124 maps=556 anon_maps=258 anon_mb=413 big1mb_n=47 big1mb_mb=392 biggest_anon_mb=36 pss_mb=592 rss_mb=605
+  latency: http://127.0.0.1:18081/ n=200 p50=5.2ms p95=7.5ms max=13.4ms
+  avail_mb=1751
+### [BASE] ypbin-gateway @ 2026-09-26T20:31:55Z
+  identity: id=789a453f2b7e19999482e050bb406c3bee0dbe8616ab419c57c0991e292fa410 created=2026-09-26T17:20:11.258712343Z image=sha256:bba6c74db900a385bb0da9809fe6dd8032c82d336a01e1105c5b8e3449f06800 mem=1342177280
+  arena: MALLOC_ARENA_MAX=UNSET
+  smaps[1]: pid=8041 maps=575 anon_maps=243 anon_mb=482 big1mb_n=54 big1mb_mb=459 biggest_anon_mb=32 pss_mb=616 rss_mb=630
+  smaps[2]: pid=8041 maps=571 anon_maps=243 anon_mb=482 big1mb_n=54 big1mb_mb=459 biggest_anon_mb=32 pss_mb=606 rss_mb=620
+  smaps[3]: pid=8041 maps=571 anon_maps=243 anon_mb=482 big1mb_n=54 big1mb_mb=459 biggest_anon_mb=32 pss_mb=606 rss_mb=620
+  latency: http://127.0.0.1:18080/ n=200 p50=4.4ms p95=5.4ms max=14.1ms
+  avail_mb=1838
+### [BASE] ypbin-access @ 2026-09-26T20:32:59Z
+  identity: id=cc2864ec8f6b68525b92e9efe49aededf2b1ace95971b6922a8adc365e2dc21e created=2026-09-26T17:51:55.057088291Z image=sha256:f12f8a6c0a73226d62fb11481ef52630ff31a2cc7dc9bdf560b1ad44d0c3b9fb mem=1342177280
+  arena: MALLOC_ARENA_MAX=UNSET
+  smaps[1]: pid=10371 maps=617 anon_maps=282 anon_mb=493 big1mb_n=62 big1mb_mb=467 biggest_anon_mb=43 pss_mb=635 rss_mb=648
+  smaps[2]: pid=10371 maps=617 anon_maps=282 anon_mb=492 big1mb_n=62 big1mb_mb=467 biggest_anon_mb=43 pss_mb=635 rss_mb=648
+  smaps[3]: pid=10371 maps=617 anon_maps=282 anon_mb=492 big1mb_n=62 big1mb_mb=467 biggest_anon_mb=43 pss_mb=635 rss_mb=648
+  latency: http://127.0.0.1:18086/ n=200 p50=5.3ms p95=7.1ms max=17.5ms
+  avail_mb=1755
+##### 基线完成 2026-09-26T20:34:04Z
+### [PAIR1] 目标服务: ypbin-system ypbin-auth  端口: 18082 18081  开始 2026-09-26T20:40:20Z
+OK   ypbin-system: 已加入 MALLOC_ARENA_MAX=2
+OK   ypbin-auth: 已加入 MALLOC_ARENA_MAX=2
+compose 合并断言: PASS
+ Container ypbin-system Recreate 
+ Container ypbin-system Recreated 
+ Container ypbin-system Starting 
+ Container ypbin-system Started 
+  运行期断言 OK：ypbin-system MALLOC_ARENA_MAX=2
+ Container ypbin-auth Recreate 
+ Container ypbin-auth Recreated 
+ Container ypbin-auth Starting 
+ Container ypbin-auth Started 
+  运行期断言 OK：ypbin-auth MALLOC_ARENA_MAX=2
+### [PAIR1-T+300s] ypbin-system @ 2026-09-26T20:45:43Z
+  identity: id=4fd8ba7db734acf2890f9ae4fe6eedb7ecb2731779c40d0d09a1771a2b4e84a5 created=2026-09-26T20:40:20.917664669Z image=sha256:ea4633c14b95f6ac08dc8c40ad945b6b290848e370293af089a1ce9290aa4471 mem=1342177280
+  arena: MALLOC_ARENA_MAX=2
+  smaps[1]: pid=52091 maps=414 anon_maps=222 anon_mb=319 big1mb_n=35 big1mb_mb=302 biggest_anon_mb=60 pss_mb=670 rss_mb=688
+  smaps[2]: pid=52091 maps=451 anon_maps=222 anon_mb=319 big1mb_n=35 big1mb_mb=302 biggest_anon_mb=60 pss_mb=623 rss_mb=640
+  smaps[3]: pid=52091 maps=498 anon_maps=222 anon_mb=319 big1mb_n=35 big1mb_mb=302 biggest_anon_mb=60 pss_mb=474 rss_mb=492
+  latency: http://127.0.0.1:18082/ n=200 p50=5.7ms p95=7.8ms max=34.8ms
+  avail_mb=1853
+### [PAIR1-T+300s] ypbin-auth @ 2026-09-26T20:46:47Z
+  identity: id=c4f87fdad6d367ebb0328c10c5e585a6e7eb1498717590add9fe362d056ce1a6 created=2026-09-26T20:40:32.224650307Z image=sha256:16591906c547237b0af2940f08c80a2ad3eb7622fa359736030b07dc2446c835 mem=1342177280
+  arena: MALLOC_ARENA_MAX=2
+  smaps[1]: pid=52449 maps=378 anon_maps=196 anon_mb=301 big1mb_n=27 big1mb_mb=284 biggest_anon_mb=59 pss_mb=623 rss_mb=641
+  smaps[2]: pid=52449 maps=378 anon_maps=196 anon_mb=301 big1mb_n=27 big1mb_mb=284 biggest_anon_mb=59 pss_mb=623 rss_mb=641
+  smaps[3]: pid=52449 maps=378 anon_maps=196 anon_mb=301 big1mb_n=27 big1mb_mb=284 biggest_anon_mb=59 pss_mb=623 rss_mb=641
+  latency: http://127.0.0.1:18081/ n=200 p50=5.4ms p95=6.8ms max=342.4ms
+  avail_mb=1874
+### [PAIR1-T+600s] ypbin-system @ 2026-09-26T20:51:52Z
+  identity: id=4fd8ba7db734acf2890f9ae4fe6eedb7ecb2731779c40d0d09a1771a2b4e84a5 created=2026-09-26T20:40:20.917664669Z image=sha256:ea4633c14b95f6ac08dc8c40ad945b6b290848e370293af089a1ce9290aa4471 mem=1342177280
+  arena: MALLOC_ARENA_MAX=2
+  smaps[1]: pid=52091 maps=495 anon_maps=222 anon_mb=320 big1mb_n=35 big1mb_mb=302 biggest_anon_mb=60 pss_mb=466 rss_mb=484
+  smaps[2]: pid=52091 maps=495 anon_maps=222 anon_mb=320 big1mb_n=35 big1mb_mb=302 biggest_anon_mb=60 pss_mb=466 rss_mb=484
+  smaps[3]: pid=52091 maps=495 anon_maps=222 anon_mb=320 big1mb_n=35 big1mb_mb=302 biggest_anon_mb=60 pss_mb=466 rss_mb=484
+  latency: http://127.0.0.1:18082/ n=200 p50=4.8ms p95=6.1ms max=12.4ms
+  avail_mb=2027
+### [PAIR1-T+600s] ypbin-auth @ 2026-09-26T20:52:56Z
+  identity: id=c4f87fdad6d367ebb0328c10c5e585a6e7eb1498717590add9fe362d056ce1a6 created=2026-09-26T20:40:32.224650307Z image=sha256:16591906c547237b0af2940f08c80a2ad3eb7622fa359736030b07dc2446c835 mem=1342177280
+  arena: MALLOC_ARENA_MAX=2
+  smaps[1]: pid=52449 maps=450 anon_maps=200 anon_mb=303 big1mb_n=28 big1mb_mb=286 biggest_anon_mb=59 pss_mb=447 rss_mb=465
+  smaps[2]: pid=52449 maps=445 anon_maps=200 anon_mb=303 big1mb_n=28 big1mb_mb=286 biggest_anon_mb=59 pss_mb=420 rss_mb=438
+  smaps[3]: pid=52449 maps=446 anon_maps=200 anon_mb=303 big1mb_n=28 big1mb_mb=286 biggest_anon_mb=59 pss_mb=421 rss_mb=439
+  latency: http://127.0.0.1:18081/ n=200 p50=5.0ms p95=7.8ms max=17.4ms
+  avail_mb=2031
+### [PAIR1] 完成 2026-09-26T20:54:01Z
+### [PAIR2] 目标服务: ypbin-gateway ypbin-access  端口: 18080 18086  开始 2026-09-26T20:57:48Z
+OK   ypbin-gateway: 已加入 MALLOC_ARENA_MAX=2
+OK   ypbin-access: 已加入 MALLOC_ARENA_MAX=2
+compose 合并断言: PASS
+ Container ypbin-gateway Recreate 
+ Container ypbin-gateway Recreated 
+ Container ypbin-gateway Starting 
+ Container ypbin-gateway Started 
+  运行期断言 OK：ypbin-gateway MALLOC_ARENA_MAX=2
+ Container ypbin-access Recreate 
+ Container ypbin-access Recreated 
+ Container ypbin-access Starting 
+ Container ypbin-access Started 
+  运行期断言 OK：ypbin-access MALLOC_ARENA_MAX=2
+### [PAIR2-T+300s] ypbin-gateway @ 2026-09-26T21:03:11Z
+  identity: id=6f23cd1a9a5e514426099aecc1332a0c19f91c4517a14694c77c72f568f7a9e0 created=2026-09-26T20:57:48.682997765Z image=sha256:bba6c74db900a385bb0da9809fe6dd8032c82d336a01e1105c5b8e3449f06800 mem=1342177280
+  arena: MALLOC_ARENA_MAX=2
+  smaps[1]: pid=61831 maps=388 anon_maps=187 anon_mb=291 big1mb_n=22 big1mb_mb=276 biggest_anon_mb=79 pss_mb=602 rss_mb=620
+  smaps[2]: pid=61831 maps=436 anon_maps=187 anon_mb=291 big1mb_n=22 big1mb_mb=276 biggest_anon_mb=79 pss_mb=468 rss_mb=486
+  smaps[3]: pid=61831 maps=424 anon_maps=187 anon_mb=292 big1mb_n=22 big1mb_mb=276 biggest_anon_mb=79 pss_mb=422 rss_mb=440
+  latency: http://127.0.0.1:18080/ n=200 p50=6.1ms p95=8.4ms max=989.9ms
+  avail_mb=2306
+### [PAIR2-T+300s] ypbin-access @ 2026-09-26T21:04:17Z
+  identity: id=08f1a69a893cde9abbf528ef298021bb51fd63685ed6515647a5efa82c340d10 created=2026-09-26T20:58:00.056633221Z image=sha256:f12f8a6c0a73226d62fb11481ef52630ff31a2cc7dc9bdf560b1ad44d0c3b9fb mem=1342177280
+  arena: MALLOC_ARENA_MAX=2
+  smaps[1]: pid=62190 maps=450 anon_maps=208 anon_mb=333 big1mb_n=27 big1mb_mb=314 biggest_anon_mb=94 pss_mb=565 rss_mb=584
+  smaps[2]: pid=62190 maps=462 anon_maps=208 anon_mb=333 big1mb_n=27 big1mb_mb=314 biggest_anon_mb=94 pss_mb=531 rss_mb=550
+  smaps[3]: pid=62190 maps=462 anon_maps=208 anon_mb=333 big1mb_n=27 big1mb_mb=314 biggest_anon_mb=94 pss_mb=531 rss_mb=550
+  latency: http://127.0.0.1:18086/ n=200 p50=5.5ms p95=7.0ms max=384.5ms
+  avail_mb=2291
+### [PAIR2-T+600s] ypbin-gateway @ 2026-09-26T21:09:21Z
+  identity: id=6f23cd1a9a5e514426099aecc1332a0c19f91c4517a14694c77c72f568f7a9e0 created=2026-09-26T20:57:48.682997765Z image=sha256:bba6c74db900a385bb0da9809fe6dd8032c82d336a01e1105c5b8e3449f06800 mem=1342177280
+  arena: MALLOC_ARENA_MAX=2
+  smaps[1]: pid=61831 maps=431 anon_maps=194 anon_mb=303 big1mb_n=24 big1mb_mb=287 biggest_anon_mb=79 pss_mb=436 rss_mb=454
+  smaps[2]: pid=61831 maps=431 anon_maps=194 anon_mb=303 big1mb_n=24 big1mb_mb=287 biggest_anon_mb=79 pss_mb=436 rss_mb=454
+  smaps[3]: pid=61831 maps=431 anon_maps=194 anon_mb=303 big1mb_n=24 big1mb_mb=287 biggest_anon_mb=79 pss_mb=436 rss_mb=454
+  latency: http://127.0.0.1:18080/ n=200 p50=5.4ms p95=7.4ms max=14.9ms
+  avail_mb=2325
+### [PAIR2-T+600s] ypbin-access @ 2026-09-26T21:10:26Z
+  identity: id=08f1a69a893cde9abbf528ef298021bb51fd63685ed6515647a5efa82c340d10 created=2026-09-26T20:58:00.056633221Z image=sha256:f12f8a6c0a73226d62fb11481ef52630ff31a2cc7dc9bdf560b1ad44d0c3b9fb mem=1342177280
+  arena: MALLOC_ARENA_MAX=2
+  smaps[1]: pid=62190 maps=466 anon_maps=208 anon_mb=337 big1mb_n=29 big1mb_mb=319 biggest_anon_mb=94 pss_mb=537 rss_mb=555
+  smaps[2]: pid=62190 maps=466 anon_maps=208 anon_mb=337 big1mb_n=29 big1mb_mb=319 biggest_anon_mb=94 pss_mb=537 rss_mb=555
+  smaps[3]: pid=62190 maps=466 anon_maps=208 anon_mb=337 big1mb_n=29 big1mb_mb=319 biggest_anon_mb=94 pss_mb=537 rss_mb=555
+  latency: http://127.0.0.1:18086/ n=200 p50=4.7ms p95=6.2ms max=12.4ms
+  avail_mb=2378
+### [PAIR2] 完成 2026-09-26T21:11:30Z

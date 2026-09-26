@@ -1,0 +1,50 @@
+[Unit]
+Description=zram compressed swap (zram device + vm.swappiness, paired persistence)
+Documentation=file:///opt/ypbin/ypbin-iot/deploy/zram-swap-systemd.md
+# ── 顺序与依赖 ────────────────────────────────────────────────────────────────
+#   1) systemd-modules-load.service 先按 /etc/modules-load.d/zram.conf 加载 zram 模块；
+#   2) 本单元再建 zram 设备并 swapon；
+#   3) 最后在脚本内部 `sysctl -w vm.swappiness`（**先 zram 再 swappiness**，成对）。
+# Before=swap.target：保证依赖 swap 的单元（含 docker 容器）看到 zram 已就绪。
+# DefaultDependencies=no + After=systemd-modules-load.service + Before=swap.target
+#   与发行版 systemd-zram-generator 的官方单元同构（见 zram-swap-systemd.md）。
+# ⚠️ 刻意**不加** `Conflicts=/Before=shutdown.target`：
+#   关机/重启时**不需要**（也不应该）把 zram 里的页解压换回物理内存 —— 内核在重启时
+#   会直接丢弃 zram 设备。不把本单元纳入 shutdown 事务 ⇒ 关机路径更短、且不会因为
+#   「内存贴水位 → swapoff 安全检查拒绝」而让关机被标记为失败。
+#   （人工回滚用 `systemctl disable --now`，那是一次普通 stop，不受此影响。）
+After=systemd-modules-load.service local-fs.target
+Before=swap.target
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+
+# 参数 = 2026-09-26 实测选定的值，勿随意改动：
+#   ZRAM_SIZE=2G        内核文档建议不超过 RAM 的 2×（本机 7939MB）；2:1 压缩比下 2G 保守
+#   ZRAM_ALGO=lz4       最低解压延迟（备选 zstd 可用，本轮不引入额外复杂度）
+#   ZRAM_MEM_LIMIT=1G   关键安全阀：限制 zram 存放压缩数据最多占用的物理内存
+#   ZRAM_PRIO=100       优先于任何磁盘 swap
+#   VM_SWAPPINESS=150   内核文档：内存级 swap 可用 >100 的值（默认 60 等于把 zram 当慢盘，几乎不用）
+Environment=ZRAM_SIZE=2G
+Environment=ZRAM_ALGO=lz4
+Environment=ZRAM_MEM_LIMIT=1G
+Environment=ZRAM_PRIO=100
+Environment=VM_SWAPPINESS=150
+
+# 成对持久化的**唯一权威入口**：脚本内部顺序 = 建 zram → mkswap/swapon → 设 swappiness，
+# 任一步失败即非 0 退出 ⇒ 本单元判失败（不会出现"只有 zram 没有 swappiness"的半套状态）。
+ExecStart=/usr/local/sbin/zram-swap-up.sh
+
+# 事后断言（成对性的兜底）：zram 已在用作 swap、算法=lz4、mem_limit=1G、优先级=100、
+# swappiness=150；任一项不符即非 0 退出 ⇒ 单元失败，绝不静默通过。
+ExecStartPost=/usr/local/sbin/zram-swap-verify.sh
+
+# 停止/回滚 = 带内存安全检查的 swapoff（`available ≥ orig_data_size + 256MiB`，否则拒绝并退出码 3）。
+# 供 `systemctl stop/disable --now zram-swap.service` 与人工回滚使用。
+ExecStop=/usr/local/sbin/zram-swap-down.sh
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

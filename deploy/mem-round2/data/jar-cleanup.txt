@@ -1,0 +1,23 @@
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/vda1        29G   25G  4.1G  86% /
+Filesystem     1K-blocks     Used Available Use% Mounted on
+/dev/vda1       30297152 25991300   4289468  86% /
+TYPE            TOTAL     ACTIVE    SIZE      RECLAIMABLE
+Images          30        11        12.16GB   4.896GB (40%)
+Containers      12        11        87.66MB   49.15kB (0%)
+Local Volumes   7         7         527.2MB   0B (0%)
+Build Cache     7         0         114.8MB   8.285kB
+docker images 行数: 34
+removed '/root/ypbin-iot-jar-rollback-20260925-135055.jar'
+removed '/root/ypbin-iot-jar-rollback-r20-20260925-162949.jar'
+removed '/root/ypbin-iot-jar-rollback-r20-final-20260925-173650.jar'
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/vda1        29G   25G  4.5G  85% /
+Filesystem     1K-blocks     Used Available Use% Mounted on
+/dev/vda1       30297152 25588120   4692648  85% /
+TYPE            TOTAL     ACTIVE    SIZE      RECLAIMABLE
+Images          30        11        12.16GB   4.896GB (40%)
+Containers      12        11        87.7MB    49.15kB (0%)
+Local Volumes   7         7         527.2MB   0B (0%)
+Build Cache     7         0         114.8MB   8.285kB
+docker images 行数: 34
