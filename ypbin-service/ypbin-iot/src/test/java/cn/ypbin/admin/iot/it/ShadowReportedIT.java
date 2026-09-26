@@ -137,7 +137,8 @@ class ShadowReportedIT {
             sessionTemplate.getMapper(OutageEventMapper.class),
             sessionTemplate.getMapper(MaintenanceWindowMapper.class),
             sessionTemplate.getMapper(IotDeviceMapper.class), new AvailabilityProperties(),
-            () -> Optional.of(TENANT), values -> { }, points -> { }, new TimeSeriesProperties(), writer);
+            () -> Optional.of(TENANT), values -> { }, points -> { }, new TimeSeriesProperties(), writer,
+            new SimpleMeterRegistry());
         cleanup();
         seedDevices();
     }

@@ -47,6 +47,7 @@ import com.baomidou.mybatisplus.extension.plugins.inner.TenantLineInnerIntercept
 import com.baomidou.mybatisplus.spring.MybatisSqlSessionFactoryBean;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.math.BigDecimal;
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -152,7 +153,7 @@ class OutageAvailabilityIT {
         service = new AvailabilityServiceImpl(livenessMapper, outageMapper, maintenanceWindowMapper,
             deviceMapper, new AvailabilityProperties(), () -> java.util.Optional.of(TENANT),
             RECORDED_LATEST::addAll, RECORDED_SERIES::addAll, new TimeSeriesProperties(),
-            RECORDED_SHADOW::addAll);
+            RECORDED_SHADOW::addAll, new SimpleMeterRegistry());
         cleanup();
         seedDevices();
     }
@@ -295,7 +296,7 @@ class OutageAvailabilityIT {
         AvailabilityServiceImpl tightScan = new AvailabilityServiceImpl(livenessMapper, outageMapper,
             maintenanceWindowMapper, deviceMapper, oneByOne, () -> java.util.Optional.of(TENANT),
             RECORDED_LATEST::addAll, RECORDED_SERIES::addAll, new TimeSeriesProperties(),
-            RECORDED_SHADOW::addAll);
+            RECORDED_SHADOW::addAll, new SimpleMeterRegistry());
         // 两个「设备不存在」的垃圾活性行（id 更小 ⇒ 优先被候选查询选中）+ 一个真断档设备
         insertOrphanLiveness(1L, 999_998L, dbNow.minusHours(1));
         insertOrphanLiveness(2L, 999_999L, dbNow.minusHours(1));

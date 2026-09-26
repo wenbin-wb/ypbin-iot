@@ -20,6 +20,7 @@ import cn.ypbin.admin.iot.availability.OutageReason;
 import cn.ypbin.admin.iot.availability.ReadingIngestReq;
 import cn.ypbin.admin.iot.availability.ReadingObservationDto;
 import cn.ypbin.admin.iot.entity.DeviceLiveness;
+import cn.ypbin.admin.iot.timeseries.PropertyIdRules;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesPoint;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesProperties;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesWriter;
@@ -43,6 +44,8 @@ import cn.ypbin.starter.tenant.core.TenantContext;
 import cn.ypbin.starter.tenant.core.TenantProvider;
 import com.baomidou.mybatisplus.core.toolkit.IdWorker;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -79,6 +82,9 @@ public class AvailabilityServiceImpl implements AvailabilityService {
 
     private static final Logger log = LoggerFactory.getLogger(AvailabilityServiceImpl.class);
 
+    /** 入站点位标识非法被丢弃的条数（§6.5 / P0-6c 的可观测出口）。 */
+    public static final String METRIC_INVALID_PROPERTY_ID = "iot.ingest.propertyid.rejected";
+
     private final DeviceLivenessMapper livenessMapper;
     private final OutageEventMapper outageMapper;
 
@@ -107,12 +113,20 @@ public class AvailabilityServiceImpl implements AvailabilityService {
      */
     private final ShadowReportedWriter shadowReportedWriter;
 
+    /**
+     * 入站点位标识非法的丢弃计数（§6.5 / P0-6c）。
+     *
+     * <p>点位标识是**外部输入**，且会被拼进 IoTDB 查询字面量与 Redis field 名 ⇒ 必须在入站就挡。
+     * 丢弃必须可观测：只 warn 日志会在压测/攻击下被刷掉，指标才能进告警。</p>
+     */
+    private final Counter invalidPropertyIdCounter;
+
     public AvailabilityServiceImpl(DeviceLivenessMapper livenessMapper, OutageEventMapper outageMapper,
                                    MaintenanceWindowMapper maintenanceWindowMapper,
                                    IotDeviceMapper deviceMapper, AvailabilityProperties properties,
                                    TenantProvider tenantProvider, LatestValueWriter latestValueWriter,
                                    TimeSeriesWriter timeSeriesWriter, TimeSeriesProperties timeSeriesProperties,
-                                   ShadowReportedWriter shadowReportedWriter) {
+                                   ShadowReportedWriter shadowReportedWriter, MeterRegistry meterRegistry) {
         this.livenessMapper = livenessMapper;
         this.outageMapper = outageMapper;
         this.maintenanceWindowMapper = maintenanceWindowMapper;
@@ -123,12 +137,15 @@ public class AvailabilityServiceImpl implements AvailabilityService {
         this.timeSeriesWriter = timeSeriesWriter;
         this.timeSeriesProperties = timeSeriesProperties;
         this.shadowReportedWriter = shadowReportedWriter;
+        this.invalidPropertyIdCounter = Counter.builder(METRIC_INVALID_PROPERTY_ID)
+            .description("入站读数因点位标识不合法被丢弃的条数").register(meterRegistry);
     }
 
     @Override
     @Transactional(rollbackFor = Exception.class)
     public int ingest(ReadingIngestReq req) {
-        List<ReadingObservationDto> items = req.getItems();
+        // 点位标识校验**必须早于任何库访问**：非法输入不得进入解析租户/写活性/写派生数据任何一步
+        List<ReadingObservationDto> items = dropInvalidPropertyIds(req.getItems());
         if (items.isEmpty()) {
             return 0;
         }
@@ -158,6 +175,50 @@ public class AvailabilityServiceImpl implements AvailabilityService {
             ? collectSeriesPoints(items, tenantByDevice) : List.of();
         writeDerivedAfterCommit(latestValues, seriesPoints, shadowUpdates);
         return processed;
+    }
+
+    /**
+     * 剔除点位标识不合法的读数（设计 §6.5 的 {@code propertyId} 白名单落点，P0-6c）。
+     *
+     * <p><b>为什么逐条丢弃而不是整批拒绝</b>：本方法服务的是 HTTP 内部通道，一批最多 500 条、可能跨多个
+     * 设备与点位；整批拒绝会把同批的**合法数据一起丢掉**，放大一次脏输入的影响面。整批拒绝（原始 4xx）
+     * 留给将来「一条 MQTT 消息 = 一个设备的一小批」的薄适配端点（设计 §6.5 方案 A）。</p>
+     *
+     * <p><b>为什么在服务层而不是只在控制器</b>：新 MQTT 端点会复用同一个 {@code ingest}（设计 §6.5：
+     * 「复用服务方法，不复用它的 HTTP 信封语义」）——校验必须与落库在同一条必经路径上，否则新端点一接
+     * 就绕过。</p>
+     *
+     * <p><b>为什么必须早于任何库访问</b>：非法输入不得进入「解析租户 → 写活性 → 写派生数据」任何一步；
+     * 本方法只做内存里的形态判断，不查库、不建连接（有单测用 mock 断言零交互）。</p>
+     *
+     * <p><b>边界（如实说明）</b>：{@code propertyId} 为 {@code null} 或空白仍按既有语义处理——
+     * 「只做断档判定的采集器」不带点位，是合法上报形态（见 {@link ReadingObservationDto#getPropertyId()}），
+     * 因此**不拒绝**、照旧只参与可用率。本方法只拒绝「带了点位但形态不合法」的条目。</p>
+     *
+     * @param items 原始上报项（可能为空、可能含 null 元素）
+     * @return 通过校验的上报项（保持原顺序）
+     */
+    private List<ReadingObservationDto> dropInvalidPropertyIds(List<ReadingObservationDto> items) {
+        List<ReadingObservationDto> accepted = new ArrayList<>(items.size());
+        for (ReadingObservationDto item : items) {
+            if (item == null) {
+                // null 元素本来就由下游各处跳过；这里原样放行，不把「上游 bug」伪装成「点位非法」
+                accepted.add(null);
+                continue;
+            }
+            String propertyId = item.getPropertyId();
+            if (propertyId == null || propertyId.isBlank() || PropertyIdRules.isValid(propertyId)) {
+                accepted.add(item);
+                continue;
+            }
+            invalidPropertyIdCounter.increment();
+            // 非法值本身是不可信输入（换行/控制字符可伪造日志行）⇒ 必须脱敏后再记，且只记长度辅助定位
+            log.warn("[iot] 读数上报的点位标识不合法，已丢弃该条（同批其它读数不受影响）："
+                    + "deviceId={} 长度={} 点位={}",
+                LogSanitizer.sanitize(item.getDeviceId()), propertyId.length(),
+                LogSanitizer.sanitize(propertyId));
+        }
+        return accepted;
     }
 
     /**
