@@ -33,9 +33,13 @@ def sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
-def dump_live() -> str:
+def dump_live(token: str) -> str:
+    # ⚠️ 开 auth 之后（2026-09-26 起）client API 也要求身份：**必须带 accessToken**，
+    # 否则 403 ⇒ curl -f 失败 ⇒ 空响应 ⇒ JSONDecodeError（本轮实测踩到）。
+    # token 是短时 JWT（非长期口令），沿用本文件既有做法经 -H 传递。
     url = f"{CLIENT}?dataId={DATA_ID}&groupName={GROUP}&namespaceId="
-    out = subprocess.run(["curl", "-fsS", "-m", "15", url], capture_output=True, check=True)
+    out = subprocess.run(["curl", "-fsS", "-m", "15", "-H", f"accessToken: {token}", url],
+                         capture_output=True, check=True)
     body = json.loads(out.stdout.decode("utf-8"))
     assert body.get("code") == 0, f"nacos read failed: {body.get('message')}"
     return body["data"]["content"]
@@ -105,7 +109,8 @@ def main() -> int:
 
     ts = time.strftime("%Y%m%d-%H%M%S")
     print(f"=== 1) dump live {DATA_ID} (TS={ts}) ===")
-    live = dump_live()
+    token = login()
+    live = dump_live(token)
     live_path = f"/tmp/access-live-{ts}.yaml"
     open(live_path, "w", encoding="utf-8").write(live)
     live_sha = sha(live)
@@ -189,11 +194,10 @@ echo "注意：access 需重启（或等 Nacos 推送）才会重新加载；未
         return 0
 
     print("=== 5) POST 到 Nacos ===")
-    tk = login()
-    publish_via_stdin(tk, new, new_path)
+    publish_via_stdin(token, new, new_path)
 
     print("=== 6) 回读校验 ===")
-    back = dump_live()
+    back = dump_live(token)
     back_sha = sha(back)
     print(f"    回读 sha256[:16]={back_sha}")
     b_lines = back.split("\n")
