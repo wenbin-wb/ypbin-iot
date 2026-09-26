@@ -660,6 +660,30 @@ value=紧凑 JSON `{v,q,ts}`），写入时机是**上报事务提交后**（Red
 **为什么先落最新值**：它是「设备详情/影子 reported」的直接数据源，也是 EMQX 入站后最容易被复用的写入口；
 时序库要等 IoTDB 实例与 CI 容器能力，先做它会让整片卡住。
 
+**补充（2026-09-26，第二轮：入站 `propertyId` 校验 P0-6c + 最新值两条小加固）**——独立复核（真 MySQL /
+真 Redis + 变异）判 PASS，其提出的登记缺口补齐在此：
+
+1. **P0-6c 两半齐全**：格式/长度（`PropertyIdRules`：字符集白名单 + 长度 1~128）**与成员校验**
+   （`PointMappingIndex`：读数点位必须是该设备已配置的映射点位）都在 `AvailabilityServiceImpl.ingest`
+   的**动库前**位置；两类原因分开计数（`iot.ingest.propertyid.rejected` / `…unmapped`），
+   被丢弃的条目是**整条**（连活性也不刷新）。
+   **仍未做（不要夸大）**：不做「该属性是否属于该产品/服务」的二次校验；`enabled=0`（停采）与
+   `ref_type=command` 的映射也算已映射；**孤儿映射**（TSL 重导入会物理删 `iot_property`
+   —— `IotThingModelServiceImpl#replaceTsl` —— 而 `iot_point_mapping` 行仍在）仍会让该主键字符串形态通过。
+2. **⚠️ 坐标形态未统一（读侧有真实后果，待决策）**：读数里的 `propertyId` 在两条路径上**不是同一种形态**——
+   `access` 采集链路上报的是**属性主键字符串**（`DeviceSpecServiceImpl#toPoint` 把
+   `AccessPointMappingDto.propertyId` 设为 `String.valueOf(mapping.getPropertyId())`），而 EMQX 设计 §6.1 的
+   `up/property` 契约、物模型/前端与**读侧**（`LatestValueQueryService`、`docs/DEMO-DATA.md` 的演示数据）
+   用的是**属性标识**（`iot_property.identifier`）。⇒ 同一个 `iot:latest:{t}:{d}` 会出现两种 field，
+   按标识查询**拿不到 access 来源的数据**。因此成员校验目前把两种形态都算「已映射」（只放一种会误杀
+   另一条活路径）。**坐标形态统一（改 access 发标识，或读侧两种都认）属独立决策**，统一后成员集合应收缩为唯一形态。
+3. **最新值超前护栏的作用域（只护最新值）**：`ts > 服务端 now + 5min` 时**不写最新值**并计数
+   `iot.ingest.latest.future_rejected`；但**活性 `last_good_at`、断档判定与 IoTDB 时序写入仍按原始 ts 处理**
+   （`aggregate` 不钳制 ts）⇒ 超前 ts 仍会让设备显示「刚刚有数据」。两条链路口径差异在此登记。
+4. **「ts 落后」没有护栏**：设备时钟回拨/停滞时，该点位会**长期停在旧值**、不自愈，只能靠
+   `iot.ingest.latest.regressed` 观测；要处置需另加「落后超阈值」策略。
+5. **可观测性缺口（登记，本轮不做）**：生产未暴露 `/actuator/metrics`，上述新指标在生产只能靠日志观测。
+
 ### 四点十八、反哺 starter 的需求清单（2026-09-24，交接材料）
 
 本仓在实现 M-2 / **生产部署**过程中积累的**必须由 starter 层解决**的需求，已整理成自包含的交接文档

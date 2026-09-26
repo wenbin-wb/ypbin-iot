@@ -204,9 +204,14 @@ public class AvailabilityServiceImpl implements AvailabilityService {
     /**
      * 剔除点位标识不合法的读数（P0-6c 的**格式/长度**子项，见设计 §6.5 的 {@code propertyId} 白名单说明）。
      *
-     * <p><b>范围（不要夸大，独立复核 2026-09-26 指出）</b>：本条只做「字符集白名单 + 长度上限 1~128」，
-     * 即**格式**校验；P0-6c 验收里「未映射（物模型属性 × 该设备点位映射）的 propertyId 被拒且计数」
-     * 那一半**尚未实现**（格式合法但未映射的点位仍会通过）。⇒ **不得对外声称 P0-6c 已闭环**。</p>
+     * <p><b>范围（P0-6c 的两半都在，但仍有明确未做项）</b>：本条只做「字符集白名单 + 长度上限 1~128」，
+     * 即**格式**校验；「未映射（物模型属性 × 该设备点位映射）被拒且计数」那一半由紧随其后的
+     * {@link #dropUnmappedPropertyIds} 承担（2026-09-26 落地）。<b>仍未做</b>（不要夸大）：
+     * ① 不做「该属性是否属于该产品/服务」的二次校验（映射行本身就是那个声明）；
+     * ② 坐标形态未统一（见 {@link PointMappingIndex} 的说明）；
+     * ③ 孤儿映射（{@code iot_property} 行被物理删除、{@code iot_point_mapping} 行仍在）仍算「已映射」；
+     * ④ {@code enabled=0}（停采）与 {@code ref_type=command} 的映射也会让属性读数通过。
+     * ②③④ 均已登记在 {@code docs/IOT-ROADMAP.md} 四点十七的补充段。</p>
      *
      * <p><b>落点与设计原文的差异（已由用户决策，如实登记）</b>：设计 §6.5 建议把校验放在**入站适配层**，
      * 并写明「不改 {@code AvailabilityService.ingest} 的语义、HTTP 通道同防护属独立决策（登记为 P2-7）」。
@@ -224,6 +229,13 @@ public class AvailabilityServiceImpl implements AvailabilityService {
      *
      * <p><b>为什么必须早于任何库访问</b>：非法输入不得进入「解析租户 → 写活性 → 写派生数据」任何一步；
      * 本方法只做内存里的形态判断，不查库、不建连接（有单测用 mock 断言零交互）。</p>
+     *
+     * <p><b>与租户解析的先后（如实说明，勿编因果）</b>：成员校验需要「已解析出租户的设备集合」当
+     * {@code knownDevices}（设备不存在时不在这里判「未映射」，避免两种原因互相污染），所以
+     * {@code resolveTenants} 必须排在本方法之前。租户解析的入参用 {@link #deviceIds} （**全部**读数涉及的
+     * 设备，含只报时刻+质量的）——与本轮之前的 {@code batches.keySet()} 语义等价（{@code aggregate} 本来就
+     * 覆盖这些设备）；本轮开发中被写成「只取带点位的设备」并在单测上导致纯时刻+质量批次被误判为
+     * 「设备不存在」，已修正。</p>
      *
      * <p><b>边界（如实说明）</b>：{@code propertyId} 为 {@code null} 或空白仍按既有语义处理——
      * 「只做断档判定的采集器」不带点位，是合法上报形态（见 {@link ReadingObservationDto#getPropertyId()}），

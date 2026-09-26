@@ -47,7 +47,14 @@ import org.springframework.stereotype.Component;
  * </ul>
  * <p>只放其中一种都会**误杀另一条活路径**（尤其只放标识会让 access 上报的读数全被判「未映射」），
  * 故两种都放。两种形态都来自**该设备自己的映射行**，因此「是不是这台设备的点位」这个判定不受影响。
- * 待平台统一坐标形态后，这里应收缩为那唯一一种（已在 ROADMAP/PR 登记）。</p>
+ * 待平台统一坐标形态后，这里应收缩为那唯一一种——登记在 {@code docs/IOT-ROADMAP.md} 四点十七的
+ * 补充段（2026-09-26）；读侧后果也写在那里：同一 key 会出现两种 field，按标识查询拿不到 access 来源的数据。</p>
+ *
+ * <p><b>已知放行面（如实登记，均为「宁松不误杀数据」的选择）</b>：① {@code enabled=0}（停采）与
+ * {@code ref_type=command} 的映射也算「已映射」；② <b>孤儿映射</b>——{@code iot_property} 行被物理删除
+ * （TSL 重导入会物理删属性，见 {@code IotThingModelServiceImpl#replaceTsl}）而 {@code iot_point_mapping}
+ * 行仍在时，本索引仍会把该主键字符串算作已映射（属性标识那一形态自然消失）。要收紧需另开一轮
+ * （例如把「属性行缺失的映射数」做成指标，或把属性存在性纳入校验）。</p>
  *
  * <p><b>租户</b>：{@code iot_point_mapping} / {@code iot_property} 都是租户表，而入站上报路径**没有租户
  * 身份**（只有 {@code X-Internal-Token}）⇒ 查询必须包在 {@link TenantContext#executeIgnore} 里，
