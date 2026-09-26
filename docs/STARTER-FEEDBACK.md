@@ -712,3 +712,57 @@ $ ssh -i ~/.ssh/id_ed25519_iot_test -p 22 root@113.142.217.58 \
 **UP-1（中）admin 仓的 Sync Whitelist 不覆盖 `.github/**`**：`ypbin-iot`（admin 的 fork）想加一条 CI 门禁时，
 **不能**改继承来的 `.github/workflows/ci.yml`（白名单只有 7 个文件），只能**新增**一个 workflow 文件。
 若上游希望下游能统一加固 CI，建议把 `.github/workflows/**`（或至少「新增文件」）纳入白名单语义并写进 `SYNC.md`。
+
+---
+
+## UP-2（高｜可用性）`ypbin-iot-starter`：建链超时硬编码 10s 且无可配默认，`IotLifecycle.bind` 又是**阻塞调用方线程**的
+
+> 提出时间：2026-09-26（生产实测暴露）｜定位：**框架侧（`ypbin-iot-starter`）**，与 access 侧的接线问题**各占一半**，见文末「归属拆分」。
+> 状态：⬜ 未修（本仓已用「把不可达 endpoint 改成快速失败」临时绕开，**不是修根因**）。
+
+### 现象
+生产启用 `ypbin-access`（单租户挂 12 台设备，其中 11 台 endpoint 是**不可达**地址）后，access 反复出现：
+
+```
+协议栈断链停采：tenantId=1 设备数=12 reason=本地租约已过期（未成功续约）
+本地租约过期，自行停采：tenantId=1 …
+```
+
+即**租约续约被饿死**，节点周期性自 fencing（实测周期约 90 s），采集断续。
+
+### 证据（生产实测，2026-09-26）
+- `docker logs ypbin-access`：`failed to bind device <id>` **严格每 10 s 一条**，异常为
+  `io.netty.channel.ConnectTimeoutException: connection timed out after 10000 ms: /10.10.0.16:15002` ⇒ 趟内逐设备阻塞。
+- 源码：`ypbin-iot-core` 的 `ConnectionSpec.DEFAULT_CONNECT_TIMEOUT = Duration.ofSeconds(10)`；
+  `ConnectionSpec.of(...)` 在 `connectTimeout == null` 时套用该常量；`IotLifecycle.bind` 用
+  `CompletableFuture.join()` **在调用方线程上等待**（实测栈：`IotLifecycle.bind` → `AccessLeaseManager` →
+  `LeaseRenewScheduler`，全在 `scheduling-1`）。单趟 11 台 × 10 s ≈ 120 s ≫ 服务端租约 TTL 30 s。
+- 关键反证：`周期重领到租户` 三次都**恰好出现在该趟阻塞结束的同一毫秒**；且把 11 台不可达设备
+  收窄后租约立即稳定（`lease_expire_at` 持续前进、`epoch` 不再跳），恢复后 10 s 内立刻复发。
+
+### 影响
+- 任何「租户下存在少量不可达/慢设备」的真实部署都会**租约抖动 → 周期性停采**，
+  且现象与「设备离线」混淆，运维极难归因（只能从 `pending_takeover` 事后发现）。
+- 宿主无法通过配置把「一趟绑定」约束在租约 TTL 内：框架既没有可配的默认建链超时（无 `@ConfigurationProperties` 绑定），
+  `bind` 又是阻塞式、单线程逐台推进。
+
+### 期望能力
+1. 把建链超时变成**框架级可配默认**（如 `ypbin.iot.transport.connect-timeout`，并允许 `ConnectionSpec` 单设备覆盖）；
+2. 提供**不阻塞调用方线程**的绑定批量 API（返回 future / 由框架自己的线程池推进），
+   或至少给出「批量绑定带整体超时」的语义，让宿主能把一趟绑定约束在租约 TTL 内；
+3. 补一条可观测：租约「客户端自认在租约内 / 服务端已判失效」的偏差计数，避免只能靠事后扫描发现。
+
+### 验收标准
+- 租户挂 N 台不可达设备时，`renew` 仍能在 TTL 内完成（集成测试：假 endpoint + 断言续约不被阻塞）；
+- `ypbin.iot.transport.connect-timeout` 可配且生效（改小后 `ConnectTimeoutException` 的 `after X ms` 随之变化）；
+- 批量绑定 API 不再占用调用方线程（线程名断言：续约线程不被建链占用）。
+
+### 会被替换掉的临时实现
+本仓当前用「把不可达演示设备的 endpoint 改成 `tcp://127.0.0.1:9`（**快速失败 0.012 s**）」
+绕开（回滚物 `/opt/ypbin/rollback-demo-endpoints.sql`）——**这是给演示数据打的补丁，不是修根因**；
+框架支持后应删除该补丁并恢复真实不可达 endpoint。
+
+### 归属拆分（避免两边互相等）
+- **框架侧（本条目）**：可配的建链超时默认值 + 非阻塞/带超时的批量绑定 + 偏差指标。
+- **access 侧（本仓 `IOT-ROADMAP.md`）**：`HttpDeviceSpecSource.findConnection` **固定传 `null`** 导致
+  即使框架支持也没有配置入口；以及把 `startCollecting` 从续约调度线程上移开的接线改动。
