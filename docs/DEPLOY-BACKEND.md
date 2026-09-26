@@ -214,18 +214,34 @@ curl -s -m 5 -o /dev/null -w '%{http_code}\n' http://113.142.217.58:18084/actuat
 ```bash
 sudo bash -c 'cd /opt/ypbin/ypbin-iot/deploy; set -a; . ./.env; set +a
 find /tmp /var/tmp /root /opt/ypbin -maxdepth 2 -type f \
-     ! -name "*.jar" ! -name "*.sql" ! -name ".env" ! -name "*.log" -print0 2>/dev/null \
+     ! -name "*.jar" ! -name "*.sql" ! -name "*.log" -print0 2>/dev/null \
 | while IFS= read -r -d "" f; do
-    c=$(grep -cF "$GATEWAY_SIGN_TOKEN" "$f" 2>/dev/null); c=${c:-0}
-    i=$(grep -cF "$INTERNAL_TOKEN" "$f" 2>/dev/null); i=${i:-0}
-    [ "$c" = "0" ] && [ "$i" = "0" ] || echo "含凭据残留: $f"
+    g=$(grep -cF "$GATEWAY_SIGN_TOKEN" "$f" 2>/dev/null); g=${g:-0}
+    i=$(grep -cF "$INTERNAL_TOKEN"     "$f" 2>/dev/null); i=${i:-0}
+    r=$(grep -cF "$REDIS_PASSWORD"     "$f" 2>/dev/null); r=${r:-0}
+    m=$(grep -cF "$MYSQL_ROOT_PASSWORD" "$f" 2>/dev/null); m=${m:-0}
+    [ "$g$i$r$m" = "0000" ] || echo "含凭据: $f (gw=$g it=$i redis=$r mysql=$m)"
   done'
-# 期望输出：只剩受管凭据文件本身（deploy/.env 与刻意的 Nacos 配置备份），不应有 /tmp 下的渲染产物
 ```
 
-> **已知且刻意保留的 600 备份**：`/opt/ypbin/nacos-ypbin-*.yaml.bak-*`（上一轮部署留下的 Nacos 配置备份，
-> root-only、未被任何 rollback 脚本引用）。它们含**当前**的网关签名标记/内部 token ⇒ 属**轮换范围**，
-> 但保留它们是回滚材料，故本轮**未删**（如确认不再需要可删）。
+判据说明（**不要夸大**）：两个 64 位随机 token 的命中是硬证据；`MYSQL_ROOT_PASSWORD`/`REDIS_PASSWORD`
+长度只有十几到三十几位，命中只能当**线索**（可能偶合），需人工看一眼文件用途再处置。
+
+**「期望输出」= 下面这份受管/遗留清单，且其中不得出现 `/tmp` 路径**（2026-09-26 实测，全部 `600`、
+root-only；`deploy/.env` 是**刻意的凭据源**，已由 `! -name ".env"` 排除在扫描外）：
+
+| 文件 | 命中 |
+|---|---|
+| `/opt/ypbin/nacos-ypbin-iot.yaml.bak-20260925-013857` | gateway ×2（**值行 + 注释行**——正是「全局 sed 把凭据写进注释」那次的物证） |
+| `/opt/ypbin/nacos-ypbin-gateway.yaml.bak-20260925-013857` | gateway ×1 |
+| `/opt/ypbin/nacos-ypbin-system.yaml.bak-20260925-013857` | gateway ×1 |
+| `/opt/ypbin/nacos-ypbin-ai.yaml.bak-20260925-013857` | gateway ×1 |
+| `/opt/ypbin/nacos-ypbin-common.yaml.bak-20260925-013857` | redis ×1、mysql ×1（**不含**两个 token） |
+| `/opt/ypbin/_rollback-20260925-003947/admin-deploy.env.bak` | gateway ×1、redis ×1、mysql ×1（近似完整凭据文件） |
+
+这 6 个文件是**上一轮部署的回滚材料**（未被任何 rollback 脚本引用），本轮**刻意未删**；
+它们与 `deploy/.env` 一同属**轮换范围**（见下）。**若在 `/tmp`、`/var/tmp` 或其它位置扫出**额外文件，
+那就是要立刻删掉的渲染残留（本轮已清掉 22 个）。
 
 > 历史轮次的部署曾在服务器 `/tmp` 留下若干 **644** 的渲染配置（含当时的网关签名标记与内部 token）。
 > 2026-09-26 已清理干净（删除 **22** 个文件，复核残留 **0**）。
