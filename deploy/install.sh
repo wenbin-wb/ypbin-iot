@@ -577,7 +577,13 @@ frontend_dist_is_fresh() {
 # 最后在 CREATE DATABASE 处报 Access denied，报错点远离真因。
 ensure_mysql_auth() {
   local err
-  if err="$(docker exec ypbin-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -N -e "SELECT 1;" 2>&1)"; then
+  # 口令经 **env** 传给容器内 mysql 客户端，不进任何 argv：
+  #   `-p"$MYSQL_ROOT_PASSWORD"` 会同时出现在 docker exec 的 argv（宿主 `ps`、`docker events` 的
+  #   exec 属性可读）与容器内 mysql 进程的 argv；`MYSQL_PWD` 是 mysql 客户端原生支持的读法（实测
+  #   mysql:8.4：`using password: YES` 即证明它真的读到了），
+  #   而 `docker exec -e MYSQL_PWD`（**只写变量名、不写值**）由 docker CLI 从客户端环境转发 ⇒
+  #   docker 客户端自己的 argv 里也没有值。
+  if err="$(MYSQL_PWD="$MYSQL_ROOT_PASSWORD" docker exec -e MYSQL_PWD ypbin-mysql mysql -uroot -N -e "SELECT 1;" 2>&1)"; then
     return 0
   fi
   if printf '%s' "$err" | grep -q "Access denied"; then
@@ -1099,6 +1105,11 @@ if [ ! -f "$ENV_FILE" ]; then
   else
     REDIS_PASSWORD="${REDIS_PASSWORD:-$(rand_hex 16)}"
   fi
+  # Nacos 控制台口令：同一个账号既是控制台管理员、也是各服务连 Nacos 的 client 凭据
+  # （compose 的 SPRING_CLOUD_NACOS_USERNAME/PASSWORD 取这两个键）。装完由本脚本把服务器口令
+  # 从内置默认口令改成该随机值（见 [5.5/7] 之后的登录/改口令段），装完不留默认口令。
+  NACOS_ADMIN_USERNAME="${NACOS_ADMIN_USERNAME:-nacos}"
+  NACOS_ADMIN_PASSWORD="${NACOS_ADMIN_PASSWORD:-$(rand_hex 16)}"
   cat > "$ENV_FILE" <<EOF
 # 由 install.sh 生成
 MYSQL_ROOT_PASSWORD=$MYSQL_ROOT_PASSWORD
@@ -1106,6 +1117,8 @@ AI_MODEL_SECRET_KEY=$AI_MODEL_SECRET_KEY
 NACOS_AUTH_TOKEN=$NACOS_AUTH_TOKEN
 NACOS_AUTH_IDENTITY_KEY=$NACOS_AUTH_IDENTITY_KEY
 NACOS_AUTH_IDENTITY_VALUE=$NACOS_AUTH_IDENTITY_VALUE
+NACOS_ADMIN_USERNAME=$NACOS_ADMIN_USERNAME
+NACOS_ADMIN_PASSWORD=$NACOS_ADMIN_PASSWORD
 INTERNAL_TOKEN=$INTERNAL_TOKEN
 GATEWAY_SIGN_TOKEN=$GATEWAY_SIGN_TOKEN
 REDIS_PASSWORD=$REDIS_PASSWORD
@@ -1115,7 +1128,7 @@ ADMIN_UI_PORT=$ADMIN_UI_PORT
 ADMIN_UI_DIST_DIR=$ADMIN_UI_DIST_DIR
 EOF
   chmod 600 "$ENV_FILE"
-  ok "已生成 .env（MySQL 密码：$MYSQL_ROOT_PASSWORD，可改 $ENV_FILE）"
+  ok "已生成 .env（各随机凭据均已写入，值不打印；路径 $ENV_FILE，600）"
 else
   warn "复用已有 .env"
   # 复用场景需把 .env 变量载入环境，供后续 Nacos 占位符替换 / compose 使用
@@ -1147,6 +1160,10 @@ env_key_backfill() { # $1=键名 $2=取值命令（仅缺键时才执行，命�
 env_key_backfill NACOS_AUTH_TOKEN 'rand_b64_48'
 env_key_backfill NACOS_AUTH_IDENTITY_KEY 'printf serverIdentity'
 env_key_backfill NACOS_AUTH_IDENTITY_VALUE 'rand_hex 32'
+# Nacos 控制台/client 口令：旧 .env 缺键时补一个随机值（首次补键后必须跑一次本脚本的改口令段，
+# 否则 .env 与服务器不一致；见 docs/NACOS-AUTH.md §3）
+env_key_backfill NACOS_ADMIN_USERNAME 'printf nacos'
+env_key_backfill NACOS_ADMIN_PASSWORD 'rand_hex 16'
 env_key_backfill INTERNAL_TOKEN 'rand_hex 32'
 env_key_backfill GATEWAY_SIGN_TOKEN 'rand_hex 32'
 if [ "$NO_DOCKER" = "1" ]; then
@@ -1185,6 +1202,16 @@ if [ "$NO_DOCKER" = "1" ]; then
 else
   info "[5.5/7] 启动基础设施（Nacos/Redis/MySQL）"
   cd "$ROOT/ypbin-admin/deploy"
+  # Redis `requirepass` 受管配置文件（600）：compose 以只读方式挂载它，替代旧写法
+  # `--requirepass <口令>`（那会把明文口令留在容器 argv）。**必须在 up 之前生成**：
+  # bind 挂载的源不存在时 docker 会把它建成目录 ⇒ redis 启动期报错。
+  # 生成器只读 .env、只打印长度/权限，从不打印口令值。位置与其它 deploy 资源一致（就在 compose 同目录）。
+  if [ ! -f "$PWD/redis-auth-conf.sh" ]; then
+    die "缺少 $PWD/redis-auth-conf.sh（Redis 需要它生成 requirepass 配置；本文件随仓库 deploy/ 一起分发）"
+  fi
+  if ! ENV_FILE="$ENV_FILE" OUT="$PWD/redis-requirepass.conf" bash "$PWD/redis-auth-conf.sh"; then
+    die "生成 redis-requirepass.conf 失败（Redis 需要它才能带 requirepass 启动），请先修好上面的报错再重跑"
+  fi
   # 基础设施镜像只走「一次 compose up」，不做任何镜像源探测/遍历：
   # REGISTRY_PREFIX 有值（使用者显式 export，或已在复用的 .env 中设置；尾斜杠已在 [5/7] 全局归一化）
   # → 按该前缀拉取；为空 → 不带前缀，直接用 Docker 守护进程默认源
@@ -1235,8 +1262,28 @@ else
 fi
 
 NACOS_CONSOLE_URL="${NACOS_CONSOLE_URL:-http://localhost:8080}"
-NACOS_USERNAME="${NACOS_USERNAME:-nacos}"
-NACOS_PASSWORD="${NACOS_PASSWORD:-nacos}"
+NACOS_USERNAME="${NACOS_ADMIN_USERNAME:-nacos}"
+# 口令双轨（2026-09-26 起；见 docs/NACOS-AUTH.md）：
+#   NACOS_CURRENT_PASSWORD = 「服务器当前口令」的外部覆盖入口（默认仍是 nacos，兼容旧调用方式，
+#     仅用于「服务器上还真是不改过的内置默认口令」这一种情形）；
+#   NACOS_TARGET_PASSWORD  = deploy/.env 的 NACOS_ADMIN_PASSWORD，**唯一真值**：既是本脚本改口令的目标，
+#     也是 compose 里各服务 SPRING_CLOUD_NACOS_PASSWORD 的来源。装完不允许服务器仍留内置默认口令。
+NACOS_CURRENT_PASSWORD="${NACOS_PASSWORD:-nacos}"
+NACOS_TARGET_PASSWORD="${NACOS_ADMIN_PASSWORD:-$NACOS_CURRENT_PASSWORD}"
+if [ -z "$NACOS_TARGET_PASSWORD" ]; then
+  die "NACOS_ADMIN_PASSWORD 为空。请写入 deploy/.env（生成：openssl rand -hex 16）后重跑；"
+  die "  该键同时是 compose 里各服务连 Nacos 的口令（SPRING_CLOUD_NACOS_PASSWORD），不允许为空。"
+fi
+
+# 口令一律经 **stdin** 投递（curl 的 `--data-urlencode "name@-"` 原生支持），不进 argv/进程列表。
+nacos_login() { # $1=口令；stdout 只出 accessToken（取不到则空）
+  printf '%s' "$1" | curl -fsS --connect-timeout 5 --max-time 30 -X POST \
+    "$NACOS_CONSOLE_URL/v3/auth/user/login" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    --data-urlencode "username=$NACOS_USERNAME" \
+    --data-urlencode "password@-" 2>/dev/null \
+    | sed -n 's/.*"accessToken":"\([^"]*\)".*/\1/p' || true
+}
 
 # 等待 Nacos Console 就绪（v3 独立 Console 端口）
 NACOS_READY=0
@@ -1262,17 +1309,34 @@ if [ "$NACOS_READY" != "1" ]; then
   warn "      很可能因连不上库或注册中心而反复重启——若后续步骤出现此类现象，请回到这里先修好 Nacos。"
 fi
 
-# 初始化 Nacos 管理员（幂等；已有管理员时忽略失败）
-curl -fsS --connect-timeout 5 --max-time 30 -X POST "$NACOS_CONSOLE_URL/v3/auth/user/admin" \
+# 初始化 Nacos 管理员（幂等；已有管理员时服务端返回 409，忽略失败）
+printf '%s' "$NACOS_CURRENT_PASSWORD" | curl -fsS --connect-timeout 5 --max-time 30 -X POST "$NACOS_CONSOLE_URL/v3/auth/user/admin" \
   -H "Content-Type: application/x-www-form-urlencoded" \
   --data-urlencode "username=$NACOS_USERNAME" \
-  --data-urlencode "password=$NACOS_PASSWORD" >/dev/null 2>&1 || true
+  --data-urlencode "password@-" >/dev/null 2>&1 || true
 
-# 登录获取 accessToken
-NACOS_TOKEN=$(curl -fsS --connect-timeout 5 --max-time 30 -X POST "$NACOS_CONSOLE_URL/v3/auth/user/login" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  --data-urlencode "username=$NACOS_USERNAME" \
-  --data-urlencode "password=$NACOS_PASSWORD" 2>/dev/null | sed -n 's/.*"accessToken":"\([^"]*\)".*/\1/p' || true)
+# 登录获取 accessToken：先试「当前口令」，失败再试「目标口令」（= 上一次安装已轮换过的值，重跑幂等）
+NACOS_TOKEN="$(nacos_login "$NACOS_CURRENT_PASSWORD")"
+if [ -z "$NACOS_TOKEN" ] && [ "$NACOS_TARGET_PASSWORD" != "$NACOS_CURRENT_PASSWORD" ]; then
+  NACOS_TOKEN="$(nacos_login "$NACOS_TARGET_PASSWORD")"
+fi
+
+# 把服务器口令改为 .env 的目标值（消除内置默认口令）。幂等：两者相同时整段跳过。
+# 端点与参数名一手核实（Nacos 3.2.4 源码 UserControllerV3：`@PutMapping` + `newPassword` + `username`）。
+# 服务器**没有**默认口令状态时（目标口令已生效）本次 PUT 会失败或改回同值，两种结果都不影响后续导入。
+if [ -n "$NACOS_TOKEN" ] && [ "$NACOS_TARGET_PASSWORD" != "$NACOS_CURRENT_PASSWORD" ]; then
+  if printf '%s' "$NACOS_TARGET_PASSWORD" | curl -fsS --connect-timeout 5 --max-time 30 -X PUT \
+      "$NACOS_CONSOLE_URL/v3/auth/user?username=$NACOS_USERNAME" \
+      -H "accessToken: $NACOS_TOKEN" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      --data-urlencode "newPassword@-" >/dev/null 2>&1; then
+    NACOS_TOKEN="$(nacos_login "$NACOS_TARGET_PASSWORD")"
+    ok "Nacos 控制台口令已改为 deploy/.env 的 NACOS_ADMIN_PASSWORD（值不打印）"
+  else
+    warn "Nacos 口令改写请求未成功——若服务器当前口令不是 $NACOS_CURRENT_PASSWORD 也不是 .env 里的"
+    warn "      NACOS_ADMIN_PASSWORD，请先对齐两者再重跑（自查：docs/NACOS-AUTH.md §4）"
+  fi
+fi
 
 # 发布 Nacos 配置（共 6 个：ypbin-common + 5 服务；幂等：已存在则覆盖；使用 Nacos 3 Console 新 API）
 if [ -n "$NACOS_TOKEN" ]; then
@@ -1335,7 +1399,7 @@ else
     -X POST "$NACOS_CONSOLE_URL/v3/auth/user/login" \
     -H "Content-Type: application/x-www-form-urlencoded" \
     --data-urlencode "username=$NACOS_USERNAME" \
-    --data-urlencode "password=$NACOS_PASSWORD" 2>&1 || true)"
+    --data-urlencode "password@-" <<<"$NACOS_PASSWORD" 2>&1 || true)"
   # ⚠️ curl 的 -w 状态行在**响应体之后**：若只打印前 800 字符，大响应体（正是本次修的那个场景）会把
   # 状态码挤掉，而"HTTP 状态"恰是本处要给出的判据。故先把状态行单独取出来打印，再打印截断后的正文。
   # 只认**捕获结果的最后一行**，且必须是 -w 的精确形态（4 空格 + http_code=<数字> 整行）：
@@ -1369,28 +1433,28 @@ if [ "$NO_DOCKER" != "1" ]; then
   DB_HOST=localhost
   DB_PORT=3306
   ensure_mysql_auth
-  TABLE_COUNT=$(docker exec ypbin-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='ypbin_admin';" 2>/dev/null || echo 0)
+  TABLE_COUNT=$(MYSQL_PWD="$MYSQL_ROOT_PASSWORD" docker exec -e MYSQL_PWD ypbin-mysql mysql -uroot -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='ypbin_admin';" 2>/dev/null || echo 0)
   if [ "${TABLE_COUNT:-0}" = "0" ]; then
-    docker exec ypbin-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e \
+    MYSQL_PWD="$MYSQL_ROOT_PASSWORD" docker exec -e MYSQL_PWD ypbin-mysql mysql -uroot -e \
       "CREATE DATABASE IF NOT EXISTS ypbin_admin DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
     for sql in "$ROOT/ypbin-admin/deploy/sql/"*.sql; do
       # xxl-job 初始化脚本自带 CREATE DATABASE xxl_job + use，不指定库执行
       if [ "$(basename "$sql")" = "005-xxl-job.sql" ]; then
         docker cp "$sql" ypbin-mysql:/tmp/init-xxl.sql
-        docker exec ypbin-mysql sh -c "mysql --default-character-set=utf8mb4 -uroot -p\"$MYSQL_ROOT_PASSWORD\" < /tmp/init-xxl.sql"
+        MYSQL_PWD="$MYSQL_ROOT_PASSWORD" docker exec -e MYSQL_PWD ypbin-mysql sh -c "mysql --default-character-set=utf8mb4 -uroot < /tmp/init-xxl.sql"
       else
         docker cp "$sql" ypbin-mysql:/tmp/init.sql
-        docker exec ypbin-mysql sh -c "mysql --default-character-set=utf8mb4 -uroot -p\"$MYSQL_ROOT_PASSWORD\" ypbin_admin < /tmp/init.sql"
+        MYSQL_PWD="$MYSQL_ROOT_PASSWORD" docker exec -e MYSQL_PWD ypbin-mysql sh -c "mysql --default-character-set=utf8mb4 -uroot ypbin_admin < /tmp/init.sql"
       fi
       ok "已执行 $(basename "$sql")"
     done
   else
     ok "MySQL 已初始化，跳过建库脚本"
     # ypbin_admin 已存在时仍确保 xxl_job 库（xxl-job-admin 独立库）就绪
-    XXL_TABLE_COUNT=$(docker exec ypbin-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='xxl_job';" 2>/dev/null || echo 0)
+    XXL_TABLE_COUNT=$(MYSQL_PWD="$MYSQL_ROOT_PASSWORD" docker exec -e MYSQL_PWD ypbin-mysql mysql -uroot -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='xxl_job';" 2>/dev/null || echo 0)
     if [ "${XXL_TABLE_COUNT:-0}" = "0" ] && [ -f "$ROOT/ypbin-admin/deploy/sql/005-xxl-job.sql" ]; then
       docker cp "$ROOT/ypbin-admin/deploy/sql/005-xxl-job.sql" ypbin-mysql:/tmp/init-xxl.sql
-      docker exec ypbin-mysql sh -c "mysql --default-character-set=utf8mb4 -uroot -p\"$MYSQL_ROOT_PASSWORD\" < /tmp/init-xxl.sql"
+      MYSQL_PWD="$MYSQL_ROOT_PASSWORD" docker exec -e MYSQL_PWD ypbin-mysql sh -c "mysql --default-character-set=utf8mb4 -uroot < /tmp/init-xxl.sql"
       ok "已执行 005-xxl-job.sql（xxl_job 库初始化）"
     fi
   fi

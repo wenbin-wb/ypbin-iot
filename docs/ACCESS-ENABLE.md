@@ -494,7 +494,7 @@ grep -n -F "$NEW" config.yaml | grep -c ':#'       # 真值不得落进注释行
 
 | 项 | 现状 | 归属 |
 |---|---|---|
-| Nacos 控制台**默认口令** | 仅监听 `127.0.0.1:8080`；口令为默认值 | **下一轮加固**（与「开 auth」一起做，那时 `NACOS_AUTH_IDENTITY_VALUE` 才有意义，一并轮换）。**本轮不动**（配错会全体注册失败） |
+| ~~Nacos 控制台**默认口令**~~ | **2026-09-26 已修**：口令改为 `openssl rand -hex 16`（只落 `deploy/.env`）、`NACOS_AUTH_IDENTITY_VALUE` 一并轮换、服务端 auth 开启（`NACOS_AUTH_ENABLE=true`），各服务补 `SPRING_CLOUD_NACOS_USERNAME/PASSWORD` | 已由 [`NACOS-AUTH.md`](NACOS-AUTH.md) 承接（含回滚与判据） |
 | `/opt/ypbin/rollback-20260925-013857.sh` 内**明文写死该口令** | `password=<值>` 仍有 **1** 处 | 遗留脚本，**仅登记**；本轮已把**新写的 6 个脚本**全部改为从 `deploy/.env` 取（`password=<值>` 均为 **0** 处，已 `bash -n` / `py_compile` 自检） |
 | IoTDB 时序静默不落库 | 已补**成功侧可观测**（另开 PR），根因待下一次真实采集判定 | 见 §6.1 |
 | 连接超时不可配 / 同步建链占用续约线程 | 未修（演示数据侧已用快速失败绕开） | `STARTER-FEEDBACK.md` **UP-2**（框架侧）+ 本仓 ROADMAP（access 侧） |

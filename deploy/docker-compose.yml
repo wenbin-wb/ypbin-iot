@@ -24,6 +24,15 @@ services:
       NACOS_AUTH_TOKEN: ${NACOS_AUTH_TOKEN:?请在deploy/.env设置NACOS_AUTH_TOKEN}
       NACOS_AUTH_IDENTITY_KEY: ${NACOS_AUTH_IDENTITY_KEY:?请在deploy/.env设置NACOS_AUTH_IDENTITY_KEY}
       NACOS_AUTH_IDENTITY_VALUE: ${NACOS_AUTH_IDENTITY_VALUE:?请在deploy/.env设置NACOS_AUTH_IDENTITY_VALUE}
+      # 服务端鉴权开关（2026-09-26 起为 true，此前为 false）：
+      #   镜像内 bin/docker-startup.sh:96-98 只在 NACOS_AUTH_ENABLE 非空时追加
+      #   `-Dnacos.core.auth.enabled=${NACOS_AUTH_ENABLE}`（JVM 系统属性优先于 application.properties 里
+      #   硬编码的 `nacos.core.auth.enabled=false`）⇒ 这是本镜像**唯一**的开 auth 入口（一手核实：容器内脚本原文）。
+      #   `console.enabled`/`admin.enabled` 在镜像 properties 里已是 true，无需另设。
+      # ⚠️ 开 auth 后 **client 侧（8848）** 也要求身份：所有连 Nacos 的服务必须带
+      #   `spring.cloud.nacos.username/password`（见各服务 environment 的 SPRING_CLOUD_NACOS_*），
+      #   否则注册失败 ⇒ 网关全体 503。开关与回滚见 docs/NACOS-AUTH.md。
+      NACOS_AUTH_ENABLE: "true"
     ports:
       - "${INTERNAL_BIND_ADDR:-0.0.0.0}:8848:8848"
       - "${INTERNAL_BIND_ADDR:-0.0.0.0}:9848:9848"
@@ -43,15 +52,31 @@ services:
   redis:
     image: ${REGISTRY_PREFIX:-}redis:7-alpine
     container_name: ypbin-redis
-    # 开启持久化并强制 requirepass（密码来自 .env，与 Nacos 共享配置 spring.data.redis.password 一致）
-    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?请在deploy/.env设置REDIS_PASSWORD}"]
+    # requirepass 由**受管 600 文件**（deploy/redis-requirepass.conf，deploy/redis-auth-conf.sh 从 .env 生成、
+    # owner/gid 对齐镜像内 redis 用户 999:1000）承载，不再写 `--requirepass <口令>`：
+    #   ① `--requirepass <值>` 会把明文口令留在容器 argv ⇒ `docker top`/宿主 `ps`/`docker events`
+    #      直接可读（2026-09-26 实测），与上一轮 IoTDB 健康检查同类；
+    #   ② 仍以 `redis-server` 作首个参数 ⇒ **保留官方 entrypoint 的 `$1 = redis-server` 分支**
+    #      （chown /data + setpriv 降权到 redis 用户），运行身份与数据卷语义不变；
+    #   ③ 首次 `up` 前该文件必须存在（缺失时 docker 会把 bind 源建成目录 ⇒ redis 启动失败）：
+    #      install.sh 已内建生成步骤，手工部署见 docs/DEPLOY-CREDENTIAL-HYGIENE.md §2。
+    command: ["redis-server", "/usr/local/etc/redis/redis-requirepass.conf", "--appendonly", "yes"]
     # 仅绑定本机回环：容器间经 compose 网络互访，无需对宿主机全网卡暴露
     ports:
       - "${INTERNAL_BIND_ADDR:-127.0.0.1}:6379:6379"
     volumes:
       - ypbin-redis-data:/data
+      - ./redis-requirepass.conf:/usr/local/etc/redis/redis-requirepass.conf:ro
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:?请在deploy/.env设置REDIS_PASSWORD}", "ping"]
+      # **不带凭据**的存活探活（TCP 连通性，与 IoTDB 同一口径）：只证明 6379 可连、不校验口令。
+      # 为什么不是带 `-a <口令>` 的 `redis-cli ping`：那条每 10s 把明文口令写进 argv（`docker top` 与
+      #   `docker events` 的 exec 属性都能抓到）；而 `redis-cli ping` 不带口令时对 NOAUTH 也 exit 0
+      #   （实测：NOAUTH 仍 0、端口关闭才 1）⇒ 它反而不比 TCP 更能证明「认证可用」，却要付出明文代价。
+      # 为什么不是 `redis-cli --no-auth-warning`/`REDISCLI_AUTH`：见 docs/DEPLOY-CREDENTIAL-HYGIENE.md §3
+      #   （前者的 `-a` 仍进 argv；后者要求把口令再注入容器 env，换来的是可替代的探活强度）。
+      # 折衷（明确记账）：口令正确性不在本探针校验，改由应用侧（auth/system 连 Redis 失败即报错、
+      #   登录链路 500）承担——本仓 Redis 侧**没有** IoTDB 那样的专用指标，如实登记为较弱口径。
+      test: ["CMD-SHELL", "timeout 3 nc -z 127.0.0.1 6379"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -72,7 +97,13 @@ services:
     volumes:
       - ypbin-mysql-data:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_ROOT_PASSWORD}"]
+      # **不带凭据**的存活探活（2026-09-26 起）：`mysqladmin ping` 只要服务端应答就 exit 0 ——
+      #   实测（mysql:8.4 容器内）：无口令/错口令 ⇒ `Access denied … (using password: NO/YES)` 且 **exit 0**；
+      #   端口关闭 ⇒ `Can't connect … (111)` 且 **exit 1**。口径与 IoTDB/Redis 一致：只证「服务端活着应答」。
+      # 为什么不是 `-p<口令>`：那条每 10s 把明文 root 口令写进 argv（`docker top`/宿主 `ps`/`docker events`
+      #   的 exec 属性可读）。口令正确性改由应用侧承担（服务连库失败即报错、健康降级），折衷见
+      #   docs/DEPLOY-CREDENTIAL-HYGIENE.md §3。
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -211,6 +242,16 @@ services:
     environment:
       NACOS_ADDR: nacos:8848
       SENTINEL_ADDR: sentinel-dashboard:8858
+      # Nacos 客户端凭据（开 auth 后必需，否则拉配置 + 注册双双失败）：环境变量到
+      # `spring.cloud.nacos.username/password` 的 relaxed binding。要点：discovery 侧
+      # （NacosDiscoveryProperties，@ConfigurationProperties("spring.cloud.nacos.discovery")）在
+      # 自身 username/password 为空时会回退到父级 `spring.cloud.nacos.*`（一手核实：spring-cloud-alibaba
+      # 2025.1.0.0 字节码常量池 `${spring.cloud.nacos.username:}`），故这两个键同时覆盖 **config 与 discovery**。
+      # 真值只写在 deploy/.env（600）。用 `:?` 而非空兜底：本文件已开 auth（NACOS_AUTH_ENABLE），
+      # 空口令必然导致「全部服务注册失败」这种最难排查的形态，宁可让 compose 在解析期就报缺失键。
+      # （install.sh 会生成该键、.env.example 已列；旧 .env 由 env_key_backfill 补齐。）
+      SPRING_CLOUD_NACOS_USERNAME: ${NACOS_ADMIN_USERNAME:-nacos}
+      SPRING_CLOUD_NACOS_PASSWORD: ${NACOS_ADMIN_PASSWORD:?请在deploy/.env设置NACOS_ADMIN_PASSWORD}
     ports:
       - "18080:18080"
     depends_on:
@@ -229,6 +270,16 @@ services:
     environment:
       NACOS_ADDR: nacos:8848
       SENTINEL_ADDR: sentinel-dashboard:8858
+      # Nacos 客户端凭据（开 auth 后必需，否则拉配置 + 注册双双失败）：环境变量到
+      # `spring.cloud.nacos.username/password` 的 relaxed binding。要点：discovery 侧
+      # （NacosDiscoveryProperties，@ConfigurationProperties("spring.cloud.nacos.discovery")）在
+      # 自身 username/password 为空时会回退到父级 `spring.cloud.nacos.*`（一手核实：spring-cloud-alibaba
+      # 2025.1.0.0 字节码常量池 `${spring.cloud.nacos.username:}`），故这两个键同时覆盖 **config 与 discovery**。
+      # 真值只写在 deploy/.env（600）。用 `:?` 而非空兜底：本文件已开 auth（NACOS_AUTH_ENABLE），
+      # 空口令必然导致「全部服务注册失败」这种最难排查的形态，宁可让 compose 在解析期就报缺失键。
+      # （install.sh 会生成该键、.env.example 已列；旧 .env 由 env_key_backfill 补齐。）
+      SPRING_CLOUD_NACOS_USERNAME: ${NACOS_ADMIN_USERNAME:-nacos}
+      SPRING_CLOUD_NACOS_PASSWORD: ${NACOS_ADMIN_PASSWORD:?请在deploy/.env设置NACOS_ADMIN_PASSWORD}
     ports:
       - "${INTERNAL_BIND_ADDR:-0.0.0.0}:18081:18081"
     depends_on:
@@ -249,6 +300,16 @@ services:
     environment:
       NACOS_ADDR: nacos:8848
       SENTINEL_ADDR: sentinel-dashboard:8858
+      # Nacos 客户端凭据（开 auth 后必需，否则拉配置 + 注册双双失败）：环境变量到
+      # `spring.cloud.nacos.username/password` 的 relaxed binding。要点：discovery 侧
+      # （NacosDiscoveryProperties，@ConfigurationProperties("spring.cloud.nacos.discovery")）在
+      # 自身 username/password 为空时会回退到父级 `spring.cloud.nacos.*`（一手核实：spring-cloud-alibaba
+      # 2025.1.0.0 字节码常量池 `${spring.cloud.nacos.username:}`），故这两个键同时覆盖 **config 与 discovery**。
+      # 真值只写在 deploy/.env（600）。用 `:?` 而非空兜底：本文件已开 auth（NACOS_AUTH_ENABLE），
+      # 空口令必然导致「全部服务注册失败」这种最难排查的形态，宁可让 compose 在解析期就报缺失键。
+      # （install.sh 会生成该键、.env.example 已列；旧 .env 由 env_key_backfill 补齐。）
+      SPRING_CLOUD_NACOS_USERNAME: ${NACOS_ADMIN_USERNAME:-nacos}
+      SPRING_CLOUD_NACOS_PASSWORD: ${NACOS_ADMIN_PASSWORD:?请在deploy/.env设置NACOS_ADMIN_PASSWORD}
     ports:
       - "${INTERNAL_BIND_ADDR:-0.0.0.0}:18082:18082"
     depends_on:
@@ -269,6 +330,16 @@ services:
     environment:
       NACOS_ADDR: nacos:8848
       SENTINEL_ADDR: sentinel-dashboard:8858
+      # Nacos 客户端凭据（开 auth 后必需，否则拉配置 + 注册双双失败）：环境变量到
+      # `spring.cloud.nacos.username/password` 的 relaxed binding。要点：discovery 侧
+      # （NacosDiscoveryProperties，@ConfigurationProperties("spring.cloud.nacos.discovery")）在
+      # 自身 username/password 为空时会回退到父级 `spring.cloud.nacos.*`（一手核实：spring-cloud-alibaba
+      # 2025.1.0.0 字节码常量池 `${spring.cloud.nacos.username:}`），故这两个键同时覆盖 **config 与 discovery**。
+      # 真值只写在 deploy/.env（600）。用 `:?` 而非空兜底：本文件已开 auth（NACOS_AUTH_ENABLE），
+      # 空口令必然导致「全部服务注册失败」这种最难排查的形态，宁可让 compose 在解析期就报缺失键。
+      # （install.sh 会生成该键、.env.example 已列；旧 .env 由 env_key_backfill 补齐。）
+      SPRING_CLOUD_NACOS_USERNAME: ${NACOS_ADMIN_USERNAME:-nacos}
+      SPRING_CLOUD_NACOS_PASSWORD: ${NACOS_ADMIN_PASSWORD:?请在deploy/.env设置NACOS_ADMIN_PASSWORD}
       AI_MODEL_SECRET_KEY: ${AI_MODEL_SECRET_KEY:?请在 deploy/.env 设置 AI_MODEL_SECRET_KEY（16/24/32 字节）}
     ports:
       - "${INTERNAL_BIND_ADDR:-0.0.0.0}:18083:18083"
@@ -292,6 +363,16 @@ services:
     environment:
       NACOS_ADDR: nacos:8848
       SENTINEL_ADDR: sentinel-dashboard:8858
+      # Nacos 客户端凭据（开 auth 后必需，否则拉配置 + 注册双双失败）：环境变量到
+      # `spring.cloud.nacos.username/password` 的 relaxed binding。要点：discovery 侧
+      # （NacosDiscoveryProperties，@ConfigurationProperties("spring.cloud.nacos.discovery")）在
+      # 自身 username/password 为空时会回退到父级 `spring.cloud.nacos.*`（一手核实：spring-cloud-alibaba
+      # 2025.1.0.0 字节码常量池 `${spring.cloud.nacos.username:}`），故这两个键同时覆盖 **config 与 discovery**。
+      # 真值只写在 deploy/.env（600）。用 `:?` 而非空兜底：本文件已开 auth（NACOS_AUTH_ENABLE），
+      # 空口令必然导致「全部服务注册失败」这种最难排查的形态，宁可让 compose 在解析期就报缺失键。
+      # （install.sh 会生成该键、.env.example 已列；旧 .env 由 env_key_backfill 补齐。）
+      SPRING_CLOUD_NACOS_USERNAME: ${NACOS_ADMIN_USERNAME:-nacos}
+      SPRING_CLOUD_NACOS_PASSWORD: ${NACOS_ADMIN_PASSWORD:?请在deploy/.env设置NACOS_ADMIN_PASSWORD}
       INTERNAL_TOKEN: ${INTERNAL_TOKEN}
       # 每个副本必须唯一（租约归属的键）；扩容时逐副本注入不同的 ACCESS_NODE_ID
       ACCESS_NODE_ID: ${ACCESS_NODE_ID:-access-1}
@@ -315,6 +396,16 @@ services:
     environment:
       NACOS_ADDR: nacos:8848
       SENTINEL_ADDR: sentinel-dashboard:8858
+      # Nacos 客户端凭据（开 auth 后必需，否则拉配置 + 注册双双失败）：环境变量到
+      # `spring.cloud.nacos.username/password` 的 relaxed binding。要点：discovery 侧
+      # （NacosDiscoveryProperties，@ConfigurationProperties("spring.cloud.nacos.discovery")）在
+      # 自身 username/password 为空时会回退到父级 `spring.cloud.nacos.*`（一手核实：spring-cloud-alibaba
+      # 2025.1.0.0 字节码常量池 `${spring.cloud.nacos.username:}`），故这两个键同时覆盖 **config 与 discovery**。
+      # 真值只写在 deploy/.env（600）。用 `:?` 而非空兜底：本文件已开 auth（NACOS_AUTH_ENABLE），
+      # 空口令必然导致「全部服务注册失败」这种最难排查的形态，宁可让 compose 在解析期就报缺失键。
+      # （install.sh 会生成该键、.env.example 已列；旧 .env 由 env_key_backfill 补齐。）
+      SPRING_CLOUD_NACOS_USERNAME: ${NACOS_ADMIN_USERNAME:-nacos}
+      SPRING_CLOUD_NACOS_PASSWORD: ${NACOS_ADMIN_PASSWORD:?请在deploy/.env设置NACOS_ADMIN_PASSWORD}
     ports:
       # ⚠️ 绑定地址**刻意与 INTERNAL_BIND_ADDR 分开**（同 IoTDB 的 IOTDB_BIND_ADDR 先例，2026-09-26）。
       # 原因：18084 现在暴露 `/actuator/metrics` 与 `/actuator/health`（可观测缺口补齐，见

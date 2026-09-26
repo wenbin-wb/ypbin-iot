@@ -66,7 +66,7 @@ NO_DOCKER=1 NACOS_ADDR=localhost:8848 DB_HOST=localhost DB_USER=root DB_PASSWORD
 
 **网络受限 / 镜像拉取**：GitHub 不可达自动降级 Gitee 镜像；公共镜像加速全部不可用时，在能拉镜像的机器 `docker save <5 个基础镜像> | gzip | ssh <服务器> 'gunzip | docker load'` 后重跑脚本即可（业务镜像基于本地已导入的 `eclipse-temurin:21-jre` legacy 构建，不联网）。
 
-**初始口令**：业务超管在种子 `deploy/sql/002-data.sql`（bcrypt，首登立即改密）；MySQL/Redis/Nacos/INTERNAL 等由 install.sh 随机生成存入 `deploy/.env`（600）；Nacos/XXL-JOB 控制台默认 `nacos/nacos`、`admin/123456`。
+**初始口令**：业务超管在种子 `deploy/sql/002-data.sql`（bcrypt，首登立即改密）；MySQL/Redis/Nacos/INTERNAL 等由 install.sh 随机生成存入 `deploy/.env`（600）。**Nacos 控制台不再保留内置默认口令**：install.sh 会把服务器口令改成 `deploy/.env` 的 `NACOS_ADMIN_PASSWORD`（`openssl rand -hex 16`），并开启服务端鉴权（`NACOS_AUTH_ENABLE=true`；各服务用同一个键经 `SPRING_CLOUD_NACOS_PASSWORD` 连 Nacos）——步骤、判据与回滚见 [`NACOS-AUTH.md`](NACOS-AUTH.md)。XXL-JOB 控制台仍是镜像默认 `admin/123456`（**未加固**，见 `DEPLOY-CREDENTIAL-HYGIENE.md` §5）。
 
 **方式二：手动**：
 

@@ -42,3 +42,6 @@ Thumbs.db
 # Claude 技能（.claude/skills 随仓库发布，供各会话/协作者统一使用）
 .claude/*
 !.claude/skills/
+
+# Redis requirepass 受管配置（由 deploy/redis-auth-conf.sh 从 .env 生成，含真实口令，绝不入库）
+deploy/redis-requirepass.conf
