@@ -1,0 +1,19 @@
+# 生产机「已安装文件」与仓库版本的 sha256 对账清单（**离线可用**）
+# 生成：bash deploy/gen-prod-install-manifest.sh > deploy/prod-install-manifest.sha256
+# 对账：bash /usr/local/sbin/reconcile-prod-vs-main.sh
+# 格式：<sha256>  <生产机安装路径>  <仓库内路径>
+# 注意：本清单必须与代码**同一次提交**；改动下列任一文件后未重跑本脚本 ⇒ 对账会报假 DRIFT。
+#
+d2efac023c0ac2cb724b87d476ee7203f3b1c498948720f5b2900bd9e0fe5f06  /usr/local/sbin/zram-swap-up.sh  deploy/zram-swap-up.sh
+04798b60cb43c567a320f42e6f1d256c9e9e426b7c5ce83ed8000444f5c6cb21  /usr/local/sbin/zram-swap-down.sh  deploy/zram-swap-down.sh
+759dd12600d26cda6e1bc2216e6c635565180f5aa92e59e544f7256eaca9808b  /usr/local/sbin/zram-swap-verify.sh  deploy/zram-swap-verify.sh
+18fdceb3348580bebe03d7103afa99acb0f3e6eeb8b6396eff991997cc5a4ad5  /etc/systemd/system/zram-swap.service  deploy/zram-swap.service
+d86d0a1f06d6cc03c0f062712cfc50d4ce68b3226f7e2970e1ca4dcab8176f0f  /etc/sysctl.d/99-zram-swap.conf  deploy/99-zram-swap.conf
+019a911f93bd74e2072998fffd400c699171065358d7fc55ec667e4a084f028c  /etc/modules-load.d/zram.conf  deploy/modules-load-zram.conf
+465333ee2b946bb0949864c95cb0e1348d9762ba9a7f3ef7e771427acd198c99  /etc/systemd/system/access-tcp-simulator.service  deploy/access-tcp-simulator.service
+6b9a16beb19c98b15a7bb1c91a2bd33a1f92c47f8602bc41481776b383e0d919  /usr/local/sbin/access-tcp-simulator.py  docs/tools/access-tcp-simulator.py
+8c4ff030e8b866c8af9dcac421d2f0c07855fe4206736fecf7ef0719eded4f53  /usr/local/sbin/feeder-watch.sh  deploy/feeder-watch.sh
+49c168455b6c0c3891576812874ff73464bfb3c4628b7c381cf8c7e0d77aa90c  /etc/systemd/system/feeder-watch.service  deploy/feeder-watch.service
+cde99c26df21cd48876c5ee475bd87be099219c50f39e5b0eb86c78e6a715266  /etc/systemd/system/feeder-watch.timer  deploy/feeder-watch.timer
+b53ba459fe2b5a02880b6ff73e133508e2bab1941ccb5210113d8cfc30f46fc4  /usr/local/sbin/post-reboot-check.sh  deploy/post-reboot-check.sh
+3c3f5a5ae357db246426faa27bd351dd02c17792990e76a5335d7621d29e5559  /usr/local/sbin/rollback-asset-inventory.sh  deploy/rollback-asset-inventory.sh

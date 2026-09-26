@@ -292,3 +292,66 @@ docker exec -i ypbin-mysql sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot 
 3. **演示设备的 `pollIntervalMs` 取 24h**（真接入时由 access 按点位周期上报）：断档由 15s 扫描按 `K×采集周期` 打开，若按真实 1 分钟周期填，所有「无断档」设备几分钟后都会被判成断档。这是为了让演示**稳定约 2 天**的取舍（开断档阈值 = `poll_interval_ms × K` = 24h × 2 = 48h，超过 48h 未上报才会被判成新断档；再往后重跑种子脚本即可刷新）；点位**数据本身的密度**不受影响（温度 1 分钟 1 点）。
 4. **`duration_sec` 列只是展示用**：可用率 SQL 用 `start_ts/end_ts` 现算窗口内秒数，所以造数时 `duration_sec` 必须等于 `end-start`（本仓已按此写入）。
 5. **「IoT 平台」标题的端到端状态（已收口）**：活库 `sys_menu.id=3204` 的 `title` 是 **i18n 键 `page.iot.title`**（不是中文原文）；运行中的前端产物已用 CI 真构建重建并部署（`/opt/ypbin/ypbin-iot/iot-ui-dist`，旧产物备份为 `iot-ui-dist.bak-*`），产物里含 `page` 命名空间的 `iot.title`（zh-CN「IoT 平台」/ en-US "IoT Platform"）。因此菜单按 i18n 正常渲染，语言切换也生效。若哪天需要把库里的键临时换成中文原文兜底（例如前端回滚到旧产物），回滚/兜底命令见 `/root/iot-demo/rollback-menu-title.sql` 的逆操作。
+
+---
+
+## 附录 · 2026-09-26 「喂数停摆」告警演练留下的**真实断档**（**不得抹掉**）
+
+> 本节是本轮运维工作（`deploy/feeder-watch.sh` 的告警判据演练）在**演示数据里留下的真实痕迹**。
+> **明确记账、不做任何清理**：该断档是**真实发生**的，可用率因此下降，属于已知事实。
+
+### 演练做了什么
+
+为验证「喂数停摆」告警**真的会响**，在生产机上**故意停掉**喂数源
+（`access-tcp-simulator.service`）**135 秒**，跑一轮默认窗口的判据，然后立刻恢复。
+
+| 项 | 值 |
+|---|---|
+| 设备 | **`9300012`** = `演示-设备-历史曲线（多点位/边界值）`（endpoint `tcp://172.20.0.1:19002`） |
+| 停摆窗口（UTC） | **2026-09-26T22:39:39Z → 22:41:54Z（135 秒）** |
+| 停摆窗口（CST） | 2026-09-27 06:39:39 → 06:41:54 |
+| 恢复 | access 于 **22:42:15Z** 重新订阅成功；**22:42:30Z** `write.rows` 恢复增长 |
+| **演示数据里的真实断档** | 可用率接口记录到 **`durationSec=157`**、`reason=NO_GOOD_DATA`、`endTs=2026-09-27 06:42:16`（CST）**——这条就是本次演练** |
+
+### 告警是否真的响了（journald 原文，`feeder-watch-drill` 单元）
+
+```
+feeder-watch @ 2026-09-26T22:39:41Z
+  · L1 write.rows: 2119 -> 2119（窗口 120s）
+  · L2 db.rows: 20040 -> 20266（窗口 900s）
+  · L3 access-tcp-simulator.service: active
+  · L3 监听 172.20.0.1:19002: 在
+  · L3 iot.timeseries.write.failed = 0
+  · L3 iot.timeseries.db.probe.failed = 0
+判定: ALERT（1 条）
+  ! L1 喂数停摆：write.rows 在 120s 内未增长（2119 -> 2119）
+feeder-watch-drill.service: Main process exited, code=exited, status=2/INVALIDARGUMENT
+```
+
+> **读法（如实）**：**只有 L1 报出了停摆** —— 因为停摆只覆盖了 L1 的 120s 窗口，
+> 之后喂数已恢复，所以 L2（900s 窗口内 `db.rows` 从 20040 涨到 20266）与三条 L3 都**正常通过**。
+> 这恰好证明：**L1 是最快的那条判据**（120s 粒度），而 L2/L3 需要在更长的停摆里才会响。
+> 单元以 `status=2` 结束 ⇒ 印证"**ALERT 会让单元进入 failed**，在 `systemctl --failed` 里一眼可见"的设计。
+> （`feeder-watch-drill` 是用 `systemd-run` 起的一次性单元；常驻的是 `feeder-watch.timer`。）
+
+### 演练后该设备的现状（**更新于 2026-09-26T23:00Z 左右**）
+
+| 指标 | 演练后实测 |
+|---|---|
+| `temperature` 最新时序点 | **2026-09-26T22:58:32Z**，`quality=GOOD`（最近 10 分钟窗口内 **299 点**，采集已完全恢复） |
+| 24h 可用率 | **`0.948657`**（`effectiveWindowSeconds=86400`，`from=2026-09-26 06:58:35`） |
+| 断档累计 | `outageSeconds=4436`、`outageCount=7`、`longestOutageSeconds=3129` |
+| 是否达标 | `meetsTarget=false`（`maxAllowedOutageSeconds=600`） |
+| 维护窗口 | `maintenanceSeconds=0`、`maintenanceWindows=[]` |
+
+> ⚠️ **不要把这个下降当成"系统故障"**：`0.948657` 里**大部分**来自该设备**既有的**长断档
+> （`longestOutageSeconds=3129` s ≈ 52 分钟，早于本次演练），**本次演练只贡献了其中 157 秒**。
+> 若要区分，看上面那条 `endTs=2026-09-27 06:42:16 CST` 的短断档即可。
+
+### 相关工具（仓库内）
+
+| 路径 | 用途 |
+|---|---|
+| `deploy/alert-drill.sh` | 本次演练的可复现脚本（停摆 → 起默认窗口判据 → 恢复 → 取证；**会在演示数据里留下真实断档**） |
+| `deploy/feeder-watch.sh` | 判据本体（四级；退出码 0/2/3） |
+| `deploy/access-tcp-simulator.md` §5 | 「喂数停摆」判据与告警查看方式 |
