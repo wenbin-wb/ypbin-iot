@@ -66,7 +66,7 @@
 >   - 行内只写 **（子代理一手核实）** 的 ⇒ 引文与 URL 来自子代理，**独立复核者本轮未逐条重取**（已知未重取：F22、F25、F26、F28、F29、F31、F35、F36、F37，以及 F10 的 pbkdf2 默认值）⇒ **结论强度弱一档**，落地前请自行复核链接；
 >   - 行内写 **【本机实测】** 的 ⇒ 命令与输出见附录 B。
 > - 任何**无出处**或**推断性**表述都不进本文档的结论；查不到的一律进 §10.2。
-> - **第二轮复核的独立发现（已采纳并写入本文档）**：① EMQX 只看 HTTP 状态码有官方**源码**级依据（`emqx_bridge_http_connector.erl`：`StatusCode >= 200 andalso StatusCode < 300 -> ok`，429/503 归 `recoverable_error`，其余 `unrecoverable_error`）；② `api_key.bootstrap_file` 为官方明载（F39b）；③ OSS 无角色凭据（C10/F39）；④ 官方 rule SQL 页对 `nth` **已载越界约束**（见 U19）。
+> - **第二轮复核的独立发现（已采纳并写入本文档）**：① EMQX 只看 HTTP 状态码有官方**源码**级依据：`emqx/emqx` tag **v5.8.9** 的 `apps/emqx_bridge_http/src/emqx_bridge_http_connector.erl` **:963-986** —— `StatusCode >= 200 andalso StatusCode < 300 -> ok`，429/503 归 `recoverable_error`，其余 `unrecoverable_error`（见 [GitHub 源码](https://github.com/emqx/emqx/blob/v5.8.9/apps/emqx_bridge_http/src/emqx_bridge_http_connector.erl#L963-L986)，一手，2026-09-26 独立复核取回）；② `api_key.bootstrap_file` 为官方明载（F39b）；③ OSS 无角色凭据（C10/F39）；④ 官方 rule SQL 页对 `nth` **已载越界约束**（见 U19）。
 
 ### 3.1 镜像与版本
 
@@ -214,7 +214,7 @@ flowchart TB
 |---|---|---|---|
 | ① 设备→EMQX | 内置库 sha256+salt | — | — |
 | ③ publish 授权 | ACL built_in_database | — | 主题模板 + `no_match=deny` |
-| ④→⑤ 规则→HTTP | `X-Internal-Token`（既有守卫） | **重复**（`max_retries`+`request_ttl` 重发；QoS1 至少一次）；**且失败可能对 EMQX 不可见**（平台恒返回 HTTP 200） | 服务端**必须**可重放；**失败必须让 EMQX 看见非 2xx** ⇒ §6.5 / H10 |
+| ④→⑤ 规则→HTTP | `X-Internal-Token`（既有守卫） | **重复**（`max_retries`+`request_ttl` 重发；QoS1 至少一次）；**且失败可能对 EMQX 不可见**（**旧通道** `/internal/readings` 因全局 HTTP 200 铁律恒返回 200；本设计以专用入站端点破例，见 §6.5） | 服务端**必须**可重放；**失败必须让 EMQX 看见非 2xx** ⇒ §6.5 / H10 |
 | ⑤→AVAIL 活性/断档 | — | 重复安全（**已核实**） | 单调合并 `earliest()/latest()`（`:498`）+ 乱序守卫（有效数据早于断档起点则不闭合，`:481`）+ `clearOpenOutage` CAS（`:485`）—— `AvailabilityServiceImpl.java:466-502` |
 | ⑤→Redis 最新值 | — | 🔴 **重复不安全（跨批乱序会回退）** | 仅批内 ts 取新 —— `RedisLatestValueWriter.java:74-81`；**见 §6.4** |
 | ⑤→IoTDB 时序 | — | 重复安全（同 ts 覆盖，**未在本仓实测**） | 由 IoTDB 时间列语义决定，列入待验证 |
@@ -394,7 +394,7 @@ ALTER TABLE iot_device
 
 ### 6.1 主推路径（P0）：Rule Engine + HTTP 动作 → 薄适配端点 + 复用既有落库链路
 
-**新增内容只有「一个薄适配控制器」**：`POST /internal/mqtt/readings`（与既有端点同在 `/internal/**` 守卫下、同一凭证）。**落库链路完全复用**——控制器只做契约适配，然后调用既有 `AvailabilityService.ingest(req)`，其后的活性/断档、最新值、时序一行不改。**为什么不直接复用 `/internal/readings` 这个端点本身**：因为本仓全局异常统一 HTTP 200，而 EMQX 只看 HTTP status（官方源码判据：`emqx_bridge_http_connector.erl` 的 `StatusCode >= 200 andalso StatusCode < 300 -> ok`，其余按 `recoverable/unrecoverable_error` 处理），若沿用 HTTP 200 信封，非法报文会被判「投递成功」而静默丢弃 —— 详见 §6.5。
+**新增内容只有「一个薄适配控制器」**：`POST /internal/mqtt/readings`（与既有端点同在 `/internal/**` 守卫下、同一凭证）。**落库链路完全复用**——控制器只做契约适配，然后调用既有 `AvailabilityService.ingest(req)`，其后的活性/断档、最新值、时序一行不改。**为什么不直接复用 `/internal/readings` 这个端点本身**：因为本仓全局异常统一 HTTP 200，而 EMQX 只看 HTTP status —— 官方源码判据：`emqx/emqx` tag **v5.8.9**、`apps/emqx_bridge_http/src/emqx_bridge_http_connector.erl:963-986`（`StatusCode >= 200 andalso StatusCode < 300 -> ok`；429/503 → `recoverable_error`；其余 → `unrecoverable_error`），[源码链接](https://github.com/emqx/emqx/blob/v5.8.9/apps/emqx_bridge_http/src/emqx_bridge_http_connector.erl#L963-L986)（一手，2026-09-26）。若沿用 HTTP 200 信封，非法报文会被判「投递成功」而静默丢弃 —— 详见 §6.5。
 
 既有可复用部分（已核实）：
 
@@ -463,7 +463,7 @@ WHERE
 | 重试 | 交给 EMQX（`max_retries` + `request_ttl`）。**平台侧不做二次重试** | 仓内既有纪律：`HttpAccessReadingSink` 刻意「失败即丢弃不重试」，避免占住线程放大远端压力（`HttpAccessReadingSink.java:35-39`） |
 | 死信 | **P0 不引入死信表**；改用**计数 + 告警**：EMQX 侧看 `dropped.*`（F28）、平台侧看 `iot.access.egress.failed` 与 5xx 响应 | 引入死信表要先有「重放工具」和「幂等键」，否则是负债；R8：**P2** 再评估 |
 | 限流 | P0 不做平台侧限流；用 EMQX `limiter`（官方有 Limiter 配置页）与设备侧 `keepalive` 倒逼 | EMQX 确有 `guides/configuration/limiter.html`（**本轮未核实其字段**，故不写具体键） |
-| 循环内 DB/RPC | **零新增循环内 DB/RPC**：主推路径不写 Java；服务端 `ingest` 的既有实现按批聚合，批量查询用一次 `IN`（`resolveTenants`/`filterCollectible`，`AvailabilityServiceImpl.java:306,584`） | 仓内铁律 |
+| 循环内 DB/RPC | **零新增循环内 DB/RPC**：主推路径的 Java 增量只有 **1 个薄适配控制器**（只做契约适配与白名单校验，**不查库、不 RPC**）；落库仍走既有 `ingest` 的按批聚合与一次 `IN` 批量查询（`resolveTenants`/`filterCollectible`，`AvailabilityServiceImpl.java:306,584`） | 仓内铁律 |
 | 批量 | P0 无批量（1 msg = 1 HTTP）；**P1** 走备选路径获得 200 条/批 | §4.2 |
 | **失败可见性** | 见 §6.5：平台「应用层拒绝」必须对 EMQX 呈现**非 2xx**，否则静默丢数据 | 仓内 HTTP 200 铁律 vs EMQX 只看 status |
 | **字段白名单** | `payload.propertyId` 必须按「物模型属性 + 该设备点位映射」做白名单校验（**P0 必做**） | 入站输入不可信铁律；否则被控设备可往 `iot:latest:{t}:{d}` 灌任意 field |
@@ -524,7 +524,7 @@ WHERE
 **事实两侧**
 
 - 仓内铁律：**全局异常统一 HTTP 200**，靠响应体 `R.code` 区分成功/失败（`docs/IOT-PLATFORM-DESIGN.md` 的异常规范、admin 后端 skill 同款约束）。
-- EMQX HTTP 动作的判据是 **HTTP 状态码**：官方对桥接的失败/重试描述全部围绕「HTTP 响应」与 `max_retries`/`request_ttl`（F27/F28），**没有**任何「读取响应体业务码」的机制。
+- EMQX HTTP 动作的判据是 **HTTP 状态码**：官方对桥接的失败/重试描述全部围绕「HTTP 响应」与 `max_retries`/`request_ttl`（F27/F28），**没有**任何「读取响应体业务码」的机制（依据同上：`emqx_bridge_http_connector.erl:963-986` 只按状态码分支；该否定性结论**仅由该源码支撑**，见 §10.2 U20）。
 
 **后果（静默丢数据）**
 
@@ -535,6 +535,10 @@ WHERE
 | 方案 | 做法 | 取舍 |
 |---|---|---|
 | **A（推荐）· 入站专用端点** | 新增 `POST /internal/mqtt/readings`（同守卫），**校验失败即返回非 2xx**（`400`），成功才 2xx；失败细节进日志与指标 | 需要在 `/internal/**` 里**破例**一个「不遵全局 HTTP 200」的端点 ⇒ 必须在代码注释与本文档写明这是**协议边界**的刻意例外，并加一个架构门禁/单测断言它确实返回 400 |
+
+**⚠️ 「400 到底怎么出」必须写死，否则会静默失效**：不要用 `@Valid @RequestBody`（`MethodArgumentNotValidException` 会被全局异常处理器转成 **HTTP 200 + `R.code`**，等于没做）。**做法**：控制器方法签名直接接 `ReadingIngestReq` 与 `HttpServletResponse`，**自己做校验**；不合法时 `response.setStatus(400)` + 写一个最小 JSON 错误体 + `return null`（或返回 `void`），**完全不经过 `R` 信封**；合法时才调用 `AvailabilityService.ingest(req)` 并返回 `R.ok(...)`。**验收**：单测直接用 `MockMvc` 断言 `status().isBadRequest()`（断言的是**原始 HTTP 状态**，不是 `R.code`）——这条单测就是「破例真的生效」的证明（照教训七/八：门禁必须验证「真的执行了」，否则假绿）。
+
+**⚠️ `propertyId` 白名单的落点（避免与「`ingest` 一行不改」冲突）**：白名单校验放在**入站适配层**（上述控制器内，一次批量取该设备的点位映射做 `Set` 包含判断，**不查库的第二遍、不在循环里查库**），**不改 `AvailabilityService.ingest` 的语义**。代价要说清：**既有 HTTP 通道 `POST /internal/readings` 不受该校验保护**——它只由 `access`（受 `X-Internal-Token` 保护的内部调用方）使用，且 `access` 自己按点位映射采集，视为可信。若要对 HTTP 通道也做同等防护，属**独立决策**（登记为 P2-7），不在 P0。
 | **B · EMQX 侧前置校验** | 在规则 SQL 里用 `WHERE`/字段存在性判断把非法报文挡在动作之外（直接丢弃并计数） | 零 Java 改动；但**规则 SQL 表达力有限**，挡不住所有契约（如枚举值、长度上限），仍有漏网 ⇒ 只能作为 A 的补充 |
 | **C · 平台侧补偿对账** | 保持 HTTP 200，另加「设备侧上报计数 vs 平台落库计数」对账 | 把问题变成**可观测**而不是**可防**；工程量大，且告警滞后 |
 
@@ -926,6 +930,7 @@ ypbin:
 | P2-4 | 设备日志/消息跟踪（对标阿里云云端运行日志，7 天可查） | [后端][中间件] |
 | P2-5 | 死信表与重放工具（先有幂等键与重放工具再引表，§6.2） | [后端] |
 | P2-6 | spec 同步：把 `docs/IOT-PLATFORM-DESIGN.md` 的 `$iot/...` 全量改为 `ypbin/...`（PR 评审通过后） | [文档] |
+| P2-7 | **HTTP 上报通道也做 `propertyId` 白名单防护**（P0-6c 只保护 MQTT 入站；HTTP 通道当前视为可信内部调用） | [后端] |
 
 ---
 
@@ -966,9 +971,11 @@ ypbin:
 | **U8** | 规则引擎模板产出的 `deviceId` 是**字符串**，能否被 Jackson 反序列化为 `Long` | 未实测（Jackson 默认支持数字字符串→Long，但**未在本项目实测**） | 若不成立，需在规则 SQL 里做数值转换 |
 | **U9** | Nacos 配置里的 `${EMQX_API_KEY}` 能否由 **Spring 从容器 env 解析**（方案 α） | 未实测 | 落地前必须端到端验证；否则改用方案 β（改 install.sh） |
 | **U10** | ~~是否存在 HOCON 预置 API Key 的手段~~ **已核实（本项已关闭）**：官方 5.8 文档明载 `api_key = { bootstrap_file = "etc/default_api_key.conf" }`，格式 `{API Key}:{Secret Key}:{?Role}`（F39b）。**首版把它写成「未核实 ⇒ 必须人工」属漏检，经独立复核指出并已改正** | 已核实（本文档亲自取回官方 REST API 页全文） | 见 U18（OSS 是否生效） |
-| **U17** | pbkdf2 `iteration_count` 默认 **4096**（F10） | 子代理核实，**独立复核未能重取**（其取到的页面在该处被截断） | 若将来改用 pbkdf2，须自行复核；本设计用 sha256，不受影响 |
+| **U17** | ~~pbkdf2 `iteration_count` 默认 4096~~ **已核实（本项已关闭）** | 第三轮独立复核一次取回即命中：authn/mnesia.html *Iteration Count … **The default is 4096***（一手，2026-09-26） | 无（本设计用 sha256） |
 | **U18** | `api_key.bootstrap_file` 在 **OSS `emqx/emqx:5.8.9`** 是否同样生效 | 官方 5.8 **开源文档**已明载；但独立复核在 OSS 源码树中未能定位该键的 schema 落点 ⇒ **OSS 侧未核实** | 决定 §8.5 走 A（自动预置）还是 B（人工建 Key）；**上线前必须实测** |
 | **U19** | 规则 SQL 里 `nth`/`tokens` 对**越界索引**的**具体返回形式**（服务账号 `svc-ingress` 的 username 无点 ⇒ `nth(2, …)` 越界） | ✅ 官方已载（**独立复核取回**）：`nth(N: integer, Array: array) -> any` 且原文 *"`N` should not be larger than the length of `Array`"*；页首并载 *"if the provided argument exceeds the stipulated range … it will result in the current SQL execution failing, incrementing the failure count by one"* ⇒ **越界不是「返回空」而是「本次规则执行失败并计数」**。**仍然未实测**的是：该失败在 5.8.9 容器里的实际表现（是否只影响该条消息、失败计数落在哪个指标、是否会让**整条规则**被停用） | §5.2 的安全性推理方向不变（越界失败同样不会展开成真实主题），但**运维后果不同**：服务账号若走进这条规则会持续累加失败计数，因此 §5.2 的设计（服务账号的 username 无点、只命中 `rules/users`）**必须在真实容器里验证**；见 [rule-sql-builtin-functions.html](https://docs.emqx.com/en/emqx/v5.8/develop/data-integration/rule-sql-builtin-functions.html)（一手，2026-09-26） |
+| **U20** | 「EMQX 的 route/主题表随不同主题数增长」这一**推断性表述**（§5.1 第 3 点「requestId 不进主题」的关键理由） | **无官方出处**（本轮未取到「主题数与内存关系」的官方量化文档） | 推理方向保守（少用主题总是更稳），但**不得当作官方结论引用**；如需量化须自行压测 |
+| **U21** | 「官方 user_management 页**未给出** POST 对已存在 `user_id` 是否 upsert 的语义」（§5.3） | 否定性核实，**本轮未取到明确原文**；处置（先 DELETE 再 POST）**刻意保守**，不依赖该语义 | 风险低；若将来要省一次调用，须先核实 upsert 语义 |
 | **U11** | 内置数据库（Mnesia）在**集群**下的规则/用户复制语义 | 未核实（D0.6 的 ⚠️ 已提示） | 本轮**单节点**，不涉集群；集群化前必须重核 |
 | **U12** | 生成 Docker 镜像的**默认容量上限**（`max_mqueue_len=1000` 等）在多租户下的叠加影响 | 部分核实（默认值来自官方配置页），叠加影响未算 | 备选路径（§6.3）的容量规划需实测 |
 | **U13** | EMQX 侧 `limiter`（限流）的**确切配置键** | 未核实（只确认有该文档页） | §6.2 不写具体键 |
