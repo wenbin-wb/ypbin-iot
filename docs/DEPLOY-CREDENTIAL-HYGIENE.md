@@ -229,8 +229,8 @@ docker inspect -f '{{.State.Health.Status}}' ypbin-mysql ypbin-redis   # 期望 
 | `docker inspect .Config.Cmd`（redis） | `… --requirepass <口令>` | `["redis-server","/usr/local/etc/redis/redis-requirepass.conf","--appendonly","yes"]`（口令值在 `.Config.Cmd` 中命中 **0** 次） |
 | 探活语义仍然有效 | — | 无口令 `PING` → `NOAUTH`；从容器内 600 文件取口令 → `PONG`；mysql 容器 `healthy`（探针 exit 0） |
 | 4 个基础设施容器 | healthy | 全部 `healthy`（mysql/redis/nacos/iotdb） |
-| **`docker events`（决定性，90s）** | 8 行含口令（mysql 4 / redis 4） | 含 mysql/redis/nacos/iotdb 口令值行数 **0/0/0/0**；新探针被观测 18/18/18/6 次；旧带凭据形态 `-p`/`-a`/`-pw` **0/0/0** |
-| `docker top` 采样（辅助，非决定性） | 90 次采样命中 2 | 90 次采样命中 **0** |
+| **`docker events`（决定性；单位=事件行，窗口=各 90s）** | **改前（两容器均旧）** 8 行含口令（mysql 4 / redis 4）；**中间态（只重建了 redis）** 16 行含 mysql 口令 | 含 mysql/redis/nacos/iotdb 口令值行数 **0/0/0/0**；新探针被观测 **mysql/redis/nacos=18、iotdb=6** 次；旧带凭据形态 `-p`/`-a`/`-pw` **0/0/0** |
+| `docker top` 采样（辅助，**无判别力**） | 「90 次命中 2」是单次偶然观察（按命中率 1/3207 估计 90 次期望≈0.03），**不可重复、不作为证据** | 90 次采样命中 **0**（同样无判别力） |
 | 全容器 `Healthcheck`/`Entrypoint`/`Cmd` 含凭据者 | 3 处 | **0** |
 
 **过程中两个必须记下的点**：
@@ -248,3 +248,12 @@ docker inspect -f '{{.State.Health.Status}}' ypbin-mysql ypbin-redis   # 期望 
 
 **已删除的临时事件流**：两次 `docker events` 捕获（含改前明文口令，最大 12MB，600 文件）
 已在提取计数后删除，只保留计数结论（本文件 §4.1 的操作约束）。
+## 9. 未决项与后续建议（复核后登记）
+
+| 项 | 状态 |
+|---|---|
+| `ypbin-access` 的 `/actuator/health` 超时（000，而 `/` = 200） | **未决**：现值可复现，但「改前是否也存在」**无一手证据**（改前容器已被替换、仓库文档无历史记录）。独立因果判断：无正面证据指向本轮改动（同批其它 4 服务 health 全 200、access 的 Nacos 注册 healthy=1、鉴权失败签名 0）。建议单独立项排查 |
+| 轮换工具把 **Nacos accessToken（JWT）经 `-H` 传 argv** | 已知残留：token 是短时凭据（非长期口令），且沿用本文件既有做法。复核者已实测 `curl -K -`（配置走 stdin）在生产可用，**建议后续统一改造**；本轮不做（避免在同一区域连续改动的风险） |
+| Redis/MySQL 探活不校验口令 | 见 §3 折衷记账（无专用应用侧指标，口径弱于 IoTDB） |
+| 容器 env 中的口令 | 见 §4（用户裁定本轮不轮换；另见 §4.1 本轮新发生的**会话暴露**，需用户知情后重新确认该裁定） |
+| `install.sh` 的改口令链路 | 未端到端验证（需重装） |

@@ -188,6 +188,11 @@ curl -s -o /dev/null -w '19000 %{http_code}\n' -m 10 http://127.0.0.1:19000/
 |---|---|
 | 内置默认口令（`nacos`，len=5，sha16 `569bf0af7a7562f3`）登录 | `hasToken=0`（响应体 `User not found! …`） |
 | 新口令（len=32，sha16 `fcaeaf3a978610dd`）登录 | `hasToken=1` |
+
+> **指纹口径（复核者指出我前后不一致，已统一）**：本文所有 `sha16` 一律是
+> **`sha256(裸值)` 的前 16 位**（`printf %s "$VALUE" | sha256sum`，**不含尾部换行**）。
+> 按此口径 `NACOS_AUTH_IDENTITY_VALUE` 的新值指纹是 **`d69aa74d438f2566`**；
+> 此前写的 `de831a029b9bd649` 是「值 + `\n`」口径，作废。
 | 口令确实不是默认值 | 指纹不同（上表两值不同）；且 `.env` 为 600 |
 
 **② client 侧 auth 真的生效（8848）**：匿名读 `ypbin-common.yaml` → **403**；带 accessToken → **200**；
@@ -205,16 +210,19 @@ Nacos 服务数 totalCount=5
 
 **④ 健康与页面**：`/actuator/health` = 18080/18081/18082/18084 **200**；`19000/` **200**；
 经前端 `19000/api/auth/captcha` **200**。`18086/actuator/health` = **000（超时）**——
-**改前基线同样是 000**（`ypbin-access` 的既有问题：`/` 返回 200，但 health 端点 30s 无响应），
-与本轮改动无关，已单列见 §7/§9。
+**改前基线同样是 000**（`ypbin-access` 的既有问题：`/` 返回 200，但 health 端点 30s 无响应）。
+
+> ⚠️ **证据等级修正（复核者要求）**：「改前基线同样是 000」是**运维记录，不是一手证据**——改前容器已在本次部署中被替换（`Created`=16:23:29），本验收窗口**无法复现改前测量**，仓库文档里也没有 18086 health 状态码的历史记录。可确证的只有：**改后现值 000**。
+> 独立因果判断（复核者与我一致）：**没有正面证据指向本轮改动**——同一次改动后其它 4 个服务 health 全 200、access 的 Nacos 注册 `healthy=1`（说明其 Nacos 客户端凭据可用）、全服务可归因鉴权失败计数为 0；且凭据错误通常表现为**快速** DOWN/503 而非 30s 挂起。
+> 但「它改前就存在」**无法证明** ⇒ 作为未决项登记，不作为已证基线。
 
 **⑤ 明文口令不出现在 healthcheck / ps / events**
 
 | 判据 | 改前 | 改后 |
 |---|---|---|
 | `docker inspect .Config.Healthcheck.Test` | mysql 含 `-p<口令>`、redis 含 `-a <口令>` | mysql `["CMD","mysqladmin","ping","-h","127.0.0.1"]`、redis `["CMD-SHELL","timeout 3 nc -z 127.0.0.1 6379"]` |
-| `docker events`（**决定性**，90s 窗口） | 8 行含口令（mysql 4 / redis 4） | **mysql=0 redis=0 nacos=0 iotdb=0**；同期新探针分别被观测到 18/18/18/6 次；旧带凭据形态 `-p`/`-a`/`-pw` 计数 **0/0/0** |
-| `docker top` 采样（辅助，非决定性） | 90 次采样命中 2 次 | 90 次采样命中 **0** 次 |
+| `docker events`（**决定性**；单位=事件行数，窗口=各 90s） | **改前（两容器均为旧配置）**：8 行含口令（mysql 4 / redis 4）<br>**中间态（只重建了 redis）**：16 行含 mysql 口令、redis 0 —— 这正是 §8.1 记的漏重建 | **mysql=0 redis=0 nacos=0 iotdb=0**；同期新探针被观测到 **mysql/redis/nacos=18、iotdb=6** 次（周期 10/10/10/30s）；旧带凭据形态 `-p`/`-a`/`-pw` 计数 **0/0/0** |
+| `docker top` 采样（辅助，**非决定性**） | 「90 次命中 2 次」是**单次观察、不可重复**：按实测命中率（mysql 3207 次才 1 次）90 次采样期望命中 ≈0.03 次 ⇒ 该数字是运气，**无判别力**，不作为改前证据 | 90 次采样命中 **0**（同样无判别力） |
 | 全容器 `Healthcheck`/`Entrypoint`/`Cmd` 含凭据者 | mysql healthcheck、redis healthcheck、redis Cmd | **0** |
 
 > `redis` 主进程 uid 实测 **999**（`redis-server` 经 entrypoint `setpriv` 降权），
@@ -226,14 +234,23 @@ Nacos 服务数 totalCount=5
 
 ### 8.4 错误面（重启窗口的瞬态 vs 常驻）
 
-- 近 15 分钟 ERROR：`access` 69（**基线 66**）、`iot` 9、`system` 5、`auth` 2（基线各 0/1/0）、
-  `gateway/nacos/mysql/redis/iotdb` 0。
-- **精确定位**：所有服务的「真鉴权失败」签名（403/Unauthorized/Access denied/user not found/
-  username or password）**计数全为 0**；多出来的 ERROR 是
-  `GrpcClient: Server check fail, please check server nacos` ——**最后一次出现在 16:25:39~16:25:42**
-  （nacos/服务重建窗口），此后消失。最近 3 分钟：gateway/auth/system/iot **0**，
-  access 10（= 其既有 `failed to bind device` 常驻问题的基线速率 ≈13/3min）。
-- ⇒ **本轮没有引入常驻错误**；重启窗口的瞬态重连错误已自愈。
+**逐服务 ERROR（近 30 分钟，复核者实测）**：`gateway/system/auth/iot` 的 ERROR 分两类——
+① `GrpcClient: Server check fail, please check server nacos`（重建窗口的瞬态重连），
+② 少量业务/框架错误（如 `system` 的 `GlobalExceptionHandler: /ypbin/sse/subscribe`、
+`iot` 的 `/internal/readings`），**不含任何鉴权签名**；`access` 以既有 `failed to bind device` 为主。
+
+**精确判据（避免「把某服务的全部 ERROR 都归因于重建窗口」这种过度概括）**：
+
+| 判据 | 结果 |
+|---|---|
+| 真鉴权失败签名（HTTP 403 / Unauthorized / Access denied / user not found / username or password） | **全部服务 0** |
+| `GrpcClient Server check fail` 时间线（近 60 分钟） | gateway/auth/system/iot/access 的**末条**分别 16:25:40 / :40 / :42 / :39 / :41 ⇒ **止于重建窗口，此后 0 条**（复核者另测得个别服务末条到 16:25:43.15，属同一窗口） |
+| `system` 的 ERROR（我先前写「最近 3 分钟 0」被复核者当场否证） | 复核者测得 3 分钟 **1**；我复测（16:48 UTC）3 分钟 **0**、15 分钟 2、30 分钟 7（其中 4 条 GrpcClient + 2 条 `/ypbin/sse/subscribe` + 1 条 ack）⇒ **「system 的 ERROR 全部来自重建窗口」不成立**；但那 2 条 `sse/subscribe` 同样**不含鉴权签名**，属业务/框架既有噪声 |
+| `access` 含子串 `"403"` 的 1 条 ERROR | 复核者见 1 条（无异常类、无 HTTP-403 语义）；我在当前窗口复测命中 **0**，且无法归类 ⇒ 登记为**未分类噪声**，不作为鉴权失败证据 |
+| `access` 的 `failed to bind device` | 常驻、速率与改前基线同量级（改前 66/15m；改后 3 分钟 10~18） |
+
+⇒ **可下的结论**：本轮**没有引入鉴权类常驻错误**、重建窗口的瞬态重连错误已自愈；
+但「各服务全部 ERROR 都归因于重建窗口」**不成立**（`system`/`iot` 有少量业务噪声，改前亦有）。
 
 ### 8.5 部署后新发现（连带面，已单开 PR）
 
