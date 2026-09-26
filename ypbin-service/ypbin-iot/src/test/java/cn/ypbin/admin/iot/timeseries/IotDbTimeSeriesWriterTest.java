@@ -29,6 +29,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -397,6 +398,77 @@ class IotDbTimeSeriesWriterTest {
             assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_FAILED).counter().count())
                 .as("空集合不是失败：不得计数")
                 .isZero();
+        }
+    }
+
+    @Test
+    @DisplayName("★ 成功侧观测：attempted 与 rows 同时计数，实际写入行数可见")
+    void mustCountAttemptedAndActualRows() throws SQLException {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        Connection connection = mock(Connection.class);
+        PreparedStatement statement = mock(PreparedStatement.class);
+        try (MockedStatic<DriverManager> driverManager = mockStatic(DriverManager.class)) {
+            driverManager.when(() -> DriverManager.getConnection(anyString(), any(Properties.class)))
+                .thenReturn(connection);
+            when(connection.prepareStatement(anyString())).thenReturn(statement);
+            when(statement.executeBatch()).thenReturn(new int[] {1, 1});
+
+            new IotDbTimeSeriesWriter(properties(10), registry).writeAll(points(2, "23.5"));
+
+            assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_ATTEMPTED).counter().count())
+                .as("待写行数").isEqualTo(2d);
+            assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_ROWS).counter().count())
+                .as("实际写入行数").isEqualTo(2d);
+            assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_FAILED).counter().count())
+                .as("未失败").isZero();
+        }
+    }
+
+    @Test
+    @DisplayName("★★ 生产缺陷形状：驱动不抛异常却吞行 ⇒ rows < attempted（此前这种沉默完全不可见）")
+    void mustExposeGapWhenDriverSwallowsRows() throws SQLException {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        Connection connection = mock(Connection.class);
+        PreparedStatement statement = mock(PreparedStatement.class);
+        try (MockedStatic<DriverManager> driverManager = mockStatic(DriverManager.class)) {
+            driverManager.when(() -> DriverManager.getConnection(anyString(), any(Properties.class)))
+                .thenReturn(connection);
+            when(connection.prepareStatement(anyString())).thenReturn(statement);
+            // 回执说明：一条明确失败、一条成功——驱动**没有抛异常**
+            when(statement.executeBatch())
+                .thenReturn(new int[] {Statement.EXECUTE_FAILED, Statement.SUCCESS_NO_INFO});
+
+            assertThatCode(() -> new IotDbTimeSeriesWriter(properties(10), registry)
+                .writeAll(points(2, "23.5")))
+                .as("契约：失败只计数不抛，绝不让上报事务回滚")
+                .doesNotThrowAnyException();
+
+            assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_ATTEMPTED).counter().count())
+                .as("待写").isEqualTo(2d);
+            assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_ROWS).counter().count())
+                .as("实际只写进 1 行——缺口必须从指标上看得见").isEqualTo(1d);
+            assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_FAILED).counter().count())
+                .as("失败计数是**批次级**语义，行级吞行不得改它的口径").isZero();
+        }
+    }
+
+    @Test
+    @DisplayName("★ 驱动违约返回 null 回执：不抛、按整批计数，但必须告警而非静默")
+    void mustNotThrowOnNullReceipt() throws SQLException {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        Connection connection = mock(Connection.class);
+        PreparedStatement statement = mock(PreparedStatement.class);
+        try (MockedStatic<DriverManager> driverManager = mockStatic(DriverManager.class)) {
+            driverManager.when(() -> DriverManager.getConnection(anyString(), any(Properties.class)))
+                .thenReturn(connection);
+            when(connection.prepareStatement(anyString())).thenReturn(statement);
+            when(statement.executeBatch()).thenReturn(null);
+
+            assertThatCode(() -> new IotDbTimeSeriesWriter(properties(10), registry)
+                .writeAll(points(2, "23.5")))
+                .doesNotThrowAnyException();
+            assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_ROWS).counter().count())
+                .as("驱动违约时保持既有的「未抛即成功」语义").isEqualTo(2d);
         }
     }
 }

@@ -16,11 +16,13 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -57,6 +59,17 @@ public class IotDbTimeSeriesWriter implements TimeSeriesWriter {
     /** 写入失败计数（按批次计）。 */
     public static final String METRIC_FAILED = "iot.timeseries.write.failed";
 
+    /** 交给写入器的**待写行数**（按行计）：与 {@link #METRIC_ROWS} 配对，用于区分「没收集」与「收集了没写」。 */
+    public static final String METRIC_ATTEMPTED = "iot.timeseries.write.attempted";
+
+    /**
+     * **实际写入行数**（按行计，累计）。
+     *
+     * <p>为什么必须有它：此前本类**只有失败计数**，于是「驱动不抛异常但一行也没落库」这种情况在指标与日志上
+     * **完全不可见**（生产实测：`write.failed=0` 而 IoTDB 当天 0 行）。成功侧没有观测＝静默降级。</p>
+     */
+    public static final String METRIC_ROWS = "iot.timeseries.write.rows";
+
     /** 数值行列清单：不含 {@code value_text}（未用列必须不出现，见类注释的实测依据）。 */
     private static final String COLUMNS_NUMERIC =
         "(tenant_id, device_id, property_id, time, value_double, quality)";
@@ -72,6 +85,11 @@ public class IotDbTimeSeriesWriter implements TimeSeriesWriter {
 
     private final TimeSeriesProperties properties;
     private final Counter failedCounter;
+    private final Counter attemptedCounter;
+    private final Counter rowsCounter;
+
+    /** 首次成功落库只打一条 INFO：成功路径在正常运行时保持安静，出问题时靠 WARN 与指标暴露。 */
+    private final AtomicBoolean firstSuccessLogged = new AtomicBoolean(false);
 
     public IotDbTimeSeriesWriter(TimeSeriesProperties properties, MeterRegistry meterRegistry) {
         // 本类可被直接构造（不经 IotTimeSeriesConfiguration）⇒ 构造时确保驱动已注册（幂等、无副作用）
@@ -79,6 +97,11 @@ public class IotDbTimeSeriesWriter implements TimeSeriesWriter {
         this.properties = properties;
         this.failedCounter = Counter.builder(METRIC_FAILED)
             .description("时序写入失败的批次数").register(meterRegistry);
+        this.attemptedCounter = Counter.builder(METRIC_ATTEMPTED)
+            .description("交给时序写入器的待写行数（与 write.rows 配对，用于区分没收集与收集了没写）")
+            .register(meterRegistry);
+        this.rowsCounter = Counter.builder(METRIC_ROWS)
+            .description("时序写入实际成功的行数（累计）").register(meterRegistry);
     }
 
     @Override
@@ -86,6 +109,8 @@ public class IotDbTimeSeriesWriter implements TimeSeriesWriter {
         if (points.isEmpty()) {
             return;
         }
+        // 先记「待写」再写：与 write.rows 配对，让「收集到了却没写进去」必然表现为两个指标的缺口
+        attemptedCounter.increment(points.size());
         // 两条语句各写一类：数值行与文本行分属不同语句（列清单不同），互不影响
         writeKind(points, true, COLUMNS_NUMERIC);
         writeKind(points, false, COLUMNS_TEXT);
@@ -142,7 +167,39 @@ public class IotDbTimeSeriesWriter implements TimeSeriesWriter {
                 bind(statement, point);
                 statement.addBatch();
             }
-            statement.executeBatch();
+            int[] results = statement.executeBatch();
+            // ⚠️ 不抛异常 ≠ 真的写进去了：逐条读回执，把「实际写入行数」记成指标。
+            //    这是本轮补上的**成功侧观测**——此前只有失败计数，导致「0 行落库但 0 失败」在生产上完全不可见。
+            if (results == null) {
+                // JDBC 契约要求 executeBatch 返回 int[]（非 null）；驱动违约时按「整批按成功计」保持
+                // 既有语义（不抛、不改上报结果），但**必须告警**——绝不静默把未知当成已知。
+                rowsCounter.increment(chunk.size());
+                log.warn("[iot] 时序驱动未按 JDBC 契约返回 executeBatch 回执（按整批成功计数，"
+                        + "实际落库行数未知）：表={} 提交={}",
+                    LogSanitizer.sanitize(properties.getTableName()), chunk.size());
+                return;
+            }
+            int succeeded = 0;
+            int failed = 0;
+            for (int result : results) {
+                if (result == Statement.EXECUTE_FAILED) {
+                    failed++;
+                } else {
+                    // SUCCESS_NO_INFO(-2) 与具体行数都算成功；INSERT 语句 1 条 = 1 行
+                    succeeded++;
+                }
+            }
+            rowsCounter.increment(succeeded);
+            if (failed > 0 || succeeded != chunk.size()) {
+                // 暴露而不是静默：回执长度/成功数与提交数不符，说明驱动吞掉了部分行
+                log.warn("[iot] 时序写入回执与提交数不符（已计数，不影响上报落库）：表={} 提交={} 成功={} "
+                        + "失败={} 回执长度={}",
+                    LogSanitizer.sanitize(properties.getTableName()), chunk.size(), succeeded, failed,
+                    results.length);
+            } else if (firstSuccessLogged.compareAndSet(false, true)) {
+                log.info("[iot] 时序写入首次落库成功：表={} 本批行数={}（累计实际行数见指标 {}）",
+                    LogSanitizer.sanitize(properties.getTableName()), succeeded, METRIC_ROWS);
+            }
         } catch (SQLException | RuntimeException ex) {
             // 失败只计数不抛：含 SQLException 与驱动对 null 参数抛的 RuntimeException
             // （实测 setString(i, null) → NPE）——契约是「绝不让上报事务回滚」

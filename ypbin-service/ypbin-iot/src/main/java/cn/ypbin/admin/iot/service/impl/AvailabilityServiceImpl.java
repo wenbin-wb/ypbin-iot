@@ -100,6 +100,17 @@ public class AvailabilityServiceImpl implements AvailabilityService {
      */
     public static final String METRIC_ORPHAN_PROPERTY_ID = "iot.ingest.propertyid.orphan";
 
+    /**
+     * 交给时序出口的**待写点数**（累计）。
+     *
+     * <p>为什么要有它：时序写入此前**只有失败计数**（见 {@code IotDbTimeSeriesWriter.METRIC_FAILED}），
+     * 于是「压根没收集到点」与「收集了却没写进去」在生产上无法区分——2026-09-26 实测到
+     * 「`write.failed=0` 而 IoTDB 当天 0 行」正是被这个盲区藏住的。本计数与写入器的
+     * {@code iot.timeseries.write.attempted}/{@code iot.timeseries.write.rows} 配对后，
+     * 三者一比对即可定位断点在哪一段。</p>
+     */
+    public static final String METRIC_SERIES_COLLECTED = "iot.timeseries.points.collected";
+
     private final DeviceLivenessMapper livenessMapper;
     private final OutageEventMapper outageMapper;
 
@@ -144,6 +155,9 @@ public class AvailabilityServiceImpl implements AvailabilityService {
     /** 入站点位**归属孤儿映射**的丢弃计数（与「未映射」分开；见 {@value #METRIC_ORPHAN_PROPERTY_ID}）。 */
     private final Counter orphanPropertyIdCounter;
 
+    /** 交给时序出口的待写点数（成功侧观测的一半，见 {@link #METRIC_SERIES_COLLECTED}）。 */
+    private final Counter seriesCollectedCounter;
+
     /** 设备 → 点位坐标集合（P0-6c 成员校验用；一次批量查映射，见 {@link PointMappingIndex}）。 */
     private final PointMappingIndex pointMappingIndex;
 
@@ -171,6 +185,9 @@ public class AvailabilityServiceImpl implements AvailabilityService {
             .description("入站读数因点位未映射到该设备被丢弃的条数").register(meterRegistry);
         this.orphanPropertyIdCounter = Counter.builder(METRIC_ORPHAN_PROPERTY_ID)
             .description("入站读数因点位归属孤儿映射（属性行已缺失）被丢弃的条数")
+            .register(meterRegistry);
+        this.seriesCollectedCounter = Counter.builder(METRIC_SERIES_COLLECTED)
+            .description("交给时序出口的待写点数（与写入器的 attempted/rows 配对定位断点）")
             .register(meterRegistry);
     }
 
@@ -615,6 +632,13 @@ public class AvailabilityServiceImpl implements AvailabilityService {
             }
         }
         if (!seriesPoints.isEmpty()) {
+            // 成功侧观测：先记「打算写多少点」。它与写入器的 attempted/rows 三者比对，
+            // 即可判定断点是在「没收集」还是「收集了没写」——不要再让这条路径静默。
+            seriesCollectedCounter.increment(seriesPoints.size());
+            if (log.isDebugEnabled()) {
+                log.debug("[iot] 时序出口收到待写点数：{}（启用={}）", seriesPoints.size(),
+                    timeSeriesProperties.isEnabled());
+            }
             try {
                 timeSeriesWriter.writeAll(seriesPoints);
             } catch (RuntimeException ex) {
