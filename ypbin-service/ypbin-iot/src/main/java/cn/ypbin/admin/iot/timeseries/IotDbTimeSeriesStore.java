@@ -59,14 +59,14 @@ public class IotDbTimeSeriesStore implements TimeSeriesStore {
     }
 
     @Override
-    public List<TimeSeriesPointResp> query(Long tenantId, Long deviceId, String propertyId, Long from, Long to,
-                                           int limit) {
+    public List<TimeSeriesPointResp> query(Long tenantId, Long deviceId, List<String> propertyIds, Long from,
+                                           Long to, int limit) {
         long fromTs = from == null ? MIN_TS : from;
         long toTs = to == null ? Long.MAX_VALUE : to;
         // 字面量必须带引号：TAG 列是 STRING，不加引号会被当成 INT32/标识符（真库实测，见类注释）
         String sql = "SELECT " + SELECT_COLUMNS + " FROM " + properties.getTableName()
             + " WHERE tenant_id = '" + tenantId + "' AND device_id = '" + deviceId + "'"
-            + " AND property_id = " + propertyIdLiteral(propertyId)
+            + " AND " + propertyIdPredicate(propertyIds)
             + " AND time >= " + fromTs + " AND time <= " + toTs
             + " ORDER BY time ASC LIMIT " + limit;
         Properties credentials = new Properties();
@@ -81,8 +81,8 @@ public class IotDbTimeSeriesStore implements TimeSeriesStore {
             }
             return points;
         } catch (SQLException ex) {
-            log.error("[iot] 历史时序查询失败（如实报错，不返回空列表）：deviceId={} propertyId={}",
-                deviceId, propertyId, ex);
+            log.error("[iot] 历史时序查询失败（如实报错，不返回空列表）：deviceId={} 形态数={}",
+                deviceId, propertyIds == null ? 0 : propertyIds.size(), ex);
             throw new BusinessException("历史时序查询失败，请稍后重试");
         }
     }
@@ -90,6 +90,36 @@ public class IotDbTimeSeriesStore implements TimeSeriesStore {
     @Override
     public boolean available() {
         return true;
+    }
+
+    /**
+     * 点位形态集合 → SQL 谓词（含校验与转义）。
+     *
+     * <p>单形态产出 {@code property_id = 'x'}（与统一之前的 SQL 逐字一致，便于比对历史查询）；
+     * 多形态产出 {@code (property_id = 'x' OR property_id = 'y')}——刻意**不用 {@code IN}**：
+     * IoTDB 表模型对 {@code IN} 的支持没有一手依据，而 {@code OR} 是关系谓词的标准组合，
+     * 风险更低。形态来自 {@code PointMappingIndex}（服务端自己查出来的），不是请求原文。</p>
+     *
+     * @param propertyIds 点位形态集合（非空）
+     * @return SQL 谓词
+     * @throws BusinessException 存在形态不合法（含 null / 超长 / 白名单外字符）
+     */
+    static String propertyIdPredicate(List<String> propertyIds) {
+        if (propertyIds == null || propertyIds.isEmpty()) {
+            // 空集合会拼出 `AND ()` 这种语法错误；这是调用方的编程错误，如实报错而不是静默放行全表
+            throw new BusinessException("查询点位形态不能为空");
+        }
+        if (propertyIds.size() == 1) {
+            return "property_id = " + propertyIdLiteral(propertyIds.getFirst());
+        }
+        StringBuilder predicate = new StringBuilder("(");
+        for (int index = 0; index < propertyIds.size(); index++) {
+            if (index > 0) {
+                predicate.append(" OR ");
+            }
+            predicate.append("property_id = ").append(propertyIdLiteral(propertyIds.get(index)));
+        }
+        return predicate.append(')').toString();
     }
 
     /**

@@ -103,3 +103,35 @@ ypbin:
     batch-size: 500
     # 连接超时（毫秒）。JDBC 只有全局登录超时，启动自检会用本值调用 DriverManager.setLoginTimeout
     connect-timeout-ms: 3000
+
+# ---------- 可观测（Spring Boot Actuator，2026-09-26 新增）----------
+# 为什么要有这一段：本轮新增/既有的入站指标（iot.ingest.latest.regressed / future_rejected / failed、
+# iot.ingest.propertyid.rejected / unmapped / orphan、iot.pointmapping.orphan、iot.access.egress.* …）
+# 在生产**只能靠日志观测**——`/actuator/metrics` 默认不暴露（Spring Boot 4.1.1 的
+# management.endpoints.web.exposure.include 默认只有 health）⇒ 出了乱序/丢点位/孤儿映射，
+# 值班只能翻日志、看不到计数趋势。
+#
+# ⚠️ 安全边界（改这一段前务必读完，见 docs/DEPLOY-BACKEND.md §5）：
+#   1) **只开只读且必要的最小集合，绝不用 `*`**：`*` 会连带 env / configprops / heapdump /
+#      threaddump / beans / loggers / mappings 等端点，其中 heapdump 可直接导出堆内存（含 DB/Redis
+#      口令、内部 token），env/configprops 会回显全部配置。**这些端点一旦暴露等于把凭据交出去。**
+#   2) **只在内网/回环可达**：本服务的 18084 在 compose 里**只绑 127.0.0.1**
+#      （`${IOT_BIND_ADDR:-127.0.0.1}:18084:18084`，刻意与 INTERNAL_BIND_ADDR 分开）⇒ 公网打不通；
+#      容器网络内（网关/内部服务）可达属"内网"。**不要把 18084 改绑到 0.0.0.0**：
+#      Actuator 端点默认**没有认证**（Sa-Token 拦截器在本服务是关闭的），绑公网 = 指标与健康细节裸奔。
+#   3) 网关上 `/iot/actuator/**` 会 StripPrefix 后转发到本服务，但网关鉴权白名单**没有**放行它
+#      （deploy/nacos/ypbin-gateway.yaml 的 exclude-paths）⇒ 必须带登录态才能穿过网关；直接打 18084 才绕过网关，
+#      所以"18084 只绑回环"是这条链路的实际边界。
+#   4) 只读性：metrics/info 是只读端点；health 已关掉细节与组件展示（show-details/show-components=never），
+#      只回 status，不会泄露数据库/中间件地址与异常堆栈。
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics,info
+  endpoint:
+    health:
+      show-details: never
+      show-components: never
+    metrics:
+      enabled: true

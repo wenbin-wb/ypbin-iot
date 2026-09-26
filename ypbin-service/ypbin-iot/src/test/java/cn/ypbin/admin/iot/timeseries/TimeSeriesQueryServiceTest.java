@@ -14,18 +14,25 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import cn.ypbin.admin.iot.entity.IotDevice;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
+import cn.ypbin.admin.iot.mapping.PointMappingIndex;
 import cn.ypbin.starter.core.exception.BusinessException;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 /**
  * 查询服务的参数校验、租户解析与「不可用即报错」语义（§5.2.1 查询路径）。
@@ -62,7 +69,7 @@ class TimeSeriesQueryServiceTest {
     @DisplayName("★ 设备 ID 为空即拒绝")
     void mustRejectNullDeviceId() {
         TimeSeriesQueryService service =
-            new TimeSeriesQueryService(mock(TimeSeriesStore.class), mock(IotDeviceMapper.class));
+            service(mock(TimeSeriesStore.class), mock(IotDeviceMapper.class));
         assertThatThrownBy(() -> service.query(null, req("temp")))
             .isInstanceOf(BusinessException.class)
             .hasMessageContaining("设备 ID");
@@ -72,7 +79,7 @@ class TimeSeriesQueryServiceTest {
     @DisplayName("★ 点位为空/空白即拒绝（不按点位查会把设备的全部点位混在一起）")
     void mustRejectBlankPropertyId() {
         TimeSeriesQueryService service =
-            new TimeSeriesQueryService(mock(TimeSeriesStore.class), mock(IotDeviceMapper.class));
+            service(mock(TimeSeriesStore.class), mock(IotDeviceMapper.class));
         assertThatThrownBy(() -> service.query(DEVICE_ID, null))
             .isInstanceOf(BusinessException.class)
             .hasMessageContaining("点位");
@@ -85,7 +92,7 @@ class TimeSeriesQueryServiceTest {
     @DisplayName("★ 区间给反即拒绝（不静默交换：静默交换会让前端拿到看似正常的结果）")
     void mustRejectInvertedRange() {
         TimeSeriesQueryService service =
-            new TimeSeriesQueryService(mock(TimeSeriesStore.class), mock(IotDeviceMapper.class));
+            service(mock(TimeSeriesStore.class), mock(IotDeviceMapper.class));
         TimeSeriesQueryReq req = req("temp");
         req.setFrom(2_000L);
         req.setTo(1_000L);
@@ -99,7 +106,7 @@ class TimeSeriesQueryServiceTest {
     @DisplayName("★ limit 越界即拒绝（1~5000）")
     void mustRejectOutOfRangeLimit() {
         TimeSeriesQueryService service =
-            new TimeSeriesQueryService(mock(TimeSeriesStore.class), mock(IotDeviceMapper.class));
+            service(mock(TimeSeriesStore.class), mock(IotDeviceMapper.class));
 
         TimeSeriesQueryReq zero = req("temp");
         zero.setLimit(0);
@@ -125,12 +132,12 @@ class TimeSeriesQueryServiceTest {
     void mustFailWhenStoreUnavailable() {
         TimeSeriesStore store = mock(TimeSeriesStore.class);
         when(store.available()).thenReturn(false);
-        TimeSeriesQueryService service = new TimeSeriesQueryService(store, mock(IotDeviceMapper.class));
+        TimeSeriesQueryService service = service(store, mock(IotDeviceMapper.class));
 
         assertThatThrownBy(() -> service.query(DEVICE_ID, req("temp")))
             .isInstanceOf(BusinessException.class)
             .hasMessageContaining("未启用");
-        verify(store, never()).query(anyLong(), anyLong(), anyString(), any(), any(), anyInt());
+        verify(store, never()).query(anyLong(), anyLong(), anyList(), any(), any(), anyInt());
     }
 
     @Test
@@ -140,12 +147,12 @@ class TimeSeriesQueryServiceTest {
         when(store.available()).thenReturn(true);
         IotDeviceMapper deviceMapper = mock(IotDeviceMapper.class);
         when(deviceMapper.selectById(DEVICE_ID)).thenReturn(null);
-        TimeSeriesQueryService service = new TimeSeriesQueryService(store, deviceMapper);
+        TimeSeriesQueryService service = service(store, deviceMapper);
 
         assertThatThrownBy(() -> service.query(DEVICE_ID, req("temp")))
             .isInstanceOf(BusinessException.class)
             .hasMessageContaining("设备不存在");
-        verify(store, never()).query(anyLong(), anyLong(), anyString(), any(), any(), anyInt());
+        verify(store, never()).query(anyLong(), anyLong(), anyList(), any(), any(), anyInt());
     }
 
     @Test
@@ -155,9 +162,9 @@ class TimeSeriesQueryServiceTest {
         when(store.available()).thenReturn(true);
         IotDeviceMapper deviceMapper = mock(IotDeviceMapper.class);
         when(deviceMapper.selectById(DEVICE_ID)).thenReturn(device());
-        when(store.query(TENANT_ID, DEVICE_ID, "temp", 1_000L, 2_000L, 50))
+        when(store.query(TENANT_ID, DEVICE_ID, List.of("temp"), 1_000L, 2_000L, 50))
             .thenReturn(List.of(point()));
-        TimeSeriesQueryService service = new TimeSeriesQueryService(store, deviceMapper);
+        TimeSeriesQueryService service = service(store, deviceMapper);
 
         TimeSeriesQueryReq req = req("temp");
         req.setFrom(1_000L);
@@ -167,7 +174,7 @@ class TimeSeriesQueryServiceTest {
         List<TimeSeriesPointResp> points = service.query(DEVICE_ID, req);
 
         assertThat(points).containsExactly(point());
-        verify(store).query(TENANT_ID, DEVICE_ID, "temp", 1_000L, 2_000L, 50);
+        verify(store).query(TENANT_ID, DEVICE_ID, List.of("temp"), 1_000L, 2_000L, 50);
     }
 
     @Test
@@ -177,15 +184,15 @@ class TimeSeriesQueryServiceTest {
         when(store.available()).thenReturn(true);
         IotDeviceMapper deviceMapper = mock(IotDeviceMapper.class);
         when(deviceMapper.selectById(DEVICE_ID)).thenReturn(device());
-        when(store.query(TENANT_ID, DEVICE_ID, "temp", null, null, TimeSeriesQueryReq.DEFAULT_LIMIT))
+        when(store.query(TENANT_ID, DEVICE_ID, List.of("temp"), null, null, TimeSeriesQueryReq.DEFAULT_LIMIT))
             .thenReturn(List.of());
-        TimeSeriesQueryService service = new TimeSeriesQueryService(store, deviceMapper);
+        TimeSeriesQueryService service = service(store, deviceMapper);
 
         TimeSeriesQueryReq req = req("temp");
         req.setLimit(null);
 
         assertThat(service.query(DEVICE_ID, req)).isEmpty();
-        verify(store).query(TENANT_ID, DEVICE_ID, "temp", null, null, TimeSeriesQueryReq.DEFAULT_LIMIT);
+        verify(store).query(TENANT_ID, DEVICE_ID, List.of("temp"), null, null, TimeSeriesQueryReq.DEFAULT_LIMIT);
     }
 
     @Test
@@ -195,8 +202,8 @@ class TimeSeriesQueryServiceTest {
         when(store.available()).thenReturn(true);
         IotDeviceMapper deviceMapper = mock(IotDeviceMapper.class);
         when(deviceMapper.selectById(DEVICE_ID)).thenReturn(device());
-        when(store.query(anyLong(), anyLong(), anyString(), any(), any(), anyInt())).thenReturn(null);
-        TimeSeriesQueryService service = new TimeSeriesQueryService(store, deviceMapper);
+        when(store.query(anyLong(), anyLong(), anyList(), any(), any(), anyInt())).thenReturn(null);
+        TimeSeriesQueryService service = service(store, deviceMapper);
 
         assertThat(service.query(DEVICE_ID, req("temp"))).isEmpty();
     }
@@ -206,9 +213,48 @@ class TimeSeriesQueryServiceTest {
     void storeAvailableMustDelegate() {
         TimeSeriesStore store = mock(TimeSeriesStore.class);
         when(store.available()).thenReturn(false);
-        TimeSeriesQueryService service = new TimeSeriesQueryService(store, mock(IotDeviceMapper.class));
+        TimeSeriesQueryService service = service(store, mock(IotDeviceMapper.class));
 
         assertThat(service.storeAvailable()).isFalse();
-        verify(store, never()).query(anyLong(), anyLong(), anyString(), any(), any(), anyInt());
+        verify(store, never()).query(anyLong(), anyLong(), anyList(), any(), any(), anyInt());
+    }
+
+    @Test
+    @DisplayName("★ 过渡期坐标兼容：按标识查询时，把该点位的**历史主键字符串形态**一并查回")
+    void mustQueryLegacyCoordinateFormToo() {
+        TimeSeriesStore store = mock(TimeSeriesStore.class);
+        when(store.available()).thenReturn(true);
+        IotDeviceMapper deviceMapper = mock(IotDeviceMapper.class);
+        when(deviceMapper.selectById(DEVICE_ID)).thenReturn(device());
+        PointMappingIndex index = mock(PointMappingIndex.class);
+        when(index.loadCoordinates(any())).thenReturn(Map.of(DEVICE_ID,
+            new PointMappingIndex.DeviceCoordinates(
+                Map.of("temp", "temp", "9130001", "temp"), Map.of("temp", Set.of("9130001")),
+                Set.of(), Set.of(), Set.of())));
+        when(store.query(eq(TENANT_ID), eq(DEVICE_ID), anyList(), any(), any(), anyInt()))
+            .thenReturn(List.of(point()));
+        TimeSeriesQueryService service = new TimeSeriesQueryService(store, deviceMapper, index);
+
+        List<TimeSeriesPointResp> points = service.query(DEVICE_ID, req("temp"));
+
+        assertThat(points).containsExactly(point());
+        ArgumentCaptor<List<String>> forms = ArgumentCaptor.forClass(List.class);
+        verify(store).query(eq(TENANT_ID), eq(DEVICE_ID), forms.capture(), any(), any(), anyInt());
+        assertThat(forms.getValue())
+            .as("只发一次查询即可覆盖两种存储形态（不做 N 次查询）")
+            .containsExactlyInAnyOrder("temp", "9130001");
+    }
+
+    /**
+     * 构造被测服务：坐标形态索引默认「没有历史形态」（专项用例另行覆盖）。
+     *
+     * @param store        时序存储
+     * @param deviceMapper  设备 Mapper
+     * @return 查询服务
+     */
+    private static TimeSeriesQueryService service(TimeSeriesStore store, IotDeviceMapper deviceMapper) {
+        PointMappingIndex pointMappingIndex = mock(PointMappingIndex.class);
+        lenient().when(pointMappingIndex.loadCoordinates(any())).thenReturn(Map.of());
+        return new TimeSeriesQueryService(store, deviceMapper, pointMappingIndex);
     }
 }

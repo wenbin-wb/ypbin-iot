@@ -90,6 +90,16 @@ public class AvailabilityServiceImpl implements AvailabilityService {
     /** 入站点位未映射到该设备被丢弃的条数（P0-6c 的成员子项；与格式非法分开计数）。 */
     public static final String METRIC_UNMAPPED_PROPERTY_ID = "iot.ingest.propertyid.unmapped";
 
+    /**
+     * 入站点位**归属孤儿映射**（{@code iot_point_mapping} 行在、其 {@code iot_property} 行已缺失）
+     * 被丢弃的条数（2026-09-26 孤儿映射收紧）。
+     *
+     * <p>与 {@value #METRIC_UNMAPPED_PROPERTY_ID} **分开计数**：两者成因不同，处置也不同——「未映射」
+     * 是设备没配这条点位（该去配映射），「孤儿」是物模型被重导入后映射成了悬空引用（该清理/重建映射）。
+     * 混在一个计数里会让运维无法判断到底该动哪一边。</p>
+     */
+    public static final String METRIC_ORPHAN_PROPERTY_ID = "iot.ingest.propertyid.orphan";
+
     private final DeviceLivenessMapper livenessMapper;
     private final OutageEventMapper outageMapper;
 
@@ -131,6 +141,9 @@ public class AvailabilityServiceImpl implements AvailabilityService {
      */
     private final Counter unmappedPropertyIdCounter;
 
+    /** 入站点位**归属孤儿映射**的丢弃计数（与「未映射」分开；见 {@value #METRIC_ORPHAN_PROPERTY_ID}）。 */
+    private final Counter orphanPropertyIdCounter;
+
     /** 设备 → 点位坐标集合（P0-6c 成员校验用；一次批量查映射，见 {@link PointMappingIndex}）。 */
     private final PointMappingIndex pointMappingIndex;
 
@@ -156,6 +169,9 @@ public class AvailabilityServiceImpl implements AvailabilityService {
             .description("入站读数因点位标识不合法被丢弃的条数").register(meterRegistry);
         this.unmappedPropertyIdCounter = Counter.builder(METRIC_UNMAPPED_PROPERTY_ID)
             .description("入站读数因点位未映射到该设备被丢弃的条数").register(meterRegistry);
+        this.orphanPropertyIdCounter = Counter.builder(METRIC_ORPHAN_PROPERTY_ID)
+            .description("入站读数因点位归属孤儿映射（属性行已缺失）被丢弃的条数")
+            .register(meterRegistry);
     }
 
     @Override
@@ -169,8 +185,9 @@ public class AvailabilityServiceImpl implements AvailabilityService {
         // 先解析设备 → 租户：既拿到写活性所需的租户，也顺带把「设备不存在」的条目留给既有分支
         // warn + 丢弃（不应把它们报成「点位未映射」——两种原因必须可分辨）
         Map<Long, Long> tenantByDevice = resolveTenants(deviceIds(items));
-        // 第②道：点位**成员**校验——读数点位必须是该设备已配置的映射点位（P0-6c 的后半）
-        items = dropUnmappedPropertyIds(items, tenantByDevice.keySet());
+        // 第②道：点位**成员/存在性**校验 + **坐标归一**——读数点位必须是该设备已配置且属性行仍存在的
+        // 映射点位；通过后一律改写成规范坐标（属性标识）再落库（P0-6c 后半 + 2026-09-26 坐标统一）
+        items = canonicalizePropertyIds(items, tenantByDevice.keySet());
         if (items.isEmpty()) {
             return 0;
         }
@@ -205,13 +222,12 @@ public class AvailabilityServiceImpl implements AvailabilityService {
      * 剔除点位标识不合法的读数（P0-6c 的**格式/长度**子项，见设计 §6.5 的 {@code propertyId} 白名单说明）。
      *
      * <p><b>范围（P0-6c 的两半都在，但仍有明确未做项）</b>：本条只做「字符集白名单 + 长度上限 1~128」，
-     * 即**格式**校验；「未映射（物模型属性 × 该设备点位映射）被拒且计数」那一半由紧随其后的
-     * {@link #dropUnmappedPropertyIds} 承担（2026-09-26 落地）。<b>仍未做</b>（不要夸大）：
+     * 即**格式**校验；「未映射（物模型属性 × 该设备点位映射）被拒且计数」与「孤儿映射被拒且计数」那一半
+     * 由紧随其后的 {@link #canonicalizePropertyIds} 承担（2026-09-26 落地并收紧）。<b>仍未做</b>（不要夸大）：
      * ① 不做「该属性是否属于该产品/服务」的二次校验（映射行本身就是那个声明）；
-     * ② 坐标形态未统一（见 {@link PointMappingIndex} 的说明）；
-     * ③ 孤儿映射（{@code iot_property} 行被物理删除、{@code iot_point_mapping} 行仍在）仍算「已映射」；
-     * ④ {@code enabled=0}（停采）与 {@code ref_type=command} 的映射也会让属性读数通过。
-     * ②③④ 均已登记在 {@code docs/IOT-ROADMAP.md} 四点十七的补充段。</p>
+     * ② {@code enabled=0}（停采）与 {@code ref_type=command} 的映射也会让属性读数通过。
+     * ② 已登记在 {@code docs/IOT-ROADMAP.md} 四点十七的补充段（“坐标形态未统一”与“孤儿映射”两项
+     * 已于 2026-09-26 闭环，见 {@link PointMappingIndex} 的类注释）。</p>
      *
      * <p><b>落点与设计原文的差异（已由用户决策，如实登记）</b>：设计 §6.5 建议把校验放在**入站适配层**，
      * 并写明「不改 {@code AvailabilityService.ingest} 的语义、HTTP 通道同防护属独立决策（登记为 P2-7）」。
@@ -275,15 +291,27 @@ public class AvailabilityServiceImpl implements AvailabilityService {
     }
 
     /**
-     * 剔除**点位未映射到该设备**的读数（P0-6c 的后半：物模型属性 × 该设备点位映射）。
+     * **坐标归一 + 成员/存在性校验**（P0-6c 后半；2026-09-26 起同时承担坐标统一与孤儿映射收紧）。
      *
-     * <p><b>与第①道（格式/长度）并列，但成因不同</b>：格式非法是「这个字符串根本不能当点位标识」；
-     * 未映射是「形态没问题，但这个点位不属于这台设备」（设备上没配这条映射，或映射被删）。两类各自计数：
-     * {@value #METRIC_INVALID_PROPERTY_ID} / {@value #METRIC_UNMAPPED_PROPERTY_ID}。</p>
+     * <p><b>规范坐标 = 属性标识</b>：本方法把通过校验的读数一律改写成
+     * {@code iot_property.identifier} 再交给下游（最新值 / 时序 / 影子 reported）。
+     * 于是**写入侧只剩一种形态**，不再出现「同一个 {@code iot:latest} 里两种 field、按标识查不到
+     * access 来源数据」的读侧后果（见 {@code docs/IOT-ROADMAP.md} 四点十七补充段）。</p>
      *
-     * <p><b>查库形态（铁律）</b>：坐标集合由 {@link PointMappingIndex} **一次批量**取回（最多两条 SQL），
+     * <p><b>过渡期仍接受历史的主键字符串形态</b>：滚动升级期间旧版 access 还在发主键字符串，
+     * 若入站只认标识会把它们**整批误杀**（表现为升级过程中数据缺口）。因此本方法按
+     * {@link PointMappingIndex.DeviceCoordinates#canonicalize(String)} 接受两种形态，**但落库一律是标识**。
+     * 过渡期结束后把索引收缩为只放标识即可（届时本方法无需改动）。</p>
+     *
+     * <p><b>与第①道（格式/长度）并列，成因三类分开计数</b>：格式非法是「这个字符串根本不能当点位标识」
+     * （{@value #METRIC_INVALID_PROPERTY_ID}）；未映射是「形态没问题，但这个点位不属于这台设备」
+     * （{@value #METRIC_UNMAPPED_PROPERTY_ID}）；**孤儿映射**是「映射行还在，但它引用的属性行已被删除」
+     * （{@value #METRIC_ORPHAN_PROPERTY_ID}，物模型重导入会物理删属性 ⇒ 这是真实存在的一类悬空引用）。
+     * 三类必须可分辨，否则运维不知道该去配映射、还是该去清理悬空映射。</p>
+     *
+     * <p><b>查库形态（铁律）</b>：坐标索引由 {@link PointMappingIndex} **一次批量**取回（最多两条 SQL），
      * 与设备数/点位数无关，**绝不在循环里查库**；入参为空或映射为空都先判空短路。
-     * 本方法自身只做内存 Set 判断。</p>
+     * 本方法自身只做内存 Map 查表与字段改写。</p>
      *
      * <p><b>为什么只对「已解析出租户的设备」判定</b>：设备不存在（或不属于任何租户）时，条目本就由既有分支
      * warn + 丢弃；若在这里按「未映射」再判一次，同一件事会被报成两种原因、且指标语义被污染。
@@ -294,10 +322,10 @@ public class AvailabilityServiceImpl implements AvailabilityService {
      *
      * @param items        已通过格式校验的上报项
      * @param knownDevices 已解析出租户的设备 ID
-     * @return 通过成员校验的上报项（保持原顺序）
+     * @return 通过校验且坐标已归一为属性标识的上报项（保持原顺序）
      */
-    private List<ReadingObservationDto> dropUnmappedPropertyIds(List<ReadingObservationDto> items,
-                                                               Set<Long> knownDevices) {
+    private List<ReadingObservationDto> canonicalizePropertyIds(List<ReadingObservationDto> items,
+                                                                Set<Long> knownDevices) {
         Set<Long> devicesToCheck = deviceIdsWithPointReadings(items).stream()
             .filter(knownDevices::contains)
             .collect(Collectors.toCollection(LinkedHashSet::new));
@@ -305,7 +333,13 @@ public class AvailabilityServiceImpl implements AvailabilityService {
             // 没有带点位的读数（纯「只报时刻+质量」批次）⇒ 一次映射查询都不发
             return new ArrayList<>(items);
         }
-        Map<Long, Set<String>> mappedCoordinates = pointMappingIndex.loadByDeviceIds(devicesToCheck);
+        Map<Long, PointMappingIndex.DeviceCoordinates> coordinatesByDevice =
+            pointMappingIndex.loadCoordinates(devicesToCheck);
+        // 配置级异常（形态撞名 / 坐标级撞名）**每批每设备告警一次**，不放在下面的逐条循环里——
+        // 500 条一批、每秒一批时逐条 WARN 会把日志打爆，而这两类问题都是**配置**问题，一条就够定位。
+        for (Map.Entry<Long, PointMappingIndex.DeviceCoordinates> entry : coordinatesByDevice.entrySet()) {
+            warnCoordinateConflicts(entry.getKey(), entry.getValue());
+        }
         List<ReadingObservationDto> accepted = new ArrayList<>(items.size());
         for (ReadingObservationDto item : items) {
             if (item == null) {
@@ -320,8 +354,21 @@ public class AvailabilityServiceImpl implements AvailabilityService {
                 accepted.add(item);
                 continue;
             }
-            if (mappedCoordinates.getOrDefault(deviceId, Set.of()).contains(propertyId)) {
+            PointMappingIndex.DeviceCoordinates coordinates =
+                coordinatesByDevice.getOrDefault(deviceId, PointMappingIndex.DeviceCoordinates.empty());
+            String canonical = coordinates.canonicalize(propertyId);
+            if (canonical != null) {
+                // 归一到规范坐标：下游（最新值/时序/影子）因此只见一种形态
+                item.setPropertyId(canonical);
                 accepted.add(item);
+                continue;
+            }
+            if (coordinates.orphanForms().contains(propertyId)) {
+                // 孤儿映射：映射行在、属性行已缺失 ⇒ 与「未映射」分开计数
+                orphanPropertyIdCounter.increment();
+                log.warn("[iot] 读数上报的点位归属**孤儿映射**（物模型属性行已缺失），已丢弃该条"
+                        + "（同批其它读数不受影响）：deviceId={} 点位={}（请清理或重建该点位映射）",
+                    LogSanitizer.sanitize(deviceId), LogSanitizer.sanitize(propertyId));
                 continue;
             }
             unmappedPropertyIdCounter.increment();
@@ -330,6 +377,38 @@ public class AvailabilityServiceImpl implements AvailabilityService {
                 LogSanitizer.sanitize(deviceId), LogSanitizer.sanitize(propertyId));
         }
         return accepted;
+    }
+
+    /**
+     * 坐标配置冲突告警（每批每设备一次）。
+     *
+     * <p>两类都必须留痕，且都**不改判**（改判会让「数据落到隔壁点位」变成查不出来的错误）：</p>
+     * <ul>
+     *   <li><b>形态级撞名</b>（{@link PointMappingIndex.DeviceCoordinates#ambiguousForms()}）：
+     *       A 点的历史主键字符串等于 B 点的属性标识 ⇒ 该形态判给标识（确定性规则）。</li>
+     *   <li><b>坐标级撞名</b>（{@link PointMappingIndex.DeviceCoordinates#duplicateIdentifiers()}）：
+     *       同设备两条映射的属性标识相同（物模型只在 service 内保证唯一）⇒ 两个点位真实共享一个规范坐标，
+     *       本平台无法分开。此处只告警；彻底解法（拒绝同设备同名标识的映射）属产品策略，
+     *       登记在 {@code docs/IOT-ROADMAP.md} 四点十七，本轮不做。</li>
+     * </ul>
+     *
+     * @param deviceId    设备 ID
+     * @param coordinates 该设备的坐标索引
+     */
+    private static void warnCoordinateConflicts(Long deviceId,
+                                                PointMappingIndex.DeviceCoordinates coordinates) {
+        if (!coordinates.ambiguousForms().isEmpty()) {
+            log.warn("[iot] 点位坐标形态撞名（该形态按**属性标识**判定，请修正物模型编码）：deviceId={} 形态数={} 形态={}",
+                LogSanitizer.sanitize(deviceId), coordinates.ambiguousForms().size(),
+                LogSanitizer.sanitize(String.join(",", coordinates.ambiguousForms())));
+        }
+        if (!coordinates.duplicateIdentifiers().isEmpty()) {
+            log.warn("[iot] 同一设备上**多个点位共用同一个规范坐标**（属性标识在 service 内唯一、跨 service 可重名）："
+                    + "deviceId={} 坐标数={} 坐标={} ⇒ 这些点位的读数会落进同一个坐标，"
+                    + "请在点位映射侧避免同设备映射同名标识（详见 iot.pointmapping.coordinate_collision）",
+                LogSanitizer.sanitize(deviceId), coordinates.duplicateIdentifiers().size(),
+                LogSanitizer.sanitize(String.join(",", coordinates.duplicateIdentifiers())));
+        }
     }
 
     /**

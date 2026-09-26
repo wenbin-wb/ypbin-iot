@@ -100,6 +100,21 @@ class DeviceSpecServiceImplTest {
     }
 
     @Test
+    @DisplayName("★ 孤儿映射（属性行缺失 ⇒ 没有属性标识）不下发：采集侧因此不会采一个必被丢弃的点位")
+    void orphanMappingMustNotBeDeliveredToAccess() {
+        when(deviceMapper.selectList(any())).thenReturn(List.of(device(100L)));
+        // 900 有属性行（temperature），901 的属性行已被物模型重导入物理删除
+        when(mappingMapper.selectList(any())).thenReturn(List.of(
+            mapping(100L, 900L, "holding:1", 1000), mapping(100L, 901L, "holding:2", 5000)));
+        when(propertyMapper.selectBatchIds(any())).thenReturn(List.of(property(900L, "temperature")));
+
+        AccessDeviceSpecResp spec = service.listByTenant(TENANT).getFirst();
+
+        assertThat(spec.getPoints()).singleElement()
+            .satisfies(point -> assertThat(point.getIdentifier()).isEqualTo("temperature"));
+    }
+
+    @Test
     @DisplayName("装配：connectionId 自带租户、点位带属性标识、设备级周期取点位最小值")
     void shouldAssembleSpecWithPoints() {
         when(deviceMapper.selectList(any())).thenReturn(List.of(device(100L)));

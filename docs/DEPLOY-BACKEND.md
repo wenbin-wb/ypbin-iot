@@ -76,3 +76,159 @@ docker restart ypbin-iot-ui
 因此「服务器上的源码」**不代表**「正在运行的产物」——
 判断线上到底跑的是哪一版，**只认容器内的 jar md5**（或前端 dist 的文件 md5），
 不要用 `git log` 去推断。要追溯「哪个提交对应这个 jar」，看构建机上的构建记录与 `docs/` 里的部署回执。
+
+## 5. 可观测：只看指标（`/actuator/metrics`）与**为什么不能用公网访问**
+
+### 5.1 暴露了什么、为什么是这个集合
+
+> 版本口径：本仓是 **Spring Boot 4.1.1**（线上 Tomcat 11.0.24）。下面用到的 `management.*` 键
+> 在 Spring Boot 3.x / 4.x 同名同义；核实来源是 4.1.1 的构件元数据
+> （`spring-boot-actuator-autoconfigure` 的 `include` 默认 `['health']`、`spring-boot-health` 的
+> `show-details` 默认 `never`）与官方文档
+> <https://docs.spring.io/spring-boot/3.5/reference/actuator/endpoints.html>（一手，访问 2026-09-26）。
+> 任务书里写的是「Spring Boot 3」，本仓实际是 4.1.1——按实际写，避免文档说谎。
+
+配置落在 `deploy/nacos/ypbin-iot.yaml`（Data ID `ypbin-iot.yaml`）的 `management:` 段：
+
+```yaml
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics,info   # ⚠️ 最小集合，绝不用 '*'
+  endpoint:
+    health:
+      show-details: never              # 只回 status，不回组件细节/异常
+      show-components: never
+    metrics:
+      enabled: true
+```
+
+- **为什么必须补这一段**：**Spring Boot 4.1.1**（本仓 `pom.xml` 的 `spring-boot.version`）的 `management.endpoints.web.exposure.include` 默认**只有 `health`**，
+  所以生产此前根本打不到 `/actuator/metrics`，本轮新增的入站指标
+  （`iot.ingest.latest.regressed` / `…future_rejected` / `…latest.failed` /
+  `…propertyid.rejected` / `…propertyid.unmapped` / `…propertyid.orphan`、
+  `iot.pointmapping.orphan`、`iot.pointmapping.coordinate_collision`、`iot.latest.coordinate.legacy` 等）
+  **只能靠日志观测**。
+- **为什么不用 `*`**：`*` 会连带 `env`、`configprops`、`heapdump`、`threaddump`、`beans`、`loggers`、`mappings`。
+  其中 `heapdump` 能把整个堆下载下来（**含数据库/Redis 口令与内部 token**），`env`/`configprops`
+  会回显全部配置。**这些端点一旦暴露等于把凭据交出去**，所以只开 `health`（探活）、`metrics`（指标）、
+  `info`（版本信息）三个只读端点。
+- **health 不泄露细节**：`show-details: never` + `show-components: never` ⇒ 只返回 `{"status":"UP"}`，
+  不会带出数据库/Redis/IoTDB 的地址、状态与异常堆栈。
+
+### 5.2 怎么只看指标（两条路径）
+
+**① 宿主机上（推荐，回环直连，不经网关、无需登录态）**
+
+```bash
+# 存活/就绪
+curl -s http://127.0.0.1:18084/actuator/health
+# 单个指标（返回真实数值，含 measurements[0].value）
+curl -s http://127.0.0.1:18084/actuator/metrics/iot.ingest.latest.regressed
+# 指标清单（看有哪些名字可用）
+curl -s http://127.0.0.1:18084/actuator/metrics | head -c 2000
+```
+
+**② 容器内（宿主机上连不到、或只想确认「服务自己看到的数」时）**
+
+```bash
+docker exec ypbin-iot sh -c 'curl -s http://127.0.0.1:18084/actuator/metrics/iot.pointmapping.orphan'
+```
+
+> 注意：**不要**通过网关 `http://<域名>/iot/actuator/metrics` 走——那条路径要带登录态
+> （`ypbin-gateway.yaml` 的 `exclude-paths` 没有放行 `/iot/actuator/**`），且会经过 `StripPrefix`，
+> 排障时多一层不确定；直接打 18084 才是「只看指标」的本意。
+
+### 5.3 为什么**不能**用公网访问（安全边界）
+
+1. **Actuator 默认没有认证**：`ypbin-iot` 关闭了本地 Sa-Token 拦截器
+   （`ypbin.security.interceptor: false`，身份由网关校验），因此直连 18084 的 `/actuator/**`
+   **不需要任何凭据**。虽然只开了三个只读端点，但指标会暴露业务规模（设备数、上报速率、失败计数），
+   健康端点会暴露存活状态——都不该公开。
+2. **实际边界靠「只绑回环」**：`deploy/docker-compose.yml` 里 18084 的映射是
+   `"${IOT_BIND_ADDR:-127.0.0.1}:18084:18084"`，**刻意不跟 `INTERNAL_BIND_ADDR` 共用**
+   （同 IoTDB 的 `IOTDB_BIND_ADDR` 先例）。不设 `IOT_BIND_ADDR` 时只监听宿主机回环 ⇒
+   公网与服务网段都打不通；**把 `IOT_BIND_ADDR` 设成 `0.0.0.0` 等于把这套无认证端点放到公网**，
+   除非同时加了反代白名单 + 认证，否则不要这么做。
+3. **不要用「网关转发」当保护**：网关鉴权只覆盖 `/iot/**` 的白名单外路径，一旦有人把
+   `/iot/actuator/**` 加进 `exclude-paths`（图省事免登录），保护就没了。收窄 18084 的绑定地址
+   才是**结构性**保证，不依赖「没人改白名单」。
+   **「与 `INTERNAL_BIND_ADDR` 解耦」怎么复现证明**（不必碰生产：生产该变量恰好已是 `127.0.0.1`，
+   新旧表达式结果相同、无法动态区分）：
+
+   ```bash
+   # 在一个只放 deploy/ 的临时目录里，故意把 INTERNAL_BIND_ADDR 设成 0.0.0.0，看 iot 是否仍回环
+   env INTERNAL_BIND_ADDR=0.0.0.0 MYSQL_ROOT_PASSWORD=x NACOS_AUTH_TOKEN=eA== \
+       NACOS_AUTH_IDENTITY_KEY=k NACOS_AUTH_IDENTITY_VALUE=v REDIS_PASSWORD=x \
+       INTERNAL_TOKEN=x GATEWAY_SIGN_TOKEN=x AI_MODEL_SECRET_KEY=0123456789abcdef \
+     docker compose -f deploy/docker-compose.yml config \
+     | python3 -c 'import sys,yaml; s=yaml.safe_load(sys.stdin)["services"]; \
+         print({n: s[n].get("ports") for n in ["ypbin-iot","ypbin-system","mysql"]})'
+   # 期望（2026-09-26 实测）：ypbin-iot = host_ip 127.0.0.1；ypbin-system/mysql = host_ip 0.0.0.0
+   # 即「18084 的回环**只**由 IOT_BIND_ADDR 决定」，不再跟着 INTERNAL_BIND_ADDR 走。
+   ```
+4. **若将来要接 Prometheus 集中抓取**：正确做法是**抓取方与目标在同一内网**（抓容器网络地址
+   `ypbin-iot:18084`，或经带认证的反代），**不要**为了省事把 18084 绑到公网；确需跨网段时，
+   应在网络层限制来源 IP（安全组/防火墙），并轮换本文件 §1 提到的内部 token。
+5. **经网关可达、但没有权限码（残余边界，已登记）**：`deploy/nacos/ypbin-gateway.yaml` 的
+   `exclude-paths` **没有**放行 `/iot/actuator/**` ⇒ 经网关必须登录；但 actuator 端点**不带权限码**，
+   而 `ypbin-iot` 的 `ypbin.security.interceptor: false` 只关掉登录态校验（身份由网关注入）
+   ⇒ **任何已登录用户**都能按 `/iot/actuator/metrics` 读到**平台级**指标（含跨租户存量，
+   如 `iot.pointmapping.orphan`）。它不等于公网暴露（前面三条边界仍在），但属**信息暴露面**。
+   按角色收口需要 starter 侧给 actuator 路径挂权限码（本仓做不到），或把 actuator 从网关摘掉。
+   **本轮未做**，登记在此。
+
+### 5.4 判据与运维注意（本轮实测口径）
+
+> ⚠️ **判据必须看响应体，不能只看 HTTP 状态码**（生产实测，2026-09-26）：本仓的全局异常约定是
+> 「**未知路径也返回 HTTP 200**，靠 `R.code` 区分」，所以**未暴露**的 actuator 端点回的是
+> `{"code":404,"data":null,"message":"接口不存在","success":false,...}` 而 **HTTP 状态码仍是 200**。
+> 只 `-w '%{http_code}'` 会把「没暴露」误读成「暴露了」。**已暴露**的 actuator 端点回的是 actuator
+> 自己的原生 JSON（如 `{"name":"...","measurements":[...],"availableTags":[]}`），两者形态完全不同。
+
+```bash
+# ✅ 回环可达且返回真实数值（原生 actuator JSON，含 measurements[0].value）
+curl -s http://127.0.0.1:18084/actuator/metrics/iot.ingest.latest.regressed
+# ✅ health 仍是 UP 且不含组件细节（期望形如 {"groups":["liveness","readiness"],"status":"UP"}）
+curl -s http://127.0.0.1:18084/actuator/health
+# ✅ 敏感端点必须**没有暴露**：看响应体里是不是那个 404 业务信封（而不是看 HTTP 状态码）
+for e in env heapdump threaddump beans configprops loggers; do
+  body="$(curl -s http://127.0.0.1:18084/actuator/$e)"
+  case "$body" in
+    *'"code":404'*) printf '%s -> 未暴露（OK）\n' "$e" ;;
+    *)              printf '%s -> ⚠️ 疑似已暴露：%s\n' "$e" "${body:0:200}" ;;
+  esac
+done
+# ✅ 公网不可达（在**非服务器的外部主机**上打服务器公网 IP）
+curl -s -m 5 -o /dev/null -w '%{http_code}\n' http://113.142.217.58:18084/actuator/metrics   # 期望连不上/超时
+```
+
+### 5.5 部署脚本的「渲染后配置」不得留在盘上（凭据卫生）
+
+`deploy/install.sh` 导入 Nacos 前的 sed 渲染产物**含真实口令与网关签名标记**。已改为
+`mktemp`（默认 600 权限）+ 用后即删 + `EXIT` trap 兜底（只删自己创建的文件，不用通配符误删并发进程的文件）。
+
+运维自查（**计数式判定，不要把文件内容打出来**；用 `find` 以覆盖**隐藏文件**与 /tmp 之外的位置）：
+
+```bash
+sudo bash -c 'cd /opt/ypbin/ypbin-iot/deploy; set -a; . ./.env; set +a
+find /tmp /var/tmp /root /opt/ypbin -maxdepth 2 -type f \
+     ! -name "*.jar" ! -name "*.sql" ! -name ".env" ! -name "*.log" -print0 2>/dev/null \
+| while IFS= read -r -d "" f; do
+    c=$(grep -cF "$GATEWAY_SIGN_TOKEN" "$f" 2>/dev/null); c=${c:-0}
+    i=$(grep -cF "$INTERNAL_TOKEN" "$f" 2>/dev/null); i=${i:-0}
+    [ "$c" = "0" ] && [ "$i" = "0" ] || echo "含凭据残留: $f"
+  done'
+# 期望输出：只剩受管凭据文件本身（deploy/.env 与刻意的 Nacos 配置备份），不应有 /tmp 下的渲染产物
+```
+
+> **已知且刻意保留的 600 备份**：`/opt/ypbin/nacos-ypbin-*.yaml.bak-*`（上一轮部署留下的 Nacos 配置备份，
+> root-only、未被任何 rollback 脚本引用）。它们含**当前**的网关签名标记/内部 token ⇒ 属**轮换范围**，
+> 但保留它们是回滚材料，故本轮**未删**（如确认不再需要可删）。
+
+> 历史轮次的部署曾在服务器 `/tmp` 留下若干 **644** 的渲染配置（含当时的网关签名标记与内部 token）。
+> 2026-09-26 已清理干净（删除 **22** 个文件，复核残留 **0**）。
+> **这些标记曾以明文出现在本机 `/tmp`，建议择期轮换**——轮换是跨服务联动
+> （`.env` 改值 → 重导 `ypbin-common.yaml` 与各服务配置 → 全量重启并复验登录/内部调用），
+> 属需要维护窗口的独立动作，**本轮未做**。

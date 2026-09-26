@@ -95,6 +95,13 @@ class IotDbTimeSeriesIT {
     /** 文本点位。 */
     private static final String PROPERTY_TEXT = "mode";
 
+    /**
+     * 坐标统一之前的**历史存储形态**：属性主键字符串。
+     *
+     * <p>用于证明过渡期读侧「两种都认」在真库上确实生效（单测只能断言拼出来的 SQL 文本）。</p>
+     */
+    private static final String LEGACY_PROPERTY = "9130099";
+
     /** 质量码。 */
     private static final String QUALITY = "GOOD";
 
@@ -187,6 +194,33 @@ class IotDbTimeSeriesIT {
         List<TimeSeriesPointResp> points = store.query(TENANT_ID, deviceId, PROPERTY_NUMERIC, ts, ts, LIMIT);
         assertThat(points).as("同刻重写是更新而不是追加：必须只有一行").hasSize(1);
         assertThat(points.get(0).value()).isEqualTo("42");
+    }
+
+    @Test
+    @DisplayName("★ 过渡期坐标兼容（真库·**存储层**）：历史**主键字符串**行与标识行能被一次多形态查询同时读回")
+    void mustQueryLegacyCoordinateFormTogetherWithIdentifier() {
+        long deviceId = 900009L;
+        long ts = System.currentTimeMillis();
+        // 坐标统一前写下的历史行：TAG 列是属性主键字符串（不是标识）
+        writer.writeAll(List.of(
+            new TimeSeriesPoint(TENANT_ID, deviceId, LEGACY_PROPERTY, "1", QUALITY, ts),
+            new TimeSeriesPoint(TENANT_ID, deviceId, PROPERTY_NUMERIC, "2", QUALITY, ts + 1)));
+        assertThat(meterRegistry.get(IotDbTimeSeriesWriter.METRIC_FAILED).counter().count()).isZero();
+
+        List<TimeSeriesPointResp> identifierOnly =
+            store.query(TENANT_ID, deviceId, PROPERTY_NUMERIC, null, null, LIMIT);
+        assertThat(identifierOnly).as("只按属性标识查 ⇒ 看不到历史形态那一行（这正是统一前的读侧缺口）")
+            .hasSize(1);
+        assertThat(identifierOnly.getFirst().value()).isEqualTo("2");
+
+        List<TimeSeriesPointResp> both = store.query(TENANT_ID, deviceId,
+            List.of(PROPERTY_NUMERIC, LEGACY_PROPERTY), null, null, LIMIT);
+        // ⚠️ 覆盖边界（如实说明）：本条走的是**存储层**的多形态查询（证明真 IoTDB 接受
+        // `(property_id = 'a' OR property_id = 'b')` 且两种形态的历史行都能读回）；
+        // 「请求里的标识 → 该点位的全部历史形态」这一步解析在 TimeSeriesQueryService，
+        // 由单测 TimeSeriesQueryServiceTest#mustQueryLegacyCoordinateFormToo 覆盖（其变异验证见 PR 回执）。
+        assertThat(both).as("过渡期读侧两种都认 ⇒ 历史行与当前行都要看见").hasSize(2);
+        assertThat(both).extracting(TimeSeriesPointResp::value).containsExactlyInAnyOrder("1", "2");
     }
 
     @Test
