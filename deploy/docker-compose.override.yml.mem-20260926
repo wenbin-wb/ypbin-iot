@@ -1,0 +1,134 @@
+# 部署机内存约束覆盖（生产机 /opt/ypbin/ypbin-iot/deploy/docker-compose.override.yml）
+#
+# ⚠️ 本文件在仓库外，不随仓库分发；改动前必须先备份（见同目录 *.bak-<TS>）。
+#
+# ── 一、IoTDB：MEMORY_SIZE 覆盖（2026-09-25 建立，本轮复核保留）
+# 官方镜像 conf/datanode-env.sh 与 conf/confignode-env.sh 在未设 MEMORY_SIZE 时按「容器可见内存」
+# 的比例算堆（DataNode 建议 50% 且无上限；ConfigNode 3/10、上限 8192MB），而本 compose 未给 iotdb
+# 设 cgroup 限制 ⇒ 容器看到宿主机 7939MB ⇒ DataNode 会申请约 3.9GB 堆；standalone 的 entrypoint.sh
+# `all` 会同时起 ConfigNode + DataNode 两个 JVM，必然 OOM。
+# MEMORY_SIZE 由镜像自带 conf/iotdb-common.sh::calculate_memory_sizes 读取；
+# MEMORY_SIZE < 4096MB 时单 JVM on-heap = base*3/4、MaxDirectMemorySize = base*1/4。
+# 768M ⇒ 两 JVM 合计 on-heap 2*576M=1152M（-Xms=-Xmx，启动即提交）+ 直接内存 2*192M + JVM 开销。
+# 本轮未改动（未取得 IoTDB 堆用量证据，不在无证据时动时序库），见任务报告「未验证项」。
+#
+# ── 二、JVM 堆 / 内存上限（2026-09-26 实测后调参）
+#
+# 实测依据（2026-09-26 17:06–17:12 UTC，容器已运行 ~40 分钟）：
+#   · free -m：MemTotal 7939 / used 7324 / available 615 / swap 0
+#   · /proc/meminfo：AnonPages 5.43G、Shmem 1.26G、Cached 1.87G、
+#     Committed_AS 14.1G vs CommitLimit 3.9G（ZGC 大量虚拟预留，overcommit=0 走启发式）
+#   · /proc/pressure/memory：avg10/60/300 全 0.00（当前无活跃压力），累计 some=179.6s / full=131.1s
+#   · 全部容器 HostConfig.Memory=0 ⇒ 无 cgroup 限制、无准入控制；
+#     当日 10:35:55 已发生一次**全局 OOM**：内核 task_memcg=…cb4ae95fc0bb…（即 ypbin-nacos），
+#     exit 137 / RestartCount=1 / OOMKilled 后由 restart 策略拉起
+#   · 5 个应用（gateway/auth/system/iot/access）为 JRE-only 镜像（无 jcmd/jattach），
+#     仅 ypbin-iot 暴露 /actuator/metrics，实测：
+#       jvm.memory.max(ZGC Old Generation)      = 512MB        （= -Xmx512m）
+#       jvm.memory.committed(area=heap)         = 256MB        （= -Xms256m，启动即提交）
+#       jvm.memory.used(area=heap)              = 152MB
+#       jvm.gc.live.data.size                   = 96.5MB       ⇒ Xmx512m ≈ live 的 5.3×
+#       jvm.memory.committed(area=nonheap)      = 177MB
+#       jvm.buffer.memory.used(id=direct)       = 33MB
+#   · smaps_rollup：ZGC 堆以 /memfd:java_heap (rw-s) 共享映射呈现
+#     ⇒ /proc/meminfo 的 Shmem 1.26G 主要是这 5 个应用的堆（Pss_Shmem 逐容器 240–260MB）
+#   · nacos 为 G1（无 ZGC），其自带 GC 日志 /home/nacos/logs/nacos_gc.log 实测：
+#       GC(14) Pause Young (Mixed) 649M->161M(1024M)
+#     ⇒ live 仅 161MB、GC 前峰值 649MB，Xmx1g ≈ live 的 6.4×；
+#       且 `-Xmn512m` 与 G1 搭配是反模式（固定新生代使 used 长期停在 649M）
+#
+# 结论：真正被"锁住"的内存是 **-Xms（启动即提交且不归还）**，其次才是 -Xmx（上界）。
+#       因此本轮只降 Xms/Xmx，不新增/删除任何容器、不碰数据卷、不碰镜像、
+#       不碰 1Panel openresty 与其它人的容器。
+#
+# 预期回收：5 应用 × (256-128)MB = 640MB；nacos (1024-512)MB = 512MB；合计 ≈ 1.15GB
+#          目标 available 稳定 ≥ 1GB（实测基线 615MB ⇒ 预期 ~1.7GB）
+#
+# 回滚：把本文件恢复为备份内容（或删掉 JAVA_OPTS / JVM_XMS / JVM_XMX / JVM_XMN / mem_limit 键），
+#       然后从 ypbin-access → ypbin-iot → ypbin-system → ypbin-auth → ypbin-gateway → nacos
+#       逐个 `docker compose -p deploy -f docker-compose.yml -f docker-compose.override.yml up -d <svc>`。
+services:
+  # ── 中间件 ────────────────────────────────────────────────────────────────
+  iotdb:
+    environment:
+      MEMORY_SIZE: 768M
+
+  nacos:
+    environment:
+      # nacos 镜像自带 ENV JVM_XMS=1g / JVM_XMX=1g / JVM_XMN=512m；
+      # bin/docker-startup.sh 用 join_if_exist 拼接：Xms=$(join_if_exist "-Xms" ${JVM_XMS}) 等。
+      # standalone 分支只拼 $Xms $Xmx $Xmn（不含 Metaspace 两项）。
+      JVM_XMS: 512m
+      JVM_XMX: 768m
+      # 显式置空 ⇒ join_if_exist 的 [ -n "$2" ] 为假 ⇒ 不向 java 传 -Xmn
+      # （去 -Xmn 依然值得：它把新生代钉死在 485 个 Eden region，使 used 长期停在 ~650M）
+      JVM_XMN: ""
+    # ⚠️⚠️ 刻意**不设** mem_limit —— 这是一条被独立复核抓出来的真实教训，不要"顺手补上"：
+    #
+    # 第一版我在这里设了 mem_limit（1024m→1536m→1792m），它**静默改变了 nacos 的 GC 算法**：
+    #   · JDK 21 会按「机器大小」自动选 GC。cgroup 内存限制会让 JVM 的 physical_memory() 变小，
+    #     落到 server-class 阈值以下 ⇒ 默认 GC 从 G1 变成 **SerialGC**（单线程 STW）。
+    #   · 一手证据：nacos GC 日志第 1 行 `[2026-09-27T01:14:19.272+0800][gc] Using Serial`，
+    #     `grep -c "Using G1"` = 0；容器内实测 `-XX:-UseContainerSupport`(看到 7939MB) → UseG1GC=true，
+    #     `-XX:+UseContainerSupport`(看到 1536MiB) → UseSerialGC=true。
+    #   · 而 nacos 镜像的 bin/docker-startup.sh **不带任何 GC 参数**，GC 完全由 ergonomics 决定。
+    #   · 该镜像也**没有**可用的"追加 JVM 参数"入口：`JAVA_OPT_EXT` 被拼在 `-jar <jar>` **之后**
+    #     （`JAVA_OPT="${JAVA_OPT} -jar ..."; JAVA_OPT="${JAVA_OPT} ${JAVA_OPT_EXT}"`）
+    #     ⇒ 放进去的 `-XX:...` 会被当成**程序参数**，不会生效。
+    #   ⇒ 结论：对「GC 由 ergonomics 决定」的容器，**加 cgroup 内存上限会静默换掉 GC**。
+    #     所以这里**去掉 mem_limit**，让 nacos 恢复改前的 G1（可见内存 = 宿主 7939MB）。
+    #
+    # 去掉 limit 后 nacos 仍**自限**：堆被 -Xmx768m 硬顶（实测 RSS 1022MiB，
+    # 理论峰值 ≈ 768 + Metaspace 108 + 非堆/原生残差 ~440 ≈ 1208MB）。
+    # 若日后确实要给 nacos 加回上限，**必须同时显式钉住 GC**；本镜像唯一可行的钉法是借用
+    # 拼接变量（如 `JVM_XMX: "768m -XX:+UseG1GC"`，该串拼在 -jar 之前），但这属于 hack、
+    # 容易被后人"规范化"掉 ⇒ 本轮判断**不值得**，故不加。
+    #
+    # 对比：5 个业务服务不受此问题影响 —— 它们通过 JAVA_OPTS **显式**传了 -XX:+UseZGC 与 -Xmx，
+    # GC/堆都不依赖 ergonomics；实测在 1280m 上限下 ReservedCodeCacheSize 仍为 240MB、
+    # TieredCompilation 仍为 true ⇒ 无隐藏降级（见下方注释）。
+
+  # ── 业务服务（5 个，统一 ZGC + 相同堆参数）───────────────────────────────
+  # JAVA_OPTS 来自镜像 ENV（-XX:+UseZGC -XX:+ZGenerational -Xms256m -Xmx512m），
+  # compose environment 优先级高于镜像 ENV ⇒ 在此覆盖即可，无需重打镜像。
+  # 保留 ZGC（本轮无证据表明 ZGC 是主要开销，不擅自换 GC）；只降 Xms/Xmx。
+  #
+  # mem_limit=1280m 定值依据：实测启动瞬态 RSS 峰值 738MiB（access，改后第一轮实测），
+  # 理论峰值 = Xmx384m + nonheap 177MB + direct 33MB + JVM 原生残差 ~270MB ≈ 865MB
+  # ⇒ 1280m 留 ≥1.48× 余量。
+  # ⚠️ 重要实测教训：ZGC 默认 -XX:+ZUncommit 且 ZUncommitDelay=300s ⇒ **重启后 5 分钟内 RSS
+  #    会停在接近 -Xmx 的水平**（启动期将堆提交到高水位，300s 后才归还）。
+  #    因此「重启后立刻看 RSS」会读到虚高值，必须等 ≥5–10 分钟再取稳态值，否则会误判。
+  #
+  # ⚠️ 待办（本轮未做，需单独批准）：**memswap_limit 未设**。Docker 在只设 mem_limit 时，默认允许
+  #    容器使用与该上限**等量**的 swap ⇒ 本文件 6 个受限容器的 `memory.swap.max` 合计
+  #    5×1280 + nacos 1792 = 8192MiB ≫ zram 设备仅 2047MiB ⇒ **容器理论上可把整个 zram 填满**，
+  #    而 zram 自身 mem_limit=1GiB，填满它会吃掉本轮刚释放出来的内存。
+  #    建议值（下一维护窗口）：`memswap_limit` = mem_limit + 256m（给冷页一个明确预算，
+  #    合计 5×1536 = 7680MiB > zram 2047MiB，若要严格封顶则设 512m → 5×1792 = 8960…
+  #    故严格做法是 memswap_limit 只比 mem_limit 多 256m 且**同时**把 zram mem_limit 视为全局硬顶，
+  #    或用 `memory.swap.max` 单独限）。本轮因 zram 实测用量为 0（si/so=0）故未实施。
+  ypbin-gateway:
+    environment:
+      JAVA_OPTS: "-XX:+UseZGC -XX:+ZGenerational -Xms128m -Xmx384m"
+    mem_limit: 1280m
+
+  ypbin-auth:
+    environment:
+      JAVA_OPTS: "-XX:+UseZGC -XX:+ZGenerational -Xms128m -Xmx384m"
+    mem_limit: 1280m
+
+  ypbin-system:
+    environment:
+      JAVA_OPTS: "-XX:+UseZGC -XX:+ZGenerational -Xms128m -Xmx384m"
+    mem_limit: 1280m
+
+  ypbin-iot:
+    environment:
+      JAVA_OPTS: "-XX:+UseZGC -XX:+ZGenerational -Xms128m -Xmx384m"
+    mem_limit: 1280m
+
+  ypbin-access:
+    environment:
+      JAVA_OPTS: "-XX:+UseZGC -XX:+ZGenerational -Xms128m -Xmx384m"
+    mem_limit: 1280m

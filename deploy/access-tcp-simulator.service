@@ -1,0 +1,52 @@
+[Unit]
+Description=ypbin-iot access 采集链路 · TCP 模拟设备（测试工具，非业务代码）
+Documentation=file:///opt/ypbin/ypbin-iot/deploy/access-tcp-simulator.md
+# 为什么需要它：生产机没有物理设备，access 侧 device `demo-dev-curve`(9300012) 的 endpoint 是
+#   tcp://172.20.0.1:19002 —— 由 access **回连宿主机**取数。没有这个模拟器，采集链路就是
+#   「零写入」：控制面全绿、容器全 Up，但 iot.reading 行数不再增长（2026-09-26 重启后实测）。
+# 本单元把「喂数源」从"某次手工 nohup 的进程"变成**受 systemd 管理的常驻进程**，
+# 从而扛住重启与进程崩溃。**不新起任何容器/中间件。**
+After=network-online.target docker.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# 172.20.0.1 = docker 网络 deploy_ypbin-net (172.20.0.0/24) 的**网关地址**（= 宿主机侧 br- 接口）。
+# ⚠️ **刻意不用 0.0.0.0**（脚本默认值），也**不能用 127.0.0.1**：
+#   · 127.0.0.1 不行 —— access 在容器内，容器回连宿主机 loopback 打不到宿主机的 127.0.0.1；
+#   · 0.0.0.0 不必要 —— 那会把 19002 暴露到公网接口（本仓对 IoTDB 6667/9091/9092 都坚持只绑回环，同理）。
+#   ⇒ 只绑网桥网关地址：容器可达、公网不可达。
+ExecStart=/usr/bin/python3 /usr/local/sbin/access-tcp-simulator.py --bind 172.20.0.1 --port 19002 --interval 2.0
+
+# 扛崩溃：无论退出码/信号都拉起；StartLimitIntervalSec=0 关掉"5 次失败就不再拉起"的限流，
+# 否则一次抖动就可能让喂数永久停摆 —— 那正是本轮要根治的"静默零写入"。
+Restart=always
+RestartSec=3
+
+# 日志进 journald（StandardOutput/StandardError 默认即 journal）
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=access-tcp-sim
+
+# 最小权限：只监听一个 TCP 端口，不需要写盘、不需要家目录、不需要设备
+DynamicUser=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+# 自身资源护栏（systemd scope，不是容器）：模拟器只是每 2s 发一帧，给足余量即可
+MemoryMax=128M
+CPUQuota=20%
+
+[Install]
+WantedBy=multi-user.target

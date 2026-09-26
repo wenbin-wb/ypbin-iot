@@ -1,0 +1,39 @@
+[Unit]
+Description=ypbin-iot 采集链路「喂数停摆」判据（**只告警，不自愈**）
+Documentation=file:///opt/ypbin/ypbin-iot/deploy/access-tcp-simulator.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/feeder-watch.sh
+
+# 退出码语义（见脚本头部）：0 = OK；2 = ALERT；3 = 无 ALERT 但判据无法求值。
+# 这里**刻意不把 2/3 当成成功**：一旦停摆，单元进入 failed ⇒
+#   · `systemctl --failed` 一眼可见；
+#   · `journalctl -u feeder-watch.service` 里有 `判定: ALERT`；
+#   · `systemctl list-timers feeder-watch.timer` 的 NEXT 会继续排下一次（timer 不受单元失败影响）。
+# 下一次运行若恢复 OK，单元会回到 inactive(dead)（oneshot 的成功态）⇒ **告警自愈**。
+#
+# ⚠️ **本单元不做任何自愈动作**（不重启喂数源、不改任何配置）。
+#    喂数源自身的崩溃恢复交给 `access-tcp-simulator.service` 的 `Restart=always`
+#    —— 「告警」与「自愈」分离，避免看门狗与单元互相打架。
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=feeder-watch
+
+# 只读作业，最小权限（保留 root：脚本要调 `systemctl is-active` 与 `ss`，避免因权限产生**假 ALERT**）
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryMax=128M
+CPUQuota=20%
+
+# 单次运行约 17 分钟（L1 120s + L2 900s），给足上限
+TimeoutStartSec=1500

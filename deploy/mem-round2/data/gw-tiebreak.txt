@@ -1,0 +1,31 @@
+##### gateway p95 定论实验 开始 2026-09-26T21:11:23Z
+### 阶段 1：arena2（当前状态，容器 6f23cd1a9a5e）
+  arena2 lat[1]: http://127.0.0.1:18080/ n=600 p50=4.8ms p95=6.7ms max=50.5ms
+  arena2 lat[2]: http://127.0.0.1:18080/ n=600 p50=4.0ms p95=5.0ms max=9.4ms
+  arena2 lat[3]: http://127.0.0.1:18080/ n=600 p50=3.6ms p95=4.9ms max=16.7ms
+  arena2 smaps: Traceback (most recent call last):
+  File "/root/mem-round2-20260926/anonmap.py", line 62, in <module>
+    main()
+  File "/root/mem-round2-20260926/anonmap.py", line 38, in main
+    with open(f"/proc/{pid}/smaps", encoding="ascii", errors="replace") as fh:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/proc/61831 /smaps'
+OK   ypbin-gateway: 已移除 MALLOC_ARENA_MAX（注释行一并清理）
+  回退断言 OK：gateway 块已无该键
+ Container ypbin-gateway Recreate 
+ Container ypbin-gateway Recreated 
+ Container ypbin-gateway Starting 
+ Container ypbin-gateway Started 
+  运行期 arena: MALLOC_ARENA_MAX=UNSET
+### 阶段 2：noenv（回退后，容器 5256838a1722）
+  noenv lat[1]: http://127.0.0.1:18080/ n=600 p50=5.3ms p95=7.6ms max=986.0ms
+  noenv lat[2]: http://127.0.0.1:18080/ n=600 p50=4.5ms p95=5.7ms max=27.6ms
+  noenv lat[3]: http://127.0.0.1:18080/ n=600 p50=3.8ms p95=4.8ms max=10.3ms
+  noenv smaps: Traceback (most recent call last):
+  File "/root/mem-round2-20260926/anonmap.py", line 62, in <module>
+    main()
+  File "/root/mem-round2-20260926/anonmap.py", line 38, in main
+    with open(f"/proc/{pid}/smaps", encoding="ascii", errors="replace") as fh:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/proc/72617 /smaps'
+##### 结束 2026-09-26T21:17:43Z（当前状态 = noenv，等作者决定是否加回）

@@ -1,0 +1,42 @@
+== 前置：user=nacos  旧口令 len=32 sha256[:16]=fcaeaf3a978610dd
+   旧口令登录 OK（token len=129）
+   当前注册：totalCount=5
+   ypbin-gateway    SPRING_CLOUD_NACOS_* 键=True  当前口令 sha256[:16]=fcaeaf3a978610dd
+   ypbin-auth       SPRING_CLOUD_NACOS_* 键=True  当前口令 sha256[:16]=fcaeaf3a978610dd
+   ypbin-system     SPRING_CLOUD_NACOS_* 键=True  当前口令 sha256[:16]=fcaeaf3a978610dd
+   ypbin-iot        SPRING_CLOUD_NACOS_* 键=True  当前口令 sha256[:16]=fcaeaf3a978610dd
+   ypbin-access     SPRING_CLOUD_NACOS_* 键=True  当前口令 sha256[:16]=fcaeaf3a978610dd
+   旧口令出现在 2 个文件中（预期：.env + 600 快照）
+     0o600 /root/mem-round2-20260926/deploy.env.bak-before-nacosrotate
+     0o600 /opt/ypbin/ypbin-iot/deploy/.env
+== 计划：新口令 len=32 sha256[:16]=7864544af931cf1d（不打印本体）
+== 1. 备份完成：/root/mem-round2-20260926/nacos-rotate-20260926-212612（0700；.oldpw/.newpw 0600，供回滚）
+== 2. PUT /v3/auth/user?username=nacos 响应：{"code":0,"message":"success","data":"update user ok!"}
+== 3a. 新口令登录 OK
+== 3b. 旧口令已被拒 ✓（且服务端无需重启即生效 ⇒ 本轮不重启 nacos，理由见报告）
+== 4. .env 已更新并回读一致（0600 保持）
+== 5. 重建 ypbin-gateway（--no-deps --force-recreate）
+   Container ypbin-gateway Recreate  |  Container ypbin-gateway Recreated  |  Container ypbin-gateway Starting  |  Container ypbin-gateway Started
+   ypbin-gateway 运行期口令指纹 OK
+== 5. 重建 ypbin-auth（--no-deps --force-recreate）
+   Container ypbin-auth Recreate  |  Container ypbin-auth Recreated  |  Container ypbin-auth Starting  |  Container ypbin-auth Started
+   ypbin-auth 运行期口令指纹 OK
+== 5. 重建 ypbin-system（--no-deps --force-recreate）
+   Container ypbin-system Recreate  |  Container ypbin-system Recreated  |  Container ypbin-system Starting  |  Container ypbin-system Started
+   ypbin-system 运行期口令指纹 OK
+== 5. 重建 ypbin-iot（--no-deps --force-recreate）
+   Container ypbin-iot Recreate  |  Container ypbin-iot Recreated  |  Container ypbin-iot Starting  |  Container ypbin-iot Started
+   ypbin-iot 运行期口令指纹 OK
+== 5. 重建 ypbin-access（--no-deps --force-recreate）
+   Container ypbin-access Recreate  |  Container ypbin-access Recreated  |  Container ypbin-access Starting  |  Container ypbin-access Started
+   ypbin-access 运行期口令指纹 OK
+== 6. 等各服务就绪（最多 150s/服务）
+   ypbin-gateway 就绪（探测 / → 200）
+   ypbin-auth TIMEOUT（探测 /actuator/health → UP）
+   ypbin-system TIMEOUT（探测 /actuator/health → UP）
+   ypbin-iot 就绪（探测 /actuator/health → UP）
+   ypbin-access 就绪（探测 / → 200）
+== 6b. 注册：totalCount=5  [('ypbin-gateway', 1), ('ypbin-iot', 1), ('ypbin-system', 1), ('ypbin-auth', 1), ('ypbin-access', 1)]
+== 6c. 19000 http=200
+== 7. 回滚脚本已生成（0600）：/root/mem-round2-20260926/nacos-rotate-20260926-212612/rollback-nacos-password.sh
+== 完成。旧指纹=fcaeaf3a978610dd  新指纹=7864544af931cf1d  （口令本体未打印、未落任何非 0600 文件）
