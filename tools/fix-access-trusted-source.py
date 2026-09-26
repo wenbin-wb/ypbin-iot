@@ -46,8 +46,9 @@ def login() -> str:
     out = subprocess.run(
         ["curl", "-sS", "-m", "15", "-X", "POST", f"{CONSOLE}/v3/auth/user/login",
          "-H", "Content-Type: application/x-www-form-urlencoded",
-         "--data-urlencode", "username=" + os.environ.get("NACOS_ADMIN_USERNAME", "nacos") + r"", "--data-urlencode", "password=" + _nacos_password() + r""],
-        capture_output=True, check=True)
+         "--data-urlencode", "username=" + os.environ.get("NACOS_ADMIN_USERNAME", "nacos"),
+         "--data-urlencode", "password@-"],
+        capture_output=True, check=True, input=_nacos_password().encode("utf-8"))
     body = json.loads(out.stdout.decode("utf-8"))
     token = body.get("accessToken")
     assert token, f"nacos login failed (no accessToken): keys={sorted(body)}"
@@ -83,9 +84,15 @@ def build_block(token: str) -> list:
 
 
 def _nacos_password():
-    """从 deploy/.env 取 Nacos 控制台口令；脚本内不留值。"""
-    if os.environ.get("NACOS_ADMIN_PASSWORD"):
-        return _nacos_password()
+    """取 Nacos 控制台口令：环境变量优先、其次 deploy/.env；只经 stdin 投递给 curl，不进 argv。
+
+    2026-09-26 修：原实现在环境变量存在时直接调用自身（自我递归），
+    只要调用方 export 了 NACOS_ADMIN_PASSWORD（回滚脚本正要求这么做）就必然 RecursionError。
+    实际意图就是「取环境变量里的值」，这里直接返回。
+    """
+    env_password = os.environ.get("NACOS_ADMIN_PASSWORD")
+    if env_password:
+        return env_password
     for line in open("/opt/ypbin/ypbin-iot/deploy/.env", encoding="utf-8"):
         if line.startswith("NACOS_ADMIN_PASSWORD="):
             return line.split("=", 1)[1].strip()
@@ -161,9 +168,10 @@ def main() -> int:
 # 一键回滚：把 ypbin-access.yaml 还原成修复前快照 {ts}
 # 快照: {bak}  sha256[:16]={live_sha}
 set -euo pipefail
-T=$(curl -sS -m 15 -X POST http://127.0.0.1:8080/v3/auth/user/login \\
+if [ -z "${{NACOS_ADMIN_PASSWORD:-}}" ]; then echo "!! 请先 export NACOS_ADMIN_PASSWORD（取 deploy/.env 的值，勿写进命令行）再跑本脚本"; exit 1; fi
+T=$(printf '%s' "$NACOS_ADMIN_PASSWORD" | curl -sS -m 15 -X POST http://127.0.0.1:8080/v3/auth/user/login \\
     -H "Content-Type: application/x-www-form-urlencoded" \\
-    --data-urlencode "username=${NACOS_ADMIN_USERNAME:-nacos}" --data-urlencode "password=$NACOS_ADMIN_PASSWORD" \\
+    --data-urlencode "username=${{NACOS_ADMIN_USERNAME:-nacos}}" --data-urlencode "password@-" \\
   | sed -n 's/.*"accessToken":"\\([^"]*\\)".*/\\1/p')
 [ -n "$T" ] || {{ echo "!! nacos 登录失败"; exit 1; }}
 curl -fsS -m 60 -X POST "http://127.0.0.1:8080/v3/console/cs/config" \\

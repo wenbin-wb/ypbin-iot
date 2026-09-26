@@ -56,8 +56,10 @@ def md5(p):
     return h.hexdigest()
 
 
-def run(cmd):
-    return subprocess.run(cmd, capture_output=True, text=True)
+def run(cmd, stdin_text=None):
+    # stdin_text：把口令/密钥这类敏感字段经 **stdin** 交给 curl（`--data-urlencode name@-`），
+    # 使其不出现在 curl 的 argv（宿主 `ps` 与 `docker events` 的 exec 属性都能读到 argv）。
+    return subprocess.run(cmd, capture_output=True, text=True, input=stdin_text)
 
 
 def hits(path, needle):
@@ -85,7 +87,8 @@ def dump(cfg, dest):
 def login():
     out = run(["curl", "-sS", "-m", "20", "-X", "POST", f"{NACOS_ADMIN}/v3/auth/user/login",
                "-H", "Content-Type: application/x-www-form-urlencoded",
-               "--data-urlencode", "username=" + os.environ.get("NACOS_ADMIN_USERNAME", "nacos") + r"", "--data-urlencode", "password=" + _nacos_password() + r""])
+               "--data-urlencode", "username=" + os.environ.get("NACOS_ADMIN_USERNAME", "nacos"),
+               "--data-urlencode", "password@-"], stdin_text=_nacos_password())
     tok = json.loads(out.stdout).get("accessToken") or ""
     if not tok:
         raise SystemExit("!! Nacos 登录失败")
@@ -112,9 +115,15 @@ def wait_health(name, port, timeout_s=200):
 
 
 def _nacos_password():
-    """从 deploy/.env 取 Nacos 控制台口令；脚本内不留值。"""
-    if os.environ.get("NACOS_ADMIN_PASSWORD"):
-        return _nacos_password()
+    """取 Nacos 控制台口令：环境变量优先、其次 deploy/.env；只经 stdin 投递给 curl，不进 argv。
+
+    2026-09-26 修：原实现在环境变量存在时直接调用自身（自我递归），
+    只要调用方 export 了 NACOS_ADMIN_PASSWORD（回滚脚本正要求这么做）就必然 RecursionError。
+    实际意图就是「取环境变量里的值」，这里直接返回。
+    """
+    env_password = os.environ.get("NACOS_ADMIN_PASSWORD")
+    if env_password:
+        return env_password
     for line in open("/opt/ypbin/ypbin-iot/deploy/.env", encoding="utf-8"):
         if line.startswith("NACOS_ADMIN_PASSWORD="):
             return line.split("=", 1)[1].strip()
@@ -235,8 +244,9 @@ set -euo pipefail
 TS={TS}; W=/opt/ypbin/secret-rotation-{key}-$TS; ROOT={ROOT}; NACOS={NACOS_ADMIN}
 umask 077; say(){{ printf '%s\\n' "$*"; }}
 install -m 600 "$W/before/deploy.env.bak-$TS" "$ROOT/deploy/.env"; say "已还原 deploy/.env"
-T="$(curl -fsS -m 20 -X POST "$NACOS/v3/auth/user/login" -H 'Content-Type: application/x-www-form-urlencoded' \\
-  --data-urlencode 'username=${NACOS_ADMIN_USERNAME:-nacos}' --data-urlencode 'password=$NACOS_ADMIN_PASSWORD' | sed -n 's/.*"accessToken":"\\([^"]*\\)".*/\\1/p')"
+if [ -z "${{NACOS_ADMIN_PASSWORD:-}}" ]; then say "!! 请先 export NACOS_ADMIN_PASSWORD（取 deploy/.env 的值，勿写进命令行）再跑本脚本"; exit 3; fi
+T="$(printf '%s' "$NACOS_ADMIN_PASSWORD" | curl -fsS -m 20 -X POST "$NACOS/v3/auth/user/login" -H 'Content-Type: application/x-www-form-urlencoded' \\
+  --data-urlencode "username=${{NACOS_ADMIN_USERNAME:-nacos}}" --data-urlencode "password@-" | sed -n 's/.*"accessToken":"\\([^"]*\\)".*/\\1/p')"
 [ -n "$T" ] || {{ say "!! nacos 登录失败"; exit 3; }}
 H="$W/.h"; printf 'header = "accessToken: %s"\\n' "$T" > "$H"; chmod 600 "$H"; unset T
 for c in {' '.join(c for c, _ in targets)}; do
