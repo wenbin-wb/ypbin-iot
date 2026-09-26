@@ -18,7 +18,7 @@
 | **C3** | 🔴 **红线：EMQX 5.8 的授权默认是 `allow`，不是 deny-by-default。** `authorization.no_match` 默认 `allow` ⇒ **不显式设 `no_match = deny` 就等于「ACL 没配对时全放行」**。上线前硬条件。 | 已核实（官方原文） |
 | **C4** | 🔴 **生产机内存余量不足以「默认配置」直接上 EMQX**：实测 **8 vCPU / 7939MB / swap=0 / available ≈ 904MB**，已有容器占 ~6.2GiB。**官方未给出最低内存/CPU 要求** ⇒ 不给官方数字，给**分阶段 + 可回滚**方案（§8.3）。 | 实测 + 否定性核实 |
 | **C5** | 🔴 **幂等缺口（P0，单列 §6.4）**：`RedisLatestValueWriter.writeAll` 是**盲 `putAll`**、只做**批内** ts 取新 ⇒ **跨批乱序重放会把「最新值」回退**。**这不是新发现** —— 该限制**早已登记**在 `RedisLatestValueWriter.java:28-31` 类 Javadoc 与 `docs/IOT-ROADMAP.md` 四点十七；但它**在既有 HTTP 上报下是低频、在 EMQX 入站后变成高频**（QoS1 重发 + `query_mode=async` + 每消息一批），因此必须在入站上线**之前**处置。 | 仓内代码级证据（文件:行号）+ 独立复核确认可真实触发 |
-| **C6** | **Topic 规范要改掉既有 `$iot/...` 约定**（设计文档 §4.2/§4.3/§6.1/§7）：`$` 开头的主题名是 MQTT 保留给服务端的命名空间，EMQX 自己的系统主题就是 `$SYS/`。改用 `ypbin/v1/{tenantId}/{deviceId}/up|down/...`，**运行时字段（requestId 等）放 payload 不放主题**。 | 已核实（EMQX 保留命名空间原文）；`$` 的 OASIS 条款原文本轮**未逐字取回** |
+| **C6** | **Topic 规范要改掉既有 `$iot/...` 约定**（设计文档 §4.2/§4.3/§6.1/§7）：`$` 开头的主题名是 MQTT 保留给服务端的命名空间，EMQX 自己的系统主题就是 `$SYS/`。改用 `ypbin/v1/{tenantId}/{deviceId}/up` 与 `.../down/...`，**运行时字段（requestId 等）放 payload 不放主题**。 | 已核实（EMQX 保留命名空间原文）；`$` 的 OASIS 条款原文本轮**未逐字取回** |
 | **C7** | **凭据：明文一次性交付、永不回显。** 平台只在「签发/轮换」那一刻返回一次明文，之后只返回元数据（EMQX 内置库只存 hash）。`credential_ref` 存**非密引用**，不存明文。G10 需新增 4 个端点（§5.3）。 | 设计决策 + 官方存储语义 |
 | **C8** | **主机侧无防火墙**（`ufw inactive`、`iptables INPUT policy ACCEPT`）⇒ 任何 `0.0.0.0` 发布的端口都直接暴露；EMQX 的 **18083 必须回环**（官方安全清单原文），**1883/8883 视接入面决定**（§8.2）。 | 实测 + 官方原文 |
 | **C9** | 🔴 **失败语义错配（易造成静默丢数据）**：本仓铁律是「全局异常统一 **HTTP 200**、靠 `R.code` 区分」，而 **EMQX 的 HTTP 动作只看 HTTP status** ⇒ 平台因契约不合法（如缺 `quality`，`@NotBlank`）拒绝时，EMQX 判定「投递成功」、**不重试、不计入 `dropped.*`**，两端都以为成功而数据不存在。入站必须为此专门设计（§6.5）。 | 仓内铁律 + 官方「body 为规则输出 / 状态码语义」原文 |
@@ -524,7 +524,7 @@ WHERE
 **事实两侧**
 
 - 仓内铁律：**全局异常统一 HTTP 200**，靠响应体 `R.code` 区分成功/失败（`docs/IOT-PLATFORM-DESIGN.md` 的异常规范、admin 后端 skill 同款约束）。
-- EMQX HTTP 动作的判据是 **HTTP 状态码**：官方对桥接的失败/重试描述全部围绕「HTTP 响应」与 `max_retries`/`request_ttl`（F27/F28），**没有**任何「读取响应体业务码」的机制（依据同上：`emqx_bridge_http_connector.erl:963-986` 只按状态码分支；该否定性结论**仅由该源码支撑**，见 §10.2 U20）。
+- EMQX HTTP 动作的判据是 **HTTP 状态码**：官方对桥接的失败/重试描述全部围绕「HTTP 响应」与 `max_retries`/`request_ttl`（F27/F28），**没有**任何「读取响应体业务码」的机制（依据同上：`emqx_bridge_http_connector.erl:963-986` 只按状态码分支；该否定性结论**仅由该源码支撑**，见 §10.2 U22）。
 
 **后果（静默丢数据）**
 
@@ -535,12 +535,14 @@ WHERE
 | 方案 | 做法 | 取舍 |
 |---|---|---|
 | **A（推荐）· 入站专用端点** | 新增 `POST /internal/mqtt/readings`（同守卫），**校验失败即返回非 2xx**（`400`），成功才 2xx；失败细节进日志与指标 | 需要在 `/internal/**` 里**破例**一个「不遵全局 HTTP 200」的端点 ⇒ 必须在代码注释与本文档写明这是**协议边界**的刻意例外，并加一个架构门禁/单测断言它确实返回 400 |
+| **B · EMQX 侧前置校验** | 在规则 SQL 里用 `WHERE`/字段存在性判断把非法报文挡在动作之外（直接丢弃并计数） | 零 Java 改动；但**规则 SQL 表达力有限**，挡不住所有契约（如枚举值、长度上限），仍有漏网 ⇒ 只能作为 A 的补充 |
+| **C · 平台侧补偿对账** | 保持 HTTP 200，另加「设备侧上报计数 vs 平台落库计数」对账 | 把问题变成**可观测**而不是**可防**；工程量大，且告警滞后 |
 
 **⚠️ 「400 到底怎么出」必须写死，否则会静默失效**：不要用 `@Valid @RequestBody`（`MethodArgumentNotValidException` 会被全局异常处理器转成 **HTTP 200 + `R.code`**，等于没做）。**做法**：控制器方法签名直接接 `ReadingIngestReq` 与 `HttpServletResponse`，**自己做校验**；不合法时 `response.setStatus(400)` + 写一个最小 JSON 错误体 + `return null`（或返回 `void`），**完全不经过 `R` 信封**；合法时才调用 `AvailabilityService.ingest(req)` 并返回 `R.ok(...)`。**验收**：单测直接用 `MockMvc` 断言 `status().isBadRequest()`（断言的是**原始 HTTP 状态**，不是 `R.code`）——这条单测就是「破例真的生效」的证明（照教训七/八：门禁必须验证「真的执行了」，否则假绿）。
 
+**⚠️ 守卫失败路径也必须一并破例（否则同一缺口从「校验」漏到「认证」）**：`X-Internal-Token` 缺失/错误时，`InternalTokenGuardInterceptor` 抛 `BusinessException` → 全局异常处理器 → **HTTP 200 + `R.code=401`**（该 Javadoc 自证：`InternalTokenGuardInterceptor.java:30`「失败转统一响应（由全局异常处理器转 HTTP 200 + `R.code=401`）」）⇒ EMQX 同样判「投递成功」而**静默丢数据**。因此入站端点的网关前置校验（或桥接侧对凭证正确性的自检）**必须同样让 EMQX 看到非 2xx**：做法是在该端点的路径上把守卫的失败也输出为原始 `401`（例如为本端点单独注册一个返回 `HttpStatus.UNAUTHORIZED` 的 `@RestControllerAdvice`，或在桥接创建后立即做一次**凭证自检**并纳入巡检 H5/P1-8）。**验收**：故意用错误 token 调该端点 → 原始 HTTP 状态必须是 `401`（而非 200）。
+
 **⚠️ `propertyId` 白名单的落点（避免与「`ingest` 一行不改」冲突）**：白名单校验放在**入站适配层**（上述控制器内，一次批量取该设备的点位映射做 `Set` 包含判断，**不查库的第二遍、不在循环里查库**），**不改 `AvailabilityService.ingest` 的语义**。代价要说清：**既有 HTTP 通道 `POST /internal/readings` 不受该校验保护**——它只由 `access`（受 `X-Internal-Token` 保护的内部调用方）使用，且 `access` 自己按点位映射采集，视为可信。若要对 HTTP 通道也做同等防护，属**独立决策**（登记为 P2-7），不在 P0。
-| **B · EMQX 侧前置校验** | 在规则 SQL 里用 `WHERE`/字段存在性判断把非法报文挡在动作之外（直接丢弃并计数） | 零 Java 改动；但**规则 SQL 表达力有限**，挡不住所有契约（如枚举值、长度上限），仍有漏网 ⇒ 只能作为 A 的补充 |
-| **C · 平台侧补偿对账** | 保持 HTTP 200，另加「设备侧上报计数 vs 平台落库计数」对账 | 把问题变成**可观测**而不是**可防**；工程量大，且告警滞后 |
 
 **结论**：**A + B 组合**。A 是 P0（否则 H10 不达标），B 作为纵深防御。**若选 A，`/internal/readings` 的既有契约与语义一行不改**（HTTP 上报通道继续返回 HTTP 200，两侧语义差异由「MQTT 入站专用端点」承担）——这也是「复用既有落库链路」的正确含义：**复用服务方法，不复用它的 HTTP 信封语义**。
 
@@ -976,6 +978,9 @@ ypbin:
 | **U19** | 规则 SQL 里 `nth`/`tokens` 对**越界索引**的**具体返回形式**（服务账号 `svc-ingress` 的 username 无点 ⇒ `nth(2, …)` 越界） | ✅ 官方已载（**独立复核取回**）：`nth(N: integer, Array: array) -> any` 且原文 *"`N` should not be larger than the length of `Array`"*；页首并载 *"if the provided argument exceeds the stipulated range … it will result in the current SQL execution failing, incrementing the failure count by one"* ⇒ **越界不是「返回空」而是「本次规则执行失败并计数」**。**仍然未实测**的是：该失败在 5.8.9 容器里的实际表现（是否只影响该条消息、失败计数落在哪个指标、是否会让**整条规则**被停用） | §5.2 的安全性推理方向不变（越界失败同样不会展开成真实主题），但**运维后果不同**：服务账号若走进这条规则会持续累加失败计数，因此 §5.2 的设计（服务账号的 username 无点、只命中 `rules/users`）**必须在真实容器里验证**；见 [rule-sql-builtin-functions.html](https://docs.emqx.com/en/emqx/v5.8/develop/data-integration/rule-sql-builtin-functions.html)（一手，2026-09-26） |
 | **U20** | 「EMQX 的 route/主题表随不同主题数增长」这一**推断性表述**（§5.1 第 3 点「requestId 不进主题」的关键理由） | **无官方出处**（本轮未取到「主题数与内存关系」的官方量化文档） | 推理方向保守（少用主题总是更稳），但**不得当作官方结论引用**；如需量化须自行压测 |
 | **U21** | 「官方 user_management 页**未给出** POST 对已存在 `user_id` 是否 upsert 的语义」（§5.3） | 否定性核实，**本轮未取到明确原文**；处置（先 DELETE 再 POST）**刻意保守**，不依赖该语义 | 风险低；若将来要省一次调用，须先核实 upsert 语义 |
+| **U22** | 「EMQX HTTP 动作**没有**任何『读取响应体业务码』的机制」（§6.5） | **否定性结论，仅由官方源码支撑**：`emqx/emqx` tag v5.8.9 的 `apps/emqx_bridge_http/src/emqx_bridge_http_connector.erl:963-986` 只按 HTTP 状态码分支、未解析响应体（独立复核 2026-09-26 取回该文件核对）；**官方文档页未见明文** | 结论方向保守（按「只认状态码」设计不会有坏处）；若将来 EMQX 引入响应体判据，需重新评估 |
+| **U23** | 「关闭 EMQX 不需要的插件/功能」的**确切手段**（§8.3 阶段 1） | 未核实（未取回 5.x 的插件/功能开关名原文） | **因此不作为阶段 1 的必需步骤**，只在实测内存仍紧时再查文档 |
+| **U24** | HTTP 动作的**批量聚合**语义与 body 模板是否支持**数组展开**（§4.2/§6.1「P0 一条消息只能一个点位」的依据） | 未核实（官方 HTTP Server 页未给批量/数组语义；官方仅给 `${var}`/`${.}` 通用模板语法） | 它是「P0 单点位契约」的立论前提之一；若实际支持数组展开，P0 可减少 HTTP 请求数 ⇒ 属**优化空间**而非正确性问题 |
 | **U11** | 内置数据库（Mnesia）在**集群**下的规则/用户复制语义 | 未核实（D0.6 的 ⚠️ 已提示） | 本轮**单节点**，不涉集群；集群化前必须重核 |
 | **U12** | 生成 Docker 镜像的**默认容量上限**（`max_mqueue_len=1000` 等）在多租户下的叠加影响 | 部分核实（默认值来自官方配置页），叠加影响未算 | 备选路径（§6.3）的容量规划需实测 |
 | **U13** | EMQX 侧 `limiter`（限流）的**确切配置键** | 未核实（只确认有该文档页） | §6.2 不写具体键 |
