@@ -303,7 +303,7 @@ install -m 600 "$W/before/deploy.env.bak-$TS" "$ROOT/deploy/.env"
 say "已还原 deploy/.env"
 if [ -z "${{NACOS_ADMIN_PASSWORD:-}}" ]; then say "!! 请先 export NACOS_ADMIN_PASSWORD（取 deploy/.env 的值，勿写进命令行）再跑本脚本"; exit 3; fi
 T="$(printf '%s' "$NACOS_ADMIN_PASSWORD" | curl -fsS -m 20 -X POST "$NACOS/v3/auth/user/login" -H 'Content-Type: application/x-www-form-urlencoded' \\
-  --data-urlencode 'username=${{NACOS_ADMIN_USERNAME:-nacos}}' --data-urlencode 'password@-' | sed -n 's/.*"accessToken":"\\([^"]*\\)".*/\\1/p')"
+  --data-urlencode "username=${{NACOS_ADMIN_USERNAME:-nacos}}" --data-urlencode "password@-" | sed -n 's/.*"accessToken":"\\([^"]*\\)".*/\\1/p')"
 [ -n "$T" ] || {{ say "!! nacos 登录失败"; exit 3; }}
 H="$W/.rb-hdr"; printf 'header = "accessToken: %s"\\n' "$T" > "$H"; chmod 600 "$H"; unset T
 for c in {' '.join(CFGS)}; do
