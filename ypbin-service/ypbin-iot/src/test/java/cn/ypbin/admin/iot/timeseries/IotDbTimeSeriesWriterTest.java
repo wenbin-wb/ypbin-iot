@@ -494,7 +494,7 @@ class IotDbTimeSeriesWriterTest {
     }
 
     @Test
-    @DisplayName("★★ 全 SUCCESS_NO_INFO：rows == attempted、缺口恒为 0 —— 故 rows 不能声称「实际落库」，真值只认库内对账")
+    @DisplayName("★★ 合规驱动的全 SUCCESS_NO_INFO：rows == attempted、缺口恒为 0 ——故 rows 不能声称「实际落库」")
     void mustCountNoInfoReceiptsAndExposeTheBlindSpot() throws SQLException {
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         Connection connection = mock(Connection.class);
@@ -503,7 +503,7 @@ class IotDbTimeSeriesWriterTest {
             driverManager.when(() -> DriverManager.getConnection(anyString(), any(Properties.class)))
                 .thenReturn(connection);
             when(connection.prepareStatement(anyString())).thenReturn(statement);
-            // 探针实证的生产形状：驱动全部回 SUCCESS_NO_INFO（「语句成功、受影响行数未知」）
+            // JDBC 合规驱动的一种合法形状：全部回 SUCCESS_NO_INFO（语句成功、受影响行数未知）
             when(statement.executeBatch())
                 .thenReturn(new int[] {Statement.SUCCESS_NO_INFO, Statement.SUCCESS_NO_INFO});
 
@@ -511,17 +511,68 @@ class IotDbTimeSeriesWriterTest {
 
             double rows = registry.get(IotDbTimeSeriesWriter.METRIC_ROWS).counter().count();
             double noInfo = registry.get(IotDbTimeSeriesWriter.METRIC_ROWS_NO_INFO).counter().count();
-            assertThat(rows).as("回执里非失败的行数").isEqualTo(2d);
-            assertThat(noInfo).as("两行全是「受影响行数未知」").isEqualTo(2d);
+            assertThat(rows).as("回执里非失败的条数").isEqualTo(2d);
+            assertThat(noInfo).as("两条全是「受影响行数未知」").isEqualTo(2d);
             assertThat(rows - noInfo)
                 .as("确认了行数的部分为 0：所以 rows 只说「驱动认了」，不等于「库里真有」")
                 .isZero();
             assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_ROWS_UNKNOWN).counter().count())
-                .as("不是 null 回执，未知行计数不得被计入").isZero();
+                .as("不是 null 回执，未知条数不得被计入").isZero();
+            assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_ROWS_NONSTANDARD).counter().count())
+                .as("SUCCESS_NO_INFO 是 JDBC 标准哨兵值，不得计入「非标准回执」").isZero();
             assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_FAILED).counter().count()).isZero();
             assertThat(warnMessages())
-                .as("全 SUCCESS_NO_INFO 不是「回执与提交数不符」（回执行数相同），不得误报")
+                .as("全 SUCCESS_NO_INFO 不是「回执与提交数不符」（回执条数相同），不得误报")
                 .isEmpty();
+        }
+    }
+
+    @Test
+    @DisplayName("★★ 本仓钉死的驱动形状：回执是 RPC 状态码（200）⇒ 全计入 rows.nonstandard，证明 rows 不是行数")
+    void mustExposeNonStandardReceiptsOfPinnedDriver() throws SQLException {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        Connection connection = mock(Connection.class);
+        PreparedStatement statement = mock(PreparedStatement.class);
+        try (MockedStatic<DriverManager> driverManager = mockStatic(DriverManager.class)) {
+            driverManager.when(() -> DriverManager.getConnection(anyString(), any(Properties.class)))
+                .thenReturn(connection);
+            when(connection.prepareStatement(anyString())).thenReturn(statement);
+            // 一手核实（`javap -p -c IoTDBStatement#executeBatchSQL`，2026-09-26）：
+            // iotdb-jdbc:2.0.1-beta 把 TSStatus.getCode()（成功 = 200）逐条塞进返回的 int[]
+            when(statement.executeBatch()).thenReturn(new int[] {200, 200});
+
+            new IotDbTimeSeriesWriter(properties(10), registry).writeAll(points(2, "23.5"));
+
+            assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_ROWS).counter().count())
+                .as("受理条数 == 本批条数（缺口恒为 0）").isEqualTo(2d);
+            assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_ROWS_NONSTANDARD).counter().count())
+                .as("200 既不是 -3/-2 也不是经典行数 0/1 ⇒ 必须计入「非标准回执」").isEqualTo(2d);
+            assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_ROWS_NO_INFO).counter().count()).isZero();
+            assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_FAILED).counter().count()).isZero();
+        }
+    }
+
+    @Test
+    @DisplayName("★★ 非 200 的 RPC 状态码（行级错误）不会被算成失败——它落进 rows 与 nonstandard，必须看得见")
+    void mustExposeErrorStatusCodeAsNonStandardReceipt() throws SQLException {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        Connection connection = mock(Connection.class);
+        PreparedStatement statement = mock(PreparedStatement.class);
+        try (MockedStatic<DriverManager> driverManager = mockStatic(DriverManager.class)) {
+            driverManager.when(() -> DriverManager.getConnection(anyString(), any(Properties.class)))
+                .thenReturn(connection);
+            when(connection.prepareStatement(anyString())).thenReturn(statement);
+            // 一条成功（200）、一条服务端错误状态码；驱动**不抛异常**（行级错误只体现在状态码里）
+            when(statement.executeBatch()).thenReturn(new int[] {200, 617});
+
+            new IotDbTimeSeriesWriter(properties(10), registry).writeAll(points(2, "23.5"));
+
+            assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_ROWS).counter().count())
+                .as("口径如此：非 -3 即计入 rows —— 这正是必须用 nonstandard 暴露它的原因").isEqualTo(2d);
+            assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_ROWS_NONSTANDARD).counter().count())
+                .as("两条都是非标准回执（含那条错误状态码）").isEqualTo(2d);
+            assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_FAILED).counter().count())
+                .as("批次级失败计数不因此变化（行级错误不抛异常）").isZero();
         }
     }
 
@@ -610,6 +661,8 @@ class IotDbTimeSeriesWriterTest {
                 .as("但这两行必须单列为「落库情况未知」，不得与驱动确认过的行混为一谈").isEqualTo(2d);
             assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_ROWS_NO_INFO).counter().count())
                 .as("null 回执不是 SUCCESS_NO_INFO，不得计入 noinfo").isZero();
+            assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_ROWS_NONSTANDARD).counter().count())
+                .as("null 回执已经单列在 unknown，不得同时计入 nonstandard").isZero();
             assertThat(warnMessages())
                 .as("驱动违约必须 WARN：删掉这条 WARN 本用例必须转红（上一轮的整改点）")
                 .anySatisfy(message -> assertThat(message).contains("未按 JDBC 契约返回"));

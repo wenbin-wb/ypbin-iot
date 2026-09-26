@@ -52,10 +52,16 @@ import org.slf4j.LoggerFactory;
  * 实测 {@code setString(i, null)} 即如此）都**只计数 + error 日志，绝不外抛**——本类的契约是
  * 「时序写入绝不拖垮上报事务」（{@link TimeSeriesWriter} 类注释）。</p>
  *
- * <p><b>成功侧观测的口径（2026-09-26 L2 复核修正）</b>：本类的 {@code rows} 系列指标全部来自
- * {@code executeBatch()} 的**驱动回执**，因此它们只回答「驱动认了多少行」，**不回答「库里有多少行」**。
- * 回执 {@link Statement#SUCCESS_NO_INFO} 的语义是「语句成功但**受影响行数未知**」⇒ 全 {@code SUCCESS_NO_INFO}
- * 时 {@code rows == attempted}、缺口恒为 0，本类**无法**发现「0 行落库但 0 失败」。
+ * <p><b>成功侧观测的口径（2026-09-26 L2 复核两轮修正）</b>：本类的 {@code rows} 系列指标全部来自
+ * {@code executeBatch()} 的**驱动回执**，因此它们只回答「驱动认了多少条语句」，**不回答「库里有多少行」**。
+ * 两轮修正各纠正了一个过度声称：
+ * ① {@link Statement#SUCCESS_NO_INFO} 的语义是「语句成功、但**受影响行数未知**」⇒ {@code rows} 不能叫
+ *   「实际落库行数」；
+ * ② 更进一步——**钉死的运行时驱动 {@code iotdb-jdbc:2.0.1-beta} 返回的根本不是 JDBC 行数**：其
+ *   {@code executeBatchSQL()} 把**RPC 状态码**（成功 = 200）逐条塞进返回的 {@code int[]}
+ *   （一手核实：{@code javap -p -c org.apache.iotdb.jdbc.IoTDBStatement#executeBatchSQL}，2026-09-26）⇒
+ *   {@code rows} 在生产上恒等于「本批受理条数」、缺口恒为 0、{@code rows.noinfo} 恒为 0，而且
+ *   **连非 200 的错误状态码也会被当成 1 行计入**（这一事实由 {@link #METRIC_ROWS_NONSTANDARD} 显式暴露）。
  * 能测到库内真值的只有低频对账探针 {@link IotDbRowCountProbe}（{@code iot.timeseries.db.rows}）。</p>
  *
  * @author wenbin
@@ -72,25 +78,27 @@ public class IotDbTimeSeriesWriter implements TimeSeriesWriter {
     public static final String METRIC_ATTEMPTED = "iot.timeseries.write.attempted";
 
     /**
-     * 驱动回执中**非失败**的行数（按行计，累计，**上界钳制到本批条数**）。
+     * 回执中**非失败**的条数（累计，**上界钳制到本批条数**）。
      *
-     * <p>⚠️ <b>它不是「实际落库行数」</b>（这是本轮修正的过度声称）：本值只是回执里
-     * 「不等于 {@link Statement#EXECUTE_FAILED}」的条数，而 {@link Statement#SUCCESS_NO_INFO} 的官方语义是
-     * 「受影响行数**未知**」。因此「本批全部 SUCCESS_NO_INFO」时本值等于 {@link #METRIC_ATTEMPTED}、
-     * 缺口恒为 0——**本指标单独无法证伪「驱动 ack 了但没落库」**。</p>
+     * <p>⚠️ <b>它不是「实际落库行数」，甚至不是「驱动确认的行数」</b>（这是两轮复核修正的过度声称）：
+     * 本值只是回执里「不等于 {@link Statement#EXECUTE_FAILED}」的条数。钉死的驱动
+     * {@code iotdb-jdbc:2.0.1-beta} 回的是 **RPC 状态码**（成功 200、失败 6xx 等，见类注释的一手依据），
+     * 因此本值在生产上恒等于 {@code attempted}、缺口恒为 0，**无法**发现「0 行落库但 0 失败」。</p>
      *
-     * <p>口径边界：真正确认了行数的部分 ≈ {@code rows - rows.noinfo - rows.unknown}（仍只是「回执说确认」，
-     * 不是「库里真有」）。库内真值只认 {@link IotDbRowCountProbe#METRIC_DB_ROWS}。</p>
+     * <p>口径边界：想要「驱动确认了行数」的部分应看
+     * {@code rows - rows.noinfo - rows.unknown - rows.nonstandard}，但**本驱动下它恒为 0**
+     * （{@code nonstandard == rows}）。库内真值只认 {@link IotDbRowCountProbe#METRIC_DB_ROWS}。</p>
      */
     public static final String METRIC_ROWS = "iot.timeseries.write.rows";
 
     /**
-     * 回执为 {@link Statement#SUCCESS_NO_INFO} 的条数（按行计，累计，上界钳制到本批条数）。
+     * 回执为 {@link Statement#SUCCESS_NO_INFO}（{@code -2}）的条数（累计，上界钳制到本批条数）。
      *
      * <p>为什么需要它：{@code rows} 把「受影响行数未知」也算作成功，于是一批全 {@code SUCCESS_NO_INFO} 时
-     * 成功侧观测**看起来完好**。本指标让这种「其实什么都没确认」的状态可被区分出来：当
-     * {@code rows.noinfo == rows} 时，成功侧的全部读数都只是「未知」。（探针实证：生产驱动回执即全
-     * {@code SUCCESS_NO_INFO}。）</p>
+     * 成功侧观测**看起来完好**；本指标让这种「其实什么都没确认」的状态可被区分出来。</p>
+     *
+     * <p><b>对本仓钉死的驱动恒为 0</b>（{@code iotdb-jdbc:2.0.1-beta} 不返回 JDBC 语义的值，见类注释）——
+     * 它存在的意义是：换驱动/换 JDBC 实现（或上游修复后）时，这个口径**自动仍然正确**。</p>
      */
     public static final String METRIC_ROWS_NO_INFO = "iot.timeseries.write.rows.noinfo";
 
@@ -101,6 +109,17 @@ public class IotDbTimeSeriesWriter implements TimeSeriesWriter {
      * 语义（不让上报事务回滚），但把它们单独计量，避免与「驱动确认过的行」混为一谈。</p>
      */
     public static final String METRIC_ROWS_UNKNOWN = "iot.timeseries.write.rows.unknown";
+
+    /**
+     * **非 JDBC 标准**回执的条数（既不是 {@code -3}/{@code -2}，也不是经典行数 {@code 0}/{@code 1}）。
+     *
+     * <p>为什么必须单独计量（2026-09-26 复核发现）：钉死的驱动回的是 **RPC 状态码**
+     * （成功 = 200，失败 = 6xx），于是 {@code rows} 把「状态码 200」当成「1 行」、把「状态码 6xx」
+     * 也当成「1 行」——既高估，又**把行级错误算成成功**。本指标把这件事摆到台面上：
+     * 当 {@code rows.nonstandard == rows}（本驱动下的常态）时，说明 {@code rows} 只是「受理条数」，
+     * 任何「成功行数」的解读都不成立。</p>
+     */
+    public static final String METRIC_ROWS_NONSTANDARD = "iot.timeseries.write.rows.nonstandard";
 
     /** 数值行列清单：不含 {@code value_text}（未用列必须不出现，见类注释的实测依据）。 */
     private static final String COLUMNS_NUMERIC =
@@ -115,12 +134,22 @@ public class IotDbTimeSeriesWriter implements TimeSeriesWriter {
     /** 批量下界（配置非法时的防御性归一：0/负数会让「按批切分」退化甚至死循环）。 */
     private static final int MIN_BATCH_SIZE = 1;
 
+    /** JDBC 的经典「一语句影响 1 行」回执（INSERT 单行语句的正常返回）。 */
+    private static final int ROW_COUNT_ONE = 1;
+
+    /** JDBC 的经典「一语句影响 0 行」回执（如零值参数、驱动省略计数时也可能回 0）。 */
+    private static final int ROW_COUNT_NONE = 0;
+
     /**
      * 同一告警点的最小告警间隔（毫秒）：长期违约时把 WARN 压到约 30 条/分。
      *
      * <p><b>为什么自建这个最小实现</b>：本仓与 {@code ypbin-starter} 都**没有**日志限流设施
      * （全仓源码 grep 无 {@code RateLimiter}/{@code throttle} 工具类，pom 里也没有 Guava / resilience4j），
      * 按「若仓库无既有手段就给最小实现」的要求补一个 CAS 计数的小工具，**不引新依赖**。</p>
+     *
+     * <p><b>限流不是无代价的</b>（如实声明，别当成「一条都不丢」）：被抑制的条数只会在**下一次放行的同类告警**
+     * 里报出；若违约在窗口内结束、此后不再有同类告警，最后一个窗口被抑制的条数不会出现在日志里。
+     * 窗口 2s、量级个位数，故不额外引入计数指标。</p>
      */
     static final long WARN_MIN_INTERVAL_MS = 2_000L;
 
@@ -130,6 +159,7 @@ public class IotDbTimeSeriesWriter implements TimeSeriesWriter {
     private final Counter rowsCounter;
     private final Counter rowsNoInfoCounter;
     private final Counter rowsUnknownCounter;
+    private final Counter rowsNonStandardCounter;
 
     /** 「回执与提交数不符」告警的限流器（独立实例：两类告警不互相挤掉）。 */
     private final LogThrottle mismatchWarnThrottle = new LogThrottle(WARN_MIN_INTERVAL_MS);
@@ -137,7 +167,7 @@ public class IotDbTimeSeriesWriter implements TimeSeriesWriter {
     /** 「回执为 null（驱动违约）」告警的限流器。 */
     private final LogThrottle nullReceiptWarnThrottle = new LogThrottle(WARN_MIN_INTERVAL_MS);
 
-    /** 首次成功落库只打一条 INFO：成功路径在正常运行时保持安静，出问题时靠 WARN 与指标暴露。 */
+    /** 首次「驱动受理」只打一条 INFO：成功路径在正常运行时保持安静，出问题时靠 WARN 与指标暴露。 */
     private final AtomicBoolean firstSuccessLogged = new AtomicBoolean(false);
 
     public IotDbTimeSeriesWriter(TimeSeriesProperties properties, MeterRegistry meterRegistry) {
@@ -150,14 +180,20 @@ public class IotDbTimeSeriesWriter implements TimeSeriesWriter {
             .description("交给时序写入器的待写行数（与 write.rows 配对，用于区分没收集与收集了没写）")
             .register(meterRegistry);
         this.rowsCounter = Counter.builder(METRIC_ROWS)
-            .description("驱动回执中非失败的行数（上界钳制到本批条数）；"
-                + "SUCCESS_NO_INFO 表示受影响行数未知，故本值不等于实际落库行数，真值见 iot.timeseries.db.rows")
+            .description("executeBatch 回执中非失败的条数（上界钳制到本批条数）；"
+                + "本驱动回的是 RPC 状态码（200），故本值只是「受理条数」，不等于实际落库行数，"
+                + "真值见 iot.timeseries.db.rows")
             .register(meterRegistry);
         this.rowsNoInfoCounter = Counter.builder(METRIC_ROWS_NO_INFO)
-            .description("驱动回执为 SUCCESS_NO_INFO（受影响行数未知）的条数（上界钳制到本批条数）")
+            .description("驱动回执为 SUCCESS_NO_INFO（受影响行数未知）的条数（上界钳制到本批条数）；"
+                + "本仓钉死的驱动恒为 0")
             .register(meterRegistry);
         this.rowsUnknownCounter = Counter.builder(METRIC_ROWS_UNKNOWN)
             .description("驱动未按 JDBC 契约返回回执（null）时按整批计入的行数——落库情况未知")
+            .register(meterRegistry);
+        this.rowsNonStandardCounter = Counter.builder(METRIC_ROWS_NONSTANDARD)
+            .description("非 JDBC 标准回执的条数（既非 -3/-2 也非经典行数 0/1）；本驱动为 RPC 状态码，"
+                + "故它恒等于 rows —— 说明 rows 不能当行数读")
             .register(meterRegistry);
     }
 
@@ -225,8 +261,8 @@ public class IotDbTimeSeriesWriter implements TimeSeriesWriter {
                 statement.addBatch();
             }
             int[] results = statement.executeBatch();
-            // ⚠️ 不抛异常 ≠ 真的写进去了：逐条读回执，把「驱动认了多少行」记成指标。
-            //    但回执 ≠ 库内真值（SUCCESS_NO_INFO = 受影响行数未知）⇒ 真值只认 IotDbRowCountProbe。
+            // ⚠️ 不抛异常 ≠ 真的写进去了：逐条读回执，把「驱动受理了多少条语句」记成指标。
+            //    回执 ≠ 行数（本驱动回的是 RPC 状态码）⇒ 真值只认 IotDbRowCountProbe。
             if (results == null) {
                 // JDBC 契约要求 executeBatch 返回 int[]（非 null）；驱动违约时按「整批按成功计」保持
                 // 既有语义（不抛、不改上报结果），但**必须告警**——绝不静默把未知当成已知。
@@ -241,22 +277,28 @@ public class IotDbTimeSeriesWriter implements TimeSeriesWriter {
             int succeeded = 0;
             int failed = 0;
             int noInfo = 0;
+            int nonStandard = 0;
             for (int result : results) {
                 if (result == Statement.EXECUTE_FAILED) {
                     failed++;
-                } else if (result == Statement.SUCCESS_NO_INFO) {
+                    continue;
+                }
+                succeeded++;
+                if (result == Statement.SUCCESS_NO_INFO) {
                     // 官方语义：语句成功、但受影响行数**未知** ⇒ 单独计量，不能当作「确认写入」
                     noInfo++;
-                    succeeded++;
-                } else {
-                    // 具体行数：INSERT 语句 1 条 = 1 行
-                    succeeded++;
+                } else if (result != ROW_COUNT_ONE && result != ROW_COUNT_NONE) {
+                    // 既不是「1 行/0 行」这类经典行数，也不是 JDBC 的哨兵值 ⇒ 非标准回执。
+                    // 本仓钉死的驱动就落在这一类（返回 RPC 状态码，成功 200、失败 6xx）——
+                    // 注意：非 200 的错误码在下面也走了 succeeded++，这正是本指标要暴露的事实。
+                    nonStandard++;
                 }
             }
             // 上界钳制：回执条数可能多于本批条数（驱动违约形态），但一批不可能影响超过本批条数的行
             int accounted = Math.min(succeeded, chunk.size());
             rowsCounter.increment(accounted);
             rowsNoInfoCounter.increment(Math.min(noInfo, accounted));
+            rowsNonStandardCounter.increment(Math.min(nonStandard, accounted));
             if (failed > 0 || succeeded != chunk.size()) {
                 // 暴露而不是静默：回执长度/成功数与提交数不符，说明驱动吞掉了部分行
                 warnThrottled(mismatchWarnThrottle,
@@ -265,7 +307,9 @@ public class IotDbTimeSeriesWriter implements TimeSeriesWriter {
                     LogSanitizer.sanitize(properties.getTableName()), chunk.size(), succeeded, failed,
                     results.length);
             } else if (firstSuccessLogged.compareAndSet(false, true)) {
-                log.info("[iot] 时序写入首次落库成功：表={} 本批行数={}（驱动回执口径；库内真值见指标 {}）",
+                // 措辞刻意避开「落库成功」：本驱动只回「受理」，库内到底有没有见 METRIC_DB_ROWS
+                log.info("[iot] 时序写入首次收到驱动受理回执：表={} 本批受理条数={}（不代表已落库；"
+                        + "库内真值见指标 {}）",
                     LogSanitizer.sanitize(properties.getTableName()), succeeded,
                     IotDbRowCountProbe.METRIC_DB_ROWS);
             }

@@ -14,6 +14,7 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -236,13 +237,39 @@ class IotDbRowCountProbeTest {
         Scheduled scheduled = IotDbRowCountProbe.class.getMethod("probeOnce")
             .getAnnotation(Scheduled.class);
         assertThat(scheduled).as("探针必须由 @Scheduled 驱动").isNotNull();
-        assertThat(scheduled.fixedDelayString())
-            .contains(String.valueOf(IotDbRowCountProbe.DEFAULT_PROBE_INTERVAL_MS));
-        assertThat(scheduled.initialDelayString())
-            .contains(String.valueOf(IotDbRowCountProbe.DEFAULT_PROBE_INITIAL_DELAY_MS));
+        // 必须**精确相等**：只用 contains(...) 时把 600000 改成 6000000 / 把 60000 改成 600001 仍「包含」
+        // 子串而假绿（2026-09-26 L2 复核用这两个变异实证过 —— 这条断言当时是假门禁）
+        assertThat(scheduled.fixedDelayString()).isEqualTo(
+            "${ypbin.timeseries.db-rows-probe-interval-ms:" + IotDbRowCountProbe.DEFAULT_PROBE_INTERVAL_MS + "}");
+        assertThat(scheduled.initialDelayString()).isEqualTo(
+            "${ypbin.timeseries.db-rows-probe-initial-delay-ms:"
+                + IotDbRowCountProbe.DEFAULT_PROBE_INITIAL_DELAY_MS + "}");
         assertThat(new TimeSeriesProperties().getDbRowsProbeIntervalMs())
             .as("配置默认值也必须等于同一常量").isEqualTo(IotDbRowCountProbe.DEFAULT_PROBE_INTERVAL_MS);
         assertThat(IotDbRowCountProbe.DEFAULT_PROBE_INTERVAL_MS)
             .as("真值对账必须低频（>=5 分钟）").isGreaterThanOrEqualTo(300_000L);
+    }
+
+    @Test
+    @DisplayName("★ 驱动对 setQueryTimeout 抛 RuntimeException（不支持超时）时也只计数不抛、保留旧值")
+    void mustCountRuntimeFailureOnUnsupportedTimeout() throws SQLException {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        Connection connection = mock(Connection.class);
+        Statement statement = mock(Statement.class);
+        doThrow(new UnsupportedOperationException("driver 不支持查询超时"))
+            .when(statement).setQueryTimeout(anyInt());
+        try (MockedStatic<DriverManager> driverManager = mockStatic(DriverManager.class)) {
+            driverManager.when(() -> DriverManager.getConnection(anyString(), any(Properties.class)))
+                .thenReturn(connection);
+            when(connection.createStatement()).thenReturn(statement);
+
+            // 本仓钉死的驱动实现了 setQueryTimeout，但「换驱动后不支持」这条路径必须有覆盖——
+            // 否则升级驱动后会以「每轮对账都失败」的形式出现，而单测全绿
+            assertThatCode(() -> new IotDbRowCountProbe(properties(), registry).probeOnce())
+                .doesNotThrowAnyException();
+            assertThat(probeFailures(registry)).isEqualTo(1d);
+            assertThat(gauge(registry)).isEqualTo((double) IotDbRowCountProbe.ROW_COUNT_UNKNOWN);
+            verify(statement, never()).executeQuery(anyString());
+        }
     }
 }

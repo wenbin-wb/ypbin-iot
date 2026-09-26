@@ -263,24 +263,41 @@ UPDATE iot_device SET endpoint = 'tcp://172.20.0.1:19002' WHERE id = 9300012;
 > **结论**：上一轮把 `iot.timeseries.write.rows` 的描述写成「实际成功行数」是**过度声称**，已修正；
 > 并补了唯一能测到「库内真值」的低频对账指标 `iot.timeseries.db.rows`。
 
-- **错在哪**：JDBC `Statement.SUCCESS_NO_INFO`（`-2`）的语义是「语句成功、但**受影响行数未知**」。
-  生产驱动的回执**正是全 `SUCCESS_NO_INFO`** ⇒ `rows == attempted`、缺口恒为 0：
-  上一轮本来要消除的「0 行落库但 0 失败」在旧口径下**并没被消除**（`rows - noinfo == 0` 才是真实情况）。
-- **现在的口径**（都有单测钉住）：
-  - `iot.timeseries.write.rows`：**驱动回执中非失败的行数**（上界钳制到本批条数），**不是**落库行数；
-  - `iot.timeseries.write.rows.noinfo`：回执为 `SUCCESS_NO_INFO`（受影响行数未知）的条数——
-    `noinfo == rows` 即「成功侧一个行数都没确认」；
-  - `iot.timeseries.write.rows.unknown`：驱动违约（`executeBatch()` 返回 `null`）时按整批计入的**未知**行数；
-  - 真正确认了行数的部分 ≈ `rows - noinfo - unknown`（仍只是「回执说确认」，不是「库里真有」）。
+- **错在哪（两轮修正）**：
+  1. `Statement.SUCCESS_NO_INFO`（`-2`）的语义是「语句成功、但**受影响行数未知**」⇒ `rows` 不能叫
+     「实际落库行数」；
+  2. 更进一步：本仓钉死的运行时驱动 `iotdb-jdbc:2.0.1-beta` **根本不返回 JDBC 行数**——其
+     `executeBatchSQL()` 把 **RPC 状态码**（成功 = 200，失败 = 6xx）逐条塞进返回的 `int[]`
+     （一手核实：`javap -p -c org.apache.iotdb.jdbc.IoTDBStatement#executeBatchSQL`，2026-09-26）。
+     后果比第 1 点更严重：`rows` 在生产上**恒等于本批条数**（缺口恒为 0），而且**非 200 的行级错误状态码
+     也被当成 1 行计入**（既不抛异常、也不进批次级 `write.failed`）。
+  > ⚠️ 复核同时指出：上一轮文字里的「探针实证生产驱动回执全 `SUCCESS_NO_INFO`」**没有依据**（与上述字节码
+  > 证据矛盾），已从代码与本手册删除；站得住的只有上一段的第 2 点。
+- **现在的口径**（都有单测钉住，且逐条做过变异验证）：
+  - `iot.timeseries.write.rows`：`executeBatch` 回执中**非失败**的条数（上界钳制到本批条数）——
+    **本驱动下它就是「受理条数」，不是行数**；
+  - `iot.timeseries.write.rows.noinfo`：回执为 `SUCCESS_NO_INFO` 的条数（**本驱动恒为 0**；
+    换驱动/JDBC 实现时口径自动仍然正确）；
+  - `iot.timeseries.write.rows.unknown`：驱动违约（`executeBatch()` 返回 `null`）时按整批计入的**未知**条数；
+  - `iot.timeseries.write.rows.nonstandard`：**既非 `-3/-2` 也非经典行数 `0/1`** 的回执条数——
+    本驱动下 `nonstandard == rows`，这是「`rows` 不能当行数读」的**可观测证据**，
+    也把「行级错误状态码被算成成功」这件事摆到台面上。
 - **唯一能证伪「ack 了但没落库」的手段**：`iot.timeseries.db.rows` ——
   低频（默认 10 分钟、可配、**绝不高频**）执行一次 `SELECT COUNT(*) FROM reading` 的真值对账；
-  未测得之前是哨兵 `-1`（**不是 0**，否则「没测」会被读成「空库」）；查询失败只计数
-  （`iot.timeseries.db.probe.failed`）+ ERROR 全堆栈、保留上一次取值、**绝不外抛**。
-  ⇒ 判据：`db.rows` 与 `write.rows` 同步增长，且 `db.rows` 等于库内实际 `count(*)`；
-  若 `write.rows` 涨而 `db.rows` 不动，就是「ack 了但没落库」的**实证**。
+  未测得之前是哨兵 `-1`（**不是 0**，否则「没测」会被读成「空库」；时序写入关闭时该指标**不存在**）；
+  查询失败只计数（`iot.timeseries.db.probe.failed`）+ ERROR 全堆栈、保留上一次取值、**绝不外抛**。
+- **判据（必须按同一窗口比「增量」，别把两个量纲直接比）**：
+  - ✅ 可取的口径：取一个时间窗（例如 10 分钟），同时记录 `Δwrite.rows`（窗口内受理条数）与
+    `Δdb.rows`（窗口内表内行数变化），并扣掉干扰项：① 同刻重复写是 **UPDATE/覆盖**不是新增；
+    ② TTL=90 天到期会**删除**行；③ 其它写入方/租户也计入 `count(*)`。在「窗口内确有持续新写入、
+    且没有同刻覆盖与 TTL 到期」的前提下，`Δwrite.rows > 0` 而 `Δdb.rows == 0` 才是
+    「ack 了但没落库」的**实证**。
+  - ❌ 不可取的口径：把 `write.rows`（JVM 生命周期内的**累计受理数**，重启归零）与 `db.rows`
+    （**表内当前行数**）直接比大小或比"是否同步增长"——量纲不同，会误判（这一条是复核纠正的）。
 - **WARN 覆盖（上一轮 L2 的整改点）**：上一轮删掉两处 WARN（回执与提交数不符、`null` 回执）后
   18 个用例仍全绿 ⇒ 本轮用 logback `ListAppender` 逐条断言 WARN，删掉任一 WARN 必然转红；
-  并给这两处告警加了**限流**（同一告警点 ≈30 条/分，被抑制的条数在下一条告警里报出，不静默丢账）。
+  并给这两处告警加了**限流**（同一告警点 ≈30 条/分）。⚠️ 限流**不是「一条都不丢」**：被抑制的条数
+  只在下一条放行的同类告警里报出，若违约在窗口内结束则最后一个窗口的条数不会出现在日志里（如实声明）。
 
 ### 6.2 租约自 fencing 抖动（**根因已定位，演示数据侧已修，框架侧待立项**）
 - **现在做的修法（演示数据侧）**：把 9 台不可达 TCP 演示设备的 endpoint 从假 IP
