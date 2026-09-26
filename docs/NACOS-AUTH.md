@@ -43,6 +43,8 @@ curl -s -o /dev/null -w '%{http_code}\n' -m 10 \
 | 控制台账号 | 用户名 `nacos`、口令**为内置默认值** | `sha256[:16]` 与 `printf %s nacos` 的 `sha256[:16]` 逐字相同（569bf0af7a7562f3）；口令 5 字符 |
 | 控制台口令端点 | `PUT /v3/auth/user?username=&newPassword=` | 官方源码 `UserControllerV3`（tag 3.2.4，见 §2）；live 探测：缺 `newPassword` 时服务端报 `Required request parameter 'newPassword' … is not present` |
 | 未开 auth 时的授权判定 | `hasPermission()` 在 `!isAnyAuthEnabled()` 时**直接放行** | 同源码 |
+| **未开 auth 时 client 侧可匿名读配置** | 实测：不带任何凭据 `curl 'http://127.0.0.1:8848/nacos/v3/client/cs/config?dataId=ypbin-common.yaml&…'` **返回 200 与配置正文** ⇒ 配置存储里的 DB/Redis 口令、`ypbin.internal.token`、`trusted-source-token` 对任何能访问 8848 的人可读 | 本文轮次实测（2026-09-26）；这也是「为什么必须开 auth」的**主要理由**（不只是控制台默认口令） |
+| 暴露面边界 | 本实例 `INTERNAL_BIND_ADDR=127.0.0.1` ⇒ `docker port ypbin-nacos` 三个端口（8848/9848/8080）**都只绑回环**，匿名读只在宿主机内/本机进程可达 | `docker port ypbin-nacos`；`.env` 的 `INTERNAL_BIND_ADDR` |
 
 ## 2. 口令长度上限：一手核实为 72（不是 32，与 IoTDB 那次事故不同）
 
@@ -167,3 +169,7 @@ curl -s -o /dev/null -w '19000 %{http_code}\n' -m 10 http://127.0.0.1:19000/
 ## 8. 实测回执（生产，被测 artifact 三元组见 §5）
 
 > 本节由部署后实测回填；口令/密钥值一律不出现在任何输出里。
+> 被测 artifact 三元组：① `deploy/docker-compose.yml` 的 `sha256[:16]`（与 `main` 逐字节一致）；
+> ② `ypbin-nacos` / 5 个业务容器重建后的 `Created` + `Image`；③ 各服务的 Nacos 凭据 env **键名**在位
+> （值不打印）。**声明之后的整个验收窗口内不做任何容器动作**（`build`/`up -d`/`restart`/`tag`），
+> 并用 `docker events`（只输出计数）审计。

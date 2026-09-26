@@ -1399,7 +1399,11 @@ else
     -X POST "$NACOS_CONSOLE_URL/v3/auth/user/login" \
     -H "Content-Type: application/x-www-form-urlencoded" \
     --data-urlencode "username=$NACOS_USERNAME" \
-    --data-urlencode "password@-" <<<"$NACOS_PASSWORD" 2>&1 || true)"
+    --data-urlencode "password@-" <<<"$NACOS_CURRENT_PASSWORD" 2>&1 || true)"
+  # ⚠️ 这里必须用 `$NACOS_CURRENT_PASSWORD`（本分支只在「当前口令与目标口令两次登录都没拿到
+  #    accessToken」时进入；复现的是**第一次**尝试，即当前口令）。历史坑：口令双轨改造时此处的
+  #    here-string 漏改，`set -u` 下它报 unbound variable 但不中止（在 `$( … || true)` 里）⇒
+  #    命令替换返回空串 ⇒ 这条诊断**恒为「未取到」+ 空正文**，把最有用的错误现场吃掉了。
   # ⚠️ curl 的 -w 状态行在**响应体之后**：若只打印前 800 字符，大响应体（正是本次修的那个场景）会把
   # 状态码挤掉，而"HTTP 状态"恰是本处要给出的判据。故先把状态行单独取出来打印，再打印截断后的正文。
   # 只认**捕获结果的最后一行**，且必须是 -w 的精确形态（4 空格 + http_code=<数字> 整行）：
