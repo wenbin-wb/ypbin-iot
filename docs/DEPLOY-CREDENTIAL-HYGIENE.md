@@ -229,7 +229,7 @@ docker inspect -f '{{.State.Health.Status}}' ypbin-mysql ypbin-redis   # 期望 
 | `docker inspect .Config.Cmd`（redis） | `… --requirepass <口令>` | `["redis-server","/usr/local/etc/redis/redis-requirepass.conf","--appendonly","yes"]`（口令值在 `.Config.Cmd` 中命中 **0** 次） |
 | 探活语义仍然有效 | — | 无口令 `PING` → `NOAUTH`；从容器内 600 文件取口令 → `PONG`；mysql 容器 `healthy`（探针 exit 0） |
 | 4 个基础设施容器 | healthy | 全部 `healthy`（mysql/redis/nacos/iotdb） |
-| **`docker events`（决定性；单位=事件行，窗口=各 90s）** | **改前（两容器均旧）** 8 行含口令（mysql 4 / redis 4）；**中间态（只重建了 redis）** 16 行含 mysql 口令 | 含 mysql/redis/nacos/iotdb 口令值行数 **0/0/0/0**；新探针被观测 **mysql/redis/nacos=18、iotdb=6** 次；旧带凭据形态 `-p`/`-a`/`-pw` **0/0/0** |
+| **`docker events`（决定性；单位=事件行）** | **改前（两容器均旧）**：独立复核者的 70s 完整捕获中 mysql/redis 口令各 **38 次**；我自己的首次捕获当时只读到 90 行（mysql 4 / redis 4），但文件后来增到 12MB ⇒ **缓冲未落盘，那是下界、不是窗口完整值**；**中间态（只重建了 redis）** 90s 窗口 16 行含 mysql 口令 | 含 mysql/redis/nacos/iotdb 口令值行数 **0/0/0/0**；新探针被观测 **mysql/redis/nacos=18、iotdb=6** 次；旧带凭据形态 `-p`/`-a`/`-pw` **0/0/0** |
 | `docker top` 采样（辅助，**无判别力**） | 「90 次命中 2」是单次偶然观察（按命中率 1/3207 估计 90 次期望≈0.03），**不可重复、不作为证据** | 90 次采样命中 **0**（同样无判别力） |
 | 全容器 `Healthcheck`/`Entrypoint`/`Cmd` 含凭据者 | 3 处 | **0** |
 

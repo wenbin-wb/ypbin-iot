@@ -221,7 +221,7 @@ Nacos 服务数 totalCount=5
 | 判据 | 改前 | 改后 |
 |---|---|---|
 | `docker inspect .Config.Healthcheck.Test` | mysql 含 `-p<口令>`、redis 含 `-a <口令>` | mysql `["CMD","mysqladmin","ping","-h","127.0.0.1"]`、redis `["CMD-SHELL","timeout 3 nc -z 127.0.0.1 6379"]` |
-| `docker events`（**决定性**；单位=事件行数，窗口=各 90s） | **改前（两容器均为旧配置）**：8 行含口令（mysql 4 / redis 4）<br>**中间态（只重建了 redis）**：16 行含 mysql 口令、redis 0 —— 这正是 §8.1 记的漏重建 | **mysql=0 redis=0 nacos=0 iotdb=0**；同期新探针被观测到 **mysql/redis/nacos=18、iotdb=6** 次（周期 10/10/10/30s）；旧带凭据形态 `-p`/`-a`/`-pw` 计数 **0/0/0** |
+| `docker events`（**决定性**；单位=事件行数） | **改前（两容器均为旧配置）**：全窗口捕获（独立复核者，70s）中 mysql/redis 口令各出现 **38 次**；我自己的第一次捕获当时只读到 90 行（mysql 4 / redis 4），但该文件后来增长到 12MB ⇒ 当时**输出还在缓冲、计数是下界而非窗口完整值**（周期 10s → 90s 窗口理论约 18 行/容器）<br>**中间态（只重建了 redis）**：90s 窗口 16 行含 mysql 口令、redis 0 —— 这正是 §8.1 记的漏重建 | **mysql=0 redis=0 nacos=0 iotdb=0**；同期新探针被观测到 **mysql/redis/nacos=18、iotdb=6** 次（周期 10/10/10/30s）；旧带凭据形态 `-p`/`-a`/`-pw` 计数 **0/0/0** |
 | `docker top` 采样（辅助，**非决定性**） | 「90 次命中 2 次」是**单次观察、不可重复**：按实测命中率（mysql 3207 次才 1 次）90 次采样期望命中 ≈0.03 次 ⇒ 该数字是运气，**无判别力**，不作为改前证据 | 90 次采样命中 **0**（同样无判别力） |
 | 全容器 `Healthcheck`/`Entrypoint`/`Cmd` 含凭据者 | mysql healthcheck、redis healthcheck、redis Cmd | **0** |
 
@@ -244,7 +244,7 @@ Nacos 服务数 totalCount=5
 | 判据 | 结果 |
 |---|---|
 | 真鉴权失败签名（HTTP 403 / Unauthorized / Access denied / user not found / username or password） | **全部服务 0** |
-| `GrpcClient Server check fail` 时间线（近 60 分钟） | gateway/auth/system/iot/access 的**末条**分别 16:25:40 / :40 / :42 / :39 / :41 ⇒ **止于重建窗口，此后 0 条**（复核者另测得个别服务末条到 16:25:43.15，属同一窗口） |
+| `GrpcClient Server check fail` 时间线（近 60 分钟；过滤口径：含 ` ERROR ` 且含 `GrpcClient`） | gateway/auth/system/iot/access 的**末条**分别 16:25:40 / :40 / :42 / :39 / :41 ⇒ **止于重建窗口，此后 0 条**（复核者另测得个别服务末条到 16:25:43.15，属同一窗口） |
 | `system` 的 ERROR（我先前写「最近 3 分钟 0」被复核者当场否证） | 复核者测得 3 分钟 **1**；我复测（16:48 UTC）3 分钟 **0**、15 分钟 2、30 分钟 7（其中 4 条 GrpcClient + 2 条 `/ypbin/sse/subscribe` + 1 条 ack）⇒ **「system 的 ERROR 全部来自重建窗口」不成立**；但那 2 条 `sse/subscribe` 同样**不含鉴权签名**，属业务/框架既有噪声 |
 | `access` 含子串 `"403"` 的 1 条 ERROR | 复核者见 1 条（无异常类、无 HTTP-403 语义）；我在当前窗口复测命中 **0**，且无法归类 ⇒ 登记为**未分类噪声**，不作为鉴权失败证据 |
 | `access` 的 `failed to bind device` | 常驻、速率与改前基线同量级（改前 66/15m；改后 3 分钟 10~18） |
@@ -271,7 +271,7 @@ Nacos 服务数 totalCount=5
 | 项 | 状态 |
 |---|---|
 | `install.sh` 的「装完把服务器口令改成 .env 值」链路 | **未端到端验证**（本轮改的是已在跑的实例，没有重装）；仅 `bash -n` + 端点/参数名一手核实 |
-| `ypbin-access` 的 `/actuator/health` 超时 + `failed to bind device` 常驻 ERROR | **本轮不改**（既有问题，改前就有；见 `docs/ACCESS-ENABLE.md`） |
+| `ypbin-access` 的 `/actuator/health` 超时 + `failed to bind device` 常驻 ERROR | **本轮不改**（改后现值可复现；**是否改前即有未证实** —— 见 §8.2④ 的证据等级修正；`failed to bind device` 的速率与改前基线同量级，见 `docs/ACCESS-ENABLE.md`） |
 | 服务仍用**超管账号**（`nacos`）连 Nacos | 未改；建议后续建最小权限 client 用户 |
 | 开 auth 后 `install.sh` / 其它脚本是否还有别的匿名 Nacos 调用点 | 本轮只修了三个 rotate 工具（原因是它们在生产实际被调用过）；未做全仓扫描 |
 | 服务器 `/tmp` 与 `/opt/ypbin` 的旧备份残留 | 本轮清掉了 `/opt/ypbin/{secret-rotation,token-rotation}-*`（**含早前轮次的回滚物，属副作用，已登记**）；`/tmp` 大文件未动 |
