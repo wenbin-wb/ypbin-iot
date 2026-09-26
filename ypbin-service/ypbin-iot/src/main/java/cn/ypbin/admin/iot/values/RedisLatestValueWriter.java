@@ -12,6 +12,7 @@ package cn.ypbin.admin.iot.values;
 import cn.ypbin.starter.core.util.LogSanitizer;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -76,55 +77,125 @@ public class RedisLatestValueWriter implements LatestValueWriter {
     public static final String METRIC_REGRESSED = "iot.ingest.latest.regressed";
 
     /**
+     * 「`ts` 超前服务端时钟过多」被拒绝的写入数（防设备误报远未来 `ts` 把点位**永久冻结**）。
+     *
+     * <p>为什么需要它：CAS 只认「更大的 `ts`」⇒ 一个远未来的 `ts` 会让该点位后续所有合法读数（`ts` 更小）
+     * 全被抑制，直到出现更大的 `ts` 为止。真实触发面是**设备时钟错**，不是攻击面。</p>
+     */
+    public static final String METRIC_FUTURE_REJECTED = "iot.ingest.latest.future_rejected";
+
+    /**
+     * 允许的最大超前偏移（默认 5 分钟）：`ts > 服务端当前时刻 + 本值` 即**不写入**并计数。
+     *
+     * <p>'now' 取**服务端**时钟（{@code System.currentTimeMillis()}），不用设备端时间——判据必须是
+     * 「相对平台时钟的偏差」。抽成具名常量而非散落的裸数字；要改成可配置时，把它接到配置绑定类即可
+     * （本轮不做，见类注释的取舍说明）。</p>
+     */
+    public static final long MAX_FUTURE_SKEW_MS = Duration.ofMinutes(5).toMillis();
+
+    /** 脚本返回值里的第 0 项：被抑制（旧 ts 后到）的点位数。 */
+    private static final int COUNT_REGRESSED = 0;
+
+    /** 脚本返回值里的第 1 项：因 ts 超前被拒绝的点位数。 */
+    private static final int COUNT_FUTURE = 1;
+
+    /**
      * 逐 field 的「比较后写入」（CAS）脚本。
      *
-     * <p>入参：`KEYS[1]` = 设备 hash key；`ARGV` = `field1, ts1, json1, field2, ts2, json2, …`（三元组连续排列）。
-     * 返回：被抑制的**严格更旧**写入数量（`ts` 相等的幂等重放不计）。</p>
+     * <p>入参：`KEYS[1]` = 设备 hash key；`ARGV` = `field1, ts1, json1, field2, ts2, json2, … , ceiling`
+     * —— 三元组连续排列，**最后一位是本批统一的超前上限**（= 服务端 now + {@link #MAX_FUTURE_SKEW_MS}，
+     * 由 Java 侧按服务端时钟算出后传入；放末位是为了让三元组保持连续、解析只需 `1, #ARGV-1, 3`）。</p>
      *
-     * <p>用 `string.match` 取尾部 `"ts":<数字>}` 而不是 `cjson.decode`：① 不需要 Lua 侧的 cjson 依赖；
+     * <p>返回：`{被抑制的严格更旧写入数, 因 ts 超前被拒绝的点位数}` —— 两个计数必须**可分辨**，
+     * 故返回 Lua 表（Spring 映射为 {@code List}）。</p>
+     *
+     * <p>用 `string.match` 取尾部 `"ts":(-?数字)}` 而不是 `cjson.decode`：① 不需要 Lua 侧的 cjson 依赖；
      * ② 本写入器产出的 JSON 恒以 ts 结尾，且值里的引号已被转义（`\"`）⇒ 值内部不可能拼出未转义的
-     * `"ts":` 形态，锚定在串尾的匹配只会命中真正的 `ts` 字段。</p>
+     * `"ts":` 形态，锚定在串尾的匹配只会命中真正的 `ts` 字段；③ `-?` 是必须的：不加负号时
+     * `{"ts":-5}` 会匹配失败 ⇒ 被当成「解析不出 ts」⇒ 该 field 的 CAS 静默失效（独立复核实测）。</p>
      */
     private static final String CAS_LUA = """
         local key = KEYS[1]
+        local ceiling = tonumber(ARGV[#ARGV])
         local suppressed = 0
-        for i = 1, #ARGV, 3 do
+        local future = 0
+        for i = 1, #ARGV - 1, 3 do
           local field = ARGV[i]
           local ts = tonumber(ARGV[i + 1])
           local payload = ARGV[i + 2]
-          local write = true
-          local stored = redis.call('HGET', key, field)
-          if stored then
-            local storedTs = string.match(stored, '"ts":(%d+)%s*}%s*$')
-            if storedTs then
-              local oldTs = tonumber(storedTs)
-              if oldTs > ts then
-                suppressed = suppressed + 1
-                write = false
-              elseif oldTs == ts then
-                write = false
+          if ceiling and ts > ceiling then
+            future = future + 1
+          else
+            local write = true
+            local stored = redis.call('HGET', key, field)
+            if stored then
+              local storedTs = string.match(stored, '"ts":(-?%d+)%s*}%s*$')
+              if storedTs then
+                local oldTs = tonumber(storedTs)
+                if oldTs > ts then
+                  suppressed = suppressed + 1
+                  write = false
+                elseif oldTs == ts then
+                  write = false
+                end
               end
             end
-          end
-          if write then
-            redis.call('HSET', key, field, payload)
+            if write then
+              redis.call('HSET', key, field, payload)
+            end
           end
         end
-        return suppressed
+        return {suppressed, future}
         """;
 
     private final StringRedisTemplate redisTemplate;
-    private final DefaultRedisScript<Long> casScript;
+
+    /**
+     * CAS 脚本（返回 Lua 表 ⇒ Spring 映射为 {@code List<Long>}）。
+     *
+     * <p>用裸 `List` 是因为 {@code DefaultRedisScript} 要的是 {@code Class<T>}，而 {@code List<Long>.class}
+     * 在 Java 里不可表达；结果元素用 {@link #countAt} 按 {@link Number} 读，不做未检查的强转。</p>
+     */
+    @SuppressWarnings("rawtypes")
+    private final DefaultRedisScript<List> casScript;
+
+    private final long maxFutureSkewMs;
     private final Counter failedCounter;
     private final Counter regressedCounter;
+    private final Counter futureRejectedCounter;
 
+    /**
+     * 用默认超前上限（{@link #MAX_FUTURE_SKEW_MS}）构造。
+     *
+     * @param redisTemplate Redis 模板
+     * @param meterRegistry 指标
+     */
     public RedisLatestValueWriter(StringRedisTemplate redisTemplate, MeterRegistry meterRegistry) {
+        this(redisTemplate, meterRegistry, MAX_FUTURE_SKEW_MS);
+    }
+
+    /**
+     * 指定超前上限（测试与将来接配置用）。
+     *
+     * @param redisTemplate   Redis 模板
+     * @param meterRegistry   指标
+     * @param maxFutureSkewMs 允许的最大超前偏移（毫秒；必须 ≥ 0）
+     */
+    public RedisLatestValueWriter(StringRedisTemplate redisTemplate, MeterRegistry meterRegistry,
+                                  long maxFutureSkewMs) {
+        if (maxFutureSkewMs < 0) {
+            // 配置错误必须当场暴露，不静默兜底（负值会让所有读数都被判「超前」而全部拒写）
+            throw new IllegalArgumentException("允许的超前偏移不能为负：" + maxFutureSkewMs);
+        }
         this.redisTemplate = redisTemplate;
-        this.casScript = new DefaultRedisScript<>(CAS_LUA, Long.class);
+        this.maxFutureSkewMs = maxFutureSkewMs;
+        this.casScript = new DefaultRedisScript<>(CAS_LUA, List.class);
         this.failedCounter = Counter.builder(METRIC_FAILED)
             .description("最新值写入 Redis 失败的批次数").register(meterRegistry);
         this.regressedCounter = Counter.builder(METRIC_REGRESSED)
             .description("最新值写入被抑制且计数为「旧 ts 后到」的点位数").register(meterRegistry);
+        this.futureRejectedCounter = Counter.builder(METRIC_FUTURE_REJECTED)
+            .description("最新值因读数时刻超前服务端时钟过多而被拒绝的点位数").register(meterRegistry);
     }
 
     /** 最新值 key：`iot:latest:{tenantId}:{deviceId}`。 */
@@ -152,29 +223,50 @@ public class RedisLatestValueWriter implements LatestValueWriter {
     }
 
     /**
-     * 原子写一台设备的全部点位（一次 `EVAL`）。
+     * 原子写一台设备的全部点位（一次脚本调用）。
      *
      * @param key      设备 hash key
      * @param winners  该设备本批的胜出点位（field → 最新值）
      */
     private void writeKeyCas(String key, Map<String, LatestValue> winners) {
-        List<String> args = new ArrayList<>(winners.size() * 3);
+        List<String> args = new ArrayList<>(winners.size() * 3 + 1);
         for (LatestValue winner : winners.values()) {
             args.add(winner.propertyId());
             args.add(String.valueOf(winner.ts()));
             args.add(json(winner));
         }
+        // 末位：本批统一的超前上限（服务端时钟 + 允许偏移），放在三元组之后以免破坏解析步长
+        long ceiling = System.currentTimeMillis() + maxFutureSkewMs;
+        args.add(String.valueOf(ceiling));
         try {
-            Long suppressed = redisTemplate.execute(casScript, List.of(key), args.toArray());
-            if (suppressed != null && suppressed > 0) {
+            List<?> result = redisTemplate.execute(casScript, List.of(key), args.toArray());
+            long suppressed = countAt(result, COUNT_REGRESSED);
+            long future = countAt(result, COUNT_FUTURE);
+            if (suppressed > 0) {
                 // 被抑制的写入是**正常业务结果**（乱序重投），不记日志刷屏，只计数供观测
                 regressedCounter.increment(suppressed);
+            }
+            if (future > 0) {
+                // 设备时钟错属异常数据：计数 + WARN（同样不上抛、不影响上报落库）
+                futureRejectedCounter.increment(future);
+                log.warn("[iot] 最新值拒绝写入：读数时刻超前服务端时钟超过 {} ms（已计数）："
+                        + "key={} 点位数={} 服务端上限={}",
+                    maxFutureSkewMs, LogSanitizer.sanitize(key), future, ceiling);
             }
         } catch (RuntimeException ex) {
             failedCounter.increment();
             log.error("[iot] 最新值写入失败（已计数，不影响上报落库）：key={} 点位数={}",
                 LogSanitizer.sanitize(key), winners.size(), ex);
         }
+    }
+
+    /** 读脚本返回的计数（缺项/非数字一律按 0，不抛——脚本返回形态异常不该拖垮上报）。 */
+    private static long countAt(List<?> result, int index) {
+        if (result == null || result.size() <= index) {
+            return 0L;
+        }
+        Object value = result.get(index);
+        return value instanceof Number number ? number.longValue() : 0L;
     }
 
     /** 紧凑 JSON：`{"v":"...","q":"GOOD","ts":1690000000000}`（值字符串化，类型由物模型定义）。 */

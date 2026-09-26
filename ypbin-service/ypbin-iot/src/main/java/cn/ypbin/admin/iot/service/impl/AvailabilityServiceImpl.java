@@ -33,6 +33,7 @@ import cn.ypbin.admin.iot.mapper.DeviceLivenessMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
 import cn.ypbin.admin.iot.mapper.OutageEventMapper;
+import cn.ypbin.admin.iot.mapping.PointMappingIndex;
 import cn.ypbin.admin.iot.service.AvailabilityService;
 import cn.ypbin.admin.iot.shadow.ShadowReportedUpdate;
 import cn.ypbin.admin.iot.shadow.ShadowReportedWriter;
@@ -50,6 +51,7 @@ import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -82,8 +84,11 @@ public class AvailabilityServiceImpl implements AvailabilityService {
 
     private static final Logger log = LoggerFactory.getLogger(AvailabilityServiceImpl.class);
 
-    /** 入站点位标识非法被丢弃的条数（§6.5 / P0-6c 的可观测出口）。 */
+    /** 入站点位标识非法被丢弃的条数（§6.5 / P0-6c 的格式子项的可观测出口）。 */
     public static final String METRIC_INVALID_PROPERTY_ID = "iot.ingest.propertyid.rejected";
+
+    /** 入站点位未映射到该设备被丢弃的条数（P0-6c 的成员子项；与格式非法分开计数）。 */
+    public static final String METRIC_UNMAPPED_PROPERTY_ID = "iot.ingest.propertyid.unmapped";
 
     private final DeviceLivenessMapper livenessMapper;
     private final OutageEventMapper outageMapper;
@@ -121,12 +126,21 @@ public class AvailabilityServiceImpl implements AvailabilityService {
      */
     private final Counter invalidPropertyIdCounter;
 
+    /**
+     * 入站点位**未映射**的丢弃计数（P0-6c 的**成员**子项；与「格式非法」分开计数，两类原因必须可分辨）。
+     */
+    private final Counter unmappedPropertyIdCounter;
+
+    /** 设备 → 点位坐标集合（P0-6c 成员校验用；一次批量查映射，见 {@link PointMappingIndex}）。 */
+    private final PointMappingIndex pointMappingIndex;
+
     public AvailabilityServiceImpl(DeviceLivenessMapper livenessMapper, OutageEventMapper outageMapper,
                                    MaintenanceWindowMapper maintenanceWindowMapper,
                                    IotDeviceMapper deviceMapper, AvailabilityProperties properties,
                                    TenantProvider tenantProvider, LatestValueWriter latestValueWriter,
                                    TimeSeriesWriter timeSeriesWriter, TimeSeriesProperties timeSeriesProperties,
-                                   ShadowReportedWriter shadowReportedWriter, MeterRegistry meterRegistry) {
+                                   ShadowReportedWriter shadowReportedWriter, PointMappingIndex pointMappingIndex,
+                                   MeterRegistry meterRegistry) {
         this.livenessMapper = livenessMapper;
         this.outageMapper = outageMapper;
         this.maintenanceWindowMapper = maintenanceWindowMapper;
@@ -137,20 +151,30 @@ public class AvailabilityServiceImpl implements AvailabilityService {
         this.timeSeriesWriter = timeSeriesWriter;
         this.timeSeriesProperties = timeSeriesProperties;
         this.shadowReportedWriter = shadowReportedWriter;
+        this.pointMappingIndex = pointMappingIndex;
         this.invalidPropertyIdCounter = Counter.builder(METRIC_INVALID_PROPERTY_ID)
             .description("入站读数因点位标识不合法被丢弃的条数").register(meterRegistry);
+        this.unmappedPropertyIdCounter = Counter.builder(METRIC_UNMAPPED_PROPERTY_ID)
+            .description("入站读数因点位未映射到该设备被丢弃的条数").register(meterRegistry);
     }
 
     @Override
     @Transactional(rollbackFor = Exception.class)
     public int ingest(ReadingIngestReq req) {
-        // 点位标识校验**必须早于任何库访问**：非法输入不得进入解析租户/写活性/写派生数据任何一步
+        // 第①道：点位标识**格式/长度**（纯内存判定，早于任何库访问）
         List<ReadingObservationDto> items = dropInvalidPropertyIds(req.getItems());
         if (items.isEmpty()) {
             return 0;
         }
+        // 先解析设备 → 租户：既拿到写活性所需的租户，也顺带把「设备不存在」的条目留给既有分支
+        // warn + 丢弃（不应把它们报成「点位未映射」——两种原因必须可分辨）
+        Map<Long, Long> tenantByDevice = resolveTenants(deviceIds(items));
+        // 第②道：点位**成员**校验——读数点位必须是该设备已配置的映射点位（P0-6c 的后半）
+        items = dropUnmappedPropertyIds(items, tenantByDevice.keySet());
+        if (items.isEmpty()) {
+            return 0;
+        }
         Map<Long, DeviceReadingBatch> batches = aggregate(items);
-        Map<Long, Long> tenantByDevice = resolveTenants(batches.keySet());
         // 最新值（点位级）与可用率（设备级）是两条独立的关注点：这里只挑「带了点位与值」的读数，
         // 且在**事务提交后**才写（见 writeLatestAfterCommit 的注释）
         List<LatestValue> latestValues = collectLatestValues(items, tenantByDevice);
@@ -236,6 +260,102 @@ public class AvailabilityServiceImpl implements AvailabilityService {
                 LogSanitizer.sanitize(propertyId));
         }
         return accepted;
+    }
+
+    /**
+     * 剔除**点位未映射到该设备**的读数（P0-6c 的后半：物模型属性 × 该设备点位映射）。
+     *
+     * <p><b>与第①道（格式/长度）并列，但成因不同</b>：格式非法是「这个字符串根本不能当点位标识」；
+     * 未映射是「形态没问题，但这个点位不属于这台设备」（设备上没配这条映射，或映射被删）。两类各自计数：
+     * {@value #METRIC_INVALID_PROPERTY_ID} / {@value #METRIC_UNMAPPED_PROPERTY_ID}。</p>
+     *
+     * <p><b>查库形态（铁律）</b>：坐标集合由 {@link PointMappingIndex} **一次批量**取回（最多两条 SQL），
+     * 与设备数/点位数无关，**绝不在循环里查库**；入参为空或映射为空都先判空短路。
+     * 本方法自身只做内存 Set 判断。</p>
+     *
+     * <p><b>为什么只对「已解析出租户的设备」判定</b>：设备不存在（或不属于任何租户）时，条目本就由既有分支
+     * warn + 丢弃；若在这里按「未映射」再判一次，同一件事会被报成两种原因、且指标语义被污染。
+     * 传入的 {@code knownDevices} 就是刚从 {@code iot_device} 解析出的设备集合。</p>
+     *
+     * <p><b>边界</b>：{@code propertyId} 为 {@code null}/空白仍按「只报时刻+质量」的合法形态放行（不带点位）；
+     * 设备无任何映射 ⇒ 该设备的读数**全部**判为未映射（丢弃 + 计数），且不会因此多发一次查询。</p>
+     *
+     * @param items        已通过格式校验的上报项
+     * @param knownDevices 已解析出租户的设备 ID
+     * @return 通过成员校验的上报项（保持原顺序）
+     */
+    private List<ReadingObservationDto> dropUnmappedPropertyIds(List<ReadingObservationDto> items,
+                                                               Set<Long> knownDevices) {
+        Set<Long> devicesToCheck = deviceIdsWithPointReadings(items).stream()
+            .filter(knownDevices::contains)
+            .collect(Collectors.toCollection(LinkedHashSet::new));
+        if (devicesToCheck.isEmpty()) {
+            // 没有带点位的读数（纯「只报时刻+质量」批次）⇒ 一次映射查询都不发
+            return new ArrayList<>(items);
+        }
+        Map<Long, Set<String>> mappedCoordinates = pointMappingIndex.loadByDeviceIds(devicesToCheck);
+        List<ReadingObservationDto> accepted = new ArrayList<>(items.size());
+        for (ReadingObservationDto item : items) {
+            if (item == null) {
+                accepted.add(null);
+                continue;
+            }
+            String propertyId = item.getPropertyId();
+            Long deviceId = item.getDeviceId();
+            if (propertyId == null || propertyId.isBlank() || deviceId == null
+                || !knownDevices.contains(deviceId)) {
+                // 无点位（只报时刻+质量）或设备不存在：交给既有分支处理，不在这里判「未映射」
+                accepted.add(item);
+                continue;
+            }
+            if (mappedCoordinates.getOrDefault(deviceId, Set.of()).contains(propertyId)) {
+                accepted.add(item);
+                continue;
+            }
+            unmappedPropertyIdCounter.increment();
+            log.warn("[iot] 读数上报的点位未映射到该设备，已丢弃该条（同批其它读数不受影响）："
+                    + "deviceId={} 点位={}",
+                LogSanitizer.sanitize(deviceId), LogSanitizer.sanitize(propertyId));
+        }
+        return accepted;
+    }
+
+    /**
+     * 本批读数涉及的**全部**设备 ID（含只报时刻+质量的读数）。
+     *
+     * <p>租户解析必须用它而不是「带点位的那些设备」：只做断档判定的采集器也刷新活性，漏掉它们的设备
+     * 会被后续当成「设备不存在」丢弃（本机单测实测过这个回归）。</p>
+     *
+     * @param items 上报项
+     * @return 设备 ID 集合（去重、保持顺序、不含 null）
+     */
+    private static Set<Long> deviceIds(List<ReadingObservationDto> items) {
+        return items.stream()
+            .filter(Objects::nonNull)
+            .map(ReadingObservationDto::getDeviceId)
+            .filter(Objects::nonNull)
+            .collect(Collectors.toCollection(LinkedHashSet::new));
+    }
+
+    /**
+     * 本批中「带了点位」的读数所涉及的设备 ID（用于**一次批量**取映射；空集合即不查库）。
+     *
+     * <p>只取带点位（非空白 {@code propertyId}）的条目：没有点位的读数不需要映射校验，
+     * 纯「只报时刻+质量」的批次因此**不会**产生任何映射查询。</p>
+     *
+     * @param items 上报项
+     * @return 设备 ID 集合（去重、保持顺序、不含 null）
+     */
+    private static Set<Long> deviceIdsWithPointReadings(List<ReadingObservationDto> items) {
+        return items.stream()
+            .filter(Objects::nonNull)
+            .filter(item -> item.getDeviceId() != null)
+            .filter(item -> {
+                String propertyId = item.getPropertyId();
+                return propertyId != null && !propertyId.isBlank();
+            })
+            .map(ReadingObservationDto::getDeviceId)
+            .collect(Collectors.toCollection(LinkedHashSet::new));
     }
 
     /**
