@@ -732,10 +732,13 @@ time/value/quality）无法拆分。**本轮的处理是「不静默」**：`Poi
 | IoTDB `iot.reading` | 共 **1396 行**；`COUNT(DISTINCT property_id)` = **8**（`demoBoundary`/`humidity`/`it_probe_hum`/`it_probe_temp`/`p_hum`/`p_temp`/`serialNo`/`temperature`）；`(device_id, property_id)` 组合数 = 18。**8 个取值里没有主键字符串形态**（4 个是规范标识、4 个是早期探测遗留） |
 | 为什么活库看不到主键形态 | 生产**没有 ypbin-access 容器**（`docker ps` 无该服务）⇒ 从未有 access 来源的数据落库；该形态是**代码层的潜在分歧**，一旦部署 access 就会显形（这正是本轮必须先统一的原因） |
 
-> 复现要点（IoTDB 必须 `-h ypbin-iotdb`：`dn_rpc_address` 只绑容器 eth0，用 `127.0.0.1` 连不上）：
+> 复现要点（IoTDB 必须 `-h ypbin-iotdb`：`dn_rpc_address` 只绑容器 eth0，用 `127.0.0.1` 连不上；
+> ⚠️ 口令**不要**写进 argv —— `-pw "<值>"` 会被 `docker top` / `/proc/<pid>/cmdline` 看到（2026-09-26 起统一改 stdin 形式，
+> 第一行是**当前**口令，取自 `deploy/.env`））：
 > ```bash
-> docker exec ypbin-iotdb /iotdb/sbin/start-cli.sh -h ypbin-iotdb -p 6667 -u root -pw "$pw" \
->   -sql_dialect table -e "SELECT COUNT(DISTINCT property_id) FROM iot.reading"
+> printf '%s\n' "$(sed -n 's/^IOTDB_PASSWORD=//p' /opt/ypbin/ypbin-iot/deploy/.env | head -1)" \
+>   | docker exec -i ypbin-iotdb /iotdb/sbin/start-cli.sh -h ypbin-iotdb -p 6667 -u root -pw \
+>       -sql_dialect table -e "SELECT COUNT(DISTINCT property_id) FROM iot.reading"
 > ```
 > MySQL/Redis 侧对应探针：`iot_point_mapping` 全表分组计数 + `LEFT JOIN iot_property` 孤儿计数；
 > Redis 用 `--scan --pattern 'iot:latest:*'` 后逐 key `HKEYS` 统计 field 形态（**数字型 = 主键字符串形态**）。

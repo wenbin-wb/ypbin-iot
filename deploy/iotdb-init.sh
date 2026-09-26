@@ -12,7 +12,14 @@
 # 环境前提：运行在官方 apache/iotdb 镜像内 —— PATH 已含 /iotdb/sbin 与 /iotdb/tools，
 #           start-cli.sh 可直接调用（官方 Dockerfile-1.0.0-standalone，2026-09-24 核实）。
 # ⚠️ 口令是本项目的**第三处**（另两处见 deploy/nacos/ypbin-iot.yaml 与 IoTDB 内的 ALTER USER）：
-#    compose 通过 IOTDB_USER / IOTDB_PASSWORD 注入，改口令时三处必须一起改，否则这里会连续 801。
+#    compose 通过 IOTDB_USER / IOTDB_PASSWORD（来自 deploy/.env）注入，
+#    改口令时三处必须一起改，否则这里会连续 801。
+# ⚠️ 口令**不进 argv**（2026-09-26 起）：`-pw <值>` 会把明文口令写进进程 args，
+#    被 `docker top` / `/proc/<pid>/cmdline` / `docker events` 看到。start-cli.sh 的 `-pw`
+#    在**后面不跟值**时会交互式提示口令，而这个提示读的是 **stdin**（一手实测，2026-09-26）：
+#    口令经管道送入 ⇒ 进程 args 里只剩一个裸 `-pw`。
+#    同时**仍然带 `-e`**（批处理模式）：它的退出码语义正是本脚本依赖的
+#    （实测：口令错 ⇒ 1、SQL 失败 ⇒ 1；交互模式则无论语句成败都退 0，会毁掉本脚本的失败判定）。
 # ============================================================
 
 set -u
@@ -21,9 +28,21 @@ SQL_FILE="${SQL_FILE:-/init/iotdb-init.sql}"
 IOTDB_HOST="${IOTDB_HOST:-iotdb}"
 IOTDB_PORT="${IOTDB_PORT:-6667}"
 IOTDB_USER="${IOTDB_USER:-root}"
-IOTDB_PASSWORD="${IOTDB_PASSWORD:-root}"
+IOTDB_PASSWORD="${IOTDB_PASSWORD:-}"
 MAX_ATTEMPTS="${MAX_ATTEMPTS:-30}"
 RETRY_INTERVAL_SECONDS="${RETRY_INTERVAL_SECONDS:-6}"
+
+# ⚠️ 口令**没有默认值**：这里以前是 `:-root`（官方公开默认口令）⇒「口令没配上」会以
+#    「静默用公开默认口令」而不是「显式报错」呈现。现在缺失即 fail-fast（退出码 1 + 明确指引）。
+# ⚠️ 为什么**不**在 compose 用 `${IOTDB_PASSWORD:?}` 做同一件事（2026-09-26 复核指出）：
+#    compose 对**整份文件**做变量插值 ⇒ 该键缺失时同目录下**任何** compose 命令都失败
+#    （连只读的 `docker compose ps`，以及 install.sh 里更早的 `up -d nacos redis mysql` 都被拦），
+#    波及面远大于本服务。故把 fail-fast 放在**真正需要口令的地方**（本脚本）。
+if [ -z "$IOTDB_PASSWORD" ]; then
+  echo "[iotdb-init] 错误：未提供 IOTDB_PASSWORD（拒绝回退到官方公开默认口令 'root'）"
+  echo "[iotdb-init] 请在 deploy/.env 设置 IOTDB_PASSWORD = IoTDB 当前生效口令；见 docs/DEPLOY-TIMESERIES.md §6"
+  exit 1
+fi
 
 # ⚠️ 挂载缺失会让下面的 while 循环一次都不执行、然后"看起来成功"——先显式拦掉
 if [ ! -s "$SQL_FILE" ]; then
@@ -31,10 +50,12 @@ if [ ! -s "$SQL_FILE" ]; then
   exit 1
 fi
 
-# 单条语句执行：用官方 CLI 的非交互批处理模式（-e，官方 CLI 文档）
+# 单条语句执行：官方 CLI 的批处理模式（-e）；口令经 stdin 送入（裸 `-pw` 触发交互式提示）
+# 管道的退出码 = start-cli.sh 的退出码（未开 pipefail，printf 的 SIGPIPE 不影响判定）
 run_statement() {
-  start-cli.sh -h "$IOTDB_HOST" -p "$IOTDB_PORT" -u "$IOTDB_USER" -pw "$IOTDB_PASSWORD" \
-    -sql_dialect table -e "${1%;}"
+  printf '%s\n' "$IOTDB_PASSWORD" \
+    | start-cli.sh -h "$IOTDB_HOST" -p "$IOTDB_PORT" -u "$IOTDB_USER" -pw \
+        -sql_dialect table -e "${1%;}"
 }
 
 # 先数一遍可执行语句：文件存在但"全是空行/注释"时主循环会零次执行并顺利退出 0 —— 同样是静默通过。

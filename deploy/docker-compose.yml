@@ -111,10 +111,11 @@ services:
       dn_data_region_consensus_port: "10760"
       dn_seed_config_node: ypbin-iotdb:10710
     ports:
-      # 6667 是客户端 RPC 口，且默认口令是公开的 root/root（官方 Authority Management：默认用户 root/默认口令 root）。
+      # 6667 是客户端 RPC 口；IoTDB 官方**默认口令是公开的 root/root**（官方 Authority Management），
+      # 生产已轮换（见 docs/DEPLOY-TIMESERIES.md §6），但本端口仍不得对外：口令只是第二道锁。
       # ⚠️ 这里用**独立**变量 IOTDB_BIND_ADDR（而不是共用的 INTERNAL_BIND_ADDR）：本仓 .env.example 把
-      # INTERNAL_BIND_ADDR 设成 0.0.0.0，共用会把 6667 连同默认口令一起暴露到全网；独立变量的默认值是回环，
-      # 即"不显式设置就只允许宿主机内访问"（要用外部客户端接入时再设 IOTDB_BIND_ADDR，并**先**改口令）。
+      # INTERNAL_BIND_ADDR 设成 0.0.0.0，共用会把 6667 暴露到全网；独立变量的默认值是回环，
+      # 即"不显式设置就只允许宿主机内访问"（要用外部客户端接入时再设 IOTDB_BIND_ADDR）。
       - "${IOTDB_BIND_ADDR:-127.0.0.1}:6667:6667"
     volumes:
       - ypbin-iotdb-data:/iotdb/data
@@ -122,19 +123,29 @@ services:
     healthcheck:
       # 官方**没有**为 Docker 部署提供健康检查端点或探针命令（官方自带 health_check.sh 是「部署环境体检」：
       # 查 JDK/内存/目录权限/端口占用/ulimit/swap，不是就绪探针）。
-      # 镜像内**按 Dockerfile 推断有 curl**（基础镜像 eclipse-temurin:17-jre-focal 的 adoptium Dockerfile
-      # 显式安装 curl，注释「curl required for historical reasons」；IoTDB 的 Dockerfile 未删任何包；
-      # ⚠️ 未在容器内 `command -v curl` 实测）、**没有 nc**；
-      # 但 6667 是 Thrift RPC 口，curl 对它没有意义（不是 HTTP）⇒ 用官方 CLI 的非交互批处理模式探活：
-      # `-e` 见官方 CLI 文档，镜像 PATH 已含 /iotdb/sbin 与 /iotdb/tools（dos2unix 等包由官方 Dockerfile 安装）。
-      # ⚠️ 该探针是我们自建的（非官方推荐做法）；本机实测（2026-09-24）确认其退出码语义：
-      #    成功 = 0，连接失败 = 1（`Error: Can't execute sql because Connection Error…`）；
-      #    因此它只用于 `docker compose ps` 观测，**不用它驱动别的服务启动顺序**（见 iotdb-init 的自重试）。
-      # ⚠️ 必须 `-h ypbin-iotdb` 而**不是** 127.0.0.1：`dn_rpc_address` 是**绑定地址**（IoTDBConfig 默认
-      #    127.0.0.1），设成 `ypbin-iotdb` 后服务端只绑容器 eth0，loopback 无监听 ⇒ 用 127.0.0.1（也是
-      #    start-cli.sh 的默认值）探活会**永远 unhealthy**（本机实测复现：同一容器 `-h <hostname>` exit 0、
-      #    `-h 127.0.0.1` exit 1）。这是观测性失真，不影响数据面（容器网络内按主机名连一切正常）。
-      test: ["CMD", "start-cli.sh", "-h", "ypbin-iotdb", "-p", "6667", "-u", "root", "-pw", "root", "-sql_dialect", "table", "-e", "SHOW DATABASES"]
+      # 6667 是 Thrift RPC 口，HTTP 探针没有意义 ⇒ 用 TCP 连通性探活。
+      #
+      # ⚠️ 2026-09-26 起改为**不发口令的 TCP 探活**，取代此前的
+      #    `start-cli.sh -h ypbin-iotdb -u root -pw <口令> -sql_dialect table -e "SHOW DATABASES"`：
+      #    那条探针每 30s 把**明文口令**放进进程 argv（实测 `docker top ypbin-iotdb` 可抓到
+      #    `… org.apache.iotdb.cli.Cli -h ypbin-iotdb -p 6667 -u root -pw <口令> -sql_dialect table -e SHOW DATABASES`，
+      #    `docker inspect .Config.Healthcheck.Test` 里也是明文）⇒ 等同于口令持续暴露。
+      # 为什么不是「换个方式传口令」：容器内 /iotdb/sbin/start-cli.sh 只认命令行 `-pw <值>`，
+      #    其 checkEnvVariables 只识别 IOTDB_INCLUDE / IOTDB_CLI_CONF 两个 `-D` 变量，
+      #    **没有**口令相关的环境变量或配置文件入口（一手核实：镜像内脚本原文，2026-09-26）
+      #    ⇒ 「配置文件 / 环境变量」两条路都不通，故取「不发口令的 TCP 探活」。
+      # 折衷（明确记账）：本探针只证明「6667 可连」，**不校验凭据**。凭据维度的低频业务探针由应用侧
+      #    承担：ypbin-iot 的 `iot.timeseries.db.rows`（SELECT COUNT(*) 真值对账，默认 10 分钟一次）
+      #    与 `iot.timeseries.db.probe.failed`（对账失败计数）——口令错/库不可用会直接表现为后者增长
+      #    （见 docs/DEPLOY-TIMESERIES.md §6）。
+      # 为什么是 bash 的 /dev/tcp：镜像内没有 nc；bash 与 timeout 实测存在（/usr/bin/bash、/usr/bin/timeout），
+      #    /dev/tcp 是 bash 内建，不依赖额外二进制。本机实测（2026-09-26）：
+      #    `timeout 5 bash -c '</dev/tcp/ypbin-iotdb/6667'` ⇒ exit 0；换成关闭端口 ⇒ exit 1。
+      # ⚠️ 必须连 `ypbin-iotdb` 而**不是** 127.0.0.1：`dn_rpc_address` 是**绑定地址**（IoTDBConfig 默认
+      #    127.0.0.1），设成 `ypbin-iotdb` 后服务端只绑容器 eth0，loopback 无监听 ⇒ 用 127.0.0.1 探活会
+      #    **永远 unhealthy**（本机实测复现：同一容器 `<hostname>` exit 0、`127.0.0.1` exit 1）。
+      # 该探针只用于 `docker compose ps` 观测，**不用它驱动别的服务启动顺序**（见 iotdb-init 的自重试）。
+      test: ["CMD-SHELL", "timeout 5 bash -c '</dev/tcp/ypbin-iotdb/6667' || exit 1"]
       interval: 30s
       timeout: 20s
       retries: 10
@@ -165,11 +176,18 @@ services:
     # 「entrypoint 与 cmd 都为空」；本服务 entrypoint 非空 ⇒ 实际进程就是 `/bin/bash /init/iotdb-init.sh`。
     # （第一版曾误以为镜像 CMD 会被当参数追加而写了 `command: []`，已按 moby 源码更正，2026-09-24。）
     environment:
-      # ⚠️ 口令的**第三处**：脚本默认 IOTDB_USER/IOTDB_PASSWORD=root。改 IoTDB 口令时，这三处必须一起改：
-      #   ① IoTDB 内（ALTER USER root SET PASSWORD …）② Nacos ypbin.timeseries.password ③ 这里
-      # （见 docs/DEPLOY-TIMESERIES.md §6）——否则重跑本容器会连续 801（用户名或口令错）并最终 exit 1。
+      # ⚠️ 口令的**第三处**：改 IoTDB 口令时这两处必须一起改：
+      #   ① IoTDB 内（ALTER USER root SET PASSWORD …）② Nacos ypbin-iot.yaml 的 ypbin.timeseries.password
+      #   （③ 就是这里）——否则重跑本容器会连续 801（用户名或口令错）并最终 exit 1。
+      # 真值只写在 deploy/.env（600、不入库）。
+      # ⚠️ 这里**刻意不用** `${IOTDB_PASSWORD:?...}`（2026-09-26 复核指出）：compose 对整份文件做变量插值，
+      #    `:?` 会让「该键缺失」升级成「同目录下任何 compose 命令都失败」（含只读的 `ps`，以及 install.sh 里
+      #    更早的 `up -d nacos redis mysql`）——波及面远大于本服务，且全新安装的 .env 本来就没有这个键。
+      #    缺键的 fail-fast 改由 iotdb-init.sh 自己承担（缺失即退出 1 + 明确指引，且**不**回退到公开默认口令）。
+      # ⚠️ 残留暴露面（如实登记）：口令虽不进 argv，但它仍是本容器的环境变量 ⇒ `docker inspect` 的
+      #    `Config.Env` 与 `/proc/<pid>/environ` 可见（仅 root/容器内可读）。这是「不落 argv」的已知代价。
       IOTDB_USER: root
-      IOTDB_PASSWORD: root
+      IOTDB_PASSWORD: ${IOTDB_PASSWORD:-}
     volumes:
       - ./iotdb-init.sh:/init/iotdb-init.sh:ro
       - ./iotdb-init.sql:/init/iotdb-init.sql:ro
