@@ -47,9 +47,12 @@ ypbin:
     connect-timeout-ms: 2000
     read-timeout-ms: 5000
     # 「接入信息」端点回给前端的 broker 地址（只用于展示与二维码，不含口令）。
-    # 生产机上的设备接入通道是**隧道/代理**可达的端口，不是 1883 公网暴露（未验证项见文档 §7）。
-    broker-host: ${EMQX_BROKER_HOST:emqx-tunnel-host}
-    broker-port: ${EMQX_BROKER_PORT:11883}
+    # ⚠️ 这是**中间件机**上 EMQX 的真实地址；但 1883 **当前只绑该机回环**（未对设备开放，
+    #    见 docs/EMQX-INTEGRATION.md §8 U-A1）⇒ 此处是"登记的真实地址"，不是"已验证可接入"。
+    #    不用 ${...} 占位符：本文件也过 install.sh 的 sed，而它只替换 4 个固定键，
+    #    新占位符既不会被替换也不会报错，只会多一层"以为配了、其实没配"的错觉（同 IoTDB 口令的取舍）。
+    broker-host: 43.242.200.8
+    broker-port: 1883
     broker-tls-enabled: false
     # 设备口令随机字节数（32 字节 = 256 位熵）
     credential-password-length: 32
