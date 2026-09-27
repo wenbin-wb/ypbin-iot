@@ -212,13 +212,22 @@ iptables -D DOCKER-USER -p tcp --dport 1883 -j DROP; iptables -D DOCKER-USER -p 
 `import_users` 同步正常）。定位结论（可复跑，见 **`deploy/emqx/diagnose-emqx-admin-h2c/`**）：
 
 - 平台 `EmqxRestAdminClient` 用 JDK `HttpClient` 的**默认 HTTP/2**；当**带体 POST**（`/api/v5/publish`）
-  是某条**新连接上的第一个请求**时，h2c upgrade 握手会被 EMQX 断开 ⇒ `java.io.IOException: EOF reached while reading`。
-- 实测：HTTP/2 直接 POST = **3/3 EXC(EOF)**；强制 HTTP/1.1 = **3/3 HTTP 202**；先发无体 `GET /status`
-  预热连接再 POST = **3/3 HTTP 202**。
-- **这是平台侧的连接生命周期缺陷，不是暴露面/网络/隧道问题**；建议正解是给该客户端显式
-  `.version(HttpClient.Version.HTTP_1_1)`（本仓本轮**未改平台代码**，已登记为待办）。
-- 运维含义：**重启/重建 EMQX 后，平台的下行发布在"连接空闲后第一次发布"时会失败**，直到该连接被
-  无体请求预热。本轮外部验收脚本因此在下行步骤**显式预热**并在脚本里注明这是**绕过**。
+  是某条**新连接上的第一个请求**时，连接会被断开 ⇒ `java.io.IOException: EOF reached while reading`。
+- 实测：HTTP/2 下**新连接首个带体 POST** = **3/3 EXC(EOF)**；强制 HTTP/1.1 = **3/3 HTTP 202**；
+  先发无体 `GET /status` 预热连接再 POST = **3/3 HTTP 202**。
+  ⚠️ **不要读成"HTTP/2 下必失败"**：上面的预热模式本身就是 HTTP/2 且 3/3 成功。
+- **归因（按独立复核意见收敛）**：独立子代理补做「绕开隧道」的直连对照后，结论是根因在
+  **EMQX/Cowboy 对带体 h2c upgrade 回 `101` 后直接 RST**，平台只是触发方 ⇒ 更准确的表述是
+  「**EMQX 侧 h2c upgrade 缺陷，平台以 HTTP/1.1 规避**」，而不是"平台自己的连接生命周期缺陷"
+  （旧措辞不够准，已改）。该直连对照由独立子代理完成，**本仓未复跑**。
+- **正解已落地**：`EmqxRestAdminClient` 显式 `.version(HttpClient.Version.HTTP_1_1)` +
+  两条防回归用例（含**线上报文级**：首个带体 POST 不得带 `Upgrade: h2c` / `HTTP2-Settings`），
+  见 PR #90；根因与判据留档在 `deploy/emqx/diagnose-emqx-admin-h2c/`。
+- **`import_users` 为什么"看起来正常"**：平台的 `upsertPasswordUser` 是**先无体 `DELETE` 再 `import_users`**，
+  那条无体 DELETE 等于**把连接预热了** ⇒ 与"JDK 对不同 body publisher 的差异"无关（早先的猜测已推翻）。
+- 运维含义：**修复部署前，重启/重建 EMQX 后平台的"空闲期首次下发"会失败**，直到连接被无体请求预热；
+  重启 `ypbin-iot` **不能**恢复（会重新协商 h2c）。本轮外部验收脚本默认做了预热，并提供了
+  `--no-warm-emqx-admin` 用于在修复部署后证明"不带绕过也 PASS"。
 
 ### 外部可达性（原始输出，2026-10-03）
 
@@ -284,6 +293,13 @@ iptables -t nat -S DOCKER | grep 1883     # 期望目的被收窄成 127.0.0.1/3
 **回滚已实测有效**（2026-10-03）：把 `EMQX_MQTT_BIND_ADDR` 改回 `127.0.0.1` 重建后，
 宿主监听变为 `127.0.0.1:1883`、`nat/DOCKER` 的 DNAT 目的收窄为 `127.0.0.1/32`，
 **从生产机探测 1883 = CLOSED**。随后按本轮决策再改回 `0.0.0.0` 并复验 = **OPEN**。
+独立复核（R6/L3）另做了**双向实验**：**保留**那条 INPUT 放行规则、**只**改绑定 ⇒ 外部**立即 CLOSED**
+⇒ 再次证明"绑定才是真闸门，`close` 单独跑不足以收回端口"。
+
+> ⚠️ **别被 `docker compose config` / `emqx ctl conf show dashboard` 泄露口令**：这两条命令都会把
+> `EMQX_DASHBOARD_PASSWORD`（以及 `.env` 里其它值）**明文回显**到终端/日志。要只看结构请用
+> `docker compose config --services`（或 `--format json` 后**只挑端口字段**，别整段打印）。
+> 这一坑由独立复核与本轮原作者各踩过一次（口令进了会话，未入库/未外传）。
 
 > ⚠️ 回滚**不影响**别人的项目：只改 `/opt/emqx/.env` 一行 + 只删本项目自己的 systemd 单元与它插的规则；
 > 全程无 `-F`、无 `iptables -P` 变更、不碰宝塔 `IN_BT` 与 ufw 链、不碰 Docker 自有链。
@@ -296,7 +312,27 @@ iptables -t nat -S DOCKER | grep 1883     # 期望目的被收窄成 127.0.0.1/3
 - **云安全组规则本身未读**：本轮只做了**外部可达性实测**（1883 可达、其余四个端口不可达），
   没有读取云控制台的入站规则内容；"为什么 13306/9000 也可达"因此**未定论**。
 - **速率限制/防爆破未设**：见上表，属显式登记。
-- **平台 HTTP/2 缺陷未修**：见上文与 `deploy/emqx/diagnose-emqx-admin-h2c/`。
+- **平台 HTTP/2 缺陷**：根因已定位、修复已提交 **PR #90**（`.version(HTTP_1_1)` + 两条防回归用例）。
+  **部署状态以该 PR 与线上 artifact 三元组为准**；本轮结束时若尚未部署，则平台"空闲期首次下发"仍会失败。
+- **`DOCKER-USER` 来源收敛未实施**：只给了正确写法与撤销方式（本轮决策是全网开放）。
+
+### 独立复核（R6/L3，2026-10-03）
+
+**结论：PASS** —— 10 条核心主张全部由独立子代理**亲自复现**（未采信原作者叙述），
+报告见 `/tmp/emqx-evidence/R6-REVIEW.md`（另附其对 h2c 的独立子报告 `R6-H2C-SUBAGENT.md`）。
+值得留档的几点：
+
+- 它用**计数器铁证**证伪了"INPUT 是闸门"：那条 1883 规则在 3 次成功外部连接前后 **pkts 都是 0**
+  （同级 18084 规则 6719→6720 会动）；`-D` 掉后外部**仍 OPEN 且 MQTT 握手正常**；恢复后
+  `iptables-save` 去计数器后 **diff 逐字节一致**。
+- 它**不信脚本自述**，自己连库核了 `iot.reading` 恰好 1 行与回执 1 行；并自写**裸 socket** 从生产机
+  连 3/3 得 `CONNACK 0x04`，证明"匿名恒 0"。
+- 它指出 4 条整改项，其中 2 条**已在合并前修掉**：① 本仓 `emqx-mqtt-expose-firewall.service` 里那句
+  「外部 SYN 仍会被 INPUT 丢掉」与实测**相反**（已按实测改写，并加"`close` 单独跑不足以收回端口"的警告）；
+  ② compose 默认值 `${EMQX_MQTT_BIND_ADDR:-0.0.0.0}` 是 **fail-open**（已改回 `:-127.0.0.1`，
+  暴露改为 `.env` 里的**显式**值）。另 2 条（措辞/归因）亦已一并修正。
+- 它的副作用已声明：复跑 E2E 使设备凭据轮换 2 次（version=27）；`docker compose config` 曾让 Dashboard
+  口令回显到其会话（未入库/未外传）。
 
 ---
 

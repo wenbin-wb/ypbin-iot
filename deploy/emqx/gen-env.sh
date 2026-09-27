@@ -36,6 +36,8 @@ NODE_COOKIE="$(openssl rand -hex 16)"
 DASH_PASSWORD="$(openssl rand -base64 24 | tr -d '\n')"
 API_KEY="$(openssl rand -hex 16)"
 API_SECRET="$(openssl rand -base64 32 | tr -d '\n')"
+# 1883 绑定地址：默认回环（fail-closed）；要对外暴露请显式传环境变量
+MQTT_BIND_ADDR="${EMQX_MQTT_BIND_ADDR:-127.0.0.1}"
 
 # ── .env（600；写入前先 umask，避免短暂的 644 窗口）──────────────────────────
 old_umask="$(umask)"
@@ -50,8 +52,10 @@ EMQX_DASHBOARD_PASSWORD=$DASH_PASSWORD
 EMQX_DASHBOARD_PORT=18093
 # Dashboard/REST 仍**只绑回环**（管理面不对外）
 EMQX_DASHBOARD_BIND_ADDR=127.0.0.1
-# 1883 开发测试期对外暴露（2026-10-03 用户决策）；生产前必须收回 ⇒ 改回 127.0.0.1
-EMQX_MQTT_BIND_ADDR=0.0.0.0
+# 1883 宿主绑定：**默认 fail-closed（只绑回环）**，避免 .env 丢失/缺省时静默对外裸奔。
+# 开发测试期要对外暴露，**显式**打开（这是刻意的、可审计的一步）：
+#   EMQX_MQTT_BIND_ADDR=0.0.0.0 bash gen-env.sh        # 或直接编辑 /opt/emqx/.env 后重建容器
+EMQX_MQTT_BIND_ADDR=$MQTT_BIND_ADDR
 EMQX_MEM_LIMIT=2g
 EMQX_API_KEY=$API_KEY
 EMQX_API_SECRET=$API_SECRET

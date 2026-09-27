@@ -63,31 +63,42 @@ Caused by: java.io.EOFException: EOF reached while reading
 | 直接下发命令 | `failed / EMQX_ERROR` | 发布**没到** EMQX（h2c EOF） |
 | 先签发一次设备凭据（内部先做**无体** `DELETE`）再立刻下发 | `failed / NO_SUBSCRIBER` | 发布**到了** EMQX（HTTP 202）；只是当时无订阅者 |
 
-## 机制（已实测，未深究到的部分明确标注）
+## 机制（区分"我实测的"与"独立复核补测的"）
 
-- **已确认**：JDK HttpClient `HTTP_2` 下，`POST /api/v5/publish` 作为某条**新连接上的第一个请求**时，
-  EMQX/Cowboy 会在 h2c upgrade 之后断开连接（读侧 EOF）；同一客户端 `HTTP_1_1` 下 3/3 成功；
-  先发**无体** `GET /status` 把 h2c 连接建立起来后，同一连接上的 `POST` 3/3 成功。
-- **未定论**：EMQX/Cowboy 侧为何在 upgrade 后对"带体请求"断开（h2c upgrade 与请求体的交互属于
-  已知的灰色地带）；为什么同为客户端的 `import_users`（multipart POST）此前能成功——推测与 JDK
-  对两类 body publisher 的处理差异有关。**本仓不对此下确定性结论**（R1）。
+- **已确认（本仓实测）**：JDK HttpClient `HTTP_2` 下，`POST /api/v5/publish` 作为某条**新连接上的第一个
+  请求**时会失败（读侧 EOF）；同一客户端 `HTTP_1_1` 下 3/3 成功；先发**无体** `GET /status` 把连接
+  建立起来后，同一连接上的 `POST` 3/3 成功。
+  ⚠️ **不要把它读成"HTTP/2 下必失败"**：本判据的 `warm` 模式本身就是 HTTP/2 且 3/3 成功。
+  准确的表述是「**新建连接上的第一个带体请求**失败」。
+- **独立复核补测的结论**（`R6-H2C-SUBAGENT.md`，**由独立子代理完成、本仓未复跑**）：它补做了"**绕开隧道**"的
+  直连对照，结论是根因在 **EMQX/Cowboy 对带体 h2c upgrade 回 `101` 之后直接 RST**，平台只是触发方。
+  ⇒ 更准确的归因是「**EMQX 侧 h2c upgrade 缺陷，平台以 HTTP/1.1 规避**」，而不是"平台自己的缺陷"
+  （旧措辞不够准，已按复核意见收敛）。
+- **`import_users` 为何"看起来正常"——已解释（推翻了本文档早先的猜测）**：平台的
+  `upsertPasswordUser` 是**先 `deleteUser`（无体 DELETE）再 `import_users`**；那条无体 DELETE 等于
+  **把连接预热了**，所以紧随其后的 multipart POST 才能成功。与 JDK 对两类 body publisher 的差异无关。
 - **不受影响**：`curl`（默认 HTTP/1.1，或 `--http2-prior-knowledge` 走先验知识路径）3/3 正常；
   这解释了"为什么手工测都是好的、只有平台会失败"。
 
-## 建议的正解（**本仓未实施**，超出本轮改动范围）
+## 正解（**已在 PR #90 落地**；部署状态见该 PR）
 
 在 `ypbin-service/ypbin-iot` 的 `EmqxRestAdminClient` 构造里显式指定协议版本：
 
 ```java
 this.httpClient = HttpClient.newBuilder()
     .connectTimeout(Duration.ofMillis(properties.getConnectTimeoutMs()))
-    .version(HttpClient.Version.HTTP_1_1)   // ← 新增：绕开 h2c upgrade 与带体请求的交互缺陷
+    .version(HttpClient.Version.HTTP_1_1)   // ← 绕开"新建连接首个带体请求"的 h2c upgrade 缺陷
     .build();
 ```
 
-或保留 HTTP/2 但对"新建连接上的 POST"重试一次（`-Djdk.httpclient.enableAllMethodRetry=true`
-只影响 JVM 全局，不建议）。推荐前者：改动一行、语义明确、已被本判据证明有效。
+**为什么不用"加重试"或"预热"**：重试只是掩盖（每次新建连接的第一次带体请求仍失败，且把一次
+用户可见的失败变成不可解释的延迟）；预热只是碰巧（依赖连接存活时间，空闲后照样失败，且每次发布
+前多一次往返）。固定 HTTP/1.1 与 EMQX REST 自身的语义一致，且已被本判据证明 3/3 成功。
 
-⚠️ 在本修复落地前，平台的下行发布在「连接空闲后第一次发布」时会失败；本轮外部验收脚本
+防回归用例（`EmqxRestAdminClientTest`，两条，均经**变异**证明会咬人）：配置级断言 `version()==HTTP_1_1`；
+**线上报文级**断言首个带体 POST 不带 `Upgrade: h2c` / `HTTP2-Settings` 头
+（⚠️ 只看 `exchange.getProtocol()` 会**恒真假绿**——JDK 内建 `HttpServer` 只用 1.1 应答）。
+
+⚠️ 修复**部署前**，平台的下行发布在「连接空闲后第一次发布」时会失败；本轮外部验收脚本
 （`accept-emqx-external.sh`）因此在第 6 步**显式预热**了一次连接（脚本内有大段注释说明这是**绕过**），
 以便把下行链路的其余部分验完。

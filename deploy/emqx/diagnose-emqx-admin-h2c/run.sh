@@ -65,4 +65,6 @@ prodr "rm -rf /tmp/ypbin-h2c; echo '  ·  生产机临时目录已删'"
 prodr "docker exec -i $CONTAINER sh -c 'rm -f /tmp/EmqxAdminH2cProbe.class; echo \"  ·  容器内 class 已删\"'"
 echo
 echo "判据：h2 ⇒ 3/3 EXC(EOF) 且 h1 ⇒ 3/3 HTTP 202 且 warm ⇒ 3/3 HTTP 202"
-echo "      ⇒ 平台的 EMQX 管理面客户端在 HTTP/2 下发布必失败；HTTP/1.1 或预热后正常。"
+echo "      ⇒ 失败点是【新建连接上的第一个带体请求】（HTTP/2 h2c upgrade 路径）；"
+echo "        注意**不是**『HTTP/2 下必失败』——上面的 warm 模式就是 HTTP/2 且 3/3 成功。"
+echo "      ⇒ 规避：客户端固定 HTTP/1.1（PR #90）或先发无体请求把连接建起来。"
