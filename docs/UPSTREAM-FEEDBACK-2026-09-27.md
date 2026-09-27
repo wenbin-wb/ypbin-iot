@@ -409,10 +409,18 @@ grep -n "excludes" -A 6 deploy/nacos/ypbin-system.yaml
 curl -s -m 8 -w "\nhttp=%{http_code}\n" http://127.0.0.1:18080/iot/actuator/metrics
 #   {"code":401,"data":null,"message":"未提供登录凭证","success":false,"timestamp":"2026-09-27 11:22:22"}
 #   http=200
+# ⑥ 生产实测（只读）：**直连服务端口、完全不带任何认证头**也能拿到指标 ⇒ 服务侧对该端点无任何认证
+curl -s -m 8 -o /tmp/m.json -w "http=%{http_code}\n" http://127.0.0.1:18084/actuator/metrics
+#   http=200
+#   {"names":["application.ready.time","application.started.time","disk.free","disk.total",
+#             "executor.active","executor.completed","executor.pool.core",…]}
 ```
-**证据强度声明（不夸大）**：以上证明的是**鉴权层事实**（仅认证、无权限码、路由可达）。
-「用一个**非管理员**的真实账号实测能读到指标」这一步**未核实**——本次未使用任何账号口令，
+**证据强度声明（不夸大）**：以上证明的是**鉴权层事实**（网关仅认证、无权限码；服务侧 `18084` 直连**零认证**、路由可达）。
+「用一个**非管理员**的真实账号**经网关**实测能读到指标」这一步**未核实**——本次未使用任何账号口令，
 按凭据纪律不应为验证而索要口令。**结论强度**：能力缺口成立；单次越权访问的实证留待有账号的会话补做。
+> 注意 ⑥ 的另一层含义：`18084` 的**唯一**现有边界是「只绑回环」（见下方「我方临时处置」）——
+> 这条边界一旦被改宽（例如为图方便设 `IOT_BIND_ADDR=0.0.0.0`），平台指标即**完全无认证**地暴露。
+> 这正是「starter 应提供权限收口能力」的直接理由。
 
 ### 影响
 平台级运行指标（摄入量、丢弃计数、出口错误、时序写入行数）对**任何已登录用户**可见，
@@ -799,7 +807,8 @@ grep -rn "throw-exception-if-no-handler" . | grep -v '/target/' | grep -v tools/
 | A5 | UP-5 网关只认证不授权 | starter | `GatewayAuthGlobalFilter.java:76-84`（仅 `authenticate`） | `sed -n '76,84p' …` | **已核实** |
 | A5 | UP-5 路由与白名单 | iot | `deploy/nacos/ypbin-gateway.yaml:49-54`（`/iot/**`+StripPrefix）、`:57-82`（白名单无 `actuator`）；`deploy/nacos/ypbin-system.yaml:90-94`（服务侧 `excludes: /actuator/**`） | `grep -n "Path=/iot/\*\*" -A 4 …` | **已核实** |
 | A5 | UP-5 未登录被拒（登录是唯一门槛） | 生产实例 | `curl http://127.0.0.1:18080/iot/actuator/metrics` ⇒ `code=401`，HTTP 200 | 同上 | **已核实** |
-| A5 | UP-5「非管理员账号实测可读」 | — | — | 未使用账号口令 | **未核实** |
+| A5 | UP-5 服务侧直连**零认证** | 生产实例 | `curl http://127.0.0.1:18084/actuator/metrics`（不带任何认证头）⇒ HTTP 200 + `{"names":[…]}` | 同上 ⑥ | **已核实** |
+| A5 | UP-5「非管理员账号**经网关**实测可读」 | — | — | 未使用账号口令 | **未核实** |
 | B6 | UP-6 全局 `sed` | admin | `deploy/install.sh:1286-1298` | `sed -n '1275,1299p' deploy/install.sh` | **已核实** |
 | B6 | UP-6 上游当前无注释占位符（潜在） | admin | `deploy/nacos/`（5 处占位符全在配置行） | `grep -rn "^\s*#.*\${" deploy/nacos/` ⇒ 无输出 | **已核实** |
 | B6 | UP-6 本 fork 的真实事故 | iot | `deploy/nacos/ypbin-iot.yaml:88-90`；物证 `docs/DEPLOY-BACKEND.md:233-240` | `grep -rn "^\s*#.*\${" deploy/nacos/` ⇒ 3 命中 | **已核实** |
