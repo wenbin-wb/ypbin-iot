@@ -19,12 +19,14 @@
 #   bash deploy/emqx/accept-emqx-downlink.sh \
 #        --mw-ssh "root@43.242.200.8 -p 61260 -i ~/.ssh/id_ed25519_ypbin_mw" \
 #        --prod-ssh "root@113.142.217.58 -i ~/.ssh/id_ed25519_iot_test" \
-#        --device 9300012 --tenant 1 [--kind property_set --identifier temperature]
+#        --device 9300012 --tenant 1 [--kind property_set --identifier switchState]
+#  ⚠️ 默认目标必须是**物模型里可写**的属性（本产品：switchState/workMode 是 RW；temperature 是 R）
+#     ——第一次跑用 temperature 时被平台正确拒成"属性不可写"，脚本默认值已据此改正。
 # =============================================================================
 set -uo pipefail
 
 MW_SSH=""; PROD_SSH=""
-DEVICE=9300012; TENANT=1; KIND=property_set; IDENTIFIER=temperature
+DEVICE=9300012; TENANT=1; KIND=property_set; IDENTIFIER=switchState
 PROD_ENV=/opt/ypbin/ypbin-iot/deploy/.env
 MW_PW_FILE=/opt/emqx/ingress/device-password
 PROBE=/opt/emqx/mqtt-device-probe.py

@@ -346,9 +346,36 @@ bash deploy/emqx/accept-emqx-ingress.sh \
 设备收到并回 `up/reply` → 实例变 `succeeded`；另跑"设备不在线"（不订阅）⇒ 平台**立即**得到
 `failed/NO_SUBSCRIBER`（耗时 <5s，而该用例超时设 15s ⇒ 证明不是等超时）；再加"连着但不回执"⇒ 扫描置 `timeout`。
 
-**状态：未验证（R1）**。段 B 按"先合并再部署"的纪律**尚未部署到生产**，因此本节的五项判据
-**没有**生产实测数据；原始输出会在合并、按 main 部署后**回填到本节**（含 artifact 三元组）。
-在此之前不得把本节读作"已通过"。
+**状态：✅ 已实测通过（2026-10-02，`accept-emqx-downlink.sh` 一次性 PASS ①–⑤）**
+
+被验 artifact 三元组（生产 `ypbin-iot`）：image id `sha256:69ca8d255626a6097e783ddd2fec8d341ed43fe98d00a79792fbc22ba9a0b79c`、
+容器内 jar md5 `efc9103a872e503be61d084b5464e22b`、StartedAt `2026-09-27T10:57:05Z`（restarts=0）；
+jar 由**合并后的 main**（`0b6471f`）本地构建后上传部署（生产机未跑 mvn）。
+
+关键原始输出（节选，逐字来自脚本）：
+
+```
+  ·  下发响应 statusCode=sent emqxMessageId=00065C74DBF68B741F6D000068CE0000
+  ·  RECEIVED topic=ypbin/v1/1/9300012/down/property/set
+      payload={"requestId":"cmd-2104164292996689921","properties":{"switchState":26.5}}
+  ·  REPLY_SENT requestId=cmd-2104164292996689921 code=0 published=True
+  ✅ 实例终态 = succeeded
+  ·  reply_payload={"deviceId":9300012,"requestId":"…","code":0,"message":"ok",
+                    "data":{"applied":26.5},"ts":1790506836628,
+                    "receivedAt":"2026-09-27T19:00:35.820266518"}
+  ·  finishedAt=2026-09-27 19:00:36 emqxMessageId=00065C74DBF68B741F6D000068CE0000
+  ✅ ① 回执落库字段齐全（设备 ts + 平台 receivedAt + finished_at）
+  ✅ ② 重复回执：端点 code=200 duplicated=true accepted=False（实例仍 succeeded；指标 +1）
+  ✅ ③ 无订阅者：statusCode=failed errorCode=NO_SUBSCRIBER errorMsg=设备未连接（无订阅者），耗时 1072ms
+  ✅ ④ 连着不回执：statusCode=timeout errorCode=TIMEOUT（扫描判定）
+  ✅ ⑤ 伪造回执（载荷 deviceId=9999999）：被按认证主题丢弃（丢弃日志 1 → 2，增量 1）
+结论: PASS（①–⑤ 全部命中）
+```
+
+> ⚠️ 首次运行时**脚本默认目标用了 `temperature`**（本产品里是 `accessMode=R`），被平台**正确拒绝**为
+> "属性不可写" ⇒ 已把默认改为可写的 `switchState`。这条恰好是"物模型校验真的生效"的反向证据。
+> 另一处已在 §6.2.1 登记：`params`/`data` 声明成 `String` 时发对象会得 `R.code=500`（生产实测），
+> 已改为 `Object`（PR #83）——**单元测试当时漏抓，因为测试直接构造 JSON 文本、与线上报文形态不符**。
 
 脚本判据（每条都刻意避免假绿）：
 ① 下发响应必须 `statusCode=sent`，且 `reply_payload` 同时含**设备 ts**与**平台 receivedAt**、`finished_at` 非空；
