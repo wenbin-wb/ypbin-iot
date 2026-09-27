@@ -77,8 +77,13 @@ UNIQUE KEY (tenant_id, device_id)
 - 本表是**租户表**：**不要**加进 `ypbin.tenant.ignore-tables`（`fail-on-missing-tenant: true`）。
 - **不使用删除语义**：轮换 = 原地更新；吊销 = 清空秘密列。因此本表不依赖逻辑删除，
   也不会出现「逻辑删除行占着唯一键、重签插不进去」的坑。
-- SQL 双写：`deploy/sql/007-iot-data.sql` 末尾 + `deploy/sql/migration/2026-09-30-iot-device-credential.sql`
+- SQL 双写：`deploy/sql/007-iot-data.sql` 末尾 + **两个**增量迁移
+  `deploy/sql/migration/2026-09-30-iot-credential-menu.sql`（菜单与授权）与
+  `deploy/sql/migration/2026-09-30-iot-credential-schema.sql`（`ALTER iot_device` + `CREATE TABLE`）
   （跑 `tools/check-iot-sql-equivalence.sh` 退出码 0）。
+  > 为什么要拆成两个文件：① 等价性脚本按**文件名排序**拼接迁移 ⇒ 007 的追加顺序必须是「先菜单、后 DDL」
+  > （`-menu` < `-schema`）；② 真库 IT 的建表助手 `ItSchema` 需要**纯 DDL 的 `-schema` 文件**在 `006` 之后单独执行
+  > （`006` 不含本功能结构，否则按实体读 `iot_device` 会撞 `Unknown column 'credential_version'`）。
 - 回滚：`deploy/sql/rollback/2026-09-30-iot-device-credential-rollback.sql`（**不可逆**：哈希与吊销审计一并消失）。
 
 ---
@@ -101,6 +106,26 @@ UNIQUE KEY (tenant_id, device_id)
 - 「重置」的判据就是第 6/7 条：**版本 +1 且哈希换代** ⇒ 旧口令必落在 `bad-password`。
 - 「吊销」的判据是第 3 条：短路在哈希之前，即使秘密列没清干净也不会放行。
 - 校验响应**只有** `allowed/result/reason/deviceId/credentialVersion`——没有任何秘密字段。
+
+---
+
+### 4.1 `issued` / `valid` / `username` 的确切语义（独立复核 B-12 后补写）
+
+| 字段 | 判据 | 吊销后 | 从未签发 |
+|---|---|---|---|
+| `issued` | **当前是否存在凭据材料**（`credential_ref` 非空） | `false` | `false` |
+| `valid` | 已签发 **且** 未吊销 | `false` | `false` |
+| `credentialVersion` / `credentialIssuedAt` | **历史**（吊销不清除） | 保留 | 空 |
+| `credentialRevokedAt` | 吊销时刻 | 非空 | 空 |
+
+⇒ **「从未签发」与「已吊销」是可区分的**：`credentialRevokedAt != null` 即「曾签发且已吊销」；
+`issued=false` 且 `credentialRevokedAt == null` 即「从未签发」。`issued` 的语义是「当前存在凭据材料」，
+**不是**「曾经签发过」——字段名容易让人读成后者，故在此写死；若将来前端需要一眼区分，可再加
+`everIssued`（= `credentialVersion != null`），属**可选**改动（会变对外契约，需单独评估）。
+
+`GET /connection` 与 `GET /credential` 对 `username` 的口径**刻意不同**：`connection` 恒返回
+`{tenantId}.{deviceId}`（它是「设备该用什么用户名连」的答案，与是否已签发无关），
+而 `credential` 在未签发/已吊销时返回空（它描述的是「当前凭据」）。
 
 ---
 
@@ -188,3 +213,35 @@ docker exec -i ypbin-mysql sh -c 'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" ypb
 | **U3** | `password_hash`/`password_salt` 直接 import 进 EMQX 内置库的**实测** | 同上 | 口径由**已知答案单测**钉住，端到端**未验证** |
 | **U4** | 端到端越权用例（A 租户 token 访问 B 租户设备 → 拒绝） | 需要真实登录态 + 双租户数据；本机纯单测跑不了（与 M-1 同一未关闭项） | 单测覆盖「跨租户 username ⇒ device-not-found」；**HTTP 层未验证** |
 | **U5** | `@Idempotent` 的重复提交窗口在**签发**语义下是否够用 | 未实测窗口与用户重试节奏 | **未验证**（重复提交会被幂等拦截；绕过幂等连点两次会连发两次轮换） |
+
+---
+
+## 8. 独立复核（R6 L3，2026-09-27）
+
+**判定：PASS**（复核者只读自跑；变异在被复核代码的 `/tmp` 副本里做，跑完删除）。
+独立实证（复核者自跑，非本文件作者转述）：
+
+| 项 | 复核者的独立判据 |
+|---|---|
+| 明文唯一出口 | 全仓仅 `issue()` 一处 `resp.setPassword(...)`；无任何 Controller 返回 `IotDeviceCredential` 实体；不存明文 |
+| 查看/接入响应无秘密 | 4/4 绿（字段名 + JSON 键集合）；变异「加 `passwordHash` 字段」⇒ 转红 |
+| 日志无凭据 | ① 全量日志 64-hex 命中 **0**；② 43 字符口令形态命中 **0**（剔除了类名假阳性）；③ 自行从 starter 源码核实 `Include.defaultIncludes()={REQUEST_PARAM,IP,CLIENT}`（不含请求/响应体）；④ 会打响应体的全量访问日志切面生产 **0 命中**；⑤ `@Idempotent` 只写占位键、不缓存响应 ⇒ 明文不进 Redis |
+| 租户隔离 | 生产实测 `username=2.9300012`（设备属租户 1）⇒ `device-not-found`；跨租户 GET 与不存在设备**同一句提示**；`javap` 核实 starter 的 `executeWithTenant` 会覆盖外层租户并 `finally` 还原 |
+| 状态机（MP 关键点） | `javap -c` 核实 `LambdaUpdateWrapper.set` **不跳过 null**、`GlobalConfig.DbConfig` 的 `updateStrategy=NOT_NULL` ⇒ 必须走 wrapper 才能清 NULL；生产时间线实证「吊销后再签发 ⇒ 校验回 `bad-password` 而非 `revoked`」 |
+| 吊销短路 | 生产实测吊销后原因码是 `revoked` 而非 `secret-missing` ⇒ 短路在哈希比较之前 |
+| SQL / 授权 | 等价性脚本 exit 0；权限码与三行菜单一一对应；`platform_only=0` ⇒ 两授权表各 3 行；id 无冲突；门禁 6 条全绿 |
+| 变异 | 8 组（含「revoke 不清秘密」「去掉幂等早返回」「重签发带旧 revokedAt」「去掉 revoked_at 的显式 set」「把凭据表加进 ignore-tables」）全部转红 |
+
+**复核者指出、本轮已收口的点**：① 本文件此前引用的迁移文件名不存在（已改，见 §3）；
+② 两段非法用户名（如 `-1.5`、`1.5+#`）无用例钉住 `^[0-9]+\.[0-9]+$`（已补）；
+③ `verify` 是否真的在「用户名解析出的租户」上下文内查库无用例钉住（已补，见 §5 表）；
+④ `deploy/nacos/ypbin-access.yaml` 里「health 只回 status」的注释与生产不符（已改，见 `docs/DEPLOY-BACKEND.md` §5.7）。
+
+**复核者指出、本轮**未改**（已登记，理由如下）**：
+
+| # | 项 | 为什么本轮不改 |
+|---|---|---|
+| 1 | `issued` 语义易被读成「曾签发」 | 语义已在 §4.1 写死；「从未签发」与「已吊销」可由 `credentialRevokedAt` 区分。新增 `everIssued` 会变对外契约，需单独评估 |
+| 2 | 18086 `/actuator/health` 挂死（根因未定位） | 非本次引入（改前改后一致，`PROD-OPS-NOTES.md` §6.3 早有登记）；修复需先定位 HealthIndicator，属**独立缺陷**。判活请用 `/actuator/health/liveness\|readiness` |
+| 3 | `/actuator/info` 回吐 pid/工作目录/堆/GC/uptime | 与 `ypbin-iot` 的**既有口径一致**（同为 `info` 白名单内）；收窄会与 iot 不一致，属单独决策 |
+| 4 | 真库 IT 未由复核者实跑（约束禁止起容器） | 由 CI 的 `iot-integration-tests.yml` 覆盖（两个 PR 的该 job 均绿） |

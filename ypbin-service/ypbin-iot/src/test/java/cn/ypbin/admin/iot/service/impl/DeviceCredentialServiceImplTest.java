@@ -35,13 +35,18 @@ import cn.ypbin.admin.iot.model.resp.DeviceConnectionResp;
 import cn.ypbin.admin.iot.model.resp.DeviceCredentialIssuedResp;
 import cn.ypbin.admin.iot.model.resp.DeviceCredentialResp;
 import cn.ypbin.starter.core.exception.BusinessException;
+import cn.ypbin.starter.tenant.core.TenantContext;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.conditions.Wrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import java.lang.reflect.Field;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -274,11 +279,18 @@ class DeviceCredentialServiceImplTest {
         assertThat(service.verify(verifyReq("2.5", password)).getReason())
             .isEqualTo(DeviceCredentialDenyReason.DEVICE_NOT_FOUND.getCode());
 
-        // 用户名非法（含通配符 ⇒ 主题注入面）必须在解析阶段就拒绝
+        // 用户名非法必须在解析阶段就拒绝。**两类都要有**：
+        // ① 单段/无点（长度不等于 2）；② 两段但不满足 ^[0-9]+\.[0-9]+$（负号、字母、通配符）——
+        //    只测①的话，把正则放宽成 ^.*$ 也不会有用例转红（独立复核 M5 实证的缺口）
         assertThat(service.verify(verifyReq("2/5", password)).getReason())
             .isEqualTo(DeviceCredentialDenyReason.MALFORMED_USERNAME.getCode());
         assertThat(service.verify(verifyReq("svc-ingress", password)).getReason())
             .isEqualTo(DeviceCredentialDenyReason.MALFORMED_USERNAME.getCode());
+        for (String illegal : List.of("-1.5", "1.5x", "1.5+#", " 1.5", "1. 5", "+1.5")) {
+            assertThat(service.verify(verifyReq(illegal, password)).getReason())
+                .as("两段式非法用户名 %s 必须被正则拦下（不能只靠段数判断）", illegal)
+                .isEqualTo(DeviceCredentialDenyReason.MALFORMED_USERNAME.getCode());
+        }
 
         // 已吊销
         when(deviceMapper.selectById(DEVICE_ID))
@@ -301,6 +313,32 @@ class DeviceCredentialServiceImplTest {
         when(credentialMapper.selectOne(any(), anyBoolean())).thenReturn(credentialRow(1, "", "", 21L));
         assertThat(service.verify(verifyReq("1.5", password)).getReason())
             .isEqualTo(DeviceCredentialDenyReason.SECRET_MISSING.getCode());
+    }
+
+    @Test
+    @DisplayName("校验必须在「用户名解析出的租户」上下文内查库，且用后还原（独立复核 M4 缺口）")
+    void verifyMustRunInsideTheTenantParsedFromUsername() {
+        String salt = DevicePasswordHasher.newSaltHex();
+        String password = DevicePasswordGenerator.generate(32);
+        when(credentialMapper.selectOne(any(), anyBoolean())).thenReturn(credentialRow(1, salt,
+            DevicePasswordHasher.hashHex(password, salt), 41L));
+        // 设备查询发生在 verifyInTenant 内：此刻租户上下文必须是用户名里的租户（2），而不是外层（空）
+        List<Optional<Long>> seenTenants = new ArrayList<>();
+        when(deviceMapper.selectById(DEVICE_ID)).thenAnswer(invocation -> {
+            seenTenants.add(TenantContext.getTenantId());
+            return device(1, null, "emqx:ref");
+        });
+
+        DeviceCredentialVerifyResp resp = service.verify(verifyReq("2." + DEVICE_ID, password));
+
+        assertThat(resp.getAllowed()).isTrue();
+        assertThat(seenTenants)
+            .as("查库时租户上下文必须是用户名里的租户 2；去掉 executeWithTenant 会退化成「无上下文」（fail-closed 抛异常）"
+                + "或被 tenant 插件按外层上下文过滤 —— 两者都拿不到设备")
+            .containsExactly(Optional.of(2L));
+        assertThat(TenantContext.getTenantId())
+            .as("校验结束后必须还原（不得把租户泄漏给同一线程上的后续调用）")
+            .isEmpty();
     }
 
     @Test
@@ -397,10 +435,10 @@ class DeviceCredentialServiceImplTest {
      * @return 全部字符串字段值
      */
     private static List<String> secretFieldValues(IotDeviceCredential row) {
-        return java.util.Arrays.stream(IotDeviceCredential.class.getDeclaredFields())
+        return Arrays.stream(IotDeviceCredential.class.getDeclaredFields())
             .filter(field -> field.getType() == String.class)
             .map(field -> readString(field, row))
-            .filter(java.util.Objects::nonNull)
+            .filter(Objects::nonNull)
             .toList();
     }
 
