@@ -48,6 +48,42 @@ public class AiModelConfigServiceImpl implements AiModelConfigService {
     /** 向量化模型 */
     public static final String MODEL_TYPE_EMBEDDING = "EMBEDDING";
 
+    /** 连接超时（秒）——**显式**取值，禁止无超时的默认客户端（仓内铁律）。 */
+    static final int CONNECT_TIMEOUT_SECONDS = 5;
+    /** 读超时（秒）——同上，显式取值。 */
+    static final int READ_TIMEOUT_SECONDS = 15;
+
+    /**
+     * 共享的 HTTP 客户端（**进程内单例，必须复用**）。
+     *
+     * <p><b>为什么是静态单例而不是每次调用 {@code HttpClient.newBuilder()} 新建</b>：
+     * JDK 的 {@code HttpClient} 自带连接池与 selector 线程；每次新建等于**丢掉连接池**，
+     * 还会让超时/协议策略散落到各调用点（历史上 {@code testConnection} 就是每次新建）。
+     * 抽到一处后，"超时是多少、用哪个协议版本"只有一个答案。</p>
+     *
+     * <p><b>为什么显式指定 HTTP/1.1</b>（与 {@code ypbin-iot} 的 {@code EmqxRestAdminClient} 同一个坑）：
+     * JDK 的默认是 HTTP/2（明文下走 h2c upgrade）。实测（2026-09-27，同款 JDK 客户端对 EMQX）：
+     * <b>带体 POST 作为某条新连接上的第一个请求</b>时，h2c upgrade 会失败
+     * （{@code java.io.IOException: EOF reached while reading}），而强制 HTTP/1.1 正常。
+     * 本类的连通性测试恰好就是"新连接 + 带体 POST"，且 {@code baseUrl} **允许用户填明文 {@code http://}**
+     * （本机模型/内网网关常见）⇒ 不指定版本时，这类地址会踩同一个坑。
+     * 对 HTTPS 而言默认值本来也能靠 ALPN 协商正确，但**统一固定 1.1** 少一类未知、且对
+     * OpenAI 兼容接口完全够用（判据见 {@code deploy/emqx/diagnose-emqx-admin-h2c/}）。</p>
+     */
+    private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
+        .connectTimeout(Duration.ofSeconds(CONNECT_TIMEOUT_SECONDS))
+        .version(HttpClient.Version.HTTP_1_1)
+        .build();
+
+    /**
+     * 取共享客户端（包级可见，仅为让测试能断言"同一个实例 + 协议版本/超时已显式设置"，不做真实网络调用）。
+     *
+     * @return 进程内共享的 {@link HttpClient}
+     */
+    static HttpClient httpClient() {
+        return HTTP_CLIENT;
+    }
+
     private final AiModelConfigMapper modelConfigMapper;
     private final AiKeyCipher keyCipher;
 
@@ -177,14 +213,12 @@ public class AiModelConfigServiceImpl implements AiModelConfigService {
         String apiKey = keyCipher.decrypt(config.getApiKey());
         long start = System.currentTimeMillis();
         try {
-            HttpClient client = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(5))
-                .build();
+            HttpClient client = httpClient();
             String payload = """
                 {"model":"%s","messages":[{"role":"user","content":"ping"}],"max_tokens":5}
                 """.formatted(config.getModelName());
             HttpRequest.Builder builder = HttpRequest.newBuilder()
-                .timeout(Duration.ofSeconds(15))
+                .timeout(Duration.ofSeconds(READ_TIMEOUT_SECONDS))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8));
             if (apiKey != null && !apiKey.isBlank()) {
