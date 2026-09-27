@@ -25,7 +25,7 @@
 
 1. **「没数据」与「读不到」必须分清**：`TimeSeriesQueryService.query` 在时序库不可用时是**抛异常**而非返回空列表（仓内既有纪律，注释原话「空列表会被读成『这段时间没数据』」），评估器若把「查询失败」当成「没有越界」就会**静默漏报**。这是本设计里最容易出错、也最难在事后发现的一点。**恢复只能由「读到合格的未越界值」驱动**（§2.2.4）。
 2. **点位的 `value` 是字符串**（`TimeSeriesPoint.value` 是 `String`），阈值比较必须显式数值化；且**非数值 / 坏质量 / 陈旧**这三类「不可判定」**不得**当作 0、**不得**当作越界、**不得**当作恢复，且必须有指标可见（§2.2.3）。
-3. **去重的唯一索引极易写反**（🔴 本文档初稿就写反过，已修正）：MySQL 唯一索引对**含 NULL 的行不做约束**，所以**不能**把 `resolved_ts` 放进唯一索引——那恰好把「活动告警」（`resolved_ts IS NULL`）这一批**放走**，去重完全失效。正确做法是用「只在活动期非 NULL」的 `active_dedup_key` 列（§2.1 表 C）。**写反了不会报错，只会重复告警刷屏**，因此必须有 §3.3-U5 那样的变异哨兵用例。
+3. **去重的唯一索引极易写反**（🔴 本文档初稿就写反过，已修正）：MySQL 唯一索引对**含 NULL 的行不做约束**，所以**不能**把 `resolved_ts` 放进唯一索引——那恰好把「活动告警」（`resolved_ts IS NULL`）这一批**放走**，去重完全失效。正确做法是用「只在活动期非 NULL」的 `active_dedup_key` 列（§2.1 表 C）。**该结论已在本机用 `mysql:8.4` 实测两个方向确认**（见 §2.1），不是照文档记忆断言。**写反了不会报错，只会重复告警刷屏**，因此必须有 §3.3-U5 那样的变异哨兵用例。
 
 ---
 
@@ -231,6 +231,18 @@ MySQL 的唯一索引对**含 NULL 的行不做约束**——只要索引涉及�
 > 替代写法：用生成列 `GENERATED ALWAYS AS (IF(resolved_ts IS NULL, <规范化去重键>, NULL))` 直接参与唯一索引，可以不新增显式列；但**显式列更容易读懂、也更容易写用例**，本设计选显式列。
 >
 > ⚠️ 该约束的**正确性必须由用例钉住**（含并发插入、以及「恢复后再次越界 ⇒ 允许新建」两个方向）。它依赖数据库对 NULL 的处理，属**隐式契约**：写反了不会有任何编译/类型错误，只会静默失去去重能力——**而失去去重能力的表现是「重复告警刷屏」，不是报错**。
+
+**已在本机实测确认（不是照文档记忆断言）**：用与本项目 compose 同一个镜像 `mysql:8.4`（实测 `mysqld 8.4.11`）在一次性容器里跑了一组最小实验，两个方向都验到了：
+
+| 实验 | 结果 | 结论 |
+|---|---|---|
+| 错误写法：`uk(tenant_id, dedup_key, resolved_ts)`，连插两条同键、`resolved_ts` 均为 `NULL` | **两条都插入成功**（活动行 = 2） | ❌ 证实该写法**完全不放约束**，去重失效 |
+| 正确写法：`uk(tenant_id, active_dedup_key)`，`active_dedup_key='k'` 连插两条 | 第 2 条报 **`ERROR 1062 (23000): Duplicate entry '1-k' for key 'inst.uk_alert_active'`** | ✅ 活动期内**同键至多一条** |
+| 把某条 `state` 置 `RESOLVED` 且 `active_dedup_key=NULL`，再插入同键活动行 | **允许**（total=2、active=1） | ✅ 恢复后可重开，历史行不受约束（满足「清除 ≠ 删除」） |
+| 恢复后已有一条活动行，再插同键活动行 | 报 `ERROR 1062` | ✅ 重开后仍然只允许一条活动告警 |
+
+> 命令形态（可复现）：`docker run --rm -v <sql>:/t.sql:ro mysql:8.4 sh -c 'mysqld --initialize-insecure --datadir=/d; mysqld --datadir=/d --socket=/d/m.sock --skip-networking & …; mysql --socket=/d/m.sock -uroot < /t.sql'`
+> 注意 socket 要放在可写目录（放 `/` 会因 `Could not create unix socket lock file /s.lock` 启动失败）。
 
 **索引建议**：`(tenant_id, device_id, start_ts)`；`(tenant_id, state, start_ts)`；`(tenant_id, severity, state)`。
 
