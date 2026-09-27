@@ -1,0 +1,17 @@
+[Unit]
+Description=每 2 分钟触发一次「EMQX 隧道停摆」判据
+Documentation=file:///opt/ypbin/ypbin-iot/deploy/emqx/README.md
+
+[Timer]
+# 「每 2 分钟」是**诚实**的：脚本单次运行 ≈ 60s（L4 采样窗口）+ 4 次快速检查，
+# 远小于 120s，不会被 systemd 因「上一次还在跑」而跳过（与 feeder-watch.timer 的
+# 17 分钟窗口不同，这里不存在「名义 2 分钟、实际 20 分钟」的差异）。
+OnCalendar=*:0/2
+# 宕机/关机错过的触发在开机后补跑一次
+Persistent=true
+Unit=emqx-tunnel-watch.service
+# 精确到秒的随机抖动，避免与其它定时任务同一秒撞车
+RandomizedDelaySec=10
+
+[Install]
+WantedBy=timers.target
