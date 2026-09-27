@@ -9,6 +9,8 @@
 > 四轮外委复核后 PASS）；本仓已同步升级 starter 版本至 3.5.0 并删除 SF-1 的临时防线 `IotPermissionGuard`。
 > **SF-4 为新增未关闭项（2026-09-25，高｜可用性）：3.5.0 引入的 `IdentityStpLogic` 让 identity 模式下的 auth 登录结构性失败。**
 > **SF-5 为新增未关闭项（2026-09-25，高｜安全）：下游 `IdentityHeaderFilter` 不校验网关身份头签名（`X-Gateway-Signed`）⇒ 直连下游端口即可伪造身份、越过网关鉴权。**
+> **UP-3 为新增未关闭项（2026-09-27，高｜数据正确性）：`ypbin-iot-starter` 的 TCP 模块没有 `payload-format`、
+> 也没有宿主可插的解码 SPI ⇒ 透传帧的原始 `byte[]` 落库成 `[B@<hash>`，曲线画不出来。**
 > starter 侧修复的**目标版本是 3.5.1**（starter 工作树当前 `revision` = `3.5.1-SNAPSHOT`；本仓当前用 3.5.0）。
 
 ---
@@ -766,3 +768,62 @@ $ ssh -i ~/.ssh/id_ed25519_iot_test -p 22 root@113.142.217.58 \
 - **框架侧（本条目）**：可配的建链超时默认值 + 非阻塞/带超时的批量绑定 + 偏差指标。
 - **access 侧（本仓 `IOT-ROADMAP.md`）**：`HttpDeviceSpecSource.findConnection` **固定传 `null`** 导致
   即使框架支持也没有配置入口；以及把 `startCollecting` 从续约调度线程上移开的接线改动。
+
+---
+
+## UP-3（高｜数据正确性）`ypbin-iot-starter`：TCP 模块无 `payload-format`、也无宿主可插的解码 SPI，透传帧的原始 `byte[]` 直接落库成 `[B@<hash>`
+
+> 提出时间：2026-09-27（生产真值定位）｜定位：**框架侧（`ypbin-iot-starter` 的 `ypbin-iot-protocol-tcp` +
+> `ypbin-iot-core` 的扩展点缺失）**
+> 状态：⬜ 未修（本仓已加**过渡解码层**绕开，见文末；过渡层有明确替换路径）
+> issue：**https://github.com/wenbin-wb/ypbin-iot-starter/issues/13**（标题与本节同，2026-09-27 已开）
+
+### 现象
+用**纯 TCP 透传**接入的设备（协议码 `tcp`）采到的读数，值是 `[B@<identityHash>`（例如 `[B@2e2bd4eb`），
+落到 IoTDB 的 `value_text`；`value_double` 恒为 `null` ⇒ 历史曲线取不到数值点，**画不出折线**。
+链路本身正常（`quality=GOOD`、时间戳连续、断档/可用率判定不受影响），所以这是**静默的语义丢失**：
+采集「成功」、落库「成功」，但数据没有值语义。
+
+### 证据（一手，均可复现）
+1. **字节来源在框架侧**：`ypbin-iot-protocol-tcp` 的 `TcpSession#dispatch` 把整帧原始字节直接作为值：
+   `PointValue.good(address, payload, context.clock().instant())`（tag `v0.1.0` = `878a493`，
+   `ypbin-iot-protocol-tcp/src/main/java/cn/ypbin/iot/protocol/tcp/TcpSession.java` 第 **295** 行；
+   `payload` 来自第 221 行注册的 `Consumer<byte[]>` 帧监听器）。类注释也写明「value 为 `byte[]`」。
+2. **姊妹模块有、TCP 没有**：`ypbin-iot-protocol-mqtt` 有 `MqttPayloadFormat`（`TEXT`/`NUMBER`/`BINARY`，
+   可用 `ypbin.iot.protocol.mqtt.payload-format` 配置），`MqttSession#decode` 会在协议层解码，
+   `text` 模式还用**严格 UTF-8**（非法字节 ⇒ BAD 值，而不是 U+FFFD 脏串）。
+   TCP 模块**既没有该配置项，也没有等价的宿主钩子**（`ypbin-iot-core` 全文无 decode/codec SPI），
+   宿主只能在 `DataListener` 里自己解——而那时**点位声明的解码参数（键/寄存器类型）并没有随 `PointValue` 传下来**。
+3. **落库形态**：生产 IoTDB `SELECT … FROM iot.reading WHERE device_id='9300012'` ⇒
+   `value_text='[B@2e2bd4eb'`、`value_double=null`；即库里是**字面文本**，不是「读出来才变数组」。
+4. 生产 access 容器 fat jar 内含 `ypbin-iot-protocol-tcp-0.1.0.jar`（`docker exec … grep -a` 实测）。
+
+### 影响
+- **所有**用 TCP 透传接入的设备，取值一律无语义（数值、布尔、文本全部退化成 `[B@…`）；
+- 时序库只能落文本列 ⇒ 曲线/聚合/阈值告警全部不可用（前端已如实提示「读数为文本，无法绘制曲线」）；
+- 由于落库「成功」且质量码 GOOD，**没有任何失败信号**，只有看数据的人才会发现——属静默降级；
+- 下游要把字节解成值，只能各自在宿主里重复实现（本仓的过渡层就是这一份重复）。
+
+### 期望能力（二选一，推荐 A；两条都要满足「解码失败显式可见」）
+- **A（推荐，与 MQTT 对齐）** 给 TCP 模块加 `ypbin.iot.protocol.tcp.payload-format`：
+  `text`（严格 UTF-8，非法 ⇒ BAD + 消息键）/`number`（解析失败 ⇒ BAD）/`binary`（原样交付 `byte[]`，默认值保持向后兼容）。
+  若还要覆盖「一帧多字段」，再加一个**按点位取字段**的宿主钩子（例如 `SubscribeRequest`/`PointValue` 上带
+  `valueSelector`），让宿主声明「这个点取帧里的哪个键」而不是自己猜。
+- **B** 在 `ypbin-iot-core` 增 **值解码 SPI**（如 `ValueDecoder`：协议模块在交付前回调宿主），
+  语义与 A 等价但更通用，可同时惠及 Modbus/OPC UA 的寄存器级解码。
+- 无论哪条：解码失败必须产出 **BAD 质量 + 明确消息键**（而不是把畸形内容当 GOOD 交付）。
+
+### 验收标准
+1. `payload-format=text` 时，合法 UTF-8 文本帧交付 `String`；含非法字节的帧交付 **BAD**（不得出现 U+FFFD 脏串）；
+2. `payload-format=number` 时，`23.5` 交付数值、非数值交付 **BAD**；默认值（不配置）与 0.1.0 行为**逐字一致**（向后兼容）；
+3. `payload-format=binary` 时原样交付 `byte[]`（现有宿主不受影响）；
+4. 有单测钉住上面三条，且做**变异验证**（把严格 UTF-8 换回 `new String(bytes, UTF_8)` 时用例必须转红）；
+5. 宿主（本仓 access）删除过渡解码层后，`iot.reading.value_double` 对新采集行有值、`/series` 返回数值点（端到端）。
+
+### 会被替换掉的临时实现
+本仓 access 的过渡解码层：`cn.ypbin.admin.access.decode.ValueDecoder` + `TextFrameValueDecoder`
+（按协议码 `tcp` 选解码器，按 `iot_property.data_type` 与点位映射的 `raw_address`（帧键）产出规范值；
+失败 ⇒ `iot.access.decode.failure{reason=…}` + WARN + 丢弃），以及 `PointMappingDataListener` 里的解码分支。
+**替换动作与生效范围见 `docs/VALUE-DECODE-DESIGN.md` §5**；框架能力就位后本层整体删除，
+`raw_address` 作为帧键的约定保留。
+

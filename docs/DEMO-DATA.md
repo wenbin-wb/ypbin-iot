@@ -19,9 +19,10 @@
 |---|---|---|
 | 可用率（24h） | `1.000000` | 已低于 1（实测 0.996470，随滑动窗口变化） |
 | 断档事件 | 0 条 | **4 条**由真扫描开/闭合（`NO_GOOD_DATA`） |
-| Redis `iot:latest:1:9300012` 的 `temperature` | 种子曲线值 | 被真实链路覆盖为 **`[B@<hash>`**（TCP 帧是原始 `byte[]`，access 不做解码 ⇒ **无值语义**；**只影响展示与曲线，不影响断档/可用率判定**，判定只看 quality 与时刻） |
+| Redis `iot:latest:1:9300012` 的 `temperature` | 种子曲线值 | 被真实链路覆盖。**2026-09-27 起是解码后的数值**（如 `23.5`）：access 新增解码层按点位映射的帧键（`raw_address='TEMP'`）与物模型类型（`decimal`）解码 TCP 文本帧；**在此之前**是 `[B@<hash>`（无值语义）。取值只影响展示与曲线，**不影响**断档/可用率判定（判定只看 quality 与时刻）。见 `docs/VALUE-DECODE-DESIGN.md` |
 | Redis 另 3 个点位（humidity/serialNo/demoBoundary） | — | 仍是 09-25 种子值（TCP 只交付订阅地址列表的**第 0 个**点位） |
 | `device_liveness.last_good_at` | — | 当天持续前进 |
+| IoTDB `iot.reading` 该设备 `temperature` | 种子曲线（数值） | **两段**：`2026-09-25` 的数值种子行（未动）+ 真链路新行。真链路新行在 2026-09-27 修复前是 `[B@<hash>`（文本列），**修复后是 `value_double=23.5`**；那 **24127 行**历史垃圾已按精确时间范围清理（回滚物 `/root/garbage-backup.tsv`，理由与核对见 `docs/ACCESS-ENABLE.md` §6.3.1 ④）——不清理则 UI 默认「近 24h + limit 1000（升序取最早）」窗口内全是垃圾，曲线仍画不出 |
 | 断档事件总数（全演示设备） | 10 条 | **14 条** |
 
 **三点务必注意**：
