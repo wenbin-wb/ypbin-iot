@@ -38,8 +38,8 @@ import org.springframework.stereotype.Service;
  * {@link TenantContext#executeWithTenant} 绑定，让插件照常追加 {@code tenant_id} 条件——
  * 既不绕过隔离，也不需要手写 tenant_id 过滤。</p>
  *
- * <p>查询次数与设备数无关：设备 1 次、点位 1 次（按 deviceId 批量 IN）、属性标识 1 次（按主键批量），
- * 空集合一律短路，绝不发空 IN。</p>
+ * <p>查询次数与设备数无关：设备 1 次、点位 1 次（按 deviceId 批量 IN）、属性 1 次（按主键批量，
+ * 取标识与数据类型），空集合一律短路，绝不发空 IN。</p>
  *
  * <p><b>下发的是属性标识（规范坐标）</b>：{@code AccessPointMappingDto.identifier} 是采集侧上报时用的
  * 坐标（2026-09-26 统一，见 {@code docs/IOT-ROADMAP.md} 四点十七补充段）；{@code propertyId}
@@ -96,18 +96,27 @@ public class DeviceSpecServiceImpl implements DeviceSpecService {
             .stream()
             .collect(Collectors.groupingBy(IotPointMapping::getDeviceId));
 
-        Map<Long, String> identifierByProperty = loadPropertyIdentifiers(mappingsByDevice);
+        Map<Long, IotProperty> propertyById = loadProperties(mappingsByDevice);
 
         List<AccessDeviceSpecResp> result = new ArrayList<>(devices.size());
         for (IotDevice device : devices) {
             result.add(toSpec(tenantId, device,
-                mappingsByDevice.getOrDefault(device.getId(), List.of()), identifierByProperty));
+                mappingsByDevice.getOrDefault(device.getId(), List.of()), propertyById));
         }
         return result;
     }
 
-    /** 批量取属性标识：空集合短路，避免空 IN。 */
-    private Map<Long, String> loadPropertyIdentifiers(Map<Long, List<IotPointMapping>> mappingsByDevice) {
+    /**
+     * 批量取属性行（标识 + 数据类型）：空集合短路，避免空 IN。
+     *
+     * <p>为何连 {@code dataType} 一起下发：采集侧解码**必须**按物模型类型决定规范值形态
+     * （数值/布尔/文本），否则只能靠帧内容猜类型——那会把编号类文本写进数值列（或反之）。
+     * 与标识同一次查询，不额外增加查询次数。</p>
+     *
+     * @param mappingsByDevice 设备 → 点位映射
+     * @return 属性主键 → 属性行
+     */
+    private Map<Long, IotProperty> loadProperties(Map<Long, List<IotPointMapping>> mappingsByDevice) {
         List<Long> propertyIds = mappingsByDevice.values().stream()
             .flatMap(List::stream)
             .map(IotPointMapping::getPropertyId)
@@ -116,16 +125,16 @@ public class DeviceSpecServiceImpl implements DeviceSpecService {
         if (propertyIds.isEmpty()) {
             return Map.of();
         }
-        Map<Long, String> identifiers = new HashMap<>(propertyIds.size());
+        Map<Long, IotProperty> properties = new HashMap<>(propertyIds.size());
         for (IotProperty property : iotPropertyMapper.selectBatchIds(propertyIds)) {
-            identifiers.put(property.getId(), property.getIdentifier());
+            properties.put(property.getId(), property);
         }
-        return identifiers;
+        return properties;
     }
 
     private AccessDeviceSpecResp toSpec(Long tenantId, IotDevice device,
                                         List<IotPointMapping> mappings,
-                                        Map<Long, String> identifierByProperty) {
+                                        Map<Long, IotProperty> propertyById) {
         AccessDeviceSpecResp spec = new AccessDeviceSpecResp();
         String deviceId = String.valueOf(device.getId());
         spec.setDeviceId(deviceId);
@@ -140,7 +149,7 @@ public class DeviceSpecServiceImpl implements DeviceSpecService {
         List<AccessPointMappingDto> points = new ArrayList<>(mappings.size());
         int orphanMappings = 0;
         for (IotPointMapping mapping : mappings) {
-            AccessPointMappingDto point = toPoint(mapping, identifierByProperty);
+            AccessPointMappingDto point = toPoint(mapping, propertyById);
             if (point.getIdentifier() == null || point.getIdentifier().isBlank()) {
                 orphanMappings++;
                 continue;
@@ -157,10 +166,12 @@ public class DeviceSpecServiceImpl implements DeviceSpecService {
         return spec;
     }
 
-    private AccessPointMappingDto toPoint(IotPointMapping mapping, Map<Long, String> identifierByProperty) {
+    private AccessPointMappingDto toPoint(IotPointMapping mapping, Map<Long, IotProperty> propertyById) {
         AccessPointMappingDto point = new AccessPointMappingDto();
         point.setPropertyId(String.valueOf(mapping.getPropertyId()));
-        point.setIdentifier(identifierByProperty.get(mapping.getPropertyId()));
+        IotProperty property = propertyById.get(mapping.getPropertyId());
+        point.setIdentifier(property == null ? null : property.getIdentifier());
+        point.setDataType(property == null ? null : property.getDataType());
         point.setAddress(mapping.getRawAddress());
         point.setAddressType(mapping.getAddressType());
         point.setIntervalMs(mapping.getPollIntervalMs());

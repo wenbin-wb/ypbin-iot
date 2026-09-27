@@ -9,6 +9,7 @@
  */
 package cn.ypbin.admin.access.link;
 
+import cn.ypbin.admin.access.decode.ValueDecoder;
 import cn.ypbin.admin.access.egress.AccessReadingSink;
 import cn.ypbin.admin.iot.device.AccessPointMappingDto;
 import cn.ypbin.iot.core.model.DeviceSpec;
@@ -58,6 +59,11 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
     private final ObjectMapper objectMapper;
     private final AccessReadingSink readingSink;
 
+    /** 原始值解码器（按协议码命中；见 {@code docs/VALUE-DECODE-DESIGN.md}）。 */
+    private final List<ValueDecoder> valueDecoders;
+
+    private final MeterRegistry meterRegistry;
+
     /**
      * 已订阅的**会话实例**（按 deviceId）。会话实例变了（框架重连会新建会话）就必须重订阅，
      * 否则表现为「链路恢复但数据不再上报」——这是框架不给宿主发重连事件时的唯一可靠判据。
@@ -89,10 +95,13 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
 
     public AccessSubscriptionPlanner(Supplier<Map<String, DeviceSession>> sessions,
                                      ObjectMapper objectMapper, AccessReadingSink readingSink,
-                                     MeterRegistry meterRegistry, Clock clock) {
+                                     List<ValueDecoder> valueDecoders, MeterRegistry meterRegistry,
+                                     Clock clock) {
         this.sessions = sessions;
         this.objectMapper = objectMapper;
         this.readingSink = readingSink;
+        this.valueDecoders = valueDecoders == null ? List.of() : List.copyOf(valueDecoders);
+        this.meterRegistry = meterRegistry;
         this.clock = clock;
         // 指标前缀统一为 `iot.access.*`（与既有的 `iot.access.lease.*` 一致；
         // S5 引入时用的 `ypbin.access.*` 是同一批 access 指标，混用会让大盘上出现两套前缀）
@@ -150,7 +159,8 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
                 : new SubscribeRequest(addresses, device.pollInterval(), device.pollInterval(), null,
                     Map.of());
             PointMappingDataListener listener = new PointMappingDataListener(device.deviceId(),
-                pollIntervalMs(device), points, readingSink);
+                device.protocol().value(), pollIntervalMs(device), points, readingSink, valueDecoders,
+                meterRegistry);
             // ⚠️ S5 修复：**订阅成功之后**才记录跟踪。
             //    此前是先写 `subscribedSessions` 再 subscribe ⇒ 异步失败时跟踪表已记上「已订阅」，
             //    对账会认为无需重试 ⇒ 该设备**永久停止采集**且只有一行 ERROR 日志。
