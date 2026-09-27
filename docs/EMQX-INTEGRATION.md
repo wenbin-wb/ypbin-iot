@@ -406,6 +406,40 @@ jar 由**合并后的 main**（`0b6471f`）本地构建后上传部署（生产�
 | **U-B4** | 自动重试 | **刻意不做**（设备侧不保证幂等）⇒ 只有人工重发 |
 | **U-B5** | 多副本下的超时扫描竞争 | 扫描是跨租户批量 UPDATE（按主键），多副本同时跑理论上会重复计数指标（状态转换本身幂等）；单副本部署下不触发 |
 
+### 6.2.6 🔴 已知陷阱（**已修**）：EMQX 重建/重启后，「空闲期首次下发」必失败且**看起来像管理面不可达**
+
+**现象**（2026-10-03 实测）：重建 EMQX 容器后，平台下发命令**一律** `failed / EMQX_ERROR / EMQX 管理面不可达`。
+极具误导性——**管理面其实是健康的**：同一容器里 `curl` 正常、隧道（`127.0.0.1:18093` 与 `172.20.0.1:18093`）正常、
+`import_users` 设备账号同步也正常。**只有平台自己的 JDK 客户端会失败**，很容易被误判成网络/隧道/暴露面问题。
+
+**根因**：平台 `EmqxRestAdminClient` 用 JDK `HttpClient` 的**默认 HTTP/2**。当**带体 POST**
+（`POST /api/v5/publish`）是某条**新连接上的第一个请求**时，h2c upgrade 握手会被 EMQX/Cowboy 断开，
+抛 `java.io.IOException: EOF reached while reading`（`Http2Connection$Http2TubeSubscriber`）
+⇒ 本类映射成 `UNREACHABLE`。EMQX 重建/重启会**清掉客户端的连接池**，于是"重建后第一次下发"正好是这个形态。
+
+**判据（可复跑，只读、只发无人订阅的诊断主题）**：
+
+```bash
+bash deploy/emqx/diagnose-emqx-admin-h2c/run.sh \
+     --prod-ssh "root@113.142.217.58 -i ~/.ssh/id_ed25519_iot_test"
+```
+
+实测：HTTP/2 直接 POST `/api/v5/publish` = **3/3 EOF**；强制 HTTP/1.1 = **3/3 HTTP 202**；
+先发一个**无体** `GET /status` 把 h2c 连接建起来再 POST = **3/3 HTTP 202**。
+
+**已修**：`EmqxRestAdminClient` 构造里显式 `.version(HttpClient.Version.HTTP_1_1)`（见该类内注释）。
+防回归：`EmqxRestAdminClientTest#httpClientMustBeConfiguredForHttp11`（配置级）与
+`#bodyCarryingPostOnFreshConnectionMustNotAttemptH2cUpgrade`（**线上报文级**：断言首个带体 POST 不带
+`Upgrade: h2c` / `HTTP2-Settings` 头——只看 `exchange.getProtocol()` 会恒真假绿，因为 JDK 内建
+`HttpServer` 只用 1.1 应答）。
+
+**运维含义（修复落地前）**：**重建/重启 EMQX 后，平台的下行发布在"连接空闲后第一次发布"时会失败**；
+重启 `ypbin-iot` **不能**恢复（会重新协商 h2c）。修复落地后不再有这个窗口。
+
+**为什么选"固定 HTTP/1.1"而不是重试/预热**：重试只是掩盖（每次新建连接的第一次带体请求仍失败）、
+预热只是碰巧（依赖连接存活时间，空闲后照样失败且每次多一次往返）；固定 1.1 与 EMQX REST 自身的
+HTTP/1.1 语义一致，且已由上述判据证明 3/3 成功。
+
 ---
 
 ## 7. 回滚
