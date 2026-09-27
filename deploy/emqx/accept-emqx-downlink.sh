@@ -5,6 +5,7 @@
 # 在**运维机**上运行。**五条**判据（①–⑤）：
 #   ① 在线：下发 → 实例 sent（emqx_message_id 非空）→ 模拟设备**真收到**（打印 payload）→ 回执 code=0
 #          → 实例 succeeded、reply_payload 含设备 data/ts、finished_at 为平台时间
+#          （emqx_message_id 只作**信息项**：EMQX 响应体的 id 解析是尽力而为，状态码才定成败）
 #   ② 幂等：同一回执重投 ⇒ duplicated、实例状态不变、iot.command.reply.duplicated +1
 #   ③ 设备未连：无订阅者时下发 ⇒ **立即** failed/NO_SUBSCRIBER（记录耗时，应远小于超时）
 #   ④ 超时：设备连着但不回执 ⇒ 扫描在 timeout_ms 后置 timeout（原因码 TIMEOUT）
@@ -233,7 +234,7 @@ FORGE_DELTA=$(( ${FORGE_AFTER:-0} - ${FORGE_BEFORE:-0} ))
 
 echo "=== 收尾：删除两台的临时文件（生产机的 /tmp/dup.cfg 里有内部凭证，必须一起清） ==="
 mwr "shred -u $MW_PW_FILE 2>/dev/null || rm -f $MW_PW_FILE; rm -f $TMP.listen $TMP.silent; echo '  ·  中间件机已清理'" || bad "中间件机清理失败"
-prodr "shred -u /tmp/dup.cfg /tmp/dup.json /tmp/cmd.json /tmp/issue.json 2>/dev/null || rm -f /tmp/dup.cfg /tmp/dup.json /tmp/cmd.json /tmp/issue.json; ls /tmp/dup.cfg /tmp/cmd.json /tmp/issue.json 2>/dev/null >/dev/null && exit 1; echo '  ·  生产机已清理（临时请求体与含内部凭证的 curl 配置已删）'" \
+prodr "shred -u /tmp/dup.cfg /tmp/dup.json /tmp/cmd.json /tmp/issue.json 2>/dev/null || rm -f /tmp/dup.cfg /tmp/dup.json /tmp/cmd.json /tmp/issue.json; for f in /tmp/dup.cfg /tmp/dup.json /tmp/cmd.json /tmp/issue.json; do [ -e \"\$f\" ] && exit 1; done; echo '  ·  生产机已清理（临时请求体与含内部凭证的 curl 配置已删）'" \
   && ok "生产机临时文件已清理" || bad "生产机仍有临时文件（含 X-Internal-Token 的 curl 配置必须删除）"
 
 echo

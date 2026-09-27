@@ -299,6 +299,10 @@ bash deploy/emqx/accept-emqx-ingress.sh \
 `{"requestId":…,"properties":["temperature"]}`（**空数组 = 全部可读属性**）；`service_call` →
 `down/service/{identifier}` + `{"requestId":…,"params":{…}}`。`qos=1`、`retain=false`（设计 F32 口径）。
 
+**报文形态（实测更正）**：`params`/`data` 在报文里都是 **JSON 值**（线上故障实证：声明成 `String` 会让发对象的客户端得到
+`R.code=500`）⇒ Java 侧用 `Object` 接收、由平台重新序列化（数字/空白归一，语义等价）；`params` **必须是对象**
+（否则明确业务错误），`data` 原样存储不解析（字符串就按字符串存）。
+
 **校验时点**：一切校验都在 **publish 之前**——设备存在性 → 端点字段（`writeDesired=true` 本轮**显式拒绝**并指引改用
 既有 `PUT /devices/{id}/shadow`；params ≤64KB 且必须是 JSON 对象）→ 物模型（标识必须在该产品物模型内；
 属性设置要求 `accessMode ∈ {W,RW}`、读属性要求 `∈ {R,RW}`）→ 标识白名单（`PropertyIdRules`，防**主题注入**）。

@@ -769,6 +769,7 @@ stateDiagram-v2
 | **B6** | **下行 payload 上限 64KB**（与入站报文体同口径）；**一切校验必须在 publish 之前**完成。 |
 | **B7** | **超时扫描**：默认超时（`ypbin.emqx.default-command-timeout-ms`，默认 30000ms）**不小于**入站动作的 `request_ttl=30s`，周期与批量上限可配；**不自动重试**。`202 = No matched subscribers` ⇒ **立即**判 `failed/NO_SUBSCRIBER`（文案"设备未连接"），不等超时。 |
 | **B8** | 状态机**六态穷举**（含非法转换被拒）；`failed`/`timeout` 可被**人工重发**重新打开（同 `requestId`、`retry_count+1`），`succeeded`/`cancelled` 不可。 |
+| **B10** | **`params`/`data` 的形态与再序列化**：两者在报文里都是 **JSON 值**（对象/数组/标量），Java 侧以 `Object` 接收后由平台**重新序列化**（数字/空白会归一，如 `1.50`→`1.5`，语义等价）。`params` 经平台校验**必须是 JSON 对象**（否则明确业务错误，不是 500）；`data` **原样存储不解析**（设备发成 JSON 字符串时就按字符串存）。 |
 | **B9** | **回执幂等**：按 `(tenant_id, request_id)` CAS 更新（只从 `pending`/`sent` 出发）；`pending` 也可直接被回执推进（平台"插 pending → 投递 → 改 sent"的窗口内设备可能已回执，不接受会出现**假失败**）。 |
 
 ---

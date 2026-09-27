@@ -13,12 +13,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
 import cn.ypbin.admin.iot.command.CommandReplyReq;
+import cn.ypbin.admin.iot.model.req.CommandSendReq;
 import cn.ypbin.admin.iot.model.req.CommandQuery;
 import cn.ypbin.admin.iot.model.req.CommandSendReq;
 import cn.ypbin.starter.log.annotation.Log;
 import java.lang.reflect.Method;
+import java.util.Map;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import tools.jackson.databind.ObjectMapper;
 
 /**
  * 在线调试端点的**权限码与例外范围**门禁。
@@ -77,6 +80,23 @@ class IotCommandControllerGateTest {
             assertThat(method.getReturnType().getSimpleName())
                 .as("%s 必须返回 R 信封", method.getName()).isEqualTo("R");
         }
+    }
+
+    @Test
+    @DisplayName("线上报文形态必须能被 Jackson 绑定：params 是 JSON **对象**，绑定后是 Map（不是 String）")
+    @SuppressWarnings("unchecked")
+    void paramsMustBindAsJsonObject() {
+        // 生产端到端实测踩过：DTO 的 params 声明成 String 时，客户端发对象 ⇒ MismatchedInputException ⇒ R.code=500。
+        // 这条用例走**真实绑定层**（此前所有用例都把 Map 直接交给服务，绕过绑定 ⇒ 抓不住这类缺陷）。
+        CommandSendReq req = new ObjectMapper().readValue(
+            "{\"kind\":\"property_set\",\"identifier\":\"temperature\",\"params\":{\"value\":25.0}}",
+            CommandSendReq.class);
+        assertThat(req.getParams()).isInstanceOf(Map.class);
+        assertThat((Map<String, Object>) req.getParams()).containsEntry("value", 25.0d);
+        CommandReplyReq reply = new ObjectMapper().readValue(
+            "{\"deviceId\":9300012,\"requestId\":\"cmd-1\",\"code\":0,\"data\":{\"applied\":26.5}}",
+            CommandReplyReq.class);
+        assertThat(reply.getData()).isInstanceOf(Map.class);
     }
 
     @Test
