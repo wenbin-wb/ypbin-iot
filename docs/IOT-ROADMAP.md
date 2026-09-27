@@ -854,6 +854,47 @@ SQL 文本门禁 + `executeIgnore` 源码门禁都钉住了这两条约束（`Av
 **IoTDB 容器 IT 本机可跑**（Docker + `apache/iotdb:2.0.11-standalone` 已实测），真库结论以**本机真跑 + CI** 双证据为准，
 覆盖不到的部分照上面的「仍未验证」逐条如实标注。
 
+### 四点二十一、协议侧读数解码：TCP 文本帧 → 规范值（2026-09-27，**过渡实现 + 反哺 starter**）
+
+**缺陷**：纯 TCP 透传设备的读数落库为 `[B@<hash>`（`value_text`），曲线画不出。
+**归属（一手核实）**：字节来自 **starter** 的 `ypbin-iot-protocol-tcp`——`TcpSession#dispatch`（tag `v0.1.0`=`878a493`，
+该文件第 **295** 行）把整帧 `byte[]` 直接当值；姊妹模块 MQTT 有 `MqttPayloadFormat` 在协议层解码，**TCP 没有**，
+core 也无宿主可插的解码 SPI ⇒ **框架侧能力缺口**（不是本仓自己写错了）。
+
+**取路**：按本仓铁律「碰到底座不合用 → 先反馈、讲清解法、不默默自造」⇒ **A 反哺 + B 过渡实现并行**：
+- **A（反哺）**：`docs/STARTER-FEEDBACK.md` **UP-3**（现象/证据/影响/期望能力/验收标准/会被替换掉的临时实现）
+  + starter 仓 issue **#13**；
+- **B（过渡，本仓落地）**：`cn.ypbin.admin.access.decode.ValueDecoder` + `TextFrameValueDecoder`
+  （`@Bean @ConditionalOnMissingBean` 装配，非 `@Component`——教训三十一）；
+  `PointMappingDataListener` 在映射与缩放之间插入解码；`HttpAccessReadingSink` 增「值仍是 `byte[]` ⇒ 丢弃」兜底闸门。
+  规则：TCP 文本帧 `KEY=VALUE`（键 = 点位映射 `raw_address`）→ 按 `iot_property.data_type` 规范化
+  （数值/布尔/文本）；**失败 ⇒ 丢弃 + `iot.access.decode.failure{reason=…}` + WARN（脱敏，不 dump 载荷）**。
+  DTO 侧新增 `AccessPointMappingDto.dataType`（`DeviceSpecServiceImpl` 随点位下发，不增加查询次数）。
+
+**为什么选 B 而不是只做 A**：A 需新发 starter 版本（0.2.0 → Central）再改依赖重部署，属跨仓发布列车；
+而宿主侧解码本就是框架认可的形态（MQTT 的 `BINARY` 注释即「宿主自行按业务协议解析」），且**替换路径明确**
+（见 `docs/VALUE-DECODE-DESIGN.md` §5：框架能力就位后删除本层）。
+
+**验证**：access 单测 112（新增解码器 11 + 映射/失败路径用例）/ iot **336**（含跨模块契约用例 `AccessDecodedValueColumnContractTest`）/ 架构 48 全绿（本机 `-am` 实跑）；
+**变异验证 3 项，均转红**：① 把解码调用换成直接透传原始值 ⇒ `AccessReadingMappingTest` 5 例红（含「值不得是 `byte[]`」）；
+② 把严格 UTF-8 换成 `new String(bytes, UTF_8)` ⇒ `NOT_UTF8` 用例与「载荷长度=4 的 not-utf8 WARN」红；
+③ 去掉出口 `byte[]` 闸门 ⇒ `rawByteValueMustBeDroppedNotStringified` 红。每次变异后均还原并读回确认。
+
+**生产端到端**（2026-09-27，双 jar 部署）：`iot.reading` 该设备 `temperature` 落 `value_double=23.5`、`value_text=null`；
+`/series` 近 1h total 192 / numeric 192，UI 默认窗口（24h、limit=1000）193/193 ⇒ 曲线可画；
+`serialNo` 仍落 `value_text='SN-DEMO-0001'`；全表 `value_text LIKE '[B@%'` 计数 **0**；`iot.timeseries.write.failed=0`、
+`iot.ingest.latest.failed=0`。完整证据（含过渡窗口、容器 md5/StartedAt）见 `docs/ACCESS-ENABLE.md` §6.3.1。
+
+**顺带的数据清理（含理由）**：库里 24127 行历史垃圾（`2026-09-26T10:48:37Z`~`2026-09-27T01:45:01Z`，`value_double` 全 null）
+已按**精确范围**删除——不删的话 UI 默认「近 24h + limit 1000（升序取最早）」窗口内前 1000 条全是垃圾，前端仍然不画曲线。
+删前已分页导出并核对「区间内无一数值行」（`count(*)=24127 / count(value_double)=0`），数值种子行（最新 `2026-09-25T04:24:26Z`，在区间外）未受影响；
+回滚物 `/root/garbage-backup.tsv` + `/root/garbage-deletes-executed.sql`。
+
+**未做（如实登记，方案见 `docs/VALUE-DECODE-DESIGN.md` §4.2）**：Modbus 寄存器 16/32 位、大小端、有符号/无符号、位域、
+字符串寄存器、无键的「整帧即值」帧、hex/JSON 负载——`iot_point_mapping` 缺位宽/符号/位域列，用载荷长度或默认值去猜
+违反「不猜」，故留待后续增量（含列设计与验收口径）。另：**真实 Modbus/OPC UA 设备未接入**，
+本轮解码路径只在 TCP 文本帧上经过生产验证；`ypbin-access` 未暴露 metrics 端点（`iot.access.*` 只能靠日志与单测观测）也已登记。
+
 ### 五、替换缝（3a 已备好，3b-2 只需新增自动配置）
 3a 的 `LoggingTenantLinkManager` 已去掉 `@Component`，由 `AccessLeaseConfiguration`（`@AutoConfiguration`
 + `@Bean @ConditionalOnMissingBean`）装配，并有源码门禁守着（四处变异全咬）。⇒ 3b-2 提供真实现时

@@ -154,7 +154,15 @@ UPDATE iot_device SET endpoint = 'tcp://172.20.0.1:19002' WHERE id = 9300012;
 - 一个 TCP 设备**只有第一个点位**会拿到数据；其余点位**根本不会被投递**（因此也**不会**触发
   `PointMappingDataListener` 的「未映射地址」WARN——独立复核 grep 该 WARN = **0 条**，不要指望用这条日志判断点位漏配）；
   实测佐证：9300012 的 `humidity`/`serialNo`/`demoBoundary` 在 Redis 里始终停在 09-25 的种子值；
-- 值为**原始 `byte[]`**，access 侧不做解码，最终落库是 `String.valueOf(byte[])` 即 `[B@<hash>`。
+- ~~值为**原始 `byte[]`**，access 侧不做解码，最终落库是 `String.valueOf(byte[])` 即 `[B@<hash>`。~~
+  **（2026-09-27 已修）** access 侧新增解码层 `cn.ypbin.admin.access.decode`（过渡实现）：TCP 文本帧按
+  `KEY=VALUE` 解析、键由点位映射 `raw_address` 声明，再按物模型 `data_type` 规范化为数值/布尔/文本；
+  解不出来就**丢弃 + 计数 + WARN**（`iot.access.decode.failure{reason=…}`），不再产生 `[B@…`。
+  完整口径、扩展点与**替换路径**见 [`VALUE-DECODE-DESIGN.md`](VALUE-DECODE-DESIGN.md)，
+  框架侧缺口见 [`STARTER-FEEDBACK.md`](STARTER-FEEDBACK.md) **UP-3**（issue #13）。
+  演示设备 9300012 的 `raw_address` 已由 `holding:0` 修正为帧键 `TEMP`
+  （`deploy/sql/fixes/2026-09-27-iot-demo-tcp-frame-key.sql`，回滚物 `deploy/sql/rollback/2026-09-27-iot-demo-tcp-frame-key-rollback.sql`；
+  放 `fixes/` 而非 `migration/`：后者受 SQL 等价门禁约束，本条是运行时数据的订正而非安装脚本的一部分）。
 
 ---
 
@@ -165,7 +173,7 @@ UPDATE iot_device SET endpoint = 'tcp://172.20.0.1:19002' WHERE id = 9300012;
 | ① | access 容器状态 / 端口 / 启动日志无真实 ERROR | `docker inspect` / `docker logs` | `running`、`18086`、`OOMKilled=false`、`RestartCount=0`；`读数出口参数自检通过`、`access 启动自检通过：node=access-1`、`1 protocol adapter(s) registered: [tcp]`。**ERROR 仅来自不可达演示设备的建链失败**（预期噪声） |
 | ② | 只重建 access | `docker inspect <name> --format '{{.State.StartedAt}}'` | 其余 10 个容器 `StartedAt` 早于 access |
 | ③ | 数据确由 access 产生 | access 日志 + 模拟器日志 + 停止实验 | `订阅成功：deviceId=9300012 点位数=4`；模拟器记录 `连接建立：('172.20.0.26', …)`（**= access 容器 IP**）；停模拟器后 `last_good_at` **冻结**，重启后**恢复前进** |
-| ④ | 业务接口返回新数据 | `GET /iot/devices/9300012/{availability,latest,series}` | `availability`：`availability=0.996470`、`outageCount=2`、两条**当天新开且已闭合**的断档；`latest`：`temperature` `ts=1790418429047`（**当天**）而其余点位仍是 09-25 的种子值；`series`：**0 点（未达成）** |
+| ④ | 业务接口返回新数据 | `GET /iot/devices/9300012/{availability,latest,series}` | `availability`：`availability=0.996470`、`outageCount=2`、两条**当天新开且已闭合**的断档；`latest`：`temperature` `ts=1790418429047`（**当天**）而其余点位仍是 09-25 的种子值；`series`：**0 点（未达成）**〔⚠️ 该读数已过时：0 点是 `propertyId` 传主键造成的参数错误，见 §6.1 更正；2026-09-27 起 `series?propertyId=temperature` 返回**数值点**，见 §6.3〕 |
 | ⑤ | IoTDB 行数增长 | IoTDB CLI | ❌ **未达成**：当天 0 行 |
 | ⑤ | Redis field 数增长 | `redis-cli` | ✅ `iot:latest:1:9300012` 的 `temperature` 时间戳随采集持续前进（**这是有效判据**）。⚠️ **不要**用 `iot:latest:*` 的 key 总数当判据：实测 12 个 key 里另有 `iot:latest:1:9990001`/`9990002` 两个**台账内不存在的探针设备**（`iot_device` 中 COUNT=0、内嵌 ts 停在 09-25），**与 access 链路无关**；独立复核已据此判该条为错误归因 |
 | ⑥ | 页面侧等价 HTTP 证据 | `curl` | `GET http://127.0.0.1:19000/` → **HTTP 200**、2996 bytes、`<title>Ypbin Admin</title>`；**浏览器渲染仍需人工确认** |
@@ -347,10 +355,94 @@ UPDATE iot_device SET endpoint = 'tcp://172.20.0.1:19002' WHERE id = 9300012;
   收窄→稳定、恢复→复发，方向完全一致。
 
 
-### 6.3 TCP 读数值无语义
-值为 `String.valueOf(byte[])` 的 `[B@<hash>`。**不影响**链路成立与断档/可用率判定（判定只看 `quality` 与时刻），
-但**最新值展示无意义**，且该点位的曲线只能落文本列。要拿到可读值需要：给 TCP 模块加 `payload-format`
-（MQTT 模块已有的能力，TCP 没有）或改用能解码数值的协议模块（如 Modbus）——**均属框架/依赖改动，超出本轮范围**。
+### 6.3 TCP 读数值无语义（**2026-09-27 已修**）
+
+**原症状**：值为 `String.valueOf(byte[])` 的 `[B@<hash>`，落 IoTDB `value_text`、`value_double=null`
+⇒ 最新值展示无意义，曲线只能落文本列（画不出）。**不影响**链路成立与断档/可用率判定（判定只看 `quality` 与时刻）。
+
+**归因（一手）**：字节来自 starter 的 TCP 协议模块——`ypbin-iot-protocol-tcp` 的 `TcpSession#dispatch`
+把整帧 `byte[]` 直接作为 `PointValue.value`（tag `v0.1.0` = `878a493`，
+`TcpSession.java` 第 **295** 行 `PointValue.good(address, payload, …)`）；access 侧再用
+`String.valueOf` 字符串化。姊妹模块 MQTT 有 `MqttPayloadFormat` 在协议层解码，**TCP 没有**，
+core 也没有宿主可插的解码 SPI ⇒ 属**框架侧能力缺口**（已按规矩反哺，见 UP-3）。
+
+**本轮修法（过渡实现 B + 反哺 A）**：access 新增解码层
+（`cn.ypbin.admin.access.decode.ValueDecoder` / `TextFrameValueDecoder`）：
+TCP 文本帧按 `KEY=VALUE` 解析、键由点位映射 `raw_address` 声明，再按物模型 `data_type` 规范化为
+数值/布尔/文本；**解不出来就丢弃 + 计数 + WARN**（`iot.access.decode.failure{reason=…}`，脱敏不 dump 载荷），
+出口另有一道「值仍是 `byte[]` 就丢弃」的兜底闸门。演示设备点位 `raw_address` 由 `holding:0` 修正为帧键 `TEMP`。
+**完整口径 / 扩展点 / 未做项 / 替换路径**：见 [`VALUE-DECODE-DESIGN.md`](VALUE-DECODE-DESIGN.md)；
+框架侧需求：见 [`STARTER-FEEDBACK.md`](STARTER-FEEDBACK.md) **UP-3**（starter issue #13）。
+
+**当前状态**：生产实测 `iot.reading` 该设备新行 `temperature` 落 `value_double`，
+`GET /iot/devices/9300012/series?propertyId=temperature` 返回**数值点** ⇒ 曲线可画
+（证据摘录见 §6.3.1；`serialNo` 等文本点仍落 `value_text`）。
+
+#### 6.3.1 修后验收证据（2026-09-27，生产）
+
+**部署**（只重建两个容器，服务器未跑 `mvn`）：
+
+| 项 | 证据 |
+|---|---|
+| 构建机 jar md5 | access `7d276c6bed66e712d29763e153ba7fb4`；iot `7be779309c7aafd195f2e8bf5cdd71a9` |
+| 容器内 jar md5 | `docker exec ypbin-access md5sum /app/app.jar` / `ypbin-iot …` **与上逐字一致** |
+| 只重建这两个 | access `StartedAt=2026-09-27T01:45:03Z`、iot `01:45:38Z`；其余容器仍是 `Up 4 hours`/`Up 6 hours` |
+| 演示点位修正 | `iot_point_mapping.id=9500011` 的 `raw_address`：`holding:0` → **`TEMP`**（**回读确认**，脚本见 `deploy/sql/fixes/2026-09-27-iot-demo-tcp-frame-key.sql`） |
+
+**过渡窗口（新 access + 旧 iot）**：旧 iot 不下发 `data_type` ⇒ 新 access 按设计**丢弃并计数**（不是乱写）：
+`09:45:55–09:46:03` 共 **15 条** `reason=unknown-data-type` WARN；iot 重启后**归零**（近 5 分钟 0 条，最后一次 WARN 停在 `09:46:03`）。
+
+**① `iot.reading` 该设备新行**（`SELECT time, property_id, value_double, value_text, quality`）：
+
+```
+2026-09-27T01:52:35.689Z | temperature | 23.5 | null | GOOD
+2026-09-27T01:52:33.689Z | temperature | 23.5 | null | GOOD
+2026-09-27T01:52:31.688Z | temperature | 23.5 | null | GOOD
+2026-09-27T01:52:29.688Z | temperature | 23.5 | null | GOOD
+2026-09-27T01:52:27.688Z | temperature | 23.5 | null | GOOD
+```
+
+文本点对照（`serialNo`，种子行）：`value_double=null`、`value_text='SN-DEMO-0001'` ⇒ **文本仍落文本列**。
+全表 `value_text LIKE '[B@%'` 计数 = **0**（不再有任何 `[B@…` 垃圾）。
+
+**② `/series` 取到数值点**（`X-User-Id/ X-Tenant-Id` 头，iot 直连 18084）：
+
+- 近 1 小时、`limit=5000`：`R.code=200`、**total 192 / numeric 192**，前 3 点
+  `{'ts':1790473587605,'value':'23.5','quality':'GOOD'}`、`…589605`、`…591605`；
+- **UI 默认窗口**（近 24 小时、`limit=1000`）：`total 193 / numeric 193` ⇒ 前端 `numericCount>0`，**曲线可画**；
+- `/latest`：`temperature` 为 `23.5`（时刻为当天最新），其余点位仍是种子值（TCP 只交付订阅地址列表第 0 个点位，见 §3.1）。
+
+**③ 指标无异常增长**（`iot` 侧经 actuator；间隔 60s 两次采样）：
+
+| 指标 | T0 → T1 | 判读 |
+|---|---|---|
+| `iot.timeseries.write.attempted` / `.rows` | 213 → 243（+30/60s） | 与模拟器 2s 节拍一致（=0.5/s） |
+| `iot.timeseries.write.failed` | 0 → 0 | 无失败 |
+| `iot.ingest.latest.failed` / `iot.ingest.propertyid.orphan` | 0 → 0 | 入站无异常 |
+| `iot.access.decode.failure{reason=unknown-data-type}` | 累计 15（全是过渡窗口），近 5 分钟 **0** | 不增长 |
+
+> ⚠️ **发现（非本次引入）**：`ypbin-access` 的 actuator **只暴露 `health`**（未配
+> `management.endpoints.web.exposure.include`），所以 `iot.access.*` 全部指标在生产**取不到 HTTP 读数**
+> ——本轮解码计数只能靠 WARN 日志与单测证明。是否给 access 开 `metrics` 端点属**对外暴露面变更**，
+> 本轮**未改**（端口当前仅 `127.0.0.1` 可达，见 `ss -ltnp`），登记为待决项。
+
+**④ 历史垃圾行清理（本次一并做，含理由与回滚物）**：
+
+- **为什么必须做**：UI 默认窗口是「近 24h + limit 1000」，而 `IotDbTimeSeriesStore` 是 `ORDER BY time ASC LIMIT n`
+  ⇒ 未清理时窗口内**最早的 1000 条**全是 `[B@` 垃圾 ⇒ 前端 `numericCount=0`，仍会提示「读数为文本，无法绘制曲线」。
+- **做法（精确、不误伤）**：先按 20 分钟窗口分页导出全量行（CLI 单次上限 1000 行），确认待删区间内
+  `count(*)=24127`、`count(value_double)=0`、`count(value_text)=24127` ⇒ 该区间**全是垃圾**，然后单条范围删除：
+  `DELETE FROM iot.reading WHERE time>=1790419717346 AND time<=1790473501975 AND device_id='9300012' AND property_id='temperature'`
+  （= `2026-09-26T10:48:37.346Z` ~ `2026-09-27T01:45:01.975Z`）。删后该区间 0 行；温度表现存 479 行**全部数值**。
+- **种子行未受影响**：数值种子行最新一条是 `2026-09-25T04:24:26Z`（在待删区间之外）。
+- **回滚物**：`/root/garbage-backup.tsv`（被删行的时间戳清单，值本身是 `[B@<identityHash>`、无复现语义）、
+  `/root/garbage-deletes-executed.sql`（md5 `6939787d877067ef12c646e129b8d8b4`）。**如实声明**：被删值内容不具可恢复价值
+  （identityHash 进程内随机），故按「时间戳 + 行数」留档。
+
+**⑤ 一次差点误判的教训（已抓回）**：第一次应用点位修正 SQL 时，我把重定向指向了**服务器上不存在的路径**
+（该文件当时只在本地仓），`docker exec -i … < 路径` 读空输入仍 `exit 0`，脚本照常打印 "sql applied"；
+**靠回读 `iot_point_mapping` 才发现 `raw_address` 仍是 `holding:0`**。第二次改为经 ssh stdin 投递并回读确认。
+⇒ 与母仓教训三十三同型：**「脚本说成功」不算落地，产物必须独立回读**。
 
 ### 6.4 对演示数据的影响（**必须知悉**）
 真实链路已**改动**演示数据，`docs/DEMO-DATA.md` 中 9300012（`demo-dev-curve`）的以下原定口径**已不再成立**：
