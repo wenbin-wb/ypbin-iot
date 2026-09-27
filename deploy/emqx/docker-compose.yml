@@ -1,0 +1,114 @@
+# =============================================================================
+# EMQX 5.8.9 —— ypbin IoT 平台的 MQTT 接入中间件（**中间件机独立 compose 项目**）
+# =============================================================================
+# 目标机：43.242.200.8:61260（Ubuntu 24.04，8C/15991MB）
+#
+# 🔴 与「别人的项目」零共享（中间件机上还跑着 aicomic-mysql / aicomic-minio / sub2api / 宝塔）：
+#   · 独立 compose 项目（`name: emqx-edge`，与 app / middleware 项目无关）
+#   · 独立 network（`emqx-edge`，172.28.0.0/16；**不接入** middleware_default / app_default / baota_net）
+#   · 独立 named volume（emqx-data / emqx-log），不使用任何别人的卷
+#   · **不触碰**别人的容器/镜像/卷/网络/配置，也不改宝塔 vhost
+#   · 禁止 `docker system prune -a` / `docker volume prune` / `docker network prune`
+#
+# 设计依据：ypbin-iot/docs/EMQX-INGRESS-DESIGN.md（§5.2 ACL、§8.1 compose、§8.2 暴露面、§8.3 资源）
+# 部署文档：ypbin-iot/docs/EMQX-DEPLOY.md
+#
+# 真源与优先级（官方镜像 emqx.conf 头部原文）：
+#   etc/base.hocon < cluster.hocon < etc/emqx.conf < **环境变量**
+#   ⇒ 本文件挂载的 emqx.conf 是 ACL/认证/监听/限量的唯一真源；
+#     仅「口令类」值走环境变量（.env，600，不入库），避免密钥进配置模板。
+# =============================================================================
+
+name: emqx-edge
+
+services:
+  emqx:
+    # pin 具体补丁版（禁止浮动 tag）：官方镜像 emqx 自 v5.9.0 起停发，5.8 线最后一版为 5.8.9，
+    # 且 `5.8` 浮动 tag 实测停更在 5.8.6。证据见设计 §3.1 F1–F4 与 H4。
+    image: ${EMQX_IMAGE:?请在 /opt/emqx/.env 设置 EMQX_IMAGE}
+    container_name: ypbin-emqx
+    # ⚠️ 带点的 FQDN：v5.8 官方只说 "stable identifier, such as a hostname or FQDN"（宽松），
+    #    6.x 官方明确「Erlang long-name 模式 ⇒ 不能用无点的短主机名」。按**严格口径**取（F6/F6b、H12）。
+    #    hostname 必须与节点名 `@` 之后一致。
+    hostname: ypbin-emqx.local
+
+    environment:
+      EMQX_NODE_NAME: ${EMQX_NODE_NAME:?}
+      # Erlang 分发 cookie：官方默认值是公开的 `emqxsecretcookie`，必须覆盖。
+      # 只从 .env（600）注入，不入库、不打印。
+      EMQX_NODE__COOKIE: ${EMQX_NODE_COOKIE:?}
+      # 首次启动即设非默认口令（官方默认 admin/public，且首登强制改密 → H2）。
+      # 键名来自官方镜像 README（映射 dashboard.default_password）。
+      EMQX_DASHBOARD__DEFAULT_PASSWORD: ${EMQX_DASHBOARD_PASSWORD:?}
+      # REST API Key 预置：官方 `api_key.bootstrap_file`（格式 `api_key:api_secret[:role]`，
+      # 缺 role 时隐式 administrator）。OSS 5.8.9 是否生效由部署自检实测（设计 U18）。
+      EMQX_API_KEY__BOOTSTRAP_FILE: /opt/emqx/etc/default_api_key.conf
+      # 日志：只走容器 stdout（console handler），由下面的 docker logging 选项封顶；
+      # 不写宿主文件卷，避免磁盘无界增长（该机 `/` 余量 ~9.5GB）。
+      EMQX_DEFAULT_LOG_HANDLER: console
+
+    ports:
+      # Dashboard **与 REST API 同端口**。18083 已按用户要求改用 18093；
+      # 宿主侧**只绑回环**（本机 ufw 虽为 active/default DROP，但不依赖它做纵深——
+      # 官方安全清单要求 Dashboard 只挂可信网络）。隧道由生产机 SSH 反向连入 127.0.0.1:18093。
+      - "${EMQX_DASHBOARD_BIND_ADDR:-127.0.0.1}:${EMQX_DASHBOARD_PORT:-18093}:18093"
+      # 1883：**默认只绑回环**。真设备接入的对外暴露属**后续独立决策**（设计 §8.2/H3：无 TLS 不得裸暴露公网）。
+      - "${EMQX_MQTT_BIND_ADDR:-127.0.0.1}:1883:1883"
+      # 8883(TLS) / 8083 / 8084（WS/WSS）/ 4370 / 5370（Erlang distribution）**一律不发布**。
+
+    volumes:
+      # 持久化（官方要求持久化 data 与 log）
+      - emqx-data:/opt/emqx/data
+      - emqx-log:/opt/emqx/log
+      # ACL / 认证 / client_attrs / 监听 / 限量：唯一真源（新增文件，随仓走，便于审计与评审）
+      - ./emqx.conf:/opt/emqx/etc/emqx.conf:ro
+      # API Key 预置文件（**启动前由 .env 生成，600，gitignore，不得入库**）
+      - ./api-key/default_api_key.conf:/opt/emqx/etc/default_api_key.conf:ro
+
+    # 🔴 必须设上限，避免将来与别人抢内存。该机 15991MB/available ~14GB（2026-09-27 实测），
+    #    给 2g 的理由：① 单节点 + 目标规模 ≤500 连接（阶段②实测）；② 设计 §8.3 的 512m 是
+    #    针对**生产机** available≈904MB 的工程建议，本机不适用；③ 留出充足余量给别人的项目，
+    #    即使 EMQX 失控也只吃掉 2g。上限不是「推荐值」——官方未给出最低/推荐内存（F8/U2）。
+    mem_limit: ${EMQX_MEM_LIMIT:-2g}
+    # 宿主 swap=0（实测），显式声明不可 swap，避免行为随宿主变化而漂移。
+    memswap_limit: ${EMQX_MEM_LIMIT:-2g}
+
+    # 日志封顶（json-file 默认无上限 ⇒ 磁盘风险）
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+    # 官方 compose 示例用的就是这条（F7）
+    healthcheck:
+      test: ["CMD", "/opt/emqx/bin/emqx", "ctl", "status"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+
+    restart: unless-stopped
+
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+
+    networks:
+      - emqx-edge
+
+networks:
+  emqx-edge:
+    name: emqx-edge
+    driver: bridge
+    ipam:
+      config:
+        # 与既有网段无重叠：172.17(.0/16) / 172.19(baota) / 172.22(app) / 172.23(middleware)
+        - subnet: 172.28.0.0/16
+
+volumes:
+  emqx-data:
+    name: emqx-data
+  emqx-log:
+    name: emqx-log

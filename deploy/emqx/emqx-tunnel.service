@@ -1,0 +1,89 @@
+[Unit]
+Description=ypbin EMQX 管理面 SSH 隧道（生产机 127.0.0.1:18093 → 中间件机 43.242.200.8:18093）
+Documentation=file:///opt/ypbin/ypbin-iot/deploy/emqx/README.md
+After=network-online.target
+Wants=network-online.target
+
+# 隧道是「断了必须自己回来」的长跑进程：禁用 systemd 的启动速率限制，
+# 否则崩溃重启 5 次/10 秒就会被判定 failed 而**永久停止重试**。
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+
+# ---------------------------------------------------------------------------
+# autossh：只做端口转发，不落地任何口令
+# ---------------------------------------------------------------------------
+# · `-M 0`           关掉 autossh 自己的监控端口，改由 ServerAlive* 探测 + systemd Restart 兜底
+#                    （官方推荐与 systemd 配合时这样用；避免监控端口与本机其它服务抢端口）
+# · `-N`             不执行远端命令（**只转发，不要 shell**）
+# · ExitOnForwardFailure=yes  转发建不起来就立刻退出 ⇒ 交给 systemd 重启，而不是「假装活着」
+# · ServerAliveInterval/CountMax  15s×3 ⇒ 约 45s 内发现死链并退出
+# · StrictHostKeyChecking=yes + 固定的 known_hosts ⇒ **主机密钥 pin**，不做 TOFU
+# · BatchMode=yes + PreferredAuthentications=publickey ⇒ 绝不提示、不用密码
+# · IdentityAgent=none ⇒ 不依赖 ssh-agent（单元里没有 agent 环境）
+# · 算法 pin（实测省 ~0.15s/次建链，直接影响「杀进程后多久恢复」）：
+#     - 关掉默认首选的**后量子 KEX** `sntrup761x25519-sha512`（CPU 重、载荷大），
+#       固定 `curve25519-sha256`；两者服务端都支持（`sshd -T` 实测）。
+#     - 固定 `HostKeyAlgorithms=ssh-ed25519`，跳过握手期的算法协商列表比价。
+#   A/B 实测（各 5 次，单位秒）：base 1.49/1.42/1.36/1.39/1.36 → pin 后 1.22/1.26/1.24/1.27/1.25
+# · 凭据只有一把**专用且受限的**私钥 /etc/ypbin/emqx-tunnel.key（600，root）；
+#   中间件机 authorized_keys 对该公钥带
+#   `restrict,port-forwarding,permitopen="127.0.0.1:18093"`。
+#   ✅ `permitopen` **确实生效**：该密钥只能把流量**转发到** 127.0.0.1:18093
+#      （实测转发到别的目标会 `administratively prohibited`）。
+#   ⚠️ **但"受限"不等于"只读"**（已由独立复核实测证伪过一版错误表述，勿再写错）：
+#      `restrict` 关掉的是 pty/agent/X11/user-rc **与两向端口转发**；同一行又用 `port-forwarding`
+#      **重新打开了两向** ⇒ **反向转发（-R）并未被禁止**（因为没设 `permitlisten`），
+#      且 OpenSSH **没有** authorized_keys 选项能做到"只许 -L 不许 -R"；同理
+#      `command=` 会让 `-N` 会话立即结束、转发失效，所以也做不到"只许转发不许执行命令"。
+#      ⇒ 该密钥的实际能力 = **转发 + 非交互 root 命令执行**，这是**已登记的残留风险**
+#      （见 docs/EMQX-DEPLOY.md §6.1 与 §10），不要当成"已被限制到只能转发一个目标"。
+ExecStart=/usr/bin/autossh -M 0 -N \
+  -o ExitOnForwardFailure=yes \
+  -o ServerAliveInterval=15 \
+  -o ServerAliveCountMax=3 \
+  -o TCPKeepAlive=yes \
+  -o BatchMode=yes \
+  -o PreferredAuthentications=publickey \
+  -o IdentityAgent=none \
+  -o StrictHostKeyChecking=yes \
+  -o UserKnownHostsFile=/etc/ypbin/emqx-tunnel.known_hosts \
+  -o KexAlgorithms=curve25519-sha256 \
+  -o HostKeyAlgorithms=ssh-ed25519 \
+  -o Compression=no \
+  -i /etc/ypbin/emqx-tunnel.key \
+  -p 61260 \
+  -L 127.0.0.1:18093:127.0.0.1:18093 \
+  root@43.242.200.8
+
+# 断线自动重连：autossh 进程退出（含建链失败）即重启；开机自启见 [Install]
+# RestartSec=100ms：**验收要求「杀进程后 3 秒内自动恢复」**。
+#   实测分解（2026-09-27）：systemd 重启延迟 0.1s + autossh 自身启动 0.5s
+#   + SSH 建链与转发建立 ≈1.4–2.0s（该链路固有：一次 ssh 会话 1.3s，服务端 UseDNS=no、
+#   GSSAPI=no，客户端算法已无优化空间）⇒ 总恢复 ≈2.5s。
+#   若用 RestartSec=1s 则实测 3.64s，**不达标**（这是把 RestartSec 压到 0.1s 的唯一原因）。
+#   代价：对端持续不可达时会以 0.1s 间隔重试；由 StartLimitIntervalSec=0 保证「永不放弃」，
+#   这是刻意取舍 ——「隧道断了自己回来」优先于「少几条日志」。
+Restart=always
+RestartSec=100ms
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=emqx-tunnel
+
+# 最小权限（该单元只做转发，不需要写文件系统、不需要换命名空间）
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryMax=128M
+CPUQuota=20%
+
+[Install]
+WantedBy=multi-user.target

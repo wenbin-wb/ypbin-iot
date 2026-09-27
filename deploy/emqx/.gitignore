@@ -1,0 +1,4 @@
+# 真实凭据只允许存在于目标机（600），**绝不入库**
+.env
+api-key/default_api_key.conf
+*.tmp

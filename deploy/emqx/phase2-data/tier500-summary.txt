@@ -1,0 +1,60 @@
+================ 阶段② 限内存 OOM/存活实测 ================
+开始(UTC)        : 2026-09-27T06:06:52Z
+档位(连接数)     : 500
+时长(s)          : 600
+每连接发送间隔   : 1000ms（= 1 msg/s）⇒ 全局消息上限 -L 300000
+QoS              : 1
+压测工具         : emqtt-bench docker.m.daocloud.io/emqx/emqtt-bench:0.6.2
+压测工具 digest  : sha256:b34b364859dab936507a73388fcf55d6a9fe422e17bbf36997e884500288dcf8
+EMQX 镜像        : docker.m.daocloud.io/emqx/emqx:5.8.9
+EMQX image id    : sha256:35b46f7aa7a0d51f3959e4344221ac5ec7f948b03e43099286b6c40a07bb393b
+mem_limit(bytes) : 2147483648
+节点             : Node 'emqx@ypbin-emqx.local' 5.8.9 is started
+-------- ① 空闲基线（压测前） --------
+                 total        used        free      shared  buff/cache   available
+  Mem:           15991        2169        8739          48        5487       13822
+  Swap:              0           0           0
+  Filesystem      Size  Used Avail Use% Mounted on
+  /dev/vda1        29G   21G  8.9G  70% /
+ypbin-emqx	239.2MiB / 2GiB	11.68%
+aicomic-mysql	420.3MiB / 15.62GiB	2.63%
+aicomic-minio	486.9MiB / 15.62GiB	3.04%
+sub2api	4.512MiB / 15.62GiB	0.03%
+  OOMKilled=false RestartCount=0 Health=healthy
+  EMQX 指标基线：publish.received=462857 delivery.dropped.queue_full=0 delivery.dropped.expired=0 client.connected=1683
+测试账号：9001.9001（publish 自己的 up/）、svc-load（subscribe ypbin/v1/+/+/up/#）；口令不回显；但对压测端 emqtt-bench 只能经 -P 传入 ⇒ 压测期间会出现在容器 argv/inspect 里；结束即删账号（口令随之失效）并删除 inspect 产物（见文件头「凭据口径」）
+-------- ② 施压（500 连接 × 1 msg/s × 600s）--------
+施压结束：实际时长 611s（采样 46 次）
+负载自证：PASS（发布端容器存在、施压 611s ≥ 80%×600s、采样 46 次）
+延迟观测器输出：n=300000  avg=2.0ms  p50=2ms  p95=3ms  p99=5ms  max=37ms  (预热丢弃 0 条)
+-------- ③ 观测结果 --------
+宿主机 available 最低点 : 13116 MB（基线 13831 MB）
+EMQX MemUsage 峰值占比  : 14% of mem_limit（阈值 < 85%）
+OOMKilled               : false（基线 false）
+RestartCount            : 0 -> 0（要求不增长）
+健康状态                : healthy
+publish.received 增量   : 300000（期望 ≈ 300000）
+client.connected 累计    : 1683 -> 2184（**累计计数器**，非当前连接数）
+messages.dropped.no_subscribers : 6342 -> 6342（压测期必须为 0 ⇒ 订阅端在场且跟得上）
+delivery.dropped.queue_full : 0 -> 0
+delivery.dropped.expired    : 0 -> 0
+messages.dropped            : 6342 -> 6342
+authorization.matched.allow : 7973 -> 12974
+宿主机 / 使用率          : 基线 70% -> 峰值 70%（要求 < 95%）
+宿主机 / 余量            : 8.9G
+消息延迟（发布→订阅端接收，latency-probe.py / paho-mqtt）：n=300000  avg=2.0ms  p50=2ms  p95=3ms  p99=5ms  max=37ms  (预热丢弃 0 条)
+  ✅ PASS  OOMKilled=false                    false
+  ✅ PASS  RestartCount 窗口内不增长    0 -> 0
+  ✅ PASS  MemUsage < 85% mem_limit           14%
+  ✅ PASS  宿主机 available ≥ 400MB      13116MB
+  ✅ PASS  压测期 available ≥ 200MB      13116MB
+  ✅ PASS  dropped.queue_full 不增长       0 -> 0
+  ✅ PASS  dropped.expired 不增长          0 -> 0
+  ✅ PASS  无 no_subscribers 丢弃          6342 -> 6342
+  ✅ PASS  宿主机 / 使用率 < 95%        70%
+  ✅ PASS  负载真的发生了（自证三条） 
+  ✅ PASS  publish.received 增量 ≥ 95%×N×D 300000 / 300000
+  ✅ PASS  容器保持 healthy               healthy
+结束(UTC)        : 2026-09-27T06:17:14Z
+采样明细         : /var/tmp/emqx-loadtest-r2/tier500/samples.csv
+档位结论: PASS（500 连接 / 600 s）
