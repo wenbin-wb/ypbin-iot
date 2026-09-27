@@ -20,10 +20,13 @@ import org.junit.jupiter.api.Test;
  * AI 模型连通性所用的 HTTP 客户端的**配置级**门禁（不做真实网络调用）。
  *
  * <p>为什么要有这一组用例：{@code testConnection} 的调用形态恰好是"**新连接 + 带体 POST**"，
- * 而 {@code baseUrl} 允许用户填**明文 {@code http://}**。JDK {@code HttpClient} 的默认协议是
- * HTTP/2 ⇒ 明文下会走 h2c upgrade，实测在"带体 POST 作为新连接首个请求"时会失败
- * （{@code java.io.IOException: EOF reached while reading}；同款问题与判据见
- * {@code deploy/emqx/diagnose-emqx-admin-h2c/}）。同时，原先每次调用都 {@code newBuilder()} 新建客户端，
+ * 而 {@code baseUrl} 允许用户填**明文 {@code http://}**。JDK {@code HttpClient} 的默认协议是 HTTP/2
+ * ⇒ 明文下会走 h2c upgrade，**在"服务端接受 upgrade 随后断开"那一类服务端上**会失败
+ * （已在 EMQX/Cowboy 上实测：{@code java.io.IOException: EOF reached while reading}；
+ * 判据见 {@code deploy/emqx/diagnose-emqx-admin-h2c/}）。
+ * ⚠️ 但**不是所有明文服务端都会失败**——不对 upgrade 做 h2c 切换的服务端下，JDK 会优雅回落 HTTP/1.1
+ * （独立复核用朴素 JDK {@code HttpServer} 实测），所以这里断言的是"客户端**不要去请求 h2c**"这一可判定的属性，
+ * 而不是"报错必然复现"。同时，原先每次调用都 {@code newBuilder()} 新建客户端，
  * 会丢掉连接池、并把超时策略散落到调用点。</p>
  *
  * <p>这三条断言都很"小"，但它们挡的是**会被整体删掉的一行**（{@code .version(...)}）与
@@ -40,8 +43,8 @@ class AiModelConfigServiceImplTest {
         HttpClient.Version version = AiModelConfigServiceImpl.httpClient().version();
 
         assertThat(version)
-            .as("必须显式 HTTP_1_1：明文 baseUrl 下，带体 POST 作为新连接首个请求会 h2c 失败"
-                + "（JDK 默认 HTTP_2）")
+            .as("必须显式 HTTP_1_1：JDK 默认 HTTP_2 下会发起 h2c upgrade，"
+                + "而带体 POST 作为新连接首个请求在「接受 upgrade 再断」的服务端（如 EMQX/Cowboy）上会失败")
             .isEqualTo(HttpClient.Version.HTTP_1_1);
     }
 
