@@ -534,7 +534,7 @@ class CommandInstanceServiceImplTest {
     }
 
     /**
-     * 便捷重载：直接按字段构造回执（认证设备默认 = 载荷设备，除专门的不一致用例外）。
+     * 按字段构造回执（认证设备由调用点单独传，见 {@code replyFromAuthenticatedTopic} 与不一致用例）。
      *
      * @param deviceId  载荷设备
      * @param requestId 请求 ID

@@ -290,6 +290,30 @@ chmod 600 "$PRIV/reply-bridge.json"
 api POST /api/v5/bridges "$PRIV/reply-bridge.json"
 expect "POST bridges（回执动作：body 原样透传 + X-Mqtt-Device 头）" 201
 
+# 回读断言（**不能只看 201**：URL/头写错时创建也会成功——属性桥当年就是被这类事故推动加了回读）
+api GET "/api/v5/bridges/webhook:$REPLY_BRIDGE_NAME"
+expect "GET bridges/webhook:$REPLY_BRIDGE_NAME（回读）" 200
+printf '%s' "$API_BODY" >"$PRIV/reply-bridge-read.json"
+python3 - "$PRIV/reply-bridge-read.json" "$REPLY_URL" "$MAX_BUFFER_BYTES" "$REQUEST_TTL" "$MAX_RETRIES" <<'PYR' || fail=1
+import json, sys
+d = json.load(open(sys.argv[1]))
+url, maxbuf, ttl, retries = sys.argv[2:6]
+problems = []
+if d.get("url") != url: problems.append(f"url={d.get('url')}（期望 {url}）")
+if str(d.get("method", "")).lower() != "post": problems.append(f"method={d.get('method')}")
+if d.get("body") != "${payload}": problems.append(f"body={d.get('body')}（期望原样透传 ${{payload}}）")
+hdr = d.get("headers") or {}
+if "X-Internal-Token" not in hdr: problems.append("headers 缺少 X-Internal-Token")
+if hdr.get("X-Mqtt-Device") != "${deviceId}": problems.append(f"headers.X-Mqtt-Device={hdr.get('X-Mqtt-Device')}（期望 ${{deviceId}} 模板）")
+ro = d.get("resource_opts") or {}
+if ro.get("max_buffer_bytes") != maxbuf: problems.append(f"max_buffer_bytes={ro.get('max_buffer_bytes')}（期望 {maxbuf}）")
+if ro.get("inflight_window") != 1: problems.append(f"inflight_window={ro.get('inflight_window')}")
+if str(ro.get("request_ttl")) != ttl: problems.append(f"request_ttl={ro.get('request_ttl')}")
+if problems:
+    print("  ❌ 回执动作参数回读不符：" + "；".join(problems)); sys.exit(3)
+print("  ✅ 回执动作参数回读一致（url/method/body=${payload}/headers 含内部凭证头与 X-Mqtt-Device 模板/缓冲与顺序参数）")
+PYR
+
 api GET /api/v5/rules
 reply_rule_id="$(printf '%s' "$API_BODY" | python3 -c '
 import json, sys
@@ -338,11 +362,32 @@ api GET "/api/v5/bridges/webhook:$BRIDGE_NAME"
 status="$(printf '%s' "$API_BODY" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status",""))' 2>/dev/null)"
 reason="$(printf '%s' "$API_BODY" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status_reason",""))' 2>/dev/null)"
 if [ "$status" = "connected" ]; then
-  ok "动作状态 = connected（健康检查已打通：反向通道 + 内部凭证均被平台接受）"
+  ok "属性动作状态 = connected（健康检查已打通：反向通道 + 内部凭证均被平台接受）"
 else
-  bad "动作状态 = $status（reason=$(printf '%s' "$reason" | redact "$TOKEN_FILE")）⇒ 链路或凭证未生效"
+  bad "属性动作状态 = $status（reason=$(printf '%s' "$reason" | redact "$TOKEN_FILE")）⇒ 链路或凭证未生效"
 fi
+api GET "/api/v5/bridges/webhook:$REPLY_BRIDGE_NAME"
+reply_status="$(printf '%s' "$API_BODY" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status",""))' 2>/dev/null)"
+if [ "$reply_status" = "connected" ]; then
+  ok "回执动作状态 = connected（回执链路同样打通）"
+else
+  bad "回执动作状态 = $reply_status ⇒ 回执链路未生效（设备回执会到不了平台）"
+fi
+# 回执规则也回读一次（enable + actions）
+api GET /api/v5/rules
+printf '%s' "$API_BODY" | python3 -c '
+import json, sys
+rules = json.load(sys.stdin).get("data", [])
+hit = [r for r in rules if r.get("name") == sys.argv[1]]
+if not hit:
+    print("  ❌ 回读不到回执规则 " + sys.argv[1]); sys.exit(3)
+r = hit[0]
+acts = r.get("actions") or []
+if not r.get("enable") or not any(a.endswith(":" + sys.argv[2]) for a in acts):
+    print("  ❌ 回执规则未启用或未挂上动作：" + str(acts)); sys.exit(3)
+print("  ✅ 回执规则 id=%s enable=%s actions=%s" % (r["id"], r["enable"], acts))
+' "$REPLY_RULE_NAME" "$REPLY_BRIDGE_NAME" || fail=1
 
 echo
-if [ "$fail" -eq 0 ]; then echo "结论: PASS（入站规则/动作已生效且链路自检通过）"; exit 0; fi
+if [ "$fail" -eq 0 ]; then echo "结论: PASS（入站 + 回执两组规则/动作均已生效，链路自检通过）"; exit 0; fi
 echo "结论: FAIL（见上面的 ❌）"; exit 1

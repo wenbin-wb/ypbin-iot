@@ -101,7 +101,7 @@ printf '%s' "$SEND_JSON" | python3 -c '
 import json,sys
 d=(json.load(sys.stdin).get("data") or {})
 assert d.get("statusCode")=="sent", "下发响应状态=%s（期望 sent）" % d.get("statusCode")
-assert (d.get("emqxMessageId") or "")!="" or True, ""
+
 print("  ·  下发响应 statusCode=%s emqxMessageId=%s" % (d.get("statusCode"), d.get("emqxMessageId")))' || bad "下发响应不是 sent（期望 200=至少一个订阅者）"
 mwr "for i in \$(seq 1 40); do grep -q RECEIVED $TMP.listen 2>/dev/null && break; sleep 0.5; done; cat $TMP.listen" | sed 's/^/  ·  /'
 mwr "grep -q RECEIVED $TMP.listen" && ok "模拟设备**真收到**下行报文" || bad "模拟设备未收到下行报文"
@@ -111,16 +111,21 @@ ST="$(instance_status "$REQ")"
 [ "$ST" = "succeeded" ] && ok "实例终态 = succeeded" || bad "实例终态 = $ST（期望 succeeded）"
 prodr "curl -s -H 'X-User-Id: 1' -H 'X-Tenant-Id: $TENANT' -H 'X-Roles: super-admin' 'http://127.0.0.1:18084/devices/$DEVICE/commands?page=1&pageSize=5' | python3 -c '
 import json,sys
-rows=(json.load(sys.stdin).get(\"data\") or {}).get(\"records\") or []
-hit=[r for r in rows if r.get(\"requestId\")==\"$REQ\"]
-r=hit[0] if hit else {}
-rp=r.get(\"replyPayload\") or \"\"
-print(\"  ·  reply_payload=%s\" % rp)
-print(\"  ·  finishedAt=%s emqxMessageId=%s\" % (r.get(\"finishedAt\"), r.get(\"emqxMessageId\")))
-assert \"receivedAt\" in rp, \"reply_payload 少了平台落库时间 receivedAt\"
-assert \"ts\" in rp, \"reply_payload 少了设备时间 ts\"
-assert r.get(\"finishedAt\"), \"finished_at 为空（平台落库时间）\"
-print(\"  ·  判据 ok：reply_payload 同时含设备 ts 与平台 receivedAt，finished_at 非空\")'"
+# ⚠️ PageResult 的 JSON 字段是 items（不是 records/list）——读错会让整段变成死断言（假绿）
+rows=(json.load(sys.stdin).get("data") or {}).get("items") or []
+hit=[r for r in rows if r.get("requestId")=="$REQ"]
+assert hit, "按 requestId 找不到实例（字段名或分页参数不对？）"
+r=hit[0]
+rp=r.get("replyPayload") or ""
+print("  ·  reply_payload=%s" % rp)
+print("  ·  finishedAt=%s emqxMessageId=%s" % (r.get("finishedAt"), r.get("emqxMessageId")))
+assert "receivedAt" in rp, "reply_payload 少了平台落库时间 receivedAt"
+assert "ts" in rp, "reply_payload 少了设备时间 ts"
+assert r.get("finishedAt"), "finished_at 为空（平台落库时间）"
+if not (r.get("emqxMessageId") or ""):
+    print("  ·  ⚠️ emqxMessageId 为空：EMQX publish 响应体的 id 解析是**尽力而为**（状态码才定成败），已登记")
+print("  ·  判据 ok：reply_payload 同时含设备 ts 与平台 receivedAt，finished_at 非空")
+'" && ok "① 回执落库字段齐全（设备 ts + 平台 receivedAt + finished_at）" || bad "① 回执落库字段断言失败（见上面的 AssertionError）"
 
 echo "=== ② 幂等：同一回执重投 ==="
 DUP0=$(metric iot.command.reply.duplicated)
@@ -185,8 +190,30 @@ hit=[r for r in rows if r.get(\"requestId\")==\"$TO_REQ\"]
 print(hit[0].get(\"errorCode\",\"\") if hit else \"\")'")"
 [ "$TO_ERR" = "TIMEOUT" ] && ok "超时的原因码 = TIMEOUT" || bad "超时的原因码 = $TO_ERR（期望 TIMEOUT）"
 
-echo "=== 收尾：删除临时口令文件与探针输出 ==="
-mwr "shred -u $MW_PW_FILE 2>/dev/null || rm -f $MW_PW_FILE; rm -f $TMP.listen $TMP.silent; echo '  ·  已清理'" || bad "清理失败"
+echo "=== ⑤ 负向：伪造载荷设备（认证头必须压过载荷） ==="
+# 在**设备自己的 up/reply 主题**上发布一条 payload.deviceId = 别的设备 的回执：
+# 认证头 X-Mqtt-Device 由 EMQX 从主题派生（= 本设备），平台必须因此丢弃。
+# 若头机制失效，平台会改用载荷设备去查实例 —— 这条就会被错误受理。
+FORGE_REQ="acc-forge-$RANDOM"
+mwr "$PYTHON - <<PY
+import json, time
+from paho.mqtt.client import CallbackAPIVersion, Client, MQTTv311
+pw=open('$MW_PW_FILE').read().strip()
+c=Client(CallbackAPIVersion.VERSION2, client_id='$TENANT.$DEVICE-forge', protocol=MQTTv311)
+c.username_pw_set('$TENANT.$DEVICE', pw)
+c.connect('127.0.0.1', 1883, 15); c.loop_start(); time.sleep(1)
+c.publish('$REPLY_TOPIC', json.dumps({'deviceId':9999999,'requestId':'$FORGE_REQ','code':0,'message':'forged','data':{},'ts':int(time.time()*1000)}), qos=1)
+time.sleep(2); c.disconnect(); c.loop_stop()
+print('  ·  伪造回执已投递（载荷 deviceId=9999999，认证设备=$DEVICE）')
+PY"
+sleep 4
+prodr "docker logs ypbin-iot --since 3m 2>&1 | grep -c '回执声称的设备与认证主题不一致'" > /tmp/forge-count 2>/dev/null || true
+FORGE_HIT=$(cat /tmp/forge-count 2>/dev/null | tr -dc '0-9')
+[ "${FORGE_HIT:-0}" -ge 1 ] && ok "平台按认证主题丢弃了伪造回执（日志命中 ${FORGE_HIT} 次）" || bad "未见到认证主题不一致的丢弃日志（认证头机制可能失效或日志未输出）"
+
+echo "=== 收尾：删除两台的临时文件（生产机的 /tmp/dup.cfg 里有内部凭证，必须一起清） ==="
+mwr "shred -u $MW_PW_FILE 2>/dev/null || rm -f $MW_PW_FILE; rm -f $TMP.listen $TMP.silent; echo '  ·  中间件机已清理'" || bad "中间件机清理失败"
+prodr "shred -u /tmp/dup.cfg /tmp/dup.json /tmp/cmd.json /tmp/issue.json 2>/dev/null || rm -f /tmp/dup.cfg /tmp/dup.json /tmp/cmd.json /tmp/issue.json; ls /tmp/dup.cfg /tmp/cmd.json 2>/dev/null && echo '  ❌ 生产机临时文件仍在' || echo '  ·  生产机已清理'" || bad "生产机清理失败"
 
 echo
 if [ "$fail" -eq 0 ]; then echo "结论: PASS（①–④ 全部命中）"; exit 0; fi

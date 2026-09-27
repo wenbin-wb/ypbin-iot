@@ -307,6 +307,12 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
                 LogSanitizer.sanitize(req.getDeviceId()), LogSanitizer.sanitize(authenticatedDevice));
             return CommandReplyResult.of(false, false, true, "回执设备与认证主题不一致");
         }
+        if (authenticatedDevice == null) {
+            // fail-open 路径必须可观测：EMQX 动作**总是**带这个头，没带说明是直接 HTTP 调用
+            // （自测/旁路），此时信任边界退化为"载荷自称的设备"，必须留痕（禁静默降级）
+            log.info("[iot] 回执缺少 X-Mqtt-Device 认证头，按载荷设备处理（仅直接 HTTP 调用应出现）：载荷={}",
+                LogSanitizer.sanitize(req.getDeviceId()));
+        }
         if (req.getDeviceId() == null || req.getDeviceId() <= 0) {
             replyDiscardedCounter.increment();
             return CommandReplyResult.of(false, false, true, "设备 ID 非法");

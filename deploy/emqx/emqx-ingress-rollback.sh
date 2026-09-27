@@ -23,6 +23,9 @@ ENV_FILE=/opt/emqx/.env
 BASE_URL=http://127.0.0.1:18093
 BRIDGE_NAME=ypbin-ingress
 RULE_NAME=ypbin_up_property
+# 段 B 的回执链路（up/reply → /internal/command-replies）也要一起撤，否则回滚后回执桥仍指着已回滚的端点重试
+REPLY_BRIDGE_NAME=ypbin-reply
+REPLY_RULE_NAME=ypbin_up_reply
 PURGE_TUNNEL=0
 
 while [ $# -gt 0 ]; do
@@ -58,8 +61,9 @@ api GET /api/v5/rules
 rule_ids="$(printf '%s' "$API_BODY" | python3 -c '
 import json, sys
 rules = json.load(sys.stdin).get("data", [])
-print(" ".join(r["id"] for r in rules if r.get("name") == sys.argv[1]))
-' "$RULE_NAME")"
+wanted = set(sys.argv[1:])
+print(" ".join(r["id"] for r in rules if r.get("name") in wanted))
+' "$RULE_NAME" "$REPLY_RULE_NAME")"
 if [ -z "$rule_ids" ]; then
   ok "无同名规则（幂等）"
 else
@@ -69,9 +73,11 @@ else
   done
 fi
 
-echo "=== 2) 删动作（桥接）==="
-api DELETE "/api/v5/bridges/webhook:$BRIDGE_NAME"
-case "$API_CODE" in 204|404) ok "DELETE bridges/webhook:$BRIDGE_NAME（HTTP $API_CODE）";; *) bad "DELETE bridge：HTTP $API_CODE；响应=$API_BODY";; esac
+echo "=== 2) 删动作（桥接：属性 + 回执）==="
+for name in "$BRIDGE_NAME" "$REPLY_BRIDGE_NAME"; do
+  api DELETE "/api/v5/bridges/webhook:$name"
+  case "$API_CODE" in 204|404) ok "DELETE bridges/webhook:$name（HTTP $API_CODE）";; *) bad "DELETE bridge $name：HTTP $API_CODE；响应=$API_BODY";; esac
+done
 
 echo "=== 3) 中间件机：停中继与防火墙放行（保留单元文件，便于回滚回来）==="
 systemctl disable --now emqx-ingress-relay.socket >/dev/null 2>&1 && ok "emqx-ingress-relay.socket 已停用" || bad "停 emqx-ingress-relay.socket 失败"
