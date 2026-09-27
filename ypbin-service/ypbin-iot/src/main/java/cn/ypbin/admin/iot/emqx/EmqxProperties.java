@@ -56,6 +56,15 @@ public class EmqxProperties {
     /** 默认下行 QoS（QoS1 = 至少一次，官方语义可能重复，靠 requestId 幂等）。 */
     public static final int DEFAULT_DOWNLINK_QOS = 1;
 
+    /** 默认下行命令超时（毫秒）：与入站动作的 {@code request_ttl=30s} 对齐，见字段注释。 */
+    public static final int DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
+
+    /** 默认超时扫描周期（毫秒）。 */
+    public static final int DEFAULT_COMMAND_SCAN_INTERVAL_MS = 15_000;
+
+    /** 默认单轮扫描候选上限（与断档扫描同量级）。 */
+    public static final int DEFAULT_COMMAND_SCAN_BATCH_SIZE = 200;
+
     /** 本环境是否已接入 MQTT broker。 */
     private boolean enabled = false;
 
@@ -86,6 +95,25 @@ public class EmqxProperties {
 
     /** 下行发布是否 retain（默认 false：命令类消息不该变成保留消息）。 */
     private boolean downlinkRetain = false;
+
+    /**
+     * 下行命令的默认超时（毫秒）。
+     *
+     * <p><b>为什么默认 30s</b>：与入站动作的 {@code request_ttl=30s} 对齐——更短会在 EMQX 还在重发时就把
+     * 命令判超时（"其实还能到"却判失败）；更长会让"设备真没回执"的判据钝化。评审确认口径：
+     * **默认超时 ≥ EMQX request_ttl**（本值相等，即最小允许值）。</p>
+     */
+    @Min(1000)
+    private int defaultCommandTimeoutMs = DEFAULT_COMMAND_TIMEOUT_MS;
+
+    /** 超时扫描周期（毫秒；周期批量扫描，**不自动重试**）。 */
+    @Min(1000)
+    private int commandScanIntervalMs = DEFAULT_COMMAND_SCAN_INTERVAL_MS;
+
+    /** 单轮超时扫描最多处理的候选数（防一次扫描把库与线程拖住，下轮继续）。 */
+    @Min(1)
+    @Max(5000)
+    private int commandScanBatchSize = DEFAULT_COMMAND_SCAN_BATCH_SIZE;
 
     /** broker 主机（供接入信息装配；未接入时为空）。 */
     private String brokerHost;

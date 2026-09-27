@@ -1,4 +1,15 @@
 # ypbin-iot 增量路线（admin 基座 + IoT 业务）
+> ## ✅ 状态更新（2026-10-02 · EMQX 平台侧集成）
+>
+> - **段 A（MQTT 入站）已完成并合并**（PR #81，main `398ddcb`）：薄适配端点 `POST /internal/mqtt/readings`
+>   （**原始 HTTP 状态码**，例外仅限 `/internal/mqtt/**`）、EMQX 规则 + HTTP 动作（`max_buffer_bytes=16MB`）、
+>   设备凭据与 EMQX 内置库同步（签发/轮换 ⇒ `import_users` 只上报哈希；吊销 ⇒ 删账号）、
+>   双向通道（生产机 autossh `-L 172.20.0.1:18093` / `-R 127.0.0.1:18084` + 中间件机 socket-proxyd 中继）。
+>   详见 `docs/EMQX-INTEGRATION.md`。
+> - **段 B（下行 / 在线调试）已实现（生产 e2e 待合并部署后回填）**：`iot_command_instance` 六态状态机 + 下发/查询/手动重发端点 +
+>   周期超时扫描（不自动重试）+ `POST /internal/command-replies` 幂等回执 + `iot:debug:send/get` 权限码与菜单。
+>   契约口径（含设计留白的 payload 形态）见 `docs/EMQX-INGRESS-DESIGN.md` §7.6。
+> - **仍未做**：真设备 1883 对外暴露（当前只绑中间件机回环）、TLS/8883、EMQX 集群、段 C 前端「在线调试」页。
 
 > **⚠️ 方向变更（2026-09-20 用户拍板）**：以后**不再按「最小可跑通增量」推进，一律以最完善的功能与设计展开**。
 > 平台级**完整设计总纲**见 [`IOT-PLATFORM-DESIGN.md`](IOT-PLATFORM-DESIGN.md)（物模型对齐 IoTDA 结构：产品→服务→属性/命令+事件扩展、

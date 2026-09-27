@@ -56,9 +56,15 @@ ypbin:
     broker-tls-enabled: false
     # 设备口令随机字节数（32 字节 = 256 位熵）
     credential-password-length: 32
-    # 下行发布（段 B 使用；本段先登记默认值，避免两批各写一份）
+    # 下行发布（段 B）
     downlink-qos: 1
     downlink-retain: false
+    # 下行命令默认超时（毫秒）：**不小于**入站动作的 request_ttl=30s（评审确认口径），
+    # 否则 EMQX 还在重发时平台就把命令判超时；单条命令可用端点入参 timeoutMs 覆盖。
+    default-command-timeout-ms: 30000
+    # 超时扫描（周期批量；**不自动重试**——重发是人在页面上的动作）
+    command-scan-interval-ms: 15000
+    command-scan-batch-size: 200
 
   # 数据保留（D0.8）：断档事件与维护窗口按 13 个月清理（**不可逆**，天数必须为正，启动自检会拒绝非法值）。
   # 只删**已闭合**的行：进行中的断档/维护窗口是活数据，删掉会让可用率 fail-open。

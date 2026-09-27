@@ -693,7 +693,7 @@ stateDiagram-v2
 | 步骤 | 动作 | 既有能力 |
 |---|---|---|
 | ① 平台下发期望 | 写属性时可勾选「同时写入影子 desired」→ `PUT /iot/devices/{id}/shadow` | **已有**：`IotShadowController` `/devices/{deviceId}/shadow`，权限 `iot:shadow:update`；`IotShadowServiceImpl.updateDesired`（`IotShadowServiceImpl.java:79-93`） |
-| ② 下发命令 | 构造 `down/property/set`，payload 含 `requestId` 与 `{properties:{...}}` | 本方案新增 |
+| ② 下发命令 | 构造 `down/property/set`，payload 含 `requestId` 与 `{properties:{...}}` | 本方案新增；**三种 kind 的确切 payload 与校验口径见 §7.6**（评审确认补齐） |
 | ③ 设备上报 | 设备发 `up/property`（走 §6 入站）→ 更新**最新值 + 时序 + 活性** | **已有链路**（`AvailabilityServiceImpl.ingest`，`AvailabilityServiceImpl.java:120`） |
 | ④ `reported` 更新 | 影子 `reported` 写入 | ✅ **G2 已在 main 落地（PR #46）**：`ShadowReportedWriter`/`DbShadowReportedWriter` 经 `IotShadowMapper.mergeReported`（`JSON_MERGE_PATCH` + 唯一键 `ON DUPLICATE KEY UPDATE`，**幂等**）写入 `reported`；且已接入本设计复用的同一条链路 —— `AvailabilityServiceImpl.ingest` 在 `afterCommit` 一并写影子（`collectShadowReported` → `writeDerivedAfterCommit` → `shadowReportedWriter.writeAll`）⇒ **无需新增 ad-hoc 写入方** |
 | ⑤ merged 对比 | 页面展示 `desired` / `reported` / `merged` 与「是否一致」 | **已有读接口** `GET /shadow`；一致性标记为前端计算 |
@@ -712,6 +712,9 @@ stateDiagram-v2
 | `POST` | `/internal/command-replies` | `X-Internal-Token`（既有守卫） | 设备回执入口（由 EMQX 规则回流，`up/reply`） |
 
 > ⚠️ `iot:debug:*` 是 `docs/IOT-UX-PROPOSAL.md:529` 已建议的权限码（*需新增（如 `iot:debug:send`）*），此处沿用，避免另造一套命名。
+>
+> ✅ **已实施（段 B，2026-10-02）**：四个端点与 `iot_command_instance`（含 `topic` 列，便于无关联审计）
+> 均已落地；payload / 校验 / 回执口径见 **§7.6**（评审确认补齐）。
 
 ### 7.5 前端「在线调试」页交互
 
@@ -747,6 +750,26 @@ stateDiagram-v2
 3. **实时性**：P0 用**轮询**（2s，仅在有非终态实例时轮询；全部终态则停）；P1 再上 SSE/WS。理由：本机资源紧张，SSE 需要长连接与推送通道，不值得在 P0 引入。
 4. **报文查看**：展示下行 / 上行原始 JSON（**脱敏**：不得包含凭据；`X-Internal-Token` 永不出现）。
 5. **占位纪律**：`docs/IOT-UX-PROPOSAL.md:1166` 的 R4「**不得做成假按钮**」继续保持：后端未上线前该页签**不出现**。
+
+---
+
+### 7.6 下行契约与实现口径（**评审确认：由父代理 2026-09-27 补齐**）
+
+> 本节是 §7.3/§7.4 的**补齐**：设计原文只写明了 `property_set` 的 payload 形态与 `up/reply` 的字段，
+> `property_get` / `service_call` 的 payload、成功码口径与校验时点没写。以下口径由父代理评审确认，
+> 段 B 按此实现（并已回写本文档，勿再按原文留白）。
+
+| # | 确认口径 |
+|---|---|
+| **B1** | `property_get` payload 为 `{"requestId":…,"properties":["temperature"]}`；**`properties` 缺省或空数组 = 读取该设备全部可读属性**（与 set 共用 `properties` 键名，set 是映射、get 是列表）。 |
+| **B2** | `service_call` payload 为 `{"requestId":…,"params":{…}}`；`identifier` **必须先按该产品物模型校验**（不在该产品定义内 ⇒ 明确业务错误、**不发布**）；回执的 `data` 承载服务输出，形态由物模型定义决定，平台**原样存储不解析**。 |
+| **B3** | 回执成功码：**`code == 0` 判 `succeeded`**，非 0 判 `failed` 并**原样保存设备的 `code`/`message`**（不要只存一句"失败"）；`ts` 取设备时间，**平台另记落库时间**（两者都留，便于排查设备时钟）。 |
+| **B4** | **例外范围不得扩散**：下发/查询/重发是浏览器/网关面向的端点，一律 **HTTP 200 + `R.code`**；真状态码例外只属于 `/internal/mqtt/**`（决策 D2）。回执内部端点同理（它靠 `X-Internal-Token` 守卫，且回执语义上幂等，不需要 4xx 阻止重试）。 |
+| **B5** | **主题注入防护**：`identifier` 会进 `down/service/{identifier}` ⇒ 必须先过**白名单校验**（复用 `PropertyIdRules`：字符集 + 长度上限），非法即业务错误、**不发布**。 |
+| **B6** | **下行 payload 上限 64KB**（与入站报文体同口径）；**一切校验必须在 publish 之前**完成。 |
+| **B7** | **超时扫描**：默认超时（`ypbin.emqx.default-command-timeout-ms`，默认 30000ms）**不小于**入站动作的 `request_ttl=30s`，周期与批量上限可配；**不自动重试**。`202 = No matched subscribers` ⇒ **立即**判 `failed/NO_SUBSCRIBER`（文案"设备未连接"），不等超时。 |
+| **B8** | 状态机**六态穷举**（含非法转换被拒）；`failed`/`timeout` 可被**人工重发**重新打开（同 `requestId`、`retry_count+1`），`succeeded`/`cancelled` 不可。 |
+| **B9** | **回执幂等**：按 `(tenant_id, request_id)` CAS 更新（只从 `pending`/`sent` 出发）；`pending` 也可直接被回执推进（平台"插 pending → 投递 → 改 sent"的窗口内设备可能已回执，不接受会出现**假失败**）。 |
 
 ---
 

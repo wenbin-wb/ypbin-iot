@@ -61,9 +61,14 @@ BLOCK = """  # EMQX 接入（设计 §8.4；拓扑/方向/未验证项见 docs/E
     broker-tls-enabled: false
     # 设备口令随机字节数（32 字节 = 256 位熵）
     credential-password-length: 32
-    # 下行发布默认值（段 B 使用；先登记避免两批各写一份）
+    # 下行发布默认值（段 B）
     downlink-qos: 1
     downlink-retain: false
+    # 下行命令默认超时（毫秒）：不小于入站动作的 request_ttl=30s（评审确认）
+    default-command-timeout-ms: 30000
+    # 超时扫描（周期批量；不自动重试）
+    command-scan-interval-ms: 15000
+    command-scan-batch-size: 200
 """
 
 
@@ -137,30 +142,37 @@ def main():
     print("[1] live dump ok → %s（600）len=%d sha256[:16]=%s"
           % (os.path.join(args.workdir, "before-" + DATA_ID), len(src), fp(src)))
 
+    lines = src.split("\n")
     if re.search(r"^  emqx:$", src, flags=re.M):
-        # 幂等：已存在则要求**逐字等于**期望段（否则人工处置——自动覆盖会悄悄改掉别人的配置）
+        # 已存在：**逐字相同则幂等跳过；不同则整段替换**（替换同样断言"除该段外逐字未变"）。
+        # 不做"逐个键合并"：那样会在段内留下旧键与新键混合的状态，也没法用"删除整段后比原文"来证明没动别处。
         start = src.index("  emqx:")
-        end = src.index("\n  #", start) + 1 if "\n  #" in src[start:] else len(src)
+        end = len(src)
+        for offset, line in enumerate(lines):
+            position = sum(len(part) + 1 for part in lines[:offset])
+            if position > start and (ANCHOR_PATTERN.match(line)
+                    or re.match(r"^  [a-z][a-z0-9-]*:", line)):
+                end = position
+                break
         current = src[start:end]
         if current == block:
             print("[2] 幂等：live 里已有**逐字相同**的 ypbin.emqx 段（无需变更）")
             return
-        raise SystemExit("!! live 里已有 ypbin.emqx 段但与期望不一致 —— 请人工比对后再决定\n"
-                         "   期望 sha256[:16]=%s 现状 sha256[:16]=%s（dump 在 %s）"
-                         % (fp(block), fp(current), args.workdir))
-
-    lines = src.split("\n")
-    anchors = [i for i, line in enumerate(lines) if ANCHOR_PATTERN.match(line)]
-    if len(anchors) != 1:
-        raise SystemExit("!! 期望 live 里锚点（# 数据保留）恰好 1 处，实际 %d 处" % len(anchors))
-    index = anchors[0]
-    out = "\n".join(lines[:index]) + "\n" + block + "\n".join(lines[index:])
-
-    # 关键断言：把插入的块删掉后必须与原文**逐字相同**（防止"顺手"改了别的配置）
-    # ⚠️ block 自身已以换行结尾 ⇒ 这里只删 block（早期写成 block + "\n" 会永远不命中而被误判成"内容被改动"）
-    if out.replace(block, "", 1) != src:
-        raise SystemExit("!! 除插入 ypbin.emqx 段以外内容被改动 —— 拒绝发布")
-    print("[2] 组装 ok：插入 %d 行、除该段外内容逐字未变（含占位符而非真值）" % (block.count("\n")))
+        out = src[:start] + block + src[end:]
+        if out.replace(block, "", 1) != src.replace(current, "", 1):
+            raise SystemExit("!! 除 ypbin.emqx 段以外内容被改动 —— 拒绝发布")
+        print("[2] 更新 ok：替换 ypbin.emqx 段（旧 sha256[:16]=%s → 新 %s），其余内容逐字未变"
+              % (fp(current), fp(block)))
+    else:
+        anchors = [i for i, line in enumerate(lines) if ANCHOR_PATTERN.match(line)]
+        if len(anchors) != 1:
+            raise SystemExit("!! 期望 live 里锚点（# 数据保留）恰好 1 处，实际 %d 处" % len(anchors))
+        index = anchors[0]
+        out = "\n".join(lines[:index]) + "\n" + block + "\n".join(lines[index:])
+        # 关键断言：把插入的块删掉后必须与原文**逐字相同**（防止"顺手"改了别的配置）
+        if out.replace(block, "", 1) != src:
+            raise SystemExit("!! 除插入 ypbin.emqx 段以外内容被改动 —— 拒绝发布")
+        print("[2] 组装 ok：插入 %d 行、除该段外内容逐字未变（含占位符而非真值）" % (block.count("\n")))
 
     if not args.apply:
         print("[3] dry-run：未发布。加 --apply 才写 Nacos")

@@ -30,6 +30,11 @@ BASE_URL=http://127.0.0.1:18093
 INGRESS_URL=http://172.28.0.1:18084/internal/mqtt/readings
 BRIDGE_NAME=ypbin-ingress
 RULE_NAME=ypbin_up_property
+# 回执链路（段 B）：up/reply → /internal/command-replies。
+# ⚠️ **必须与属性上报分开**：动作的 URL 是固定的（bridge 的 url 不能用模板），而回执要打到另一个路径。
+REPLY_BRIDGE_NAME=ypbin-reply
+REPLY_RULE_NAME=ypbin_up_reply
+REPLY_URL=http://172.28.0.1:18084/internal/command-replies
 UP_TOPIC_FILTER='ypbin/v1/+/+/up/property'
 # H6：默认 256MB 在中间件机上过大（阶段②压测时容器 mem_limit=2g），显式下调到 16MB
 MAX_BUFFER_BYTES=16MB
@@ -40,6 +45,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --env-file)   ENV_FILE="$2"; shift 2 ;;
     --token-file) TOKEN_FILE="$2"; shift 2 ;;
+    --reply-url)  REPLY_URL="$2"; shift 2 ;;
     --base-url)   BASE_URL="$2"; shift 2 ;;
     --ingress-url) INGRESS_URL="$2"; shift 2 ;;
     *) echo "未知参数: $1" >&2; exit 1 ;;
@@ -244,6 +250,108 @@ if not any(a.endswith(suffix) for a in acts):
 print("  ✅ 规则 id=%s enable=%s actions=%s" % (r["id"], r["enable"], acts))
 ' "$RULE_NAME" "$BRIDGE_NAME" || fail=1
 
+# ── B3 回执链路：up/reply → /internal/command-replies ─────────────────────────────
+# 为什么 body 用 `${payload}` 原样透传：回执契约（设计 §7.1）就是设备发的 JSON，
+# 逐字段模板会在 message/data/ts 缺省时渲染出**非法 JSON**（模板不支持条件字段）。
+# ⚠️ 但"透传"意味着 deviceId 来自**载荷**（不可信）⇒ 因此额外用 header 把**主题派生的认证设备**
+#    传给平台（headers 支持模板），平台侧做一致性校验（见 InternalCommandReplyController）：
+#    载荷声称的设备必须等于主题里的设备，否则丢弃（防同租户/跨租户替别人回执）。
+api DELETE "/api/v5/bridges/webhook:$REPLY_BRIDGE_NAME"
+case "$API_CODE" in 204|404) ok "DELETE bridges/webhook:$REPLY_BRIDGE_NAME（幂等前置清理，HTTP $API_CODE）";; *) bad "DELETE reply bridge：HTTP $API_CODE";; esac
+python3 - "$PRIV/reply-bridge.json" "$REPLY_URL" "$TOKEN_FILE" "$MAX_BUFFER_BYTES" "$REQUEST_TTL" "$MAX_RETRIES" <<'PYB'
+import json, sys
+out, url, token_file, maxbuf, ttl, retries = sys.argv[1:7]
+token = open(token_file).read().strip()
+payload = {
+    "type": "webhook",
+    "name": "ypbin-reply",
+    "url": url,
+    "method": "post",
+    "headers": {
+        "content-type": "application/json",
+        "X-Internal-Token": token,
+        # 主题段派生的认证设备（EMQX 从 MQTT 主题取值，不受载荷影响）
+        "X-Mqtt-Device": "${deviceId}",
+    },
+    "body": "${payload}",
+    "max_retries": int(retries),
+    "connect_timeout": "5s",
+    "resource_opts": {
+        "max_buffer_bytes": maxbuf,
+        "query_mode": "async",
+        "request_ttl": ttl,
+        "inflight_window": 1,
+        "health_check_interval": "15s",
+    },
+}
+open(out, "w").write(json.dumps(payload))
+PYB
+chmod 600 "$PRIV/reply-bridge.json"
+api POST /api/v5/bridges "$PRIV/reply-bridge.json"
+expect "POST bridges（回执动作：body 原样透传 + X-Mqtt-Device 头）" 201
+
+# 回读断言（**不能只看 201**：URL/头写错时创建也会成功——属性桥当年就是被这类事故推动加了回读）
+api GET "/api/v5/bridges/webhook:$REPLY_BRIDGE_NAME"
+expect "GET bridges/webhook:$REPLY_BRIDGE_NAME（回读）" 200
+printf '%s' "$API_BODY" >"$PRIV/reply-bridge-read.json"
+python3 - "$PRIV/reply-bridge-read.json" "$REPLY_URL" "$MAX_BUFFER_BYTES" "$REQUEST_TTL" "$MAX_RETRIES" <<'PYR' || fail=1
+import json, sys
+d = json.load(open(sys.argv[1]))
+url, maxbuf, ttl, retries = sys.argv[2:6]
+problems = []
+if d.get("url") != url: problems.append(f"url={d.get('url')}（期望 {url}）")
+if str(d.get("method", "")).lower() != "post": problems.append(f"method={d.get('method')}")
+if d.get("body") != "${payload}": problems.append(f"body={d.get('body')}（期望原样透传 ${{payload}}）")
+hdr = d.get("headers") or {}
+if "X-Internal-Token" not in hdr: problems.append("headers 缺少 X-Internal-Token")
+if hdr.get("X-Mqtt-Device") != "${deviceId}": problems.append(f"headers.X-Mqtt-Device={hdr.get('X-Mqtt-Device')}（期望 ${{deviceId}} 模板）")
+if int(d.get("max_retries", -1)) != int(retries): problems.append(f"max_retries={d.get('max_retries')}")
+ro = d.get("resource_opts") or {}
+if ro.get("query_mode") != "async": problems.append(f"query_mode={ro.get('query_mode')}")
+if ro.get("max_buffer_bytes") != maxbuf: problems.append(f"max_buffer_bytes={ro.get('max_buffer_bytes')}（期望 {maxbuf}）")
+if ro.get("inflight_window") != 1: problems.append(f"inflight_window={ro.get('inflight_window')}")
+if str(ro.get("request_ttl")) != ttl: problems.append(f"request_ttl={ro.get('request_ttl')}")
+if problems:
+    print("  ❌ 回执动作参数回读不符：" + "；".join(problems)); sys.exit(3)
+print("  ✅ 回执动作参数回读一致（url/method/body=${payload}/headers 含内部凭证头与 X-Mqtt-Device 模板/缓冲与顺序参数）")
+PYR
+
+api GET /api/v5/rules
+reply_rule_id="$(printf '%s' "$API_BODY" | python3 -c '
+import json, sys
+try:
+    rules = json.load(sys.stdin).get("data", [])
+except Exception:
+    rules = []
+print(next((r["id"] for r in rules if r.get("name") == sys.argv[1]), ""))
+' "$REPLY_RULE_NAME")"
+if [ -n "$reply_rule_id" ]; then
+  api DELETE "/api/v5/rules/$reply_rule_id"
+  case "$API_CODE" in 204|404) ok "DELETE rules/$reply_rule_id（幂等前置清理，HTTP $API_CODE）";; *) bad "DELETE reply rule：HTTP $API_CODE";; esac
+fi
+python3 - "$PRIV/reply-rule.json" "$REPLY_RULE_NAME" "$REPLY_BRIDGE_NAME" <<'PYC'
+import json, sys
+out, rule_name, bridge_name = sys.argv[1:4]
+# WHERE 与属性规则同一身份一致性口径（纵深防御；真正的绑定靠 X-Mqtt-Device 头）
+sql = (
+    "SELECT nth(4, tokens(topic, '/')) AS deviceId, payload"
+    ' FROM "ypbin/v1/+/+/up/reply"'
+    " WHERE nth(3, tokens(topic, '/')) = nth(1, tokens(username, '.'))"
+    " AND nth(4, tokens(topic, '/')) = nth(2, tokens(username, '.'))"
+)
+payload = {
+    "name": rule_name,
+    "sql": sql,
+    "actions": [f"webhook:{bridge_name}"],
+    "enable": True,
+    "description": "ypbin 设备命令回执 up/reply → 平台 /internal/command-replies（段 B）",
+}
+open(out, "w").write(json.dumps(payload))
+PYC
+chmod 600 "$PRIV/reply-rule.json"
+api POST /api/v5/rules "$PRIV/reply-rule.json"
+expect "POST rules（回执：up/reply → 回执动作）" 201
+
 echo
 echo "=== C. 自检：动作健康状态（走真实链路打平台端点）==="
 if [ -n "${rule_id:-}" ]; then
@@ -256,11 +364,32 @@ api GET "/api/v5/bridges/webhook:$BRIDGE_NAME"
 status="$(printf '%s' "$API_BODY" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status",""))' 2>/dev/null)"
 reason="$(printf '%s' "$API_BODY" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status_reason",""))' 2>/dev/null)"
 if [ "$status" = "connected" ]; then
-  ok "动作状态 = connected（健康检查已打通：反向通道 + 内部凭证均被平台接受）"
+  ok "属性动作状态 = connected（健康检查已打通：反向通道 + 内部凭证均被平台接受）"
 else
-  bad "动作状态 = $status（reason=$(printf '%s' "$reason" | redact "$TOKEN_FILE")）⇒ 链路或凭证未生效"
+  bad "属性动作状态 = $status（reason=$(printf '%s' "$reason" | redact "$TOKEN_FILE")）⇒ 链路或凭证未生效"
 fi
+api GET "/api/v5/bridges/webhook:$REPLY_BRIDGE_NAME"
+reply_status="$(printf '%s' "$API_BODY" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status",""))' 2>/dev/null)"
+if [ "$reply_status" = "connected" ]; then
+  ok "回执动作状态 = connected（回执链路同样打通）"
+else
+  bad "回执动作状态 = $reply_status ⇒ 回执链路未生效（设备回执会到不了平台）"
+fi
+# 回执规则也回读一次（enable + actions）
+api GET /api/v5/rules
+printf '%s' "$API_BODY" | python3 -c '
+import json, sys
+rules = json.load(sys.stdin).get("data", [])
+hit = [r for r in rules if r.get("name") == sys.argv[1]]
+if not hit:
+    print("  ❌ 回读不到回执规则 " + sys.argv[1]); sys.exit(3)
+r = hit[0]
+acts = r.get("actions") or []
+if not r.get("enable") or not any(a.endswith(":" + sys.argv[2]) for a in acts):
+    print("  ❌ 回执规则未启用或未挂上动作：" + str(acts)); sys.exit(3)
+print("  ✅ 回执规则 id=%s enable=%s actions=%s" % (r["id"], r["enable"], acts))
+' "$REPLY_RULE_NAME" "$REPLY_BRIDGE_NAME" || fail=1
 
 echo
-if [ "$fail" -eq 0 ]; then echo "结论: PASS（入站规则/动作已生效且链路自检通过）"; exit 0; fi
+if [ "$fail" -eq 0 ]; then echo "结论: PASS（入站 + 回执两组规则/动作均已生效，链路自检通过）"; exit 0; fi
 echo "结论: FAIL（见上面的 ❌）"; exit 1

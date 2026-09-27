@@ -107,6 +107,54 @@ public final class DeviceMqttNaming {
     }
 
     /**
+     * 下行属性设置主题（设计 §5.1）。
+     *
+     * @param tenantId 租户 ID
+     * @param deviceId 设备 ID
+     * @return 形如 {@code ypbin/v1/1/2/down/property/set}
+     */
+    public static String topicDownPropertySet(Long tenantId, Long deviceId) {
+        return topicDownPrefix(tenantId, deviceId) + "property/set";
+    }
+
+    /**
+     * 下行读属性主题（设计 §5.1）。
+     *
+     * @param tenantId 租户 ID
+     * @param deviceId 设备 ID
+     * @return 形如 {@code ypbin/v1/1/2/down/property/get}
+     */
+    public static String topicDownPropertyGet(Long tenantId, Long deviceId) {
+        return topicDownPrefix(tenantId, deviceId) + "property/get";
+    }
+
+    /**
+     * 下行服务调用主题（设计 §5.1）。
+     *
+     * <p>{@code identifier} **必须先经 {@code PropertyIdRules} 校验**（调用点在 {@code CommandPayloads}）：
+     * 它会被拼进主题段，含 {@code /} {@code +} {@code #} 就能把主题扩成更宽的模式。</p>
+     *
+     * @param tenantId   租户 ID
+     * @param deviceId   设备 ID
+     * @param identifier 物模型命令标识
+     * @return 形如 {@code ypbin/v1/1/2/down/service/setTemp}
+     */
+    public static String topicDownService(Long tenantId, Long deviceId, String identifier) {
+        return topicDownPrefix(tenantId, deviceId) + "service/" + identifier;
+    }
+
+    /**
+     * 上行回执主题（设计 §5.1；设备发布，{@code requestId} 在 payload 里而不是主题里）。
+     *
+     * @param tenantId 租户 ID
+     * @param deviceId 设备 ID
+     * @return 形如 {@code ypbin/v1/1/2/up/reply}
+     */
+    public static String topicUpReply(Long tenantId, Long deviceId) {
+        return topicUpPrefix(tenantId, deviceId) + "reply";
+    }
+
+    /**
      * 从用户名解析租户 ID（先过正则，避免把非法值当成合法身份）。
      *
      * @param username 用户名

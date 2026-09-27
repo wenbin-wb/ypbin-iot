@@ -10,9 +10,9 @@
 package cn.ypbin.admin.iot.mqtt;
 
 import cn.ypbin.admin.iot.availability.ReadingObservationDto;
+import cn.ypbin.admin.iot.util.RequestIdRules;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.regex.Pattern;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -44,20 +44,17 @@ import lombok.Setter;
 @Setter
 public class MqttReadingIngestReq {
 
-    /** 请求 ID 上限（与 {@code iot_mqtt_ingest_receipt.request_id} 列宽一致）。 */
-    public static final int MAX_REQUEST_ID_LENGTH = 64;
+    /** 请求 ID 上限（**委托** {@link RequestIdRules}，避免第二份口径）。 */
+    public static final int MAX_REQUEST_ID_LENGTH = RequestIdRules.MAX_LENGTH;
 
-    /** 请求 ID 形态：字母/数字/下划线/点/冒号/连字符（与点位标识同一套字符口径，便于规则引擎侧拼接）。 */
-    public static final String REQUEST_ID_PATTERN =
-        "[A-Za-z0-9_.:-]{1," + MAX_REQUEST_ID_LENGTH + "}";
+    /** 请求 ID 形态（**委托** {@link RequestIdRules}）。 */
+    public static final String REQUEST_ID_PATTERN = RequestIdRules.PATTERN;
 
     /** 单条 MQTT 消息允许承载的读数条数上限（一条消息 = 一台设备的一小批，防单报文放大）。 */
     public static final int MAX_ITEMS = 50;
 
     /** 请求体字节数上限（防超大 payload 进内存；超限在解析前按 4xx 拒绝）。 */
     public static final int MAX_BODY_LENGTH = 64 * 1024;
-
-    private static final Pattern REQUEST_ID = Pattern.compile(REQUEST_ID_PATTERN);
 
     /** 设备侧请求 ID（幂等键；同设备内唯一）。 */
     private String requestId;
@@ -81,6 +78,6 @@ public class MqttReadingIngestReq {
      * @return 合法返回 {@code true}
      */
     public static boolean isValidRequestId(String requestId) {
-        return requestId != null && REQUEST_ID.matcher(requestId).matches();
+        return RequestIdRules.isValid(requestId);
     }
 }
