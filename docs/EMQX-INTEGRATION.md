@@ -325,6 +325,20 @@ bash deploy/emqx/accept-emqx-ingress.sh \
 按规矩**双写**（`007` 末尾 + `migration/2026-10-02-iot-command-instance.sql`）+ `sys_role_menu` + `sys_template_menu`
 （`tools/check-iot-sql-equivalence.sh` 绿）。
 
+**前端入口状态（2026-10-02，段 C）**：`ypbin-iot-ui` 侧已上线——设备详情抽屉第 5 个页签「在线调试」
+（`views/iot/devices/modules/detail-debug.vue` + `api/iot/command.ts`，PR #26，main `8bcc883`），
+**只调上面这三个端点**（不新增后端字段/端点）：下发 → 2s 轮询（**不引入 ws/SSE**）看状态与回执；
+历史分页 + 状态筛选 + 展开看下行 payload 与上行回执（设备 `code`/`message`/`data`、设备 `ts`、平台 `receivedAt`）；
+手动重发**同一 `requestId`**（不新生成）；门禁用 `iot:debug:get`（页签）与 `iot:debug:send`（下发/重发按钮）；
+失败态**原样显示后端 `message`** 并保留原始 `code` 可展开，绝不画成空态。
+
+> **契约限制（前端已如实标注，不作为后端缺陷）**：后端一条指令只接受**一个** `identifier`
+> （`CommandPayloads` 对 `property_get` 只放一个元素；`PropertyIdRules` 白名单不含逗号）⇒ 页面的「多点位」
+> 目前由**前端扇出**成 N 条独立指令（各自 `requestId`、单批上限 20、页面有批次标记与汇总）。
+> **后续由后端多元素支持替换**（设计 §7.3 已允许该形态：`property_set` 的 `properties` 是映射、
+> `property_get` 的是列表），届时前端扇出可收回为单条——本条登记为后端后续项。
+> 另：`writeDesired` 仍是 U-B1（未实现、显式拒绝），前端**不做**那个复选框（避免假按钮）。
+
 ### 6.2.2 验收判据（段 B）
 
 | 判据 | 期望 | 结果 |
