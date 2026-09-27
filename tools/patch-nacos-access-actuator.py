@@ -54,7 +54,11 @@ BLOCK = """
 #   3) 网关上**没有** access 的路由（它只被 iot 的内部租约/读数链路与宿主机的值班命令直接调用），
 #      所以「只绑回环」就是这条链路的实际边界。
 #   4) 只读性：metrics/info 是只读端点；health 已关掉细节与组件展示（show-details/show-components=never），
-#      只回 status，不会泄露中间件地址与异常堆栈。
+#      不会泄露中间件地址与异常堆栈。
+#      ⚠️ **但 access 的 `/actuator/health` 在生产会挂起**（收到请求后不返回任何字节；2026-09-27 部署前后各实测一次，
+#      `PROD-OPS-NOTES.md` §6.3 早有登记，**非本段引入**、根因未定位）⇒ **不要把它当可用探针**，
+#      判活请用 `/actuator/health/liveness` 与 `/actuator/health/readiness`（均 {"status":"UP"}，毫秒级返回）。
+#      `info` 会回 process 段（pid/工作目录/堆/GC/uptime）——与 ypbin-iot 的既有口径一致，不含凭据。
 management:
   endpoints:
     web:

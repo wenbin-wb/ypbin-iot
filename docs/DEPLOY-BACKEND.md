@@ -267,6 +267,8 @@ done
 # ✅ 公网不可达（在**非服务器的外部主机**上）：18086/18084 期望 000 / curl exit 7；19000/18080 期望 200
 ```
 
+> ⚠️ **live 配置里的这段注释是发布当时的版本**（脚本 `tools/patch-nacos-access-actuator.py` 的 `BLOCK` 与仓库 yaml 已按复核意见补上 health 挂起的事实；live 的注释差异不影响行为）。
+
 > ⚠️ **access 的 `/actuator/health` 会挂起**（2026-09-27 部署前后各测一次，均 >6s 无响应；`PROD-OPS-NOTES.md`
 > §6.3 早已登记同类现象）。**不是本次改动引入**（改前改后同样挂起），且与 metrics 暴露无关。
 > 需要判活时用 `/actuator/health/liveness` 与 `/actuator/health/readiness`（均为 `{"status":"UP"}`，毫秒级）。
