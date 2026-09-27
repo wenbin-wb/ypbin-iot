@@ -6,7 +6,7 @@
 >   设备凭据与 EMQX 内置库同步（签发/轮换 ⇒ `import_users` 只上报哈希；吊销 ⇒ 删账号）、
 >   双向通道（生产机 autossh `-L 172.20.0.1:18093` / `-R 127.0.0.1:18084` + 中间件机 socket-proxyd 中继）。
 >   详见 `docs/EMQX-INTEGRATION.md`。
-> - **段 B（下行 / 在线调试）已实现（生产 e2e 待合并部署后回填）**：`iot_command_instance` 六态状态机 + 下发/查询/手动重发端点 +
+> - **段 B（下行 / 在线调试）已实现并生产实测通过**（`docs/EMQX-INTEGRATION.md` §6.2.3，2026-09-27）：`iot_command_instance` 六态状态机 + 下发/查询/手动重发端点 +
 >   周期超时扫描（不自动重试）+ `POST /internal/command-replies` 幂等回执 + `iot:debug:send/get` 权限码与菜单。
 >   契约口径（含设计留白的 payload 形态）见 `docs/EMQX-INGRESS-DESIGN.md` §7.6。
 > - **仍未做**：真设备 1883 对外暴露（当前只绑中间件机回环）、TLS/8883、EMQX 集群、段 C 前端「在线调试」页。

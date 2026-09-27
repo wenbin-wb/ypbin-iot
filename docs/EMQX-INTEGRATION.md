@@ -331,7 +331,7 @@ bash deploy/emqx/accept-emqx-ingress.sh \
 |---|---|---|
 | 状态机 | 6×6=36 种转换逐个断言（非法被拒）；`failed`/`timeout` 可重发、其余不可 | ✅ `CommandInstanceStatusTest` 4 用例 |
 | 下发成功 | 实例 `pending→sent`；payload/topic 与契约一致；`qos=1`/`retain=false` | ✅ `CommandInstanceServiceImplTest` |
-| 设备未连 | `202` ⇒ **立即** `failed/NO_SUBSCRIBER`（不等超时） | 单测 ✅；**生产实测待合并部署后回填**（见 §6.2.3） |
+| 设备未连 | `202` ⇒ **立即** `failed/NO_SUBSCRIBER`（不等超时） | 单测 ✅；**生产实测 ✅（2026-09-27，1072ms ≪ 15000ms，见 §6.2.3）** |
 | 校验不发布 | 未知标识 / 属性不可写 / 未知命令 / 非法 kind / `writeDesired=true` / params 非法 ⇒ 业务错误且 `verify(never()) publish` | ✅ 4 用例 |
 | 重发 | 同 requestId、`retry_count+1`、失败原因被清空（显式 set） | ✅ |
 | 回执 | `code=0→succeeded`（`reply_payload` 原样含 data/ts）；非 0→`failed`（保留 code/message）；重复→`duplicated` 不更新；设备不一致/未知 requestId/设备不存在→丢弃 | ✅ 4 用例 |
@@ -346,13 +346,13 @@ bash deploy/emqx/accept-emqx-ingress.sh \
 设备收到并回 `up/reply` → 实例变 `succeeded`；另跑"设备不在线"（不订阅）⇒ 平台**立即**得到
 `failed/NO_SUBSCRIBER`（耗时 <5s，而该用例超时设 15s ⇒ 证明不是等超时）；再加"连着但不回执"⇒ 扫描置 `timeout`。
 
-**状态：✅ 已实测通过（2026-10-02，`accept-emqx-downlink.sh` 一次性 PASS ①–⑤）**
+**状态：✅ 已实测通过（2026-09-27，`accept-emqx-downlink.sh` **整改后** PASS ①–⑤；首轮失败见下方 ⚠️）**
 
 被验 artifact 三元组（生产 `ypbin-iot`）：image id `sha256:69ca8d255626a6097e783ddd2fec8d341ed43fe98d00a79792fbc22ba9a0b79c`、
 容器内 jar md5 `efc9103a872e503be61d084b5464e22b`、StartedAt `2026-09-27T10:57:05Z`（restarts=0）；
 jar 由**合并后的 main**（`0b6471f`）本地构建后上传部署（生产机未跑 mvn）。
 
-关键原始输出（节选，逐字来自脚本）：
+关键原始输出（**节选，为可读性做了合并/缩写**——逐字原文见 PR #84 回执与脚本自身输出）：
 
 ```
   ·  下发响应 statusCode=sent emqxMessageId=00065C74DBF68B741F6D000068CE0000
@@ -365,10 +365,14 @@ jar 由**合并后的 main**（`0b6471f`）本地构建后上传部署（生产�
                     "receivedAt":"2026-09-27T19:00:35.820266518"}
   ·  finishedAt=2026-09-27 19:00:36 emqxMessageId=00065C74DBF68B741F6D000068CE0000
   ✅ ① 回执落库字段齐全（设备 ts + 平台 receivedAt + finished_at）
-  ✅ ② 重复回执：端点 code=200 duplicated=true accepted=False（实例仍 succeeded；指标 +1）
-  ✅ ③ 无订阅者：statusCode=failed errorCode=NO_SUBSCRIBER errorMsg=设备未连接（无订阅者），耗时 1072ms
-  ✅ ④ 连着不回执：statusCode=timeout errorCode=TIMEOUT（扫描判定）
-  ✅ ⑤ 伪造回执（载荷 deviceId=9999999）：被按认证主题丢弃（丢弃日志 1 → 2，增量 1）
+  ✅ 重复回执后实例仍为 succeeded（不被改写）
+  ·  端点级幂等：code=200 duplicated=true accepted=False
+  ✅ 重复回执在**端点**上被明确判为 duplicated（不依赖全局指标）；iot.command.reply.duplicated +1
+  ·  statusCode=failed errorCode=NO_SUBSCRIBER errorMsg=设备未连接（无订阅者）
+  ✅ 无订阅者时**同步**判定 failed（耗时 1072ms，远小于超时 15000ms）；原因码 = NO_SUBSCRIBER
+  ✅ 扫描已把实例置为 timeout；超时的原因码 = TIMEOUT
+  ·  伪造回执已投递（载荷 deviceId=9999999，认证设备=9300012）
+  ✅ 平台按认证主题丢弃了伪造回执（日志计数 1 → 2，增量 1）
 结论: PASS（①–⑤ 全部命中）
 ```
 
@@ -438,6 +442,33 @@ jar 由**合并后的 main**（`0b6471f`）本地构建后上传部署（生产�
 | **U-A13** | **同 requestId 的幂等不是原子的**：预查 + `ON DUPLICATE KEY UPDATE` 只保证回执行唯一，不阻止两个**并发**请求都调用 `ingest`（IoTDB 非事务 ⇒ 时序可能双写） | 当前由动作 `inflight_window=1`（同客户端串行）+ 单节点兜住 | 多节点/提高 inflight 窗口前必须改成"插入回执成功者才继续落库"（插入先行、失败即 return） |
 | **U-A14** | sa-token 防火墙对 `//`、`..` 类路径返回 **HTTP 200 + text/plain `非法请求：<path>`**（`sa-token-core` 的 `SaFirewallCheckHookForBlackPath`）——又一种"200 = 成功"的静默形态 | 当前**不可达**：动作 URL 回读为 `http://172.28.0.1:18084/internal/mqtt/readings`，无重复斜杠 | 若将来动作 URL / 隧道 / 中继配置引入多余斜杠，双端会全绿而数据不存在 ⇒ 变更 URL 时必须实测一次端到端 |
 | **U-A11** | 中间件机防火墙规则的持久性 | 由 `emqx-ingress-firewall.service` 幂等维护，`systemctl enable` 后开机自启 | 若有人在宝塔面板里重置 iptables 规则，本服务不会自动重跑 ⇒ 归 P1-8 巡检（与隧道停摆告警同类） |
+
+---
+
+## 8.1 已决策（**不再跟进**）
+
+| 事项 | 决定 | 依据/备注 |
+|---|---|---|
+| **`admin.ypbin.cn` 502** | **用户已决定不处理（2026-09-27）**：「`admin.ypbin.cn` 不用管」。**勿再作为待办重新提出**。 | 根因是"删除中间件机旧 ypbin 栈"的**预期连带影响**（宝塔 vhost 把 `/` 反代到已删除的 `127.0.0.1:18080`）；近 7 天命中经核查**全是扫描器/CVE 探测、无真实用户会话**。将来若要恢复，路径 = **重指向到 `113.142.217.58`** 或**改宝塔 vhost**（本轮**不做**任何生产改动：不碰宝塔、不碰 vhost、不重启 nginx）。 |
+
+## 8.2 待用户决策（**不要自行推进**）
+
+| 事项 | 现状（安全默认） | 若要开放需要什么 |
+|---|---|---|
+| **真设备 MQTT 1883 是否对外暴露** | **仍未决定**；当前**保持不暴露**（1883 只绑中间件机回环，设备侧只能经隧道/代理接入）——这是**安全的默认** | ① 仅放行**设备来源**（不要 0.0.0.0 全网）；② **建议同时启用 TLS 8883**（明文口令出公网不可接受，官方安全清单要求）；③ 开放前需重跑一次端到端与负向（匿名/越权）用例；④ 与 P1-2（TLS/暴露面评审）合并评估。**本轮不得自行开放**。 |
+
+## 8.3 本回合留下的两条工程教训（值得留档）
+
+1. **单元测试直接构造 JSON 文本 ⇒ 不经过绑定层 ⇒ 报文形态错了也能全绿。**
+   实例：`CommandSendReq.params` / `CommandReplyReq.data` 声明成 `String`，而线上报文是 **JSON 对象**——
+   全部单测绿，生产一跑就是 `R.code=500`（`MismatchedInputException`）。
+   **规则**：报文形态必须**按线上真实形态**构造（对象就用对象/`Map`），并且**至少一条用例走真实绑定层**
+   （`ObjectMapper.readValue(线上报文, DTO.class)`）——本仓已补 `IotCommandControllerGateTest#paramsMustBindAsJsonObject`。
+2. **计数/拒绝口径必须与数据面在同一层。**
+   实例：入站的体积护栏一度写在**控制器**里，绕过了服务层唯一会计数的 `reject()` ⇒
+   `iot.mqtt.ingest.rejected{reason=BODY_TOO_LARGE}` 恒为 0（监控规则"看起来配好了、却永不触发"），
+   而数据本身仍被正确拒绝——**可观测性假阴性**，独立复核才判出。
+   **规则**：凡"拒绝/丢弃"都要有计数出口，且**计数点必须在拒绝判定的同一层**；只有状态码没有计数的守卫一律视为缺陷。
 
 ---
 
