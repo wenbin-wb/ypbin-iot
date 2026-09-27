@@ -422,7 +422,7 @@ MySQL 的唯一索引对**含 NULL 的行不做约束**——只要索引涉及�
 
 - 列：级别 / 设备 / 点位 / 规则 / 当前值 / 阈值 / 状态 / 首次越界 / 持续时长 / 操作（确认、关闭、跳设备详情）；
 - 筛选：状态、级别、时间范围、设备/产品；
-- **必须区分失败态与空态**（与刚修好的台账页同一口径：`#empty` 插槽里，有失败原因就展示后端 message，没有才给空态引导）；
+- **必须区分失败态与空态**（与刚修好的 5 个 IoT 列表页同一口径）：失败 `Alert` 挂在**表格之外**由 `listError` 驱动、原样展示后端 `message`；`#empty` 槽只在「真的没有任何告警」时才渲染。**不要**把失败提示只写在 `#empty` 槽里（见 §2.5.3 的理由）；
 - **分页 `total/page/pageSize` 是字符串**（后端 Long 全局序列化）⇒ 消费处必须显式转数（用 `#/utils/backend-number.ts` 的 `toBackendNumber`）。**这是本轮刚统一的口径，新页面必须遵守**；
 - 权限码建议：`iot:alert:list`（查）、`iot:alert:ack`（确认）、`iot:alert:close`（关闭）、`iot:alert:rule:list|update`（规则管理）；规则管理页可作为独立页或抽屉（**待决策**，见 §5）。
 
@@ -432,11 +432,16 @@ MySQL 的唯一索引对**含 NULL 的行不做约束**——只要索引涉及�
 
 | 风险 | 已建立的防线 |
 |---|---|
-| i18n 文案里的裸 `{`/`}` 在**渲染期**抛 `SyntaxError` → 整块白屏 | CI 门禁 `scripts/check-i18n-message-compile.mjs`（全库、zh/en、真实 vue-i18n、逐叶子键编译、空跑自检、变异验证过会指名该键） |
-| 后端 Long 序列化成字符串 → 分页 prop 类型告警 / `"0"` 被当真值 | `#/utils/backend-number.ts` 的 `toBackendNumber`（唯一转换点）+ 消费处显式转数 |
-| `v-access` 无 `updated` → 权限码迟到时区块永不出现 | 关键区块用 `computed + v-if`（不用指令） |
-| 列表加载失败被画成空态 | `#empty` 插槽区分失败态（展示后端 message）与空态 |
-| 渲染期异常 → 空白 | `panel-error-boundary.vue` |
+| i18n 文案里的裸 `{`/`}` 在**渲染期**抛 `SyntaxError` → 整块白屏 | CI 门禁 `scripts/check-i18n-message-compile.mjs`（全库、zh/en、真实 vue-i18n、**按「每个应用一套 i18n」的优先级**逐叶子键编译、空跑自检、变异验证过会指名该键） |
+| 后端 Long 序列化成字符串 → 分页 prop 类型告警 / `"0"` 被当真值 | `#/utils/backend-number.ts` 的 `toBackendNumber` + 消费处显式转数（**实测**：直接喂字符串会触发 `Invalid prop: type check failed for prop "total"`） |
+| `v-access` 无 `updated` → 权限码变化不重算（机制属实，但本项目权限码在导航前就写入 ⇒ 正常流程不可达，属**防御性加固**） | 区块级用 `computed + v-if`；散落的单个操作按钮仍保留指令（刻意划的范围） |
+| 列表加载失败被画成空态（**假空态**） | 🔴 失败 `Alert` 必须挂在**表格之外**并用 `listError` 驱动；`#empty` 槽仅在其为「空」时才渲染（**不能只写在 `#empty` 槽里**：真实 vxe 只在表体无行时才渲染该槽，「已有数据后刷新失败」时槽不渲染 ⇒ 失败提示会消失、页面继续展示过期数据） |
+| 渲染期异常 → 空白 | `panel-error-boundary.vue`（注意其适用范围目前仅「在线调试」页签，见 §2.5.4） |
+
+### 2.5.4 已知未覆盖（如实）
+
+- `panel-error-boundary.vue` 目前**只包住「在线调试」页签**。其它页签/抽屉若发生渲染期异常仍会整块空白；扩到其它区块需给该组件加 `title` prop + 新 i18n 键（其 Alert 标题当前硬编码为在线调试文案），属独立改动。
+- IoT **之外**仍有未显式转数的分页 `total` 消费处（`api/ai/knowledge.ts` 的 `total: number` 声明、`views/ai/knowledge/modules/use-documents-grid.ts` 与 `views/system/*/list.vue` 直通 `PageResult`）⇒ 「唯一转换点」这一说法**只在 IoT 范围内成立**。新增告警列表页时应直接按本项目口径写（显式转数），不要照抄 system 列表。
 
 ### 2.6 ⑥ 不做的部分与理由
 
