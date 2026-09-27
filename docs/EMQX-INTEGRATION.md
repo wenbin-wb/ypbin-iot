@@ -437,10 +437,25 @@ jar 由**合并后的 main**（`0b6471f`）本地构建后上传部署（生产�
 > ⚠️ **部署状态（务必先看这句）**：修复在 **PR #90**，已于 2026-09-27 **部署并验证**
 > （修复前 3/3 `EMQX_ERROR` → 修复后 3/3 `NO_SUBSCRIBER`；证据见
 > `deploy/emqx/expose-evidence/platform-h2c-fix-verified.txt`）。
-> **判断"线上到底跑的是哪一版"只认线上 artifact**：容器内 `md5sum /app/app.jar` 是否等于
-> **你本次上传的那个文件**的 md5。
-> ⚠️ **不要拿两次独立构建的 md5 互比** —— Spring Boot 打包含时间戳等，同一源码两次构建 md5 就会不同；
-> 唯一可靠的比法是「容器内 md5 == 本次上传件的 md5」。别只看"PR 已合并"就以为生效。
+> **判断"线上到底跑的是哪一版"—— 用类级指纹，不要比 jar 的 md5**
+> （独立复核实测：**同一份源码构建两次，jar 的 md5 就不同**，而内部 class 逐字节相同
+> ⇒ 比 jar 的 md5 会在**真已修复**的机器上判成"未部署"，是**假阴性**）：
+>
+> ```bash
+> # 容器内**既无 unzip 也无 jar** ⇒ 先 docker cp 到宿主机（生产机上有 python3 / jar / javap）
+> docker cp ypbin-iot:/app/app.jar /tmp/app.jar
+> python3 - <<'PY'
+> import zipfile, hashlib
+> z = zipfile.ZipFile('/tmp/app.jar')
+> name = 'BOOT-INF/classes/cn/ypbin/admin/iot/emqx/EmqxRestAdminClient.class'
+> print('class md5 =', hashlib.md5(z.read(name)).hexdigest())
+> PY
+> rm -f /tmp/app.jar
+> # 判据：ff1652568cd3a0fdd3123954d09a7bc1 = **含修复**；6131133e… = 修复前
+> # 更强的确认：javap -p -c 该 class，应看到 getstatic …HttpClient$Version.HTTP_1_1
+> ```
+>
+> 别只看"PR 已合并"就以为生效。
 
 **现象**（2026-09-27 实测）：重建 EMQX 容器后，平台下发命令**一律** `failed / EMQX_ERROR / EMQX 管理面不可达`。
 极具误导性——**管理面其实是健康的**：同一容器里 `curl` 正常、隧道（`127.0.0.1:18093` 与 `172.20.0.1:18093`）正常、
@@ -470,9 +485,10 @@ bash deploy/emqx/diagnose-emqx-admin-h2c/run.sh \
 **运维含义（修复落地前）**：**重建/重启 EMQX 后，平台的下行发布在"连接空闲后第一次发布"时会失败**；
 重启 `ypbin-iot` **不能**恢复（会重新协商 h2c）。修复落地后不再有这个窗口。
 
-**为什么选"固定 HTTP/1.1"而不是重试/预热**：重试只是掩盖（每次新建连接的第一次带体请求仍失败）、
-预热只是碰巧（依赖连接存活时间，空闲后照样失败且每次多一次往返）；固定 1.1 与 EMQX REST 自身的
-HTTP/1.1 语义一致，且已由上述判据证明 3/3 成功。
+**为什么选"固定 HTTP/1.1"而不是重试/预热**：**重试没用**（实测：同一客户端连试 3 次**全失败** ——
+失败点是 h2c upgrade 与"带体请求"的交互，不是偶发抖动，所以重试只会把一次失败变成三次失败）、
+预热只是碰巧（依赖连接存活时间，空闲后照样失败，且每次发布前多一次往返）；固定 1.1 与 EMQX REST
+自身的 HTTP/1.1 语义一致，且已由上述判据证明 3/3 成功。
 
 ---
 
