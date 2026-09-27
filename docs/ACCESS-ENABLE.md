@@ -390,7 +390,10 @@ TCP 文本帧按 `KEY=VALUE` 解析、键由点位映射 `raw_address` 声明，
 | 演示点位修正 | `iot_point_mapping.id=9500011` 的 `raw_address`：`holding:0` → **`TEMP`**（**回读确认**，脚本见 `deploy/sql/fixes/2026-09-27-iot-demo-tcp-frame-key.sql`） |
 
 **过渡窗口（新 access + 旧 iot）**：旧 iot 不下发 `data_type` ⇒ 新 access 按设计**丢弃并计数**（不是乱写）：
-`09:45:55–09:46:03` 共 **15 条** `reason=unknown-data-type` WARN；iot 重启后**归零**（近 5 分钟 0 条，最后一次 WARN 停在 `09:46:03`）。
+`09:45:35.487–09:46:03.491`（本地 CST）共 **15 条** `reason=unknown-data-type` WARN（15 条全是同一原因）；
+iot 重启后**归零**（近 5 分钟 0 条，最后一次 WARN 停在 `09:46:03`）。
+> 修正记录（R6 复核点名）：本行初版写 `09:45:55` 起，复核者实测**首条是 `09:45:35.487`**——8 秒窗口放不下 15 条 2s 节拍的记录；
+> 已按 `docker logs | grep 读数解码失败 | head -1` 的真值更正（计数 15 本就正确）。
 
 **① `iot.reading` 该设备新行**（`SELECT time, property_id, value_double, value_text, quality`）：
 
@@ -425,6 +428,12 @@ TCP 文本帧按 `KEY=VALUE` 解析、键由点位映射 `raw_address` 声明，
 > `management.endpoints.web.exposure.include`），所以 `iot.access.*` 全部指标在生产**取不到 HTTP 读数**
 > ——本轮解码计数只能靠 WARN 日志与单测证明。是否给 access 开 `metrics` 端点属**对外暴露面变更**，
 > 本轮**未改**（端口当前仅 `127.0.0.1` 可达，见 `ss -ltnp`），登记为待决项。
+>
+> ⚠️ **两条 R6 复核登记的边界（已修文档，未改行为）**：
+> ① 兜底闸门只在默认出口 `HttpAccessReadingSink` 上，3a 的日志占位出口 `LoggingAccessReadingSink`
+>    **没有**同类闸门（它只打 INFO 日志、不落库，故无数据完整性影响）；
+> ② MQTT `payload-format=binary` 的 `byte[]` 会被该闸门**丢弃**（不再是落 `[B@…` 文本行）——
+>    属有意的行为变更，已在 `docs/VALUE-DECODE-DESIGN.md` §3/§4.2 登记（当前生产 access 无 mqtt 模块，影响为 0）。
 
 **④ 历史垃圾行清理（本次一并做，含理由与回滚物）**：
 

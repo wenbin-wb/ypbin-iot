@@ -74,7 +74,17 @@
   （只记设备/点位/地址/**载荷长度**与原因，**不 dump 帧内容**）。
 - 兜底闸门：`HttpAccessReadingSink` 若发现值仍是 `byte[]` ⇒ 计数（`iot.access.egress.invalid`）+ WARN + 丢弃
   ⇒ `[B@…` **在任何单条路径走偏时也不会入库**。
-- 不改既有取值路径：非 `byte[]` 载荷、以及没有解码器认领的协议码 ⇒ **原样透传**（Modbus/OPC UA/MQTT 行为不变）。
+- 不改既有取值路径：非 `byte[]` 载荷、以及没有解码器认领的协议码 ⇒ **原样透传**
+  （Modbus / OPC UA / MQTT 的 **TEXT/NUMBER** 模式行为不变）。
+  ⚠️ **一处有意的行为变更（已登记，R6 复核点名项）**：MQTT `payload-format=binary` 交付的是**原始 `byte[]`**
+  （`MqttSession#decode` 的 `BINARY` 分支），本层不认领 `mqtt` ⇒ 原样透传到出口 ⇒ 被上一条兜底闸门
+  **丢弃并计数**（`iot.access.egress.invalid` + WARN）。**修复前**它会被 `String.valueOf` 落成一行
+  `value_text='[B@<hash>'`，**修复后不再落行** ⇒ 断档/可用率口径会变（少一条无值语义的读数）。
+  这是「垃圾绝不入库」的必然结果，属有意取舍；MQTT binary 负载的**宿主侧解码**已登记为未做项（见 §4.2）。
+  当前生产 access fat jar 内**不含 mqtt 协议模块**，故生产影响为 0（潜伏项）。
+- 兜底闸门的**覆盖边界**（如实登记）：只在默认出口 `HttpAccessReadingSink` 上；3a 的日志占位出口
+  `LoggingAccessReadingSink` 没有同类闸门——它只打 INFO 日志、**不落库**，故无数据完整性影响，
+  但装配它时残留 `byte[]` 会以 `[B@hash` 出现在日志里。
 
 ---
 
@@ -98,6 +108,7 @@
 | 字符串寄存器（多寄存器拼 UTF-8） | 同上，缺列 | 增 `word_count` + `encoding`；验收：中文/半角混合、奇数字节 |
 | 「整帧即值」（无键的裸值帧） | 需要一个**显式**的地址类型声明（否则只能靠「帧里没有 `=` 就拿整帧当值」这种猜测） | `AddressType` 增 `tcp-line`（或映射增 `decode_format` 列）；验收：裸值帧解出数值、且键值帧仍走键路径（互不串味） |
 | 十六进制/JSON 负载 | 未涉及本次缺陷；且需要显式声明 | 同「整帧即值」：新增解码格式声明后再实现；**不建议**把 `byte[]` 转 hex 充数（无值语义、曲线仍画不出） |
+| **MQTT `payload-format=binary` 的宿主侧解码** | 本次只解 TCP 文本帧；binary 交付的是原始 `byte[]`，本层不认领 `mqtt` ⇒ 被出口闸门丢弃（见 §3 的行为变更说明） | 由 MQTT 设备的宿主解码器实现 `ValueDecoder.supports("mqtt")`（或改用 `text`/`number`）；验收：binary 负载能按业务协议解出值且不再被闸门丢弃 |
 
 > 这些都要动**平台数据模型**（列/枚举/校验/前端表单），故不在本次「修一条链路」的范围内，登记为后续增量；
 > 本次只做**能不做假设就做对**的那部分。
