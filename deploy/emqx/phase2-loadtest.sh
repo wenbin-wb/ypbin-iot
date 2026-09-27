@@ -96,13 +96,17 @@ AUTH_ID='password_based%3Abuilt_in_database'
 SAMPLES="$OUT/samples.csv"
 SUMMARY="$OUT/summary.txt"
 BENCH_OUT="$OUT/bench"
-mkdir -p "$BENCH_OUT"
+mkdir -p "$BENCH_OUT"; chmod 700 "$BENCH_OUT"
 
-api() {
+api() {  # 回显 HTTP 状态码（调用方可判定失败；**不再一律丢弃**）
   local method="$1" path="$2" data="${3:-}"
   local args=(-s -K "$PRIV/curlrc" -o /dev/null -w '%{http_code}' -X "$method"
               -H 'Content-Type: application/json')
-  [ -n "$data" ] && args+=(-d "$data")
+  if [ -n "$data" ]; then
+    # 用 `--data-binary @file`：body 走**私有 600 文件**，不出现在 argv（口令/用户名不进 /proc）
+    printf '%s' "$data" >"$PRIV/data.json"; chmod 600 "$PRIV/data.json"
+    args+=(--data-binary "@$PRIV/data.json")
+  fi
   curl "${args[@]}" "$BASE_URL$path"
 }
 # 一次取回本轮需要的全部 EMQX 指标（避免逐指标多次 curl 拖慢采样周期）
@@ -120,23 +124,43 @@ host_avail_mb()  { free -m | awk '/^Mem:/{print $7}'; }
 disk_use_pct()   { df -P / | awk 'NR==2{gsub("%","",$5);print $5}'; }
 disk_avail()     { df -h / | awk 'NR==2{print $4}'; }
 
+CLEANED=0
 cleanup() {
+  [ "$CLEANED" -eq 1 ] && return   # EXIT 与 INT/TERM 都会触发；幂等重入保护
+  CLEANED=1
   docker rm -f "emqx-load-pub-$TIER" >/dev/null 2>&1
   # 压测端（emqtt-bench）只支持 `-P <明文口令>` ⇒ 它的 `docker inspect` 产物
-  # （bench/pub.inspect.json 的 Config.Cmd）里**含压测期间有效的临时口令**。
-  # 账号在本函数末尾会被删除（口令随之失效），但仍**立即删掉这些命令记录**，
-  # 只保留 summary/samples/latency 这些不含口令的证据；要留档请显式 --keep-out。
+  # （bench/pub.inspect.json 的 Config.Cmd）里含压测期间的临时口令。账号删除后口令即失效，
+  # 但仍立即删掉这些命令记录；要留档请显式 --keep-out。
   if [ "$KEEP_OUT" -eq 0 ]; then
     rm -f "$BENCH_OUT"/*.inspect.json "$BENCH_OUT"/*.cid
   fi
+
+  # ⚠️ **顺序不能反**：`api` 依赖 `$PRIV/curlrc`，所以**必须先删账号、再删 $PRIV**。
+  #    上一版把 `rm -rf "$PRIV"` 写在这里之前 ⇒ 四个 DELETE 全部静默失败、账号永不清理
+  #    （实测回归：脚本退出后临时口令仍能登录）。且**不再吞掉失败**（禁静默降级）。
+  if [ "$KEEP" -eq 1 ]; then
+    echo "⚠️ --keep-users：**保留**临时账号 $LOAD_DEV / $LOAD_SVC 与它们的 ACL 规则（排查用，务必手工清理）" >&2
+  else
+    # 显式四条删除（**不要**用字符串解析来区分"用户/规则"——上一版据此把规则当用户删，
+    # 结果 rules/users 里残留 svc-load 规则；且 `api` 的返回码必须被检查，不许静默吞掉）。
+    del_or_warn() { # del_or_warn <说明> <path>
+      local rc; rc=$(api DELETE "$2")
+      case "$rc" in
+        204|404) printf '  %-22s 已清理（HTTP %s）\n' "$1" "$rc" ;;
+        *)       printf '  ⚠️ %-19s 清理失败（HTTP %s）—— 临时对象可能残留，请手工检查\n' "$1" "$rc" >&2 ;;
+      esac
+    }
+    del_or_warn "认证用户 $LOAD_DEV" "/api/v5/authentication/$AUTH_ID/users/$LOAD_DEV"
+    del_or_warn "认证用户 $LOAD_SVC" "/api/v5/authentication/$AUTH_ID/users/$LOAD_SVC"
+    del_or_warn "ACL 规则 $LOAD_SVC" "/api/v5/authorization/sources/built_in_database/rules/users/$LOAD_SVC"
+    del_or_warn "授权缓存"           "/api/v5/authorization/cache"
+    unset -f del_or_warn
+  fi
   rm -rf "$PRIV"
-  [ "$KEEP" -eq 1 ] && return
-  api DELETE "/api/v5/authentication/$AUTH_ID/users/$LOAD_DEV" >/dev/null 2>&1
-  api DELETE "/api/v5/authentication/$AUTH_ID/users/$LOAD_SVC" >/dev/null 2>&1
-  api DELETE "/api/v5/authorization/sources/built_in_database/rules/users/$LOAD_SVC" >/dev/null 2>&1
-  api DELETE /api/v5/authorization/cache >/dev/null 2>&1
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT TERM
 
 read -r M0_RECV M0_DROPQ M0_DROPE M0_MSGDROP M0_NOSUB M0_CONN M0_ALLOW <<<"$(m_snapshot | tr ',' ' ')"
 M0_AVAIL="$(host_avail_mb)"; M0_DISK="$(disk_use_pct)"
@@ -175,7 +199,7 @@ done
 api POST /api/v5/authorization/sources/built_in_database/rules/users \
     "[{\"username\":\"$LOAD_SVC\",\"rules\":[{\"action\":\"subscribe\",\"permission\":\"allow\",\"topic\":\"$SUB_TOPIC\"}]}]" >/dev/null
 api DELETE /api/v5/authorization/cache >/dev/null
-echo "测试账号：$LOAD_DEV（publish 自己的 up/）、$LOAD_SVC（subscribe $SUB_TOPIC）；口令只在本进程内存、不回显" | tee -a "$SUMMARY"
+echo "测试账号：$LOAD_DEV（publish 自己的 up/）、$LOAD_SVC（subscribe $SUB_TOPIC）；口令不回显；但对压测端 emqtt-bench 只能经 -P 传入 ⇒ 压测期间会出现在容器 argv/inspect 里；结束即删账号（口令随之失效）并删除 inspect 产物（见文件头「凭据口径」）" | tee -a "$SUMMARY"
 
 ############################ ② 施压 ############################
 echo "-------- ② 施压（$TIER 连接 × 1 msg/s × ${DURATION}s）--------" | tee -a "$SUMMARY"
@@ -254,6 +278,9 @@ wait "$PROBE_PID" 2>/dev/null
 echo "延迟观测器输出：$(cat "$LATENCY_LOG" 2>/dev/null || echo '(无)')" | tee -a "$SUMMARY"
 
 ############################ ③ 观测与判据 ############################
+# ⚠️ 必须在**用它的那一行之前**赋值：下面 ③ 的报告块就要用它（曾把它写在 verdict=0 前面，
+#    结果 `set -u` 在报告块第一行就报 unbound variable，整段 ③ 被吃掉 —— 已修，勿再挪回去）。
+HAVE_SAMPLES=$([ "$i" -ge 1 ] && echo 1 || echo 0)
 read -r M1_RECV M1_DROPQ M1_DROPE M1_MSGDROP M1_NOSUB M1_CONN M1_ALLOW <<<"$(m_snapshot | tr ',' ' ')"
 M1_OOM="$(docker inspect "$CONTAINER" --format '{{.State.OOMKilled}}')"
 M1_RESTART="$(docker inspect "$CONTAINER" --format '{{.RestartCount}}')"
@@ -287,8 +314,6 @@ LAT_LINE="$(grep -h '^n=' "$LATENCY_LOG" 2>/dev/null | tail -1)"
 [ -n "$LAT_LINE" ] || LAT_LINE="未能求值（观测器未产出结果，见 $BENCH_OUT/latency-probe.log）"
 echo "消息延迟（发布→订阅端接收，latency-probe.py / paho-mqtt）：$LAT_LINE" | tee -a "$SUMMARY"
 
-# 无采样时不得让"看似安全"的读数蒙混过关（min_avail 初值 999999 / max_mem_pct 初值 0 都不是实测值）
-HAVE_SAMPLES=$([ "$i" -ge 1 ] && echo 1 || echo 0)
 verdict=0
 chk() { if [ "$2" = "1" ]; then printf '  ✅ PASS  %-34s %s\n' "$1" "$3" | tee -a "$SUMMARY"
         else printf '  ❌ FAIL  %-34s %s\n' "$1" "$3" | tee -a "$SUMMARY"; verdict=1; fi; }

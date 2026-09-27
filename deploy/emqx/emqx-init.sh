@@ -57,7 +57,12 @@ api() {
   local body="$PRIV/body"
   local args=(-s -K "$PRIV/curlrc" -o "$body" -w '%{http_code}' -X "$method"
               -H 'Content-Type: application/json')
-  [ -n "$data" ] && args+=(-d "$data")
+  if [ -n "$data" ]; then
+    # 本脚本的 body 只是 ACL 规则（不含凭据），但仍统一走**私有 600 文件** +
+    # `--data-binary @file`，避免将来有人往里塞凭据时不知不觉进 argv。
+    printf '%s' "$data" >"$PRIV/data.json"; chmod 600 "$PRIV/data.json"
+    args+=(--data-binary "@$PRIV/data.json")
+  fi
   API_CODE="$(curl "${args[@]}" "$BASE_URL$path")"
   API_BODY="$(cat "$body")"
   rm -f "$body"

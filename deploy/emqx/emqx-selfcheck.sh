@@ -19,8 +19,10 @@
 #   S11 服务账号（username 无点）subscribe 通配 `ypbin/v1/+/+/up/#` 必须放行
 #       —— 同时验证 `client_attrs_init` 的 `nth` 越界不会让服务账号路径失效（设计 U6/U19）
 #
-# 凭据纪律：临时测试账号的口令**只存在于本进程内存**（不落任何文件），
-#           退出时 trap 删除全部临时账号与临时 ACL 规则；输出永不打印口令。
+# 凭据纪律：临时测试账号的口令**不落盘、不回显**；所有带口令的 HTTP body 用
+#           `--data-binary @<私有 600 文件>` 传（**不进 argv**），脚本退出时 trap 删除
+#           全部临时账号与临时 ACL 规则。⚠️ 不要写成"只在进程内存"——建号与登录的 JSON
+#           若用 `-d '<json>'` 会出现在 /proc/<pid>/cmdline（本机非 root 用户可读）。
 #
 # 退出码：0 = 全部 PASS；1 = 有 FAIL
 # 用法：bash emqx-selfcheck.sh [--env-file /opt/emqx/.env] [--base-url http://127.0.0.1:18093]
@@ -81,7 +83,11 @@ api() { # api <method> <path> [json] → API_CODE / API_BODY
   local body="$PRIV/api-body"
   local args=(-s -K "$PRIV/curlrc" -o "$body" -w '%{http_code}' -X "$method"
               -H 'Content-Type: application/json')
-  [ -n "$data" ] && args+=(-d "$data")
+  if [ -n "$data" ]; then
+    # 用 `--data-binary @file`：body（可能含口令）走私有 600 文件，**不进 argv**
+    printf '%s' "$data" >"$PRIV/data.json"; chmod 600 "$PRIV/data.json"
+    args+=(--data-binary "@$PRIV/data.json")
+  fi
   API_CODE="$(curl "${args[@]}" "$BASE_URL$path")"
   API_BODY="$(cat "$body")"; rm -f "$body"
 }
@@ -103,7 +109,10 @@ for k in ["packets.connack.auth_error","packets.publish.auth_error","packets.sub
 ' 2>/dev/null
 }
 
+CLEANED=0
 cleanup() {
+  [ "$CLEANED" -eq 1 ] && return
+  CLEANED=1
   [ "$KEEP" -eq 1 ] && { echo "（--keep-probe-users：保留临时账号与规则以便排查）"; return; }
   for u in "$DEV_A" "$DEV_B" "$SVC_PROBE"; do
     api DELETE "/api/v5/authentication/$AUTH_ID/users/$u" >/dev/null 2>&1
@@ -113,6 +122,7 @@ cleanup() {
   rm -rf "$PRIV"
 }
 trap cleanup EXIT
+trap 'cleanup; exit 130' INT TERM
 
 echo "=== S1 容器 / 节点健康 ==="
 h="$(docker inspect "$CONTAINER" --format '{{.State.Health.Status}}' 2>/dev/null || echo unknown)"
@@ -148,13 +158,16 @@ api GET /api/v5/authorization/settings
                       || fail "GET /authorization/settings（API Key 鉴权）= $API_CODE"
 
 echo "=== S5 Dashboard 口令（H2）==="
+printf '%s' '{"username":"admin","password":"public"}' >"$PRIV/login-bad.json"; chmod 600 "$PRIV/login-bad.json"
 code="$(curl -s -o "$PRIV/login-bad" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"public"}' "$BASE_URL/api/v5/login")"
+  --data-binary "@$PRIV/login-bad.json" "$BASE_URL/api/v5/login")"
 [ "$code" = 401 ] && pass "旧默认口令 admin/public 被拒（HTTP 401）" \
                   || fail "旧默认口令 admin/public **未被拒**（HTTP $code）⇒ 口令没改到位"
 rm -f "$PRIV/login-bad"
+printf '{"username":"admin","password":"%s"}' "$EMQX_DASHBOARD_PASSWORD" >"$PRIV/login-ok.json"
+chmod 600 "$PRIV/login-ok.json"
 code="$(curl -s -o "$PRIV/login-ok" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
-  -d "{\"username\":\"admin\",\"password\":\"$EMQX_DASHBOARD_PASSWORD\"}" "$BASE_URL/api/v5/login")"
+  --data-binary "@$PRIV/login-ok.json" "$BASE_URL/api/v5/login")"
 if [ "$code" = 200 ]; then
   TOKLEN="$(LOGIN_JSON="$PRIV/login-ok" python3 -c 'import json,os;print(len(json.load(open(os.environ["LOGIN_JSON"])).get("token","")))' 2>/dev/null)"
   pass "来自 .env 的 Dashboard 口令可登录（HTTP 200；token 长度 ${TOKLEN:-?}）"
@@ -177,7 +190,7 @@ for u in "$DEV_A:$PW_A" "$DEV_B:$PW_B" "$SVC_PROBE:$PW_S"; do
   api DELETE "/api/v5/authentication/$AUTH_ID/users/${u%%:*}" >/dev/null
   api POST "/api/v5/authentication/$AUTH_ID/users" \
       "{\"user_id\":\"${u%%:*}\",\"password\":\"${u#*:}\",\"is_superuser\":false}"
-  [ "$API_CODE" = 201 ] && pass "临时账号 ${u%%:*} 已创建（口令只在本进程内存，不回显）" \
+  [ "$API_CODE" = 201 ] && pass "临时账号 ${u%%:*} 已创建（口令不经 argv、不回显）" \
                         || fail "临时账号 ${u%%:*} 创建失败：HTTP $API_CODE $API_BODY"
 done
 # 服务账号的通配订阅规则（与生产服务账号同名规则，供 S11 用）

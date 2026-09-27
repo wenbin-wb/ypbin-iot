@@ -8,9 +8,14 @@
 #   3. 安装并启用 `emqx-tunnel.service`（autossh，Restart=always、开机自启）
 #   4. 安装「停摆告警」脚本与 timer（**只告警不自愈**）
 #
-# 凭据纪律：本脚本**不生成也不保存任何口令**；唯一的凭据是那把专用私钥，
-#           且中间件机侧对该公钥带 `restrict,port-forwarding,permitopen="127.0.0.1:18093"`
-#           —— 拿到它也只能转发这一个目标，不能登录、不能开别的转发。
+# 凭据纪律：本脚本**不生成也不保存任何口令**；唯一的凭据是那把专用私钥。
+#           中间件机侧对该公钥带 `restrict,port-forwarding,permitopen="127.0.0.1:18093"`
+#           —— **转发目标**被钉死在这一个（`permitopen` 实测生效：转发到别处会被
+#           `administratively prohibited` 拒绝）。
+#           ⚠️ **但"目标被钉死" ≠ "只能转发"**：同一行的 `port-forwarding` 是**两向**开关且未设
+#           `permitlisten` ⇒ **反向转发（-R）仍可用**；OpenSSH 也没有"只许转发不许执行命令"的
+#           authorized_keys 选项（`command=` 会让 -N 会话立刻结束）。实际能力 = 转发 + 非交互 root
+#           命令执行，属**已登记的残留风险**（docs/EMQX-DEPLOY.md §6.1 / §10 U-H）。
 #
 # 前置条件：生产机已装 autossh（`autossh -V` 可跑）。生产机**无法直连外网**，
 #           apt 装不上时按 docs/EMQX-DEPLOY.md 的「离线装入 autossh」步骤，
