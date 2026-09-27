@@ -2,12 +2,14 @@
 # =============================================================================
 # accept-emqx-downlink.sh —— 段 B 下行端到端验收（**可复跑**）
 # =============================================================================
-# 在**运维机**上运行。四条判据（①–④）：
+# 在**运维机**上运行。**五条**判据（①–⑤）：
 #   ① 在线：下发 → 实例 sent（emqx_message_id 非空）→ 模拟设备**真收到**（打印 payload）→ 回执 code=0
 #          → 实例 succeeded、reply_payload 含设备 data/ts、finished_at 为平台时间
 #   ② 幂等：同一回执重投 ⇒ duplicated、实例状态不变、iot.command.reply.duplicated +1
 #   ③ 设备未连：无订阅者时下发 ⇒ **立即** failed/NO_SUBSCRIBER（记录耗时，应远小于超时）
 #   ④ 超时：设备连着但不回执 ⇒ 扫描在 timeout_ms 后置 timeout（原因码 TIMEOUT）
+#   ⑤ 伪造：在设备自己的 up/reply 上发一条 payload.deviceId = 别的设备 的回执 ⇒ 必须被平台按
+#      「认证主题不一致」丢弃（**这正是"EMQX 模板头 X-Mqtt-Device 失效"的判别用例**）
 #
 # 凭据纪律：设备口令由本脚本现签现用（**会轮换该设备凭据**），明文只经 `ssh | ssh` 管道落到
 # 中间件机 600 文件，不打印、不进 argv；收尾 shred 删除。
@@ -88,7 +90,7 @@ prodr "python3 -c 'import json;print((json.load(open(\"/tmp/issue.json\")).get(\
 DOWN_TOPIC="ypbin/v1/$TENANT/$DEVICE/down/#"
 REPLY_TOPIC="ypbin/v1/$TENANT/$DEVICE/up/reply"
 
-echo "=== ① 在线：设备订阅 → 平台下发 → 设备回执 ==="
+echo "=== ① 在线：设备订阅 → 平台下发 → 设备回执（判据：sent + reply_payload 字段齐全）==="
 mwr "rm -f $TMP.listen; nohup $PYTHON $PROBE --mode listen --username '$TENANT.$DEVICE' --password-file $MW_PW_FILE --client-id '$TENANT.$DEVICE' --topic '$DOWN_TOPIC' --device-id $DEVICE --reply-topic '$REPLY_TOPIC' --reply-code 0 --reply-message ok --reply-data '{\"applied\":26.5}' --wait-seconds 40 > $TMP.listen 2>&1 & echo started"
 mwr "for i in \$(seq 1 40); do grep -q SUBSCRIBED $TMP.listen 2>/dev/null && break; sleep 0.5; done"
 mwr "grep -q SUBSCRIBED $TMP.listen" && ok "模拟设备已建立订阅（先等订阅再下发，避免竞态假红）" || bad "模拟设备未订阅成功"
@@ -194,6 +196,7 @@ echo "=== ⑤ 负向：伪造载荷设备（认证头必须压过载荷） ==="
 # 在**设备自己的 up/reply 主题**上发布一条 payload.deviceId = 别的设备 的回执：
 # 认证头 X-Mqtt-Device 由 EMQX 从主题派生（= 本设备），平台必须因此丢弃。
 # 若头机制失效，平台会改用载荷设备去查实例 —— 这条就会被错误受理。
+FORGE_BEFORE=$(prodr "docker logs ypbin-iot --since 30m 2>&1 | grep -c '回执声称的设备与认证主题不一致'" 2>/dev/null | tr -dc '0-9')
 FORGE_REQ="acc-forge-$RANDOM"
 mwr "$PYTHON - <<PY
 import json, time
@@ -207,14 +210,16 @@ time.sleep(2); c.disconnect(); c.loop_stop()
 print('  ·  伪造回执已投递（载荷 deviceId=9999999，认证设备=$DEVICE）')
 PY"
 sleep 4
-prodr "docker logs ypbin-iot --since 3m 2>&1 | grep -c '回执声称的设备与认证主题不一致'" > /tmp/forge-count 2>/dev/null || true
-FORGE_HIT=$(cat /tmp/forge-count 2>/dev/null | tr -dc '0-9')
-[ "${FORGE_HIT:-0}" -ge 1 ] && ok "平台按认证主题丢弃了伪造回执（日志命中 ${FORGE_HIT} 次）" || bad "未见到认证主题不一致的丢弃日志（认证头机制可能失效或日志未输出）"
+FORGE_AFTER=$(prodr "docker logs ypbin-iot --since 30m 2>&1 | grep -c '回执声称的设备与认证主题不一致'" 2>/dev/null | tr -dc '0-9')
+FORGE_DELTA=$(( ${FORGE_AFTER:-0} - ${FORGE_BEFORE:-0} ))
+[ "$FORGE_DELTA" -ge 1 ] && ok "平台按认证主题丢弃了伪造回执（日志计数 ${FORGE_BEFORE:-0} → ${FORGE_AFTER:-0}，增量 ${FORGE_DELTA}）" \
+  || bad "未见到"认证主题不一致"的丢弃日志增量（认证头机制可能失效或日志未输出）"
 
 echo "=== 收尾：删除两台的临时文件（生产机的 /tmp/dup.cfg 里有内部凭证，必须一起清） ==="
 mwr "shred -u $MW_PW_FILE 2>/dev/null || rm -f $MW_PW_FILE; rm -f $TMP.listen $TMP.silent; echo '  ·  中间件机已清理'" || bad "中间件机清理失败"
-prodr "shred -u /tmp/dup.cfg /tmp/dup.json /tmp/cmd.json /tmp/issue.json 2>/dev/null || rm -f /tmp/dup.cfg /tmp/dup.json /tmp/cmd.json /tmp/issue.json; ls /tmp/dup.cfg /tmp/cmd.json 2>/dev/null && echo '  ❌ 生产机临时文件仍在' || echo '  ·  生产机已清理'" || bad "生产机清理失败"
+prodr "shred -u /tmp/dup.cfg /tmp/dup.json /tmp/cmd.json /tmp/issue.json 2>/dev/null || rm -f /tmp/dup.cfg /tmp/dup.json /tmp/cmd.json /tmp/issue.json; ls /tmp/dup.cfg /tmp/cmd.json /tmp/issue.json 2>/dev/null >/dev/null && exit 1; echo '  ·  生产机已清理（临时请求体与含内部凭证的 curl 配置已删）'" \
+  && ok "生产机临时文件已清理" || bad "生产机仍有临时文件（含 X-Internal-Token 的 curl 配置必须删除）"
 
 echo
-if [ "$fail" -eq 0 ]; then echo "结论: PASS（①–④ 全部命中）"; exit 0; fi
+if [ "$fail" -eq 0 ]; then echo "结论: PASS（①–⑤ 全部命中）"; exit 0; fi
 echo "结论: FAIL（见上面的 ❌）"; exit 1

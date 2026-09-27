@@ -305,7 +305,9 @@ if d.get("body") != "${payload}": problems.append(f"body={d.get('body')}（期�
 hdr = d.get("headers") or {}
 if "X-Internal-Token" not in hdr: problems.append("headers 缺少 X-Internal-Token")
 if hdr.get("X-Mqtt-Device") != "${deviceId}": problems.append(f"headers.X-Mqtt-Device={hdr.get('X-Mqtt-Device')}（期望 ${{deviceId}} 模板）")
+if int(d.get("max_retries", -1)) != int(retries): problems.append(f"max_retries={d.get('max_retries')}")
 ro = d.get("resource_opts") or {}
+if ro.get("query_mode") != "async": problems.append(f"query_mode={ro.get('query_mode')}")
 if ro.get("max_buffer_bytes") != maxbuf: problems.append(f"max_buffer_bytes={ro.get('max_buffer_bytes')}（期望 {maxbuf}）")
 if ro.get("inflight_window") != 1: problems.append(f"inflight_window={ro.get('inflight_window')}")
 if str(ro.get("request_ttl")) != ttl: problems.append(f"request_ttl={ro.get('request_ttl')}")

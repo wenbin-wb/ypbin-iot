@@ -342,7 +342,7 @@ bash deploy/emqx/accept-emqx-ingress.sh \
 设备收到并回 `up/reply` → 实例变 `succeeded`；另跑"设备不在线"（不订阅）⇒ 平台**立即**得到
 `failed/NO_SUBSCRIBER`（耗时 <5s，而该用例超时设 15s ⇒ 证明不是等超时）；再加"连着但不回执"⇒ 扫描置 `timeout`。
 
-**状态：未验证（R1）**。段 B 按"先合并再部署"的纪律**尚未部署到生产**，因此本节的四项判据
+**状态：未验证（R1）**。段 B 按"先合并再部署"的纪律**尚未部署到生产**，因此本节的五项判据
 **没有**生产实测数据；原始输出会在合并、按 main 部署后**回填到本节**（含 artifact 三元组）。
 在此之前不得把本节读作"已通过"。
 
@@ -350,7 +350,10 @@ bash deploy/emqx/accept-emqx-ingress.sh \
 ① 下发响应必须 `statusCode=sent`，且 `reply_payload` 同时含**设备 ts**与**平台 receivedAt**、`finished_at` 非空；
 ② 重复回执在**端点**上必须返回 `duplicated=true`（不依赖全局指标差值）；
 ③ 无订阅者时必须 `errorCode=NO_SUBSCRIBER`（只判 `failed` 会把 `EMQX_ERROR` 也放过）且耗时 <5s；
-④ 超时必须 `statusCode=timeout` **且** `errorCode=TIMEOUT`。
+④ 超时必须 `statusCode=timeout` **且** `errorCode=TIMEOUT`；
+⑤ **伪造回执必须被丢弃**：在设备自己的 `up/reply` 主题上发一条 `payload.deviceId = 别的设备` 的回执，
+必须命中原因为「认证主题不一致」的丢弃日志（按**前后增量**判定）——这是「EMQX 模板头 `X-Mqtt-Device` 失效」
+的判别用例（头失效时平台会退回用载荷设备，该伪造就可能被受理）。
 
 ### 6.2.4 回滚（段 B）
 
