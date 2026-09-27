@@ -668,7 +668,7 @@ printf '123456' | sha256sum
 ```bash
 curl -sS --http1.1 \
   https://raw.githubusercontent.com/xuxueli/xxl-job/3.4.2/xxl-job-admin/src/main/java/com/xxl/job/admin/framework/controller/LoginController.java \
-  | grep -n "Sha256Tool.sha256"
+  | sed -n '10p;67,68p'
 #  10:import com.xxl.tool.crypto.Sha256Tool;
 #  67:		String passwordHash = Sha256Tool.sha256(password);
 #  68:		if (!passwordHash.equals(xxlJobUser.getPassword())) {
