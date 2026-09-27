@@ -48,8 +48,13 @@ public class CommandReplyReq {
     /** 结果说明（失败时原样保留进 {@code error_msg}）。 */
     private String message;
 
-    /** 服务输出（JSON；平台原样存储、不解析）。 */
-    private String data;
+    /**
+     * 服务输出（任意 JSON；平台**原样存储、不解析**）。
+     *
+     * <p>同样用 {@code Object}：设备回执里的 {@code data} 通常是 JSON **对象**，声明成 {@code String}
+     * 会把回执拒成系统异常（生产端到端实测踩到）。</p>
+     */
+    private Object data;
 
     /** 设备时间（epoch 毫秒；平台另记落库时间）。 */
     private Long ts;

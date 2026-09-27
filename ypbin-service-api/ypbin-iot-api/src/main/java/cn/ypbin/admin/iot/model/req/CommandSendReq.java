@@ -46,8 +46,15 @@ public class CommandSendReq {
     /** 目标标识（属性标识或命令标识；{@code property_get} 可空 = 全部可读属性）。 */
     private String identifier;
 
-    /** 参数（JSON **对象**文本；{@code property_set} 需含 {@code value}，{@code service_call} 为服务入参）。 */
-    private String params;
+    /**
+     * 参数（**JSON 对象**；{@code property_set} 需含 {@code value}，{@code service_call} 为服务入参）。
+     *
+     * <p><b>为什么是 {@code Object} 而不是 {@code String}</b>：契约里的 {@code params} 是 JSON **对象**
+     * （设计 §7.6 B2 的 payload 就是 {@code {"requestId":…,"params":{…}}}）。若 Java 侧声明成 {@code String}，
+     * 客户端发对象会被 Jackson 拒成**系统异常（R.code=500）**——生产端到端实测踩到过（验收脚本发的就是对象）。
+     * 声明成 {@code Object} 后由服务层统一序列化并**显式校验必须是对象**（字符串/数组给出明确业务错误）。</p>
+     */
+    private Object params;
 
     /** 超时（毫秒；可空 = 用全局默认，见 {@code ypbin.emqx.default-command-timeout-ms}）。 */
     @Min(value = 1, message = "超时必须为正数")

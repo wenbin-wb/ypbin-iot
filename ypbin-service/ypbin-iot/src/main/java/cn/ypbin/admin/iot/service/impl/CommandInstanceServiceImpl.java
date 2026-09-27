@@ -187,7 +187,9 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
         CommandKind kind = requireKind(req.getKind());
         requireWriteDesiredUnsupported(req);
         // 体积与形态：params 必须在**构造 payload 之前**校验（评审核心要求：校验失败一律不发布）
-        JsonNode params = CommandPayloads.readObjectOrNull(req.getParams(), objectMapper);
+        // DTO 里是 Object（客户端发的是 JSON 对象）；这里统一序列化成文本再走"必须是对象 + ≤64KB"的校验
+        String paramsJson = toJsonText(req.getParams());
+        JsonNode params = CommandPayloads.readObjectOrNull(paramsJson, objectMapper);
         ThingModel model = loadThingModel(device.getProductId());
         Target target = resolveTarget(kind, model, req.getIdentifier());
         int timeoutMs = req.getTimeoutMs() == null
@@ -196,8 +198,8 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
         String topic = CommandPayloads.topic(kind, device.getTenantId(), deviceId, target.identifier());
         // ⚠️ payload 用 target.identifier()（**不是 label**）：property_get 不带标识时它是 null ⇒
         //    payload 里是空数组（"全部可读属性"），而实例列里记的是审计标签 all-properties
-        String payload = CommandPayloads.build(kind, requestId, target.payloadId(),
-            params == null ? null : req.getParams(), objectMapper);
+        String payload = CommandPayloads.build(kind, requestId, target.payloadId(), paramsJson,
+            objectMapper);
 
         IotCommandInstance row = new IotCommandInstance();
         row.setId(IdWorker.getId());
@@ -399,13 +401,9 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
         if (req.getMessage() != null) {
             node.put("message", req.getMessage());
         }
-        if (req.getData() != null && !req.getData().isBlank()) {
-            // data 形态由物模型定义决定：能解析成 JSON 就原样嵌入，否则按字符串保存（**不解析语义**）
-            try {
-                node.set("data", objectMapper.readTree(req.getData()));
-            } catch (RuntimeException ex) {
-                node.put("data", req.getData());
-            }
+        if (req.getData() != null) {
+            // data 形态由物模型定义决定：**原样嵌入，不解析语义**（对象/数组/标量都能存）
+            node.set("data", objectMapper.valueToTree(req.getData()));
         }
         if (req.getTs() != null) {
             node.put("ts", req.getTs());
@@ -677,6 +675,16 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
                     + LogSanitizer.sanitize(identifier));
         }
         return new Target(identifier, identifier, null);
+    }
+
+    /**
+     * 把 DTO 里的 {@code Object} 入参序列化成 JSON 文本（{@code null} 原样返回）。
+     *
+     * @param value 入参对象
+     * @return JSON 文本；入参为 {@code null} 时返回 {@code null}
+     */
+    private String toJsonText(Object value) {
+        return value == null ? null : objectMapper.writeValueAsString(value);
     }
 
     /**

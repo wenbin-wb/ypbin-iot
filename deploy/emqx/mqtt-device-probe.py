@@ -145,7 +145,8 @@ def main():
     parser.add_argument("--password-file", default=None, help="600 文件；口令不落 argv")
     parser.add_argument("--client-id", default=None)
     parser.add_argument("--topic", required=True)
-    parser.add_argument("--payload", required=True)
+    parser.add_argument("--payload", default=None,
+                        help="pub 模式必填；listen 模式不需要（收到消息后可回执）")
     parser.add_argument("--qos", type=int, default=1)
     parser.add_argument("--mode", choices=("pub", "listen"), default="pub",
                         help="pub=发布上行读数；listen=订阅下行并在收到后回执")
@@ -163,6 +164,9 @@ def main():
             password = handle.read().strip()
     if args.mode == "listen":
         return listen(args, password)
+    if args.payload is None:
+        print("BAD_ARGS pub 模式必须给 --payload")
+        return EXIT_NETWORK
 
     outcome = Outcome()
     # paho 2.x：显式声明回调 API 版本（VERSION1 已废弃，会在 stderr 打警告，污染验收输出）

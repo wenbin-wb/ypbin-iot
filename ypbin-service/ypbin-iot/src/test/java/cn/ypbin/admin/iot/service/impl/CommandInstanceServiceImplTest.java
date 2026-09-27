@@ -53,6 +53,7 @@ import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.List;
+import java.util.Map;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -135,7 +136,7 @@ class CommandInstanceServiceImplTest {
         when(emqxAdminClient.publish(any(), any(), anyInt(), anyBoolean()))
             .thenReturn(new EmqxPublishOutcome(EmqxPublishResult.DELIVERED, "msg-1"));
 
-        CommandInstanceResp resp = service.send(DEVICE, req("property_set", "temperature", "{\"value\":25.0}"),
+        CommandInstanceResp resp = service.send(DEVICE, req("property_set", "temperature", Map.of("value", 25.0)),
             CommandSource.CONSOLE, 7L);
 
         assertThat(resp.getStatusCode()).isEqualTo(CommandInstanceStatus.SENT.getCode());
@@ -160,7 +161,7 @@ class CommandInstanceServiceImplTest {
         when(emqxAdminClient.publish(any(), any(), anyInt(), anyBoolean()))
             .thenReturn(new EmqxPublishOutcome(EmqxPublishResult.NO_SUBSCRIBER, null));
 
-        CommandInstanceResp resp = service.send(DEVICE, req("property_set", "temperature", "{\"value\":1}"),
+        CommandInstanceResp resp = service.send(DEVICE, req("property_set", "temperature", Map.of("value", 1)),
             CommandSource.CONSOLE, 1L);
 
         assertThat(resp.getStatusCode()).isEqualTo(CommandInstanceStatus.FAILED.getCode());
@@ -178,7 +179,7 @@ class CommandInstanceServiceImplTest {
         when(emqxAdminClient.publish(any(), any(), anyInt(), anyBoolean()))
             .thenThrow(new EmqxClientException(EmqxErrorCode.UNREACHABLE, "down"));
 
-        CommandInstanceResp resp = service.send(DEVICE, req("property_set", "temperature", "{\"value\":1}"),
+        CommandInstanceResp resp = service.send(DEVICE, req("property_set", "temperature", Map.of("value", 1)),
             CommandSource.CONSOLE, 1L);
 
         assertThat(resp.getStatusCode()).isEqualTo(CommandInstanceStatus.FAILED.getCode());
@@ -189,12 +190,12 @@ class CommandInstanceServiceImplTest {
     @DisplayName("物模型校验：未知标识 / 属性不可写 / 未知命令 ⇒ 业务错误且**绝不发布**")
     void unknownIdentifierMustBeRejectedBeforePublish() {
         stubDeviceAndThingModel();
-        assertThatThrownBy(() -> service.send(DEVICE, req("property_set", "nope", "{\"value\":1}"),
+        assertThatThrownBy(() -> service.send(DEVICE, req("property_set", "nope", Map.of("value", 1)),
             CommandSource.CONSOLE, 1L)).isInstanceOf(BusinessException.class);
-        assertThatThrownBy(() -> service.send(DEVICE, req("property_set", "readonly", "{\"value\":1}"),
+        assertThatThrownBy(() -> service.send(DEVICE, req("property_set", "readonly", Map.of("value", 1)),
             CommandSource.CONSOLE, 1L))
             .as("只读属性不可写").isInstanceOf(BusinessException.class);
-        assertThatThrownBy(() -> service.send(DEVICE, req("service_call", "nope", "{}"),
+        assertThatThrownBy(() -> service.send(DEVICE, req("service_call", "nope", Map.of()),
             CommandSource.CONSOLE, 1L)).isInstanceOf(BusinessException.class);
         assertThatThrownBy(() -> service.send(DEVICE, req("property_get", "nope", null),
             CommandSource.CONSOLE, 1L))
@@ -204,10 +205,25 @@ class CommandInstanceServiceImplTest {
     }
 
     @Test
+    @DisplayName("params 不是 JSON 对象（字符串/数组）⇒ 明确业务错误且不发布（不能变成系统异常 500）")
+    void nonObjectParamsMustBeBusinessError() {
+        stubDeviceAndThingModel();
+        // 生产端到端实测踩过：DTO 若声明成 String，客户端发对象会被 Jackson 拒成 R.code=500；
+        // 反过来，客户端把 params 当字符串发也必须给出**业务错误**（而不是 500）：
+        assertThatThrownBy(() -> service.send(DEVICE, req("service_call", "setTemp", "not-an-object"),
+            CommandSource.CONSOLE, 1L))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("JSON");
+        assertThatThrownBy(() -> service.send(DEVICE, req("property_set", "temperature", List.of(1, 2)),
+            CommandSource.CONSOLE, 1L))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("对象");
+        verify(emqxAdminClient, never()).publish(any(), any(), anyInt(), anyBoolean());
+    }
+
+    @Test
     @DisplayName("writeDesired=true 显式拒绝（不静默忽略），且不发布")
     void writeDesiredMustBeRejectedExplicitly() {
         stubDeviceAndThingModel();
-        CommandSendReq req = req("property_set", "temperature", "{\"value\":1}");
+        CommandSendReq req = req("property_set", "temperature", Map.of("value", 1));
         req.setWriteDesired(Boolean.TRUE);
         assertThatThrownBy(() -> service.send(DEVICE, req, CommandSource.CONSOLE, 1L))
             .isInstanceOf(BusinessException.class)
@@ -219,7 +235,7 @@ class CommandInstanceServiceImplTest {
     @DisplayName("非法类型码 ⇒ 业务错误且不发布")
     void unknownKindMustBeRejected() {
         stubDeviceAndThingModel();
-        assertThatThrownBy(() -> service.send(DEVICE, req("reboot", "temperature", "{}"),
+        assertThatThrownBy(() -> service.send(DEVICE, req("reboot", "temperature", Map.of()),
             CommandSource.CONSOLE, 1L)).isInstanceOf(BusinessException.class);
         verifyNoInteractions(emqxAdminClient);
     }
@@ -498,7 +514,7 @@ class CommandInstanceServiceImplTest {
      * @param params     参数
      * @return 请求
      */
-    private static CommandSendReq req(String kind, String identifier, String params) {
+    private static CommandSendReq req(String kind, String identifier, Object params) {
         CommandSendReq req = new CommandSendReq();
         req.setKind(kind);
         req.setIdentifier(identifier);
@@ -529,7 +545,7 @@ class CommandInstanceServiceImplTest {
      * @return 受理结果
      */
     private CommandReplyResult replyFromAuthenticatedTopic(Long deviceId, String requestId, int code,
-                                                          String message, String data, Long ts) {
+                                                          String message, Object data, Long ts) {
         return service.applyReply(reply(deviceId, requestId, code, message, data, ts), deviceId);
     }
 
@@ -545,7 +561,7 @@ class CommandInstanceServiceImplTest {
      * @return 回执
      */
     private static CommandReplyReq reply(Long deviceId, String requestId, int code, String message,
-                                        String data, Long ts) {
+                                        Object data, Long ts) {
         CommandReplyReq req = new CommandReplyReq();
         req.setDeviceId(deviceId);
         req.setRequestId(requestId);
