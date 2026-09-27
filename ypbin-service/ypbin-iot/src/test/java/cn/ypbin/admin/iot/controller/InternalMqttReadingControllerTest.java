@@ -141,16 +141,21 @@ class InternalMqttReadingControllerTest {
     }
 
     @Test
-    @DisplayName("超长报文在解析前被拦下：400 + BODY_TOO_LARGE（不进入 JSON 解析与落库）")
-    void oversizedBodyMustBeRejectedBeforeParsing() throws Exception {
+    @DisplayName("服务层判超长报文时，控制器映射为原始 400 + BODY_TOO_LARGE（护栏与计数都在服务层）")
+    void oversizedBodyMustBeRejected() throws Exception {
+        // 体积护栏**刻意不在控制器**：控制器直接写 400 会绕过服务层的指标计数
+        // （独立复核实测到 iot.mqtt.ingest.rejected{reason=BODY_TOO_LARGE} 恒为 0）。
+        // 因此这里只断言"服务层的拒绝被映射成原始 400"，护栏本身与计数由
+        // MqttReadingIngestServiceImplTest#oversizedBodyMustBeRejectedAndCounted 覆盖。
         String huge = "{\"requestId\":\"r1\",\"pad\":\""
             + "x".repeat(MqttReadingIngestReq.MAX_BODY_LENGTH + 10) + "\"}";
+        when(service.ingest(anyString())).thenThrow(
+            new MqttIngestRejectionException(MqttIngestRejectReason.BODY_TOO_LARGE, "超长"));
         mockMvc.perform(post("/internal/mqtt/readings")
                 .contentType(MediaType.APPLICATION_JSON).content(huge)
                 .header("X-Internal-Token", TOKEN))
             .andExpect(status().isBadRequest())
             .andExpect(jsonPath("$.code").value("BODY_TOO_LARGE"));
-        verify(service, never()).ingest(any());
     }
 
     /**

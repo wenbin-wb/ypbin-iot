@@ -27,10 +27,6 @@ import cn.ypbin.admin.iot.values.RedisLatestValueWriter;
 import cn.ypbin.starter.core.util.LogSanitizer;
 import cn.ypbin.starter.tenant.core.TenantContext;
 import com.baomidou.mybatisplus.core.toolkit.IdWorker;
-import tools.jackson.core.JacksonException;
-import tools.jackson.databind.DeserializationFeature;
-import tools.jackson.databind.ObjectMapper;
-import tools.jackson.databind.ObjectReader;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.util.ArrayList;
@@ -151,6 +147,13 @@ public class MqttReadingIngestServiceImpl implements MqttReadingIngestService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public MqttReadingIngestResult ingest(String rawBody) {
+        // 体积护栏必须在**这里**（而不是控制器）：控制器里直接写 400 会绕过 reject()，
+        // 于是 iot.mqtt.ingest.rejected{reason=BODY_TOO_LARGE} **永远为 0**——监控规则"看起来配好了、
+        // 却永不触发"（独立复核以实测判出的真缺陷）。护栏仍早于 JSON 解析，防内存放大的目的不变。
+        if (rawBody != null && rawBody.length() > MqttReadingIngestReq.MAX_BODY_LENGTH) {
+            reject(MqttIngestRejectReason.BODY_TOO_LARGE,
+                "报文长度 " + rawBody.length() + " 超过上限 " + MqttReadingIngestReq.MAX_BODY_LENGTH);
+        }
         MqttReadingIngestReq req = parse(rawBody);
         // 第①段：纯内存的报文/字段校验——任何一条不合法都在动库之前整批拒绝
         Long deviceId = validate(req);

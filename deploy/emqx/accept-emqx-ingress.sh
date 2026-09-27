@@ -19,6 +19,10 @@
 # 凭据纪律：设备口令由本脚本现签现用，明文只经 `ssh | ssh` 管道落到中间件机 600 文件，
 # 不打印、不进 argv；EMQX API Key 只在中间件机的 600 curl 配置文件里；退出时清理临时口令文件。
 #
+# ⚠️ **副作用（每次运行都会发生，知情后使用）**：脚本第 0 步会**轮换该设备的凭据**（version +1、
+#   旧口令立即失效），收尾 `shred` 掉明文 ⇒ 跑完后这台设备**没有"已知口令"**。若现场有真设备在用，
+#   跑完请重新签发一次并把明文交付设备；CI/复跑场景无影响。
+#
 # 用法：
 #   bash deploy/emqx/accept-emqx-ingress.sh \
 #        --mw-ssh "root@43.242.200.8 -p 61260 -i ~/.ssh/id_ed25519_ypbin_mw" \
@@ -122,8 +126,10 @@ mwr "/opt/emqx/venv/bin/python3 /opt/emqx/mqtt-device-probe.py --username '$TENA
 sleep 6
 M_ACCEPT1=$(metric iot.mqtt.ingest.accepted); M_ROWS1=$(metric iot.timeseries.write.rows); DB1=$(iotdb_rows)
 [ "$((M_ACCEPT1 - M_ACCEPT0))" -ge 1 ] && ok "③ iot.mqtt.ingest.accepted +$((M_ACCEPT1 - M_ACCEPT0))" || bad "入站受理计数未增长"
-[ "$((M_ROWS1 - M_ROWS0))" -ge 1 ] && ok "③ iot.timeseries.write.rows +$((M_ROWS1 - M_ROWS0))（含 access 通道并行写入，故只作增长判据）" || bad "时序写入计数未增长"
-[ "$((DB1 - DB0))" -ge 1 ] && ok "① IoTDB 设备行数 +$((DB1 - DB0))" || bad "IoTDB 未新增行"
+# ⚠️ 下面两条**刻意不作为 PASS 判据**（独立复核指出不特异）：access 通道每 2s 也在写同一设备同一点位，
+#    设备总行数与 write.rows 会被它推高 —— 入站断掉时这两条依然可能为绿。承重判据是紧随其后的
+#    「按 ts+value 精确定位恰好 1 行」（以及 accepted 与 series）。
+info "③ iot.timeseries.write.rows +$((M_ROWS1 - M_ROWS0))、IoTDB 设备总行数 +$((DB1 - DB0))（含 access 并行写入，仅供参照）"
 prodr "PW=\$(sed -n 's/^IOTDB_PASSWORD=//p' $PROD_ENV); docker exec ypbin-iotdb bash -c \"start-cli.sh -h ypbin-iotdb -p 6667 -u root -pw \\\"\$PW\\\" -sql_dialect table -e \\\"SELECT time, tenant_id, device_id, property_id, value_double, quality FROM iot.reading WHERE device_id='$DEVICE' AND time >= $((TS-1500)) AND time <= $((TS+1500)) ORDER BY time\\\"\" 2>/dev/null | grep -E '\\|' | tail -6 | sed 's/^/  ·  /'"
 hit=$(prodr "PW=\$(sed -n 's/^IOTDB_PASSWORD=//p' $PROD_ENV); docker exec ypbin-iotdb bash -c \"start-cli.sh -h ypbin-iotdb -p 6667 -u root -pw \\\"\$PW\\\" -sql_dialect table -e \\\"SELECT count(*) FROM iot.reading WHERE device_id='$DEVICE' AND time >= $((TS-1500)) AND time <= $((TS+1500)) AND value_double=$VALUE\\\"\" 2>/dev/null | grep -oE '^[|][[:space:]]*[0-9]+[[:space:]]*[|]' | head -1 | tr -dc '0-9'")
 [ "${hit:-0}" = "1" ] && ok "① 本消息在 IoTDB 恰好 1 行（ts+value 精确归属，与 access 通道的 $FEEDER_VALUE 可区分）" || bad "① 按 ts+value 定位到 $hit 行（期望 1）"

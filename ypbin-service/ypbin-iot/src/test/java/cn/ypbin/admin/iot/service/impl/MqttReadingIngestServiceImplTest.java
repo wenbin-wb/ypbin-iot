@@ -67,6 +67,8 @@ class MqttReadingIngestServiceImplTest {
 
     private IotMqttIngestReceiptMapper receiptMapper;
 
+    private SimpleMeterRegistry meterRegistry;
+
     private MqttReadingIngestServiceImpl service;
 
     @BeforeEach
@@ -78,8 +80,9 @@ class MqttReadingIngestServiceImplTest {
         // 证明的是服务自身钉死的解析口径（而非 Jackson/Boot 的某个默认值），默认值被改动时用例仍会咬人
         ObjectMapper mapper = new ObjectMapper().rebuild()
             .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES).build();
+        meterRegistry = new SimpleMeterRegistry();
         service = new MqttReadingIngestServiceImpl(availabilityService, deviceMapper, receiptMapper,
-            mapper, new SimpleMeterRegistry());
+            mapper, meterRegistry);
     }
 
     @Test
@@ -238,6 +241,25 @@ class MqttReadingIngestServiceImplTest {
             .isInstanceOf(MqttIngestRejectionException.class)
             .extracting(ex -> ((MqttIngestRejectionException) ex).getReason())
             .isEqualTo(MqttIngestRejectReason.ITEMS_TOO_MANY);
+        verifyNoInteractions(availabilityService, deviceMapper, receiptMapper);
+    }
+
+    @Test
+    @DisplayName("超长报文整批 400，**且 iot.mqtt.ingest.rejected{reason=BODY_TOO_LARGE} 必须 +1**")
+    void oversizedBodyMustBeRejectedAndCounted() {
+        // 这条用例是独立复核判出的真缺陷的回归：体积护栏一度写在控制器里 ⇒ 绕过了 reject() 的计数，
+        // 指标恒为 0（监控规则"看起来配好了、却永不触发"）。断言指标而不是只断言异常，
+        // 正是为了让"护栏放在哪一层"这件事被门禁咬住。
+        String huge = "{\"requestId\":\"r-huge\",\"pad\":\""
+            + "x".repeat(MqttReadingIngestReq.MAX_BODY_LENGTH + 10) + "\"}";
+        assertThatThrownBy(() -> service.ingest(huge))
+            .isInstanceOf(MqttIngestRejectionException.class)
+            .extracting(ex -> ((MqttIngestRejectionException) ex).getReason())
+            .isEqualTo(MqttIngestRejectReason.BODY_TOO_LARGE);
+        assertThat(meterRegistry.get(MqttReadingIngestServiceImpl.METRIC_REJECTED)
+            .tag("reason", "BODY_TOO_LARGE").counter().count())
+            .as("超长报文必须计入拒绝指标（写 400 但不计数 = 可观测性假阴性）")
+            .isEqualTo(1.0d);
         verifyNoInteractions(availabilityService, deviceMapper, receiptMapper);
     }
 

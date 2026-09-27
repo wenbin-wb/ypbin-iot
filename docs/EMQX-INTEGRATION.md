@@ -31,7 +31,7 @@
 | 约束 | `requestId` `[A-Za-z0-9_.:-]{1,64}` 必填；`items` 1–50 条且**必须同属一台设备**；`propertyId` 走 `PropertyIdRules`（1–128，字符集白名单）；`quality` 走 `ReadingQuality` 白名单（`GOOD\|UNCERTAIN\|BAD\|STALE\|NOT_CONNECTED\|CONFIG_ERROR`，**大小写敏感**）；`value` 非空且 ≤4096 字符；`ts` 为正且不超前 `RedisLatestValueWriter.MAX_FUTURE_SKEW_MS`（5 分钟，与最新值写入器同一口径）；`pollIntervalMs` 为正且 ≤24h；报文 ≤64KB |
 | 响应 | 成功/幂等重投 **200** + `R` 信封（`data.accepted/dropped/duplicated`）；契约非法 **400** + `{"code":"<原因码>","message":"…"}`；其它异常 **503**（EMQX 判 recoverable 会重试） |
 | 租户 | **按设备行反查**（`TenantContext.executeIgnore` → `iot_device.tenant_id`），**不信任报文体里的任何 tenant 字段**；报文体带 `tenantId` 会被忽略（有实测用例） |
-| 幂等 | 表 `iot_mqtt_ingest_receipt`，唯一键 `(tenant_id, device_id, request_id)`；命中即**整批跳过**（不调用 `ingest`，因此不会重复写最新值/时序/活性/影子） |
+| 幂等 | 表 `iot_mqtt_ingest_receipt`，唯一键 `(tenant_id, device_id, request_id)`；命中即**整批跳过**（不调用 `ingest`，因此不会重复写最新值/时序/活性/影子）。⚠️ **顺序重投是强保证，并发重投不是**——预查 + `ON DUPLICATE KEY UPDATE` 只保证**回执行**唯一，两个真正并发的同 `requestId` 请求仍可能都调用到 `ingest`（IoTDB 非事务 ⇒ 时序可能双写）。当前被动作的 `inflight_window=1`（单节点串行投递）兜住，见 §8 U-A13。 |
 | 落库 | **完全复用** `AvailabilityService.ingest`（本端点不新增任何落库链路；点位**映射**校验仍由该服务的既有实现承担） |
 
 **为什么 `requestId` 必填、且唯一键含 `device_id`**：`requestId` 由**设备**生成，跨设备不保证唯一
@@ -175,7 +175,7 @@ WHERE 是**纵深防御**：ACL 已挡住越权发布（实测 §6 ⑤），这�
 
 | 请求 | 结果 |
 |---|---|
-| `POST /api/v5/authentication/password_based%3Abuilt_in_database/users`，体 `{user_id, password_hash, salt, is_superuser}` | **HTTP 400** `{"unmatched":"password","unknown":"password_hash,salt","reason":"unknown_fields"}` |
+| `POST /api/v5/authentication/password_based%3Abuilt_in_database/users`，体 `{user_id, password_hash, salt, is_superuser}` | **HTTP 400**，外层 `{"code":"BAD_REQUEST","message":"…"}`，`message` **本身是一段被转义的 JSON 字符串**：`{\"unmatched\":\"password\",\"unknown\":\"password_hash,salt\",\"reason\":\"unknown_fields\"}`（复核者取回的原始响应体逐字如此） |
 | 同上，体 `{user_id, password}`（明文） | **HTTP 201**（可用，但明文会离开平台 ⇒ **不采用**） |
 | `POST …/import_users`，multipart 字段名 **`file`** | **HTTP 400** `Missing required parameter: filename` |
 | `POST …/import_users`，multipart 字段名 **`filename`**，CSV `user_id,password_hash,salt,is_superuser` | **HTTP 200** `{"total":1,"success":1,"failed":0,"override":0,"skipped":0}` |
@@ -240,6 +240,11 @@ bash deploy/emqx/accept-emqx-ingress.sh \
 | ④ 幂等 | 同一 `requestId` 重投 ⇒ `duplicated+1`、**不新增时序行**、MySQL 回执仍 1 行 | 全部命中（按 ts+value 精确定位仍为 1 行） |
 | ⑤ ACL 负向 | 匿名连接被拒、发别人主题被拒 | `connack.auth_error +1`；`publish.auth_error +1`、`nomatch +1` |
 
+> ⚠️ 该脚本**每次运行都会轮换设备凭据并在收尾 shred 明文**（因为它必须用平台现签的凭据才叫端到端）。
+> 运行后该设备没有"已知口令"；如需让真设备继续用，跑完重新签发一次并把明文交付出去。
+> 另外：① 与 ③ 两条"增长"判据**刻意不作 PASS 判据**（access 通道每 2s 也在写同一设备同一点位，
+> 设备总行数/写行数会被它推高）——承重的是紧随其后的"按 ts+value 精确定位恰好 1 行"。
+
 **另两条独立用例**（直接打端点，证明「不信任报文」与「非法即 4xx」）：
 
 | 用例 | 实测 |
@@ -248,6 +253,30 @@ bash deploy/emqx/accept-emqx-ingress.sh \
 | 非法质量码 `"good"`（小写） | **HTTP 400** `{"code":"QUALITY_INVALID"}`；EMQX 侧判不可重试、不重放 |
 | 未映射点位 `no_such_point` | **HTTP 400** `{"code":"NO_ACCEPTED_ITEM"}` + `iot.ingest.propertyid.unmapped +1` |
 | 凭证缺失/错误 | **HTTP 401**（原始状态码，不是 200 + `R.code`） |
+
+### 6.1 独立复核（R6/L3，2026-10-01）
+
+由**独立子代理**复核（不继承作者结论、自己重跑门禁与两台真机实测、3 次变异实验）。
+
+**总判定 PASS**（有条件），7 个复核维度全部 PASS，并给出 1 个真缺陷 + 若干文档/资产不准确与未登记风险。
+**复核者发现并已在本提交整改**：
+
+| 复核发现 | 严重度 | 处置 |
+|---|---|---|
+| `iot.mqtt.ingest.rejected{reason=BODY_TOO_LARGE}` **永不增长**（体积护栏写在控制器里，绕过服务层唯一会计数的 `reject()`） | 真缺陷·中 | ✅ 护栏**下沉到服务层**（仍早于 JSON 解析），并新增回归用例 `oversizedBodyMustBeRejectedAndCounted` 断言该指标 ==1；变异（去掉护栏）已实测转红 |
+| `MqttReadingIngestServiceImpl` 有整块重复 import | 真缺陷·低 | ✅ 已删（javac 容忍，故门禁未拦） |
+| U-A6「拿不到 EMQX 侧丢弃读数」**不成立** | 文档不准确·中 | ✅ 改为：读数出口是 `GET /api/v5/bridges/webhook:ypbin-ingress/metrics` 与 `GET /api/v5/rules/{id}/metrics`（复核实测 `{"dropped":0,"matched":13,"success":10,"failed":3,…}`） |
+| §4.2 的 400 响应体引用的是内层对象 | 文档不准确·低 | ✅ 已按外层包装改写 |
+| 中间件机部署的 `mqtt-device-probe.py` 与仓库版有 docstring 漂移 | 资产漂移·低 | ✅ 已重新分发仓库版 |
+| **新隧道单元没有停摆告警**（既有 watch 只盯 `emqx-tunnel.service`） | 未登记风险·中 | ✅ 登记为 U-A12（P1 用同一脚本加第二实例） |
+| 幂等非原子（并发同 requestId 可能双写时序） | 未登记边界·低 | ✅ 登记为 U-A13，并在 §1.1 补前提 |
+| sa-token 防火墙对 `//`/`..` 路径返回 **HTTP 200 + `非法请求`**（另一种 200=成功形态，当前不可达） | 未登记·低 | ✅ 登记为 U-A14 |
+| 验收脚本两条增长判据不特异（设备总行数/写行数含 access 并行写入） | 验收判据·低 | ✅ 已降级为**信息行**（不再作为 PASS 判据），承重判据是"按 ts+value 精确定位恰好 1 行" |
+
+**复核者的诚实边界（照抄）**：真设备经 1883/8883 的外部接入、TLS、平台侧 503 重试路径、ACL 漂移本身、
+`value` 含引号破 JSON、EMQX 集群复制语义 —— 均**未核实**（与 §8 一致）。
+> 复核副作用（已登记，勿当作缺陷）：复核与验收脚本**每次运行都会轮换设备 9300012 的凭据**
+> 并在收尾 `shred` 明文 ⇒ 运行后设备没有"已知口令"，真设备会被踢掉；如需保持可用，跑完重新签发一次并留存明文交付设备。
 
 ---
 
@@ -281,6 +310,9 @@ bash deploy/emqx/accept-emqx-ingress.sh \
 | **U-A8** | 入站凭证最小化 | 入站动作复用全局 `INTERNAL_TOKEN`（RK9） | 泄露它 = 拿到 `/internal/**` 写权限；P1-5 |
 | **U-A9** | 凭据对账任务（平台台账 ↔ EMQX 用户差集） | 未做（P1-7） | 吊销时 EMQX 不可达会留残留账号；吊销路径已记 ERROR + 指标 |
 | **U-A10** | 现网设备 9300012 的**演示数据**与 access 通道并行写入 | 验收期间 access 通道每 2s 也在写同一设备同一温度点位（值 23.5） | 判据因此改为"按 ts+value 精确定位"，**不是**按设备总行数；读"最新值"时可能看到 access 的 23.5（属预期，不是 MQTT 丢数据） |
+| **U-A12** | **新隧道单元没有停摆告警**（独立复核指出）：既有 `emqx-tunnel-watch.sh` 只判 `emqx-tunnel.service` 与 `127.0.0.1:18093`；入站用的 `-R 127.0.0.1:18084` 与新的出向 `-L 172.20.0.1:18093` 都在 `emqx-ingress-tunnel.service` 里，它"进程在但转发没建起来"时没有任何判据 | 未做 | 入站静默停摆（EMQX 侧看 bridge `failed`/`dropped`，平台侧无感）⇒ **P1-8 巡检必须覆盖**：用同一 watch 脚本加第二实例（`--unit emqx-ingress-tunnel.service` + 两个端口判据） |
+| **U-A13** | **同 requestId 的幂等不是原子的**：预查 + `ON DUPLICATE KEY UPDATE` 只保证回执行唯一，不阻止两个**并发**请求都调用 `ingest`（IoTDB 非事务 ⇒ 时序可能双写） | 当前由动作 `inflight_window=1`（同客户端串行）+ 单节点兜住 | 多节点/提高 inflight 窗口前必须改成"插入回执成功者才继续落库"（插入先行、失败即 return） |
+| **U-A14** | sa-token 防火墙对 `//`、`..` 类路径返回 **HTTP 200 + text/plain `非法请求：<path>`**（`sa-token-core` 的 `SaFirewallCheckHookForBlackPath`）——又一种"200 = 成功"的静默形态 | 当前**不可达**：动作 URL 回读为 `http://172.28.0.1:18084/internal/mqtt/readings`，无重复斜杠 | 若将来动作 URL / 隧道 / 中继配置引入多余斜杠，双端会全绿而数据不存在 ⇒ 变更 URL 时必须实测一次端到端 |
 | **U-A11** | 中间件机防火墙规则的持久性 | 由 `emqx-ingress-firewall.service` 幂等维护，`systemctl enable` 后开机自启 | 若有人在宝塔面板里重置 iptables 规则，本服务不会自动重跑 ⇒ 归 P1-8 巡检（与隧道停摆告警同类） |
 
 ---

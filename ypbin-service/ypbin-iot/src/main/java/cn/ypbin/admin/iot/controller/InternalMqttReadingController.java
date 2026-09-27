@@ -11,7 +11,6 @@ package cn.ypbin.admin.iot.controller;
 
 import cn.ypbin.admin.iot.mqtt.MqttIngestRejectReason;
 import cn.ypbin.admin.iot.mqtt.MqttIngestRejectionException;
-import cn.ypbin.admin.iot.mqtt.MqttReadingIngestReq;
 import cn.ypbin.admin.iot.mqtt.MqttReadingIngestResult;
 import cn.ypbin.admin.iot.service.MqttReadingIngestService;
 import cn.ypbin.starter.core.model.R;
@@ -90,11 +89,6 @@ public class InternalMqttReadingController {
     @PostMapping
     public void ingest(@RequestBody(required = false) String body, HttpServletResponse response)
         throws IOException {
-        if (body != null && body.length() > MqttReadingIngestReq.MAX_BODY_LENGTH) {
-            // 体积护栏在解析之前：先拦住内存放大，不进入 JSON 解析
-            writeRejected(response, MqttIngestRejectReason.BODY_TOO_LARGE);
-            return;
-        }
         MqttReadingIngestResult result;
         try {
             result = mqttReadingIngestService.ingest(body);
