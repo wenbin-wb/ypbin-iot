@@ -27,9 +27,18 @@ Type=simple
 #       固定 `curve25519-sha256`；两者服务端都支持（`sshd -T` 实测）。
 #     - 固定 `HostKeyAlgorithms=ssh-ed25519`，跳过握手期的算法协商列表比价。
 #   A/B 实测（各 5 次，单位秒）：base 1.49/1.42/1.36/1.39/1.36 → pin 后 1.22/1.26/1.24/1.27/1.25
-# · 凭据只有一把**专用且被限制的**私钥 /etc/ypbin/emqx-tunnel.key（600，root）；
+# · 凭据只有一把**专用且受限的**私钥 /etc/ypbin/emqx-tunnel.key（600，root）；
 #   中间件机 authorized_keys 对该公钥带
-#   `restrict,port-forwarding,permitopen="127.0.0.1:18093"` ⇒ 该密钥**只能**转发这一个目标。
+#   `restrict,port-forwarding,permitopen="127.0.0.1:18093"`。
+#   ✅ `permitopen` **确实生效**：该密钥只能把流量**转发到** 127.0.0.1:18093
+#      （实测转发到别的目标会 `administratively prohibited`）。
+#   ⚠️ **但"受限"不等于"只读"**（已由独立复核实测证伪过一版错误表述，勿再写错）：
+#      `restrict` 关掉的是 pty/agent/X11/user-rc **与两向端口转发**；同一行又用 `port-forwarding`
+#      **重新打开了两向** ⇒ **反向转发（-R）并未被禁止**（因为没设 `permitlisten`），
+#      且 OpenSSH **没有** authorized_keys 选项能做到"只许 -L 不许 -R"；同理
+#      `command=` 会让 `-N` 会话立即结束、转发失效，所以也做不到"只许转发不许执行命令"。
+#      ⇒ 该密钥的实际能力 = **转发 + 非交互 root 命令执行**，这是**已登记的残留风险**
+#      （见 docs/EMQX-DEPLOY.md §6.1 与 §10），不要当成"已被限制到只能转发一个目标"。
 ExecStart=/usr/bin/autossh -M 0 -N \
   -o ExitOnForwardFailure=yes \
   -o ServerAliveInterval=15 \

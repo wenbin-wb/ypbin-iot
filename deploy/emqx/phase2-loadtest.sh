@@ -28,6 +28,14 @@
 #      ⇒ 延迟 p95 改由本目录的 **latency-probe.py**（~60 行、paho-mqtt 2.1.0、只订阅不施压）
 #      逐条统计；负载**仍然全部**由官方 emqtt-bench 产生。
 #
+# ⚠️ 凭据口径（**别写成"只在进程内存"**，实测会打脸）：
+#   · 本脚本自己用 `curl -K <600 文件>`，API Key 不进 argv；
+#   · 但**压测端 emqtt-bench 只支持 `-P <明文口令>`** ⇒ 压测期间该口令会出现在
+#     `docker inspect <pub 容器>` 的 `Config.Cmd` 里（以及 /proc/<pid>/cmdline）。
+#     对策：输出目录默认 700；`cleanup()` 立即删除 `bench/*.inspect.json` 与 `*.cid`；
+#     账号在压测结束时删除（口令随之失效）。**不声称"口令绝不落盘"**。
+#   · 要保留 inspect 留档请显式加 `--keep-out`（自行承担口令残留在已失效账号上的风险）。
+#
 # 用法：
 #   bash phase2-loadtest.sh --tier 100 --duration 600 --out /var/tmp/emqx-loadtest/tier100
 #   bash phase2-loadtest.sh --tier 500 --duration 600 --out /var/tmp/emqx-loadtest/tier500
@@ -50,6 +58,7 @@ QOS=1
 PERIOD_MS=1000          # 每连接 1 msg/s
 OUT=""
 KEEP=0
+KEEP_OUT=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -59,6 +68,7 @@ while [ $# -gt 0 ]; do
     --out)      OUT="$2"; shift 2 ;;
     --env-file) ENV_FILE="$2"; shift 2 ;;
     --keep-users) KEEP=1; shift ;;
+    --keep-out)   KEEP_OUT=1; shift ;;
     *) echo "未知参数: $1" >&2; exit 1 ;;
   esac
 done
@@ -69,6 +79,13 @@ mkdir -p "$OUT"
 [ -r "$ENV_FILE" ] || { echo "读不到 $ENV_FILE" >&2; exit 1; }
 set -a; . "$ENV_FILE"; set +a
 : "${EMQX_API_KEY:?}"; : "${EMQX_API_SECRET:?}"
+
+# ── 凭据不进 argv：curl 从**私有 700 目录里的 600 配置文件**读（argv 里只有文件路径）──
+PRIV="$(mktemp -d)"; chmod 700 "$PRIV"
+printf 'user = "%s:%s"\n' "$EMQX_API_KEY" "$EMQX_API_SECRET" >"$PRIV/curlrc"; chmod 600 "$PRIV/curlrc"
+
+# 输出目录：默认 700（里面有压测端的命令记录，含**压测期间有效**的临时口令）
+mkdir -p "$OUT"; chmod 700 "$OUT"
 
 TENANT=9001
 LOAD_DEV="${TENANT}.9001"          # 压测设备账号：只能 publish 自己的 up/#
@@ -83,14 +100,14 @@ mkdir -p "$BENCH_OUT"
 
 api() {
   local method="$1" path="$2" data="${3:-}"
-  local args=(-s -o /dev/null -w '%{http_code}' -X "$method"
-              -u "$EMQX_API_KEY:$EMQX_API_SECRET" -H 'Content-Type: application/json')
+  local args=(-s -K "$PRIV/curlrc" -o /dev/null -w '%{http_code}' -X "$method"
+              -H 'Content-Type: application/json')
   [ -n "$data" ] && args+=(-d "$data")
   curl "${args[@]}" "$BASE_URL$path"
 }
 # 一次取回本轮需要的全部 EMQX 指标（避免逐指标多次 curl 拖慢采样周期）
 m_snapshot() {
-  curl -s -u "$EMQX_API_KEY:$EMQX_API_SECRET" "$BASE_URL/api/v5/metrics?aggregate=true" \
+  curl -s -K "$PRIV/curlrc" "$BASE_URL/api/v5/metrics?aggregate=true" \
     | python3 -c '
 import json,sys
 d=json.load(sys.stdin)
@@ -105,6 +122,14 @@ disk_avail()     { df -h / | awk 'NR==2{print $4}'; }
 
 cleanup() {
   docker rm -f "emqx-load-pub-$TIER" >/dev/null 2>&1
+  # 压测端（emqtt-bench）只支持 `-P <明文口令>` ⇒ 它的 `docker inspect` 产物
+  # （bench/pub.inspect.json 的 Config.Cmd）里**含压测期间有效的临时口令**。
+  # 账号在本函数末尾会被删除（口令随之失效），但仍**立即删掉这些命令记录**，
+  # 只保留 summary/samples/latency 这些不含口令的证据；要留档请显式 --keep-out。
+  if [ "$KEEP_OUT" -eq 0 ]; then
+    rm -f "$BENCH_OUT"/*.inspect.json "$BENCH_OUT"/*.cid
+  fi
+  rm -rf "$PRIV"
   [ "$KEEP" -eq 1 ] && return
   api DELETE "/api/v5/authentication/$AUTH_ID/users/$LOAD_DEV" >/dev/null 2>&1
   api DELETE "/api/v5/authentication/$AUTH_ID/users/$LOAD_SVC" >/dev/null 2>&1
@@ -193,12 +218,34 @@ while docker inspect "emqx-load-pub-$TIER" --format '{{.State.Running}}' 2>/dev/
   read -r pr dq de md ns cc al <<<"$(m_snapshot | tr ',' ' ')"
   echo "$(date -u +%FT%TZ),$i,$el,$avail,$du,$used,$limit,$pct,$oom,$rc,$hl,${bmem:-NA},$pr,$dq,$de,$md,$ns,$cc" >> "$SAMPLES"
   [ "$avail" -lt "$min_avail" ] && min_avail="$avail"
-  pc=$(printf '%.0f' "${pct%\%}"); [ "$pc" -gt "$max_mem_pct" ] && max_mem_pct="$pc"
+  if [[ "${pct}" =~ ^[0-9.]+%$ ]]; then
+    pc=$(printf '%.0f' "${pct%\%}")
+  else
+    pc=-1   # 读不到就**不参与峰值统计**，而不是静默当成 0（避免"看起来内存很低"）
+    echo "  ⚠️ 第 $i 次采样读不到 emqx 的 MemPerc（'$pct'），该点不计入峰值" >&2
+  fi
+  [ "$pc" -gt "$max_mem_pct" ] && max_mem_pct="$pc"
   [ "$du" -gt "$max_disk" ] && max_disk="$du"
   sleep 10
 done
 elapsed=$(( $(date +%s) - start ))
 echo "施压结束：实际时长 ${elapsed}s（采样 $i 次）" | tee -a "$SUMMARY"
+
+# ── 负载自证（**没有这一条，压测端启动失败时也会打印 PASS**）──────────────────
+# 三条独立证据：① 发布端容器真的在运行过；② 施压时长接近标称；③ 采样到至少 1 次。
+LOAD_OK=1; LOAD_WHY=""
+if ! docker inspect "emqx-load-pub-$TIER" >/dev/null 2>&1; then
+  LOAD_OK=0; LOAD_WHY="发布端容器 emqx-load-pub-$TIER 从未创建（docker run 失败，看 $BENCH_OUT/pub.cid）"
+elif [ "$i" -lt 1 ]; then
+  LOAD_OK=0; LOAD_WHY="一次采样都没做（发布端即刻退出）"
+elif [ "$elapsed" -lt "$((DURATION * 8 / 10))" ]; then
+  LOAD_OK=0; LOAD_WHY="施压只持续 ${elapsed}s，远低于标称 ${DURATION}s（≥80% 才算成立）"
+fi
+if [ "$LOAD_OK" -eq 1 ]; then
+  echo "负载自证：PASS（发布端容器存在、施压 ${elapsed}s ≥ 80%×${DURATION}s、采样 $i 次）" | tee -a "$SUMMARY"
+else
+  echo "负载自证：FAIL（$LOAD_WHY）" | tee -a "$SUMMARY"
+fi
 # 收尾：取压测端日志与容器的 inspect（-d 模式下 stdout 不会进文件）
 docker logs "emqx-load-pub-$TIER" >"$BENCH_OUT/pub.log" 2>&1 || true
 docker inspect "emqx-load-pub-$TIER" >"$BENCH_OUT/pub.inspect.json" 2>&1 || true
@@ -214,8 +261,13 @@ M1_DISK="$(disk_use_pct)"
 
 {
   echo "-------- ③ 观测结果 --------"
-  echo "宿主机 available 最低点 : ${min_avail} MB（基线 ${M0_AVAIL} MB）"
-  echo "EMQX MemUsage 峰值占比  : ${max_mem_pct}% of mem_limit（阈值 < 85%）"
+  if [ "$HAVE_SAMPLES" -eq 1 ]; then
+    echo "宿主机 available 最低点 : ${min_avail} MB（基线 ${M0_AVAIL} MB）"
+    echo "EMQX MemUsage 峰值占比  : ${max_mem_pct}% of mem_limit（阈值 < 85%）"
+  else
+    echo "宿主机 available 最低点 : **不可求值（0 次采样）**"
+    echo "EMQX MemUsage 峰值占比  : **不可求值（0 次采样）**"
+  fi
   echo "OOMKilled               : ${M1_OOM}（基线 ${M0_OOM}）"
   echo "RestartCount            : ${M0_RESTART} -> ${M1_RESTART}（要求不增长）"
   echo "健康状态                : $(docker inspect "$CONTAINER" --format '{{.State.Health.Status}}')"
@@ -235,18 +287,22 @@ LAT_LINE="$(grep -h '^n=' "$LATENCY_LOG" 2>/dev/null | tail -1)"
 [ -n "$LAT_LINE" ] || LAT_LINE="未能求值（观测器未产出结果，见 $BENCH_OUT/latency-probe.log）"
 echo "消息延迟（发布→订阅端接收，latency-probe.py / paho-mqtt）：$LAT_LINE" | tee -a "$SUMMARY"
 
+# 无采样时不得让"看似安全"的读数蒙混过关（min_avail 初值 999999 / max_mem_pct 初值 0 都不是实测值）
+HAVE_SAMPLES=$([ "$i" -ge 1 ] && echo 1 || echo 0)
 verdict=0
 chk() { if [ "$2" = "1" ]; then printf '  ✅ PASS  %-34s %s\n' "$1" "$3" | tee -a "$SUMMARY"
         else printf '  ❌ FAIL  %-34s %s\n' "$1" "$3" | tee -a "$SUMMARY"; verdict=1; fi; }
 chk "OOMKilled=false"                "$([ "$M1_OOM" = false ] && echo 1 || echo 0)" "$M1_OOM"
 chk "RestartCount 窗口内不增长"      "$([ "$M1_RESTART" -eq "$M0_RESTART" ] && echo 1 || echo 0)" "$M0_RESTART -> $M1_RESTART"
-chk "MemUsage < 85% mem_limit"       "$([ "$max_mem_pct" -lt 85 ] && echo 1 || echo 0)" "${max_mem_pct}%"
-chk "宿主机 available ≥ 400MB"       "$([ "$min_avail" -ge 400 ] && echo 1 || echo 0)" "${min_avail}MB"
-chk "压测期 available ≥ 200MB"       "$([ "$min_avail" -ge 200 ] && echo 1 || echo 0)" "${min_avail}MB"
+chk "MemUsage < 85% mem_limit"       "$([ "$HAVE_SAMPLES" -eq 1 ] && [ "$max_mem_pct" -lt 85 ] && echo 1 || echo 0)" "$([ "$HAVE_SAMPLES" -eq 1 ] && echo "${max_mem_pct}%" || echo "无采样，不可求值")"
+chk "宿主机 available ≥ 400MB"       "$([ "$HAVE_SAMPLES" -eq 1 ] && [ "$min_avail" -ge 400 ] && echo 1 || echo 0)" "$([ "$HAVE_SAMPLES" -eq 1 ] && echo "${min_avail}MB" || echo "无采样，不可求值")"
+chk "压测期 available ≥ 200MB"       "$([ "$HAVE_SAMPLES" -eq 1 ] && [ "$min_avail" -ge 200 ] && echo 1 || echo 0)" "$([ "$HAVE_SAMPLES" -eq 1 ] && echo "${min_avail}MB" || echo "无采样，不可求值")"
 chk "dropped.queue_full 不增长"      "$([ "$M1_DROPQ" -le "$M0_DROPQ" ] && echo 1 || echo 0)" "$M0_DROPQ -> $M1_DROPQ"
 chk "dropped.expired 不增长"         "$([ "$M1_DROPE" -le "$M0_DROPE" ] && echo 1 || echo 0)" "$M0_DROPE -> $M1_DROPE"
 chk "无 no_subscribers 丢弃"         "$([ "$M1_NOSUB" -eq "$M0_NOSUB" ] && echo 1 || echo 0)" "$M0_NOSUB -> $M1_NOSUB"
 chk "宿主机 / 使用率 < 95%"          "$([ "$max_disk" -lt 95 ] && echo 1 || echo 0)" "${max_disk}%"
+chk "负载真的发生了（自证三条）"     "$LOAD_OK" "$LOAD_WHY"
+chk "publish.received 增量 ≥ 95%×N×D" "$([ "$(( M1_RECV - M0_RECV ))" -ge "$(( TIER * DURATION * 95 / 100 ))" ] && echo 1 || echo 0)" "$(( M1_RECV - M0_RECV )) / $(( TIER * DURATION ))"
 chk "容器保持 healthy"               "$([ "$(docker inspect "$CONTAINER" --format '{{.State.Health.Status}}')" = healthy ] && echo 1 || echo 0)" "$(docker inspect "$CONTAINER" --format '{{.State.Health.Status}}')"
 
 docker rm -f "emqx-load-pub-$TIER" >/dev/null 2>&1

@@ -37,6 +37,15 @@ done
 set -a; . "$ENV_FILE"; set +a
 : "${EMQX_API_KEY:?}"; : "${EMQX_API_SECRET:?}"
 
+# ── 凭据不进 argv ────────────────────────────────────────────────────────────
+# `curl -u "$KEY:$SECRET"` 会把密钥写进进程命令行（/proc/<pid>/cmdline 本机任何用户可读）。
+# 改用**私有 700 目录里的 600 配置文件** + `curl -K`（argv 里只有文件路径）。
+PRIV="$(mktemp -d)"; chmod 700 "$PRIV"
+curlrc() { printf 'user = "%s:%s"\n' "$EMQX_API_KEY" "$EMQX_API_SECRET" >"$PRIV/curlrc"; chmod 600 "$PRIV/curlrc"; }
+curlrc
+cleanup_priv() { rm -rf "$PRIV"; }
+trap cleanup_priv EXIT
+
 fail=0
 ok()   { printf '  ✅ %s\n' "$1"; }
 bad()  { printf '  ❌ %s\n' "$1"; fail=1; }
@@ -45,12 +54,13 @@ info() { printf '  ·  %s\n' "$1"; }
 # api <method> <path> [json]  → 把「HTTP 状态码」写进全局 API_CODE，正文进 API_BODY
 api() {
   local method="$1" path="$2" data="${3:-}"
-  local args=(-s -o /tmp/.emqx-init-body -w '%{http_code}' -X "$method"
-              -u "$EMQX_API_KEY:$EMQX_API_SECRET" -H 'Content-Type: application/json')
+  local body="$PRIV/body"
+  local args=(-s -K "$PRIV/curlrc" -o "$body" -w '%{http_code}' -X "$method"
+              -H 'Content-Type: application/json')
   [ -n "$data" ] && args+=(-d "$data")
   API_CODE="$(curl "${args[@]}" "$BASE_URL$path")"
-  API_BODY="$(cat /tmp/.emqx-init-body)"
-  rm -f /tmp/.emqx-init-body
+  API_BODY="$(cat "$body")"
+  rm -f "$body"
 }
 expect() { # expect <desc> <want-code>
   if [ "$API_CODE" = "$2" ]; then ok "$1（HTTP $API_CODE）"; else bad "$1：期望 HTTP $2，实得 $API_CODE；响应=$API_BODY"; fi
@@ -58,13 +68,25 @@ expect() { # expect <desc> <want-code>
 
 echo "=== A. 配置红线断言（$(date -u +%FT%TZ) UTC）==="
 
-# ── A0 容器与节点健康（官方健康检查命令）──────────────────────────────────────
-if docker exec "$CONTAINER" /opt/emqx/bin/emqx ctl status >/tmp/.emqx-status 2>&1; then
-  ok "容器内 emqx ctl status：$(tr '\n' ' ' </tmp/.emqx-status)"
+# ── A00 REST API Key 可用性（**先证明工具本身可用**，否则后面全是"假红"）──────
+# 这一条专治一个**静默失效**的坑：api-key 预置文件若属主/权限不对，EMQX 只在启动日志里
+# 打印 `failed_to_open_the_bootstrap_file, reason: Permission denied`（**不致死不报错**），
+# 之后所有 REST 断言都会失败但看不出根因。这里先把它变成一条明确的断言与指引。
+api GET /api/v5/status
+if [ "$API_CODE" = "200" ]; then
+  ok "REST API Key 可用（GET /api/v5/status = 200）"
 else
-  bad "emqx ctl status 失败：$(cat /tmp/.emqx-status)"
+  bad "REST API Key 不可用（HTTP $API_CODE）⇒ 先查：① /opt/emqx/.env 的 EMQX_API_KEY/EMQX_API_SECRET 是否与 /opt/emqx/api-key/default_api_key.conf 一致；② 该文件属主是否为**容器内 uid**（见 gen-env.sh 的 EMQX_UID）、权限 400；③ docker logs $CONTAINER | grep -i bootstrap_file"
+  echo "结论: FAIL（API Key 不可用，后续断言无意义）"; exit 1
 fi
-rm -f /tmp/.emqx-status
+
+# ── A0 容器与节点健康（官方健康检查命令）──────────────────────────────────────
+if docker exec "$CONTAINER" /opt/emqx/bin/emqx ctl status >"$PRIV/status" 2>&1; then
+  ok "容器内 emqx ctl status：$(tr '\n' ' ' <"$PRIV/status")"
+else
+  bad "emqx ctl status 失败：$(cat "$PRIV/status")"
+fi
+rm -f "$PRIV/status"
 
 health="$(docker inspect "$CONTAINER" --format '{{.State.Health.Status}}' 2>/dev/null || echo unknown)"
 [ "$health" = "healthy" ] && ok "docker healthcheck = healthy" || bad "docker healthcheck = $health"

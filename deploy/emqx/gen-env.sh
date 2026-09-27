@@ -63,9 +63,21 @@ chmod 600 "$ENV_FILE"
 EMQX_UID="${EMQX_UID:-1000}"
 mkdir -p "$APIKEY_DIR"
 printf '%s:%s\n' "$API_KEY" "$API_SECRET" >"$APIKEY_FILE"
-chown "$EMQX_UID:$EMQX_UID" "$APIKEY_DIR" "$APIKEY_FILE" 2>/dev/null || true
+# ⚠️ **不要**对 chown 加 `|| true`：属主不对 ⇒ 容器内（uid 1000）读不到 ⇒ EMQX 只在启动日志里
+#    打印 `failed_to_open_the_bootstrap_file, reason: Permission denied`（**不致死不报错**），
+#    结果是 API Key 静默失效。这里失败就**显式报错退出**（R6：禁静默降级）。
+if ! chown "$EMQX_UID:$EMQX_UID" "$APIKEY_DIR" "$APIKEY_FILE"; then
+  echo "chown 到容器 uid ($EMQX_UID) 失败 ⇒ API Key 预置文件容器内读不到，必须人工修正后再起容器" >&2
+  exit 1
+fi
 chmod 700 "$APIKEY_DIR"
 chmod 400 "$APIKEY_FILE"
+# 自证：属主/权限就是容器内 EMQX 进程能读到的形态（uid 必须等于 EMQX_UID，权限必须为 400）
+own="$(stat -c '%u:%g' "$APIKEY_FILE")"; perm="$(stat -c '%a' "$APIKEY_FILE")"
+if [ "$own" != "$EMQX_UID:$EMQX_UID" ] || [ "$perm" != "400" ]; then
+  echo "API Key 预置文件权限自证失败：owner=$own perm=$perm（期望 $EMQX_UID:$EMQX_UID / 400）" >&2
+  exit 1
+fi
 
 # ── 只用「长度 + 指纹」回显，绝不回显值 ──────────────────────────────────────
 echo "已生成（仅回显长度与指纹，值不打印）："
@@ -76,5 +88,6 @@ for pair in "EMQX_NODE_COOKIE:$NODE_COOKIE" "EMQX_DASHBOARD_PASSWORD:$DASH_PASSW
     "$(printf '%s' "$val" | sha256sum | cut -c1-12)"
 done
 printf '  %-26s %s (mode %s)\n' "$ENV_FILE" "已写入" "$(stat -c %a "$ENV_FILE")"
-printf '  %-26s %s (mode %s)\n' "$APIKEY_FILE" "已写入" "$(stat -c %a "$APIKEY_FILE")"
+printf '  %-26s %s (mode %s, owner %s)\n' "$APIKEY_FILE" "已写入" "$(stat -c %a "$APIKEY_FILE")" "$(stat -c '%u:%g' "$APIKEY_FILE")"
+printf '  %-26s %s\n' "API-Key 可用性" "**未在此校验**：起容器后由 emqx-init.sh 的 A00 断言（GET /api/v5/status=200）兜底"
 umask "$old_umask"

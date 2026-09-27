@@ -63,6 +63,12 @@ set -a; . "$ENV_FILE"; set +a
 : "${EMQX_API_KEY:?}"; : "${EMQX_API_SECRET:?}"
 : "${EMQX_DASHBOARD_PASSWORD:?}"
 
+# ── 凭据不进 argv、中间文件不落世界可读目录 ──────────────────────────────────
+# · `curl -u` 会把密钥写进 /proc/<pid>/cmdline ⇒ 改用 700 目录里的 600 `-K` 配置文件；
+# · Dashboard 登录响应含 JWT，**不能**放 /tmp（默认 umask 644）⇒ 一律落在 $PRIV（700）。
+PRIV="$(mktemp -d)"; chmod 700 "$PRIV"
+printf 'user = "%s:%s"\n' "$EMQX_API_KEY" "$EMQX_API_SECRET" >"$PRIV/curlrc"; chmod 600 "$PRIV/curlrc"
+
 AUTH_ID='password_based%3Abuilt_in_database'
 PASS_N=0; FAIL_N=0
 
@@ -72,20 +78,21 @@ note() { printf '     · %s\n' "$1"; }
 
 api() { # api <method> <path> [json] → API_CODE / API_BODY
   local method="$1" path="$2" data="${3:-}"
-  local args=(-s -o /tmp/.emqx-sc-body -w '%{http_code}' -X "$method"
-              -u "$EMQX_API_KEY:$EMQX_API_SECRET" -H 'Content-Type: application/json')
+  local body="$PRIV/api-body"
+  local args=(-s -K "$PRIV/curlrc" -o "$body" -w '%{http_code}' -X "$method"
+              -H 'Content-Type: application/json')
   [ -n "$data" ] && args+=(-d "$data")
   API_CODE="$(curl "${args[@]}" "$BASE_URL$path")"
-  API_BODY="$(cat /tmp/.emqx-sc-body)"; rm -f /tmp/.emqx-sc-body
+  API_BODY="$(cat "$body")"; rm -f "$body"
 }
 
 # metrics <key> → 数值（读不到输出 -1）
 metrics() {
-  curl -s -u "$EMQX_API_KEY:$EMQX_API_SECRET" "$BASE_URL/api/v5/metrics?aggregate=true" \
+  curl -s -K "$PRIV/curlrc" "$BASE_URL/api/v5/metrics?aggregate=true" \
     | python3 -c "import json,sys;print(json.load(sys.stdin).get('$1',-1))" 2>/dev/null || echo -1
 }
 metric_snapshot() {
-  curl -s -u "$EMQX_API_KEY:$EMQX_API_SECRET" "$BASE_URL/api/v5/metrics?aggregate=true" \
+  curl -s -K "$PRIV/curlrc" "$BASE_URL/api/v5/metrics?aggregate=true" \
     | python3 -c '
 import json,sys
 d=json.load(sys.stdin)
@@ -103,6 +110,7 @@ cleanup() {
   done
   api DELETE "/api/v5/authorization/sources/built_in_database/rules/users/$SVC_PROBE" >/dev/null 2>&1
   api DELETE /api/v5/authorization/cache >/dev/null 2>&1
+  rm -rf "$PRIV"
 }
 trap cleanup EXIT
 
@@ -126,8 +134,8 @@ for p in "$MQTT_PORT" 18093; do
 done
 
 echo "=== S3/S4 Health 与 REST 鉴权 ==="
-code="$(curl -s -o /tmp/.emqx-sc-h -w '%{http_code}' "$BASE_URL/status")"
-body="$(cat /tmp/.emqx-sc-h)"; rm -f /tmp/.emqx-sc-h
+code="$(curl -s -o "$PRIV/health" -w '%{http_code}' "$BASE_URL/status")"
+body="$(cat "$PRIV/health")"; rm -f "$PRIV/health"
 if [ "$code" = 200 ] && printf '%s' "$body" | grep -q "is started"; then
   pass "GET /status = 200 且含 'is started'"
 else
@@ -140,19 +148,20 @@ api GET /api/v5/authorization/settings
                       || fail "GET /authorization/settings（API Key 鉴权）= $API_CODE"
 
 echo "=== S5 Dashboard 口令（H2）==="
-code="$(curl -s -o /tmp/.emqx-sc-l1 -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+code="$(curl -s -o "$PRIV/login-bad" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
   -d '{"username":"admin","password":"public"}' "$BASE_URL/api/v5/login")"
 [ "$code" = 401 ] && pass "旧默认口令 admin/public 被拒（HTTP 401）" \
                   || fail "旧默认口令 admin/public **未被拒**（HTTP $code）⇒ 口令没改到位"
-rm -f /tmp/.emqx-sc-l1
-code="$(curl -s -o /tmp/.emqx-sc-l2 -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+rm -f "$PRIV/login-bad"
+code="$(curl -s -o "$PRIV/login-ok" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
   -d "{\"username\":\"admin\",\"password\":\"$EMQX_DASHBOARD_PASSWORD\"}" "$BASE_URL/api/v5/login")"
 if [ "$code" = 200 ]; then
-  pass "来自 .env 的 Dashboard 口令可登录（HTTP 200；token 长度 $(python3 -c 'import json;print(len(json.load(open("/tmp/.emqx-sc-l2")).get("token","")))' 2>/dev/null)）"
+  TOKLEN="$(LOGIN_JSON="$PRIV/login-ok" python3 -c 'import json,os;print(len(json.load(open(os.environ["LOGIN_JSON"])).get("token","")))' 2>/dev/null)"
+  pass "来自 .env 的 Dashboard 口令可登录（HTTP 200；token 长度 ${TOKLEN:-?}）"
 else
   fail "来自 .env 的 Dashboard 口令登录失败（HTTP $code）⇒ data 卷是旧口令初始化的（见 EMQX-DEPLOY.md 的口令重置一节）"
 fi
-rm -f /tmp/.emqx-sc-l2
+rm -f "$PRIV/login-ok"
 
 echo "=== S6-S11 MQTT 认证 / ACL 正负用例（emqtt-bench $BENCH_IMAGE）==="
 echo "  压测客户端镜像: $BENCH_IMAGE"
@@ -181,7 +190,7 @@ api DELETE /api/v5/authorization/cache >/dev/null
 bench() { timeout "$1" docker run --rm --pull=never --network "$NETWORK" "$BENCH_IMAGE" "${@:2}" >/dev/null 2>&1 || true; }
 
 echo "  ── 指标基线 ──"
-metric_snapshot | tee /tmp/.emqx-sc-before
+metric_snapshot | tee "$PRIV/before"
 
 # S6 匿名连接
 b="$(metrics packets.connack.auth_error)"; anon0="$(metrics client.auth.anonymous)"
@@ -242,8 +251,8 @@ al1="$(metrics authorization.matched.allow)"
                       || fail "S11 服务账号通配订阅未放行：matched.allow $al0 → $al1"
 
 echo "  ── 指标终态 ──"
-metric_snapshot | tee /tmp/.emqx-sc-after
-rm -f /tmp/.emqx-sc-before /tmp/.emqx-sc-after
+metric_snapshot | tee "$PRIV/after"
+rm -f "$PRIV/before" "$PRIV/after"
 
 echo
 echo "=== 自检结论：PASS=$PASS_N FAIL=$FAIL_N ==="

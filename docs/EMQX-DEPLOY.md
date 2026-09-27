@@ -16,7 +16,7 @@
 | **C3** | **`api_key.bootstrap_file` 在 OSS `emqx/emqx:5.8.9` 上确实生效**（设计 U18 → **已关闭**）：容器启动日志无 `failed_to_open_the_bootstrap_file`，且 `curl -u <key>:<secret> .../api/v5/status` 返回 **HTTP 200**。 | 一手实测（§4.2） |
 | **C4** | **隧道自愈达标**：生产机 `autossh + systemd`，**杀隧道进程后恢复 1.84–2.00 s（5/5 次，全部 < 3 s）**；杀 ssh 子进程由 autossh 自己重连（**1.24 s**，systemd 不重启单元）。 | 一手实测（§6.3） |
 | **C5** | **端口不回公网**：宿主侧 1883/18093 监听集合 = `{127.0.0.1:*}`；**从生产机（另一网络）实测 1883/18083/8883/18093 全部不可达**，而 61260(sshd) 可达（对照组成立）。 | 一手实测（§5.2） |
-| **C6** | **阶段② 通过**：100 与 500 连接两档（各 10 分钟、QoS1、1 msg/s/连接）全程 `OOMKilled=false`、`RestartCount` 不增长、`mem_limit` 使用率峰值 **≈13%**（2GiB 上限）、延迟 **p95 = 3 ms（100 档）/ 4 ms（500 档）**、`/` 使用率不升。 | 一手实测（§7） |
+| **C6** | **阶段② 通过**：100 与 500 连接两档（各 10 分钟、QoS1、1 msg/s/连接）全程 `OOMKilled=false`、`RestartCount` 不增长、`mem_limit` 使用率峰值 **≈13%**（2GiB 上限）、延迟 **p95 = 3 ms / 3 ms**（100/500 档；p99 分别 5 ms / 4 ms，max 26 ms / 30 ms）、`/` 使用率不升。 | 一手实测（§7） |
 | **C7** | **对「别人的项目」零影响**：`aicomic-mysql` / `aicomic-minio` / `sub2api` / 宝塔 的容器 ID、镜像 ID、网络、卷、监听端口全部未变；**未执行任何 prune**。 | 一手实测（§8） |
 | **C8** | ⚠️ **本阶段交付的是「平台可用」= 管理面（REST）+ 认证/ACL + 可承载的 broker**；**真设备接入 1883 的对外暴露、TLS 8883、平台侧入站/下行集成**均**未做**，且**属后续独立决策点**（§9）。 | 范围声明 |
 
@@ -180,6 +180,14 @@ rules/users  （数组体 [{"username":..,"rules":[..]}]）：
 
 **自检退出码**：`PASS=19 FAIL=0` → `emqx-init.sh` exit 0。
 
+> **指标口径附注（独立复核实测，务必知道）**：`packets.subscribe.auth_error` **只对 MQTT 5.0 客户端**的越权
+> SUBSCRIBE 增长（SUBACK `Not authorized`）；**MQTT 3.1.1** 客户端越权订阅时该计数器**不增长**
+> （SUBACK `Unspecified error`，只有 `authorization.nomatch` 增长）。S9 用的是 emqtt-bench（默认 `-V 5`），
+> 所以文档里的数字成立；但**将来用 MQTT 3.1.1 设备做验收时，必须改看 `authorization.nomatch`**，否则会误判成"没拦住"。
+> 同理，越权 publish 的拒绝在 MQTT 5 会拿到 PUBACK `Not authorized`，而 MQTT 3.1.1 下由于
+> `deny_action=ignore`，客户端侧**看不到任何错误**（pub 返回 0 表示"已发出"，不代表"已接受"）——
+> **MUST 用 EMQX 侧指标判定，不能看客户端返回码**。
+
 ---
 
 ## 5. 阶段① 连通性验收（隧道 + 公网不可达）
@@ -244,9 +252,21 @@ HTTP=200
 **凭据最小化**：仅有的一把私钥 `/etc/ypbin/emqx-tunnel.key`（600，root）在中间件机侧被限制为
 `restrict,port-forwarding,permitopen="127.0.0.1:18093"` ⇒ **即使拿到也开不了别的转发**；单元/脚本里**不落任何口令**。
 
-> **R8 残留风险（如实登记）**：`restrict` 关掉了 pty/agent/X11/反向转发，但 **OpenSSH 没有「只允许转发、禁止执行命令」的
-> authorized_keys 选项**（`command=` 会让 `-N` 会话立刻结束、转发失效）。⇒ 该密钥理论上可执行**非交互**命令。
-> 缓解：私钥仅存于生产机 root（600），且使用它的单元以 `-N` 运行；**如需彻底消除，需改用非 ssh 的转发方案或受限 shell**——属后续决策。
+> **R8 残留风险（如实登记；本节曾被独立复核判为"表述与实测相反"，已改正）**：
+> `restrict,port-forwarding,permitopen="127.0.0.1:18093"` 里
+> - ✅ `permitopen` **确实生效**：该密钥只能把流量**转发到** `127.0.0.1:18093`（转发到 1883 等其它目标会被
+>   sshd 以 `channel 1: open failed: administratively prohibited` 拒绝——独立复核实测）。
+> - ⚠️ **但它并没有关掉反向转发**：`restrict` 关的是「两向端口转发 + pty/agent/X11/user-rc」，
+>   而同一行的 `port-forwarding` **把两向都重新打开了**；由于**没有设 `permitlisten`**，
+>   用该私钥 `-R 127.0.0.1:<任意端口>:…` **可以成功**（独立复核用 `-R 127.0.0.1:19997:127.0.0.1:22`
+>   实测成功：中间件机上出现监听、回读到的 banner 是**生产机**的）。
+> - ⚠️ 同理，**OpenSSH 没有**「只允许转发、禁止执行命令」的 authorized_keys 选项
+>   （`command=` 会让 `-N` 会话立刻结束、转发失效）⇒ 该密钥也能执行**非交互命令**（`id -un` → `root`）。
+> - **实际能力 = 转发 + 非交互 root 命令执行**；**不得**描述成「只能转发这一个目标」。
+>
+> 缓解与取舍：私钥仅存在于生产机 root（600），唯一使用者是以 `-N` 运行的隧道单元；两条残留能力
+> **不新增可利用面**（持有者本就有 root 命令执行权）。**如要真正收窄**，需要换方案（例如把隧道改成
+> 由中间件机侧的受限服务主动拉取，或用一个只做转发的专用守护进程），属后续独立决策——**本阶段不做**。
 
 ### 6.2 停摆告警（`emqx-tunnel-watch.{sh,service,timer}`）—— **只告警不自愈**
 
@@ -277,6 +297,10 @@ HTTP=200
 | 5 | 04:22:49.030Z | 04:22:50.906Z | **1.88 s** |
 
 杀 **ssh 子进程**（autossh 自身监控路径）2 次：**1.24 s / 1.24 s**，且 `NRestarts` **不变** ⇒ 是 autossh 自己重连的，不是 systemd 重启单元。
+
+**独立复核者复测（另一时段、同一调优参数）**：杀 autossh **2.69 s / 2.00 s / 1.82 s**（3/3 < 3 s），
+杀 ssh 子进程 **1.27 s / 1.27 s**。⇒ 把两次观测合起来看，**杀主进程的恢复区间是 1.82–2.69 s（8 轮全部 < 3 s）**，
+文档上面那 5 轮的 1.84–2.00 s 只是其中一段（离散步度约 ±0.9 s，来自该链路 SSH 建链耗时本身的抖动）。
 
 **调优过程（先测再调，别拍脑袋）**：
 
@@ -313,12 +337,36 @@ HTTP=200
 | `messages.dropped.no_subscribers` | 不增长（订阅端在场） | 6334 → 6334 | 6334 → 6334 | ✅ |
 | `publish.received` 增量 | ≈ N×600 | 60000 | 300000 | ✅（**全部被订阅端收齐**） |
 | 宿主机 `/` 使用率 | < 95% | 70% → 70% | 70% → 70% | ✅ |
+| **负载自证**（发布端容器存在 + 时长 ≥80% 标称 + 采样 ≥1 次） | 必须成立 | 612s / 46 次 | 612s / 46 次 | ✅ |
+| **`packets.publish.received` 增量 ≥ 95%×N×D** | ≥ 57000 / ≥ 285000 | 60000 | 300000 | ✅ |
 | 容器健康 | 保持 healthy | healthy | healthy | ✅ |
 | 消息延迟 p95 | 无官方阈值（本阶段自设观察项） | **3 ms** | **3 ms** | 参考（p99 5/4 ms，max 26/30 ms） |
 
-**两档均为 `档位结论: PASS`**（每档 10 项判据全绿）。原始证据：
+**两档均为 `档位结论: PASS`**（每档 **12 项判据**全绿）。原始证据：
 `deploy/emqx/phase2-data/tier100-summary.txt`、`tier500-summary.txt`（脚本原始输出）、
 `tier100-samples.csv`、`tier500-samples.csv`（各 46 次采样，含宿主机/容器/EMQX 指标逐点值）。
+
+> **口径说明（两个"增量"不是同一个测量窗口，别当成矛盾）**：
+> - `summary.txt` 里的 `publish.received 增量 = 60000 / 300000` 是**压测结束、容器移除后**读的累计计数器差值
+>   （窗口 = 整个压测）；
+> - `samples.csv` 里首尾差值（**59849 / 298949**）是**采样窗口**内的差值（首个采样点在压测开始后 ~2s，
+>   末个采样点在压测结束前 ~2s，各少掉约一个采样周期的量），**必然略小于**总量。
+> - 最硬的"收齐"证据是延迟观测器的收包条数 **n=60000 / n=300000**（它逐条统计，丢一条就少一条），
+>   与 `600 × 100`、`600 × 500` **完全相等**。
+
+> **口径与读数的三处澄清（独立复核指出，已核实）**：
+> 1. **指标全名**：脚本与本文档有时简写 `publish.received`，EMQX 里的**真实键名**是
+>    `packets.publish.received`（REST `GET /api/v5/metrics?aggregate=true`）。另外 `client.connected`
+>    是**累计计数器**（不是当前连接数，当前连接数看 `GET /api/v5/clients` 的 `meta.count`）。
+> 2. **summary 里有两个"基线"**：① 块 `free -m` 打印的是脚本启动那一刻的 available；
+>    ③ 块「基线 N MB」是随后读变量时的另一时刻 ⇒ 两者会差十几 MB（实测 13802 vs 13820）。
+>    这是**两次采样**，不是矛盾；§7.1 表里的"最低点"取自 `samples.csv`（唯一口径）。
+> 3. **读数会随时间漂移**：`messages.dropped.no_subscribers` 在压测期间 92 个采样点**恒为 6334**，
+>    但复核期间有人做了一次"有权限但无订阅者"的探测发布，现值变成 **6336** —— 该增量**与本次压测无关**。
+>    另外压测里 `authorization.matched.allow` 只涨约 N×10+1 而不是 N×600，原因是**授权缓存**
+>    （`max_size=32`、`ttl=1m`）让同一 (username, topic, action) 的重复判定命中缓存；`nomatch` 同理。
+>    **这不影响任何判据**（判据用的是"是否增长/是否被拒"，不是绝对条数）。
+
 
 > ⚠️ **宿主机级阈值（available ≥ 400MB / ≥ 200MB）在中间件机上「平凡成立」**（可用内存 ~13GB）——
 > 这正是把 EMQX 挪到这台机器上的**目的**。它们**不是**本次通过的证明；真正有意义的是
@@ -334,14 +382,14 @@ HTTP=200
 【100 连接】施压实际时长 612s，采样 46 次
   宿主机 available 最低点 : 13214 MB（基线 13820 MB）
   EMQX MemUsage 峰值占比  : 13% of mem_limit（2GiB 上限；≈225MiB 稳态）
-  压测端（emqtt-bench pub 容器）峰值内存: ≈587 MiB（宿主机侧，不在 EMQX 的 mem_limit 内）
+  压测端（emqtt-bench pub 容器）峰值内存: 588.4 MiB（取自 samples.csv 的 bench_pub_mem；宿主机侧，不计入 EMQX 的 mem_limit）
   publish.received 增量   : 60000（= 100 × 600，期望一致）
   延迟: n=60000  avg=2.0ms  p50=2ms  p95=3ms  p99=5ms  max=26ms
 
 【500 连接】施压实际时长 612s，采样 46 次
   宿主机 available 最低点 : 13127 MB（基线 13838 MB）
-  EMQX MemUsage 峰值占比  : 15% of mem_limit（≈273MiB 稳态）
-  压测端峰值内存          : ≈628 MiB
+  EMQX MemUsage 峰值占比  : 15% of mem_limit（CSV 实测峰值 14.70%；稳态 ≈262MiB）
+  压测端峰值内存          : 628.4 MiB（取自 samples.csv）
   publish.received 增量   : 300000（= 500 × 600，期望一致）
   延迟: n=300000  avg=2.0ms  p50=2ms  p95=3ms  p99=4ms  max=30ms
 ```
@@ -351,19 +399,20 @@ HTTP=200
 | 项 | 压测前 | 压测后 |
 |---|---|---|
 | `authenticate` 内置库用户 | 0 个（自检已清） | **0 个**（脚本 `trap` 已删 `9001.9001` / `svc-load`） |
+| 压测端命令记录（含压测期口令） | — | `cleanup()` **立即删除** `bench/*.inspect.json` 与 `*.cid`；`$OUT` 权限 700（要留档需显式 `--keep-out`） |
 | `rules/users` | `svc-ingress`、`svc-egress` | **同名两条**（临时 `svc-load` 规则已删） |
 | `rules/all` | 设备模板 2 条 | 设备模板 2 条（未变） |
 | 残留压测容器 | — | **无**（`docker ps -a | grep -E 'load|qoe|prom|probe'` 为空） |
 | `OOMKilled` / `RestartCount` | false / 0 | **false / 0** |
 | 宿主机 `/` | 70%（8.9G 余量） | **70%（8.9G 余量）** |
-| EMQX 卷占用 | `emqx-data` ~240KB、`emqx-log` ~4KB | **同量级**（log handler=console，容器 json 日志 3.5KB，且已封顶 5×20MB） |
+| EMQX 卷占用 | `emqx-data` ~240KB、`emqx-log` ~4KB | **同量级**（复核时 `emqx-data` 340K、json 日志 6.8KB；log handler=console 且 json 日志已封顶 5×20MB） |
 
 
 ### 7.3 内存上限取值的依据（R2/R8）
 
 - **官方未给出 Docker 部署的最低/推荐内存**（设计 F8，否定性核实）⇒ 本文件的 `2g` **不是官方数字**。
 - 取值理由：① 中间件机 15991MB、`available≈14GB`（实测），512m 的前提（生产机 904MB）不成立；
-  ② 目标规模 ≤500 连接，实测峰值仅 **≈13–16% of 2GiB**（≈350MB）；③ **必须封顶**，避免将来与同机别人的项目抢内存。
+  ② 目标规模 ≤500 连接，实测峰值仅 **13.20% / 14.70% of 2GiB**（≈301 MiB，取自 samples.csv）；③ **必须封顶**，避免将来与同机别人的项目抢内存。
 - 若将来要跑更大规模或更多 bridge：**先改上限再压测**，不要「先上再观察」。
 
 ---
@@ -452,7 +501,10 @@ bash /opt/ypbin/ypbin-iot/deploy/emqx/emqx-tunnel-install.sh --dir /opt/ypbin/yp
 | **U-E** | `retainer`（保留消息）实际行为 | 配置已封顶，**未压测** | `max_retained_messages=1000`、`msg_expiry_interval=1h`；`up/state` retained 属下一阶段 |
 | **U-F** | 集群/多节点 | 未涉及 | 单节点 standalone；设计 U11 |
 | **U-G** | EMQX 云安全组规则 | **只读了主机防火墙** | 未读云控制台入站规则（设计 U16）；本机 ufw 已是第二层 |
-| **U-H** | 隧道密钥的「禁执行命令」 | **做不到（OpenSSH 无此选项）** | 见 §6.1 的 R8 残留风险 |
+| **U-H** | 隧道密钥的「禁执行命令」**与「禁反向转发」** | **都做不到**（OpenSSH 无对应 authorized_keys 选项；`port-forwarding` 是两向开关，且未设 `permitlisten`） | 见 §6.1 的 R8 残留风险；已由独立复核实测证伪过一版错误表述 |
+| **U-K** | 压测期临时口令的落点 | **会进压测容器的 argv**（emqtt-bench 只支持 `-P <明文>`） | 已在脚本 `cleanup()` 里删除 `*.inspect.json`（含 `Config.Cmd`）并把 `$OUT` 设为 700；账号在压测结束时删除 ⇒ 口令随之失效。**不得声称"口令绝不落盘"** |
+| **U-M** | Erlang 分发 cookie 会出现在容器内 `beam.smp` 的 **argv**（`-setcookie`） | **Erlang 机制，非脚本引入**：实测在自检运行期间扫描宿主机 `/proc/*/cmdline`，只有 `comm=beam.smp`（容器内 EMQX 本体）命中，**API Key / Secret / Dashboard 口令 0 命中**（这是 D-6 整改的验证口径） | 暴露面 = 宿主 root 可见，与 `.env`(600, root) 同级 ⇒ 不产生新的越权路径；但**不要**声称"cookie 只存在于环境变量" |
+| **U-L** | 跨 bridge 可达性的机制 | **未定论**：独立复核从默认 bridge 实测 `172.28.0.2` 的 1883/18093/18083/8883 **全不可达**，但 iptables 里存在按端口的跨 bridge ACCEPT 规则 ⇒ 规则层与实测层不一致，未从 `middleware_default`/`app_default` 源网络实测（刻意不接入别人的网络） | 本阶段暴露面结论**不依赖**跨 bridge 可达性（宿主侧只绑回环 + ufw 无放行 + 公网实测不可达）；后续如需"其他容器也不可达"的强结论，用一次性源网络补测 |
 | **U-I** | `sub2api` 容器自身 `unhealthy` | **属其自身既有状态** | 部署前即 `Up 6 weeks (unhealthy)`、`StartedAt=2026-08-14`；**未触碰** |
 | **U-J** | 阶段② 只测到 500 连接 | 未测更高档 | 设计目标规模即 500；更高规模需重新压测并复核 `mem_limit` |
 
