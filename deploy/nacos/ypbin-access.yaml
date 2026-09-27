@@ -60,3 +60,34 @@ ypbin:
       batch-size: 200
       # 微批周期（毫秒）
       flush-interval-ms: 1000
+
+# ---------- 可观测（Spring Boot Actuator，2026-09-27 新增，对齐 ypbin-iot.yaml）----------
+# 为什么要有这一段：access 已经带了大量指标（iot.access.egress.* / iot.access.lease.* /
+# iot.access.config.* / iot.access.subscribe.* / iot.access.spec.* / iot.access.connection.* /
+# iot.access.decode.failure），但 `/actuator/metrics` 默认不暴露（Spring Boot 4.1.1 的
+# management.endpoints.web.exposure.include 默认只有 health）⇒ 生产只能翻 WARN 日志、看不到计数趋势。
+# 上一轮新增的 iot.access.decode.failure 正是这个缺口：它只在 WARN 里可见。
+#
+# ⚠️ 安全边界（与 ypbin-iot.yaml 同一口径，改前务必读完）：
+#   1) **只开只读且必要的最小集合，绝不用 `*`**：`*` 会连带 env / configprops / heapdump /
+#      threaddump / beans / loggers / mappings；heapdump 可直接导出堆内存（含内部 token），
+#      env/configprops 会回显全部配置。**暴露它们等于把凭据交出去。**
+#   2) **只在内网/回环可达**：access 的 18086 在 compose 里**只绑 127.0.0.1**
+#      （`${ACCESS_BIND_ADDR:-127.0.0.1}:18086:18086`，**刻意与 INTERNAL_BIND_ADDR 分开**，同
+#      IOT_BIND_ADDR / IOTDB_BIND_ADDR 先例）⇒ 公网打不通。**不要把 18086 改绑到 0.0.0.0**：
+#      Actuator 端点默认**没有认证**（access 的 Sa-Token 拦截器是关闭的），绑公网 = 指标裸奔。
+#   3) 网关上**没有** access 的路由（它只被 iot 的内部租约/读数链路与宿主机的值班命令直接调用），
+#      所以「只绑回环」就是这条链路的实际边界。
+#   4) 只读性：metrics/info 是只读端点；health 已关掉细节与组件展示（show-details/show-components=never），
+#      只回 status，不会泄露中间件地址与异常堆栈。
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics,info
+  endpoint:
+    health:
+      show-details: never
+      show-components: never
+    metrics:
+      enabled: true

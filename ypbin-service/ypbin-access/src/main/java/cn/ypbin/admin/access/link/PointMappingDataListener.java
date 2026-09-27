@@ -10,6 +10,7 @@
 package cn.ypbin.admin.access.link;
 
 import cn.ypbin.admin.access.decode.DecodeFailure;
+import cn.ypbin.admin.access.decode.DecodeFailureMetrics;
 import cn.ypbin.admin.access.decode.DecodeOutcome;
 import cn.ypbin.admin.access.decode.ValueDecoder;
 import cn.ypbin.admin.access.egress.AccessReading;
@@ -62,11 +63,8 @@ import org.slf4j.LoggerFactory;
  */
 public class PointMappingDataListener implements DataListener {
 
-    /** 解码失败计数（按原因打标签，取值集合有界）。 */
-    public static final String METRIC_DECODE_FAILURE = "iot.access.decode.failure";
-
-    /** 失败原因标签名。 */
-    private static final String TAG_REASON = "reason";
+    /** 解码失败计数（按原因打标签，取值集合有界；名字与预注册的唯一来源见 {@link DecodeFailureMetrics}）。 */
+    public static final String METRIC_DECODE_FAILURE = DecodeFailureMetrics.METRIC_NAME;
 
     private static final Logger log = LoggerFactory.getLogger(PointMappingDataListener.class);
 
@@ -176,7 +174,8 @@ public class PointMappingDataListener implements DataListener {
      */
     private void onDecodeFailure(AccessPointMappingDto point, DecodeFailure failure, Object rawValue) {
         decodeFailureCount++;
-        Counter counter = meterRegistry.counter(METRIC_DECODE_FAILURE, TAG_REASON, failure.getCode());
+        // 计数器在启动期已按全部原因码预注册（值 0）⇒ 这里只自增，不再建 meter（见 DecodeFailureMetrics）
+        Counter counter = DecodeFailureMetrics.counter(meterRegistry, failure);
         counter.increment();
         log.warn("[access] 读数解码失败，已丢弃该点：device={} property={} address={} 原因={}({}) "
                 + "载荷长度={} 数据类型={}（见 {} 指标；帧格式/点位地址/物模型类型需一致）",
