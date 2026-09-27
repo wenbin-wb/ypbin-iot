@@ -141,6 +141,56 @@ systemctl reboot
 
 ---
 
+## 陷阱 5 · access 的**聚合** `/actuator/health` 会被 Redis 健康项挂死（判活请用 liveness/readiness）
+
+**发现方式**：2026-09-27 按批准的只读定位窗口实测（把 `management.endpoint.health.show-details`/`show-components`
+**临时**设为 `always` → 重启 access → 逐个 `curl /actuator/health/<id>` → 立即改回 `never` 并重启）。
+
+**现象**：`curl -m 120 http://127.0.0.1:18086/actuator/health` ⇒ `HTTP=000 time=120.0`（**≥120s 不返回**，
+不是 30–60s 超时）；而 `/actuator/health/liveness`、`/actuator/health/readiness` 毫秒级 `{"status":"UP"}`。
+
+**根因（本轮定位，逐项取证）**：**`redis` 健康项**。
+
+| 组件 | 实测 |
+|---|---|
+| `diskSpace` / `ping` / `ssl` / `refreshScope` / `livenessState` / `readinessState` | 200，毫秒级 |
+| `discoveryComposite` | 200，t=0.037s（**含 Nacos 服务清单**，内容正常） |
+| `nacosDiscovery` / `nacosConfig` / `db` | 404（无此组件） |
+| **`redis`** | **`HTTP=000 t=6.0s`（8s 超时截断）；长超时 `-m 30` 仍 `HTTP=000 t=30.0`** ⇒ 无限阻塞 |
+
+⇒ 两个先前假设都被实测**证伪**：① **不是 Nacos**（`discoveryComposite` 毫秒级返回，且挂起期间 8s 内没有任何
+新的 outbound 连接——连采 3 次 `/proc/net/tcp`+`tcp6`，对端集合与基线完全相同）；② **不是全局线程/事件循环
+耗尽**（其余组件与 `/actuator/metrics` 全程正常）。**是 redis 这一项独有的**。
+
+**它的性质（重要）**：`redis` 项**完全没有发起 TCP 连接**（挂起期间到 `6379` 的连接数为 0，容器内 `ypbin-redis`/`redis`
+都能解析到 `172.20.0.11`）⇒ 阻塞发生在**获取/创建连接对象阶段**，不是「连不上某个地址」的网络超时。
+
+**而 access 根本不用 Redis**：没有 `spring.data.redis.*` 配置、没有任何到 6379 的连接、代码里也没有 Redis 用法
+⇒ 这是**依赖组合/自动装配给一个「不用 Redis 的服务」装配出了 Redis 连接工厂 + 健康项**，属装配面问题。
+
+**怎么办**
+1. **判活不要用聚合 health**：用 `/actuator/health/liveness` 与 `/actuator/health/readiness`（毫秒级、真 UP）。
+2. **修症状（一行，待批准后做）**：`deploy/nacos/ypbin-access.yaml` 的 `management` 段加
+   `health.redis.enabled: false` ⇒ 聚合 health 立即恢复可用。这是**关掉一个本服务不需要的健康项**，
+   不是放宽安全策略。
+3. **更彻底（需与 starter 侧一起定）**：确认 access 确实不需要 Redis 后，把 Redis 自动装配从 access 排除
+   （`spring.autoconfigure.exclude`）或从依赖里去掉 `spring-data-redis`；**不要**在没确认前删依赖。
+4. **闭环验证（下一步，两次配置改动 + 两次重启足够）**：加 `health.redis.enabled=false` 后
+   `/actuator/health` 应立刻返回 200 ⇒ 证明聚合挂起**唯一**由 redis 引起（当前证据是「其余组件全快 +
+   redis 无限阻塞」的强相关，**尚未做该闭环**）。
+
+**窗口纪律（本轮实际执行）**：改前声明 artifact 三元组（image `4bc3178ff0aa…` / jar md5
+`74fb9ac1e8929658a572aaf18e115a26` / StartedAt `2026-09-27T03:48:48Z`）；`docker events` 审计（只计数）
+显示窗口内**只有 access 的 kill/stop/die/start/restart**，其它容器零动作；测完把
+`show-details`/`show-components` 改回 `never`——**live 配置 sha256 回到窗口前的 `4cfea417ea4efc2e`（逐字节还原）**。
+工具：`tools/patch-nacos-yaml-value.py`（只改 live 里一个标量键、保留注释、带 600 备份与回读轮询）。
+
+> 附：**Boot 4.1.1 里组件路径的开关是 `show-components`**，不是 `show-details`——本轮第一次只把
+> `show-details` 设为 `always` 时 `/actuator/health/<id>` 仍是 404，把 `show-components` 也设为 `always` 后
+> 才可逐组件访问。下次做同类定位别再只改一个。
+
+---
+
 ## 5. 「喂数停摆」定时告警：怎么开、怎么看
 
 **两件套**（仓库 `deploy/`，已装 `/etc/systemd/system/`）：
@@ -185,9 +235,19 @@ systemctl list-timers feeder-watch.timer          # 应能看到 NEXT/LAST
 | 层 | 判据 | 窗口 |
 |---|---|---|
 | L1 | `iot.timeseries.write.rows` 无增长（**进程内计数器，ypbin-iot 重启会归零 ⇒ 必须配 L2**） | 120s |
+| **L1b** | **对账**：`iot.access.egress.accepted` 与 `iot.timeseries.write.rows` 的**增量差**超容差（默认 `>10%` 或 `>20` 条，**故意放宽**）⇒ 疑似**真丢数据**。计数器归零（access/iot 重启）时判据**不可求值**而不是告警 | 同 L1 |
 | L2 | `iot.timeseries.db.rows` 无增长（`COUNT(*)` 真值探针，服务端约 10 分钟一次） | 900s |
 | L3 | `access-tcp-simulator.service` 非 active / `172.20.0.1:19002` 无监听 | 即时 |
 | L3 | `iot.timeseries.write.failed` / `iot.timeseries.db.probe.failed` 非 0 | 即时 |
+
+### 5.2.1 为什么需要 L1b（对账）而不是「看日志里有没有 dropped」
+
+2026-09-27 实测：access 日志里 `[ypbin-iot] inbound buffer overflow on connection t1-d9300012; dropped frames=N`
+每 ~2s 一条、N 单调增长，**但数据一条都没丢**——同一 61s 窗口内
+`egress.accepted +31`、`egress.sent +31`、`write.rows +31`、`points.collected +31`，与设备 2s/帧 完全一致。
+被淘汰的是 `NettyChannelConnection.drainFrames()` **无人消费的辅助缓冲副本**（字节码证据见
+`docs/STARTER-FEEDBACK.md` UP-12；已作为反哺条目提给 starter：issue #17）。
+⇒ 「日志里有 dropped」是**误报源**；**对账**才是真丢数据的判据。两者互补：L1b 报警时再回看日志找原因。
 
 ### 5.3 ⚠️ 两个必须知道的边界
 

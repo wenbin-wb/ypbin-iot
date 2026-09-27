@@ -827,3 +827,132 @@ $ ssh -i ~/.ssh/id_ed25519_iot_test -p 22 root@113.142.217.58 \
 **替换动作与生效范围见 `docs/VALUE-DECODE-DESIGN.md` §5**；框架能力就位后本层整体删除，
 `raw_address` 作为帧键的约定保留。
 
+---
+
+## UP-11（中｜可观测性）`ypbin-iot-starter`：两个同名 `iotMetricsRecorder` bean 竞争，命中取决于**自动配置处理顺序** ⇒ 宿主静默丢框架指标
+
+> 提出时间：2026-09-27（生产实测暴露）｜定位：**框架侧（`ypbin-iot-spring-boot-starter` 的条件注解与自动配置排序耦合）**
+> 状态：⬜ 未修（本仓**刻意不绕**——不在宿主自建 recorder 抢 bean，否则等于把框架缺口盖住）
+> issue：**https://github.com/wenbin-wb/ypbin-iot-starter/issues/16**（标题与本节同，2026-09-27 已开）
+
+### 现象
+`ypbin-access` 启动日志出现：
+
+```
+[ypbin-iot] no MeterRegistry found; iotMetricsRecorder falls back to the no-op implementation and
+metrics are DISCARDED. Add micrometer (e.g. spring-boot-starter-actuator) or provide your own
+MetricsRecorder bean to collect them.
+```
+
+于是 access 侧**框架指标全部丢弃**：`ypbin.iot.read.duration`、`ypbin.iot.write.duration`、
+`ypbin.iot.subscription.points`、`ypbin.iot.errors` 在 `/actuator/metrics` 里一个都看不到
+（access 自己的 `iot.access.*` 指标**不受影响**，因为它直接注入 `MeterRegistry`）。
+
+### 证据（一手，均可复现）
+1. **starter 里有两个同名同类型 bean**（`ypbin-iot-spring-boot-starter-0.1.0.jar`，`javap -v` 读注解 + 常量池）：
+   - `IotMicrometerAutoConfiguration#iotMetricsRecorder(MeterRegistry)`：
+     `@AutoConfiguration(before = IotAutoConfiguration.class)` + `@ConditionalOnClass(MeterRegistry)`
+     + `@ConditionalOnBean(MeterRegistry)` + `@ConditionalOnMissingBean`；成功时打
+     `[ypbin-iot] iotMetricsRecorder bound to Micrometer ({})`；
+   - `IotAutoConfiguration#iotMetricsRecorder()`：`@ConditionalOnMissingBean` ⇒ 返回 `NoopMetricsRecorder`
+     + 上面那句 `DISCARDED`。
+2. **同一份 starter、同一 Boot 版本，两个宿主结果不同**：access 打出 `DISCARDED`（1 次命中），
+   **`ypbin-iot` 一次都没有** ⇒ 决定因素是**自动配置处理顺序**，不是「宿主缺依赖」。
+3. **宿主确实有 `MeterRegistry`**：access 的 pom 依赖 `spring-boot-starter-actuator`，
+   且它自己注入 `MeterRegistry` 的 bean 正常工作（生产 `/actuator/metrics` 里 29 个 `iot.access.*` 可读）。
+   因此 `@ConditionalOnBean(MeterRegistry.class)` 判假只能是**求值时机**问题：
+   `@ConditionalOnBean` **只看「到此为止已注册的 bean 定义」**，而 `MeterRegistry` 由 Boot 的
+   `MetricsAutoConfiguration`（Boot 4.1.1：`org.springframework.boot.micrometer.metrics.autoconfigure.MetricsAutoConfiguration`）
+   定义；starter **只声明了相对 `IotAutoConfiguration` 的先后，没有声明相对它的先后** ⇒
+   一旦该类排在 `MetricsAutoConfiguration` 之前处理，条件就判假、noop 先注册、Micrometer 那个
+   `@ConditionalOnMissingBean` 再退让 ⇒ 静默丢指标。
+4. `MicrometerMetricsRecorder` 的常量池即丢失清单：`ypbin.iot.read.duration` / `ypbin.iot.write.duration` /
+   `ypbin.iot.subscription.points`（投递给宿主的订阅点位数）/ `ypbin.iot.errors`（按消息键分类的协议层错误次数）。
+
+### 影响
+- 宿主「看起来接了指标」（自有指标正常），**框架侧的读/写耗时、协议错误率、订阅点数全丢**；
+- 且是**静默**的：日志是 **INFO** 级、措辞像「提醒」，不会有人当故障处理 —— 正是「悄悄丢指标」的典型形态；
+- 排障时最关键的一组量（吞吐/错误率/订阅面）恰好缺位，只能回退到翻日志。
+
+### 期望能力（(a)(b) 任选其一，(c) 建议一并做）
+- **(a) 把排序写全**：`@AutoConfiguration(before = IotAutoConfiguration.class, after = MetricsAutoConfiguration.class)`
+  —— 注意 Boot 3/4 的包名不同（本仓基线 4.1.1 为 `org.springframework.boot.micrometer.metrics.autoconfigure`），
+  需按各自主线选，或用 `@AutoConfigureAfter(name = "…")` 的字符串形式避免编译期耦合。
+- **(b) 更稳（不依赖排序）**：把 bean 方法入参改成 `ObjectProvider<MeterRegistry>`，在**创建时**惰性取
+  （`getIfAvailable()`），并在拿到时打 `bound to Micrometer`、拿不到时才回退 noop。
+- **(c) 让回退可被发现**：classpath **有** micrometer 却仍未命中时，升级为 **WARN** 并给出可执行指引
+  （「检查 `IotMicrometerAutoConfiguration` 的处理顺序 / 不要自己定义 `MetricsRecorder`」），
+  而不是 INFO 级的「提醒」；`NoopMetricsRecorder` 也建议在 `describe()`/日志里自报「我在丢指标」。
+
+### 验收标准
+1. 一个「只有 `spring-boot-starter-actuator` + iot-starter」的最小宿主启动后，日志出现
+   `bound to Micrometer` 且**不出现** `DISCARDED`；`/actuator/metrics` 里能看到上述 4 个 `ypbin.iot.*` 指标名；
+2. 现有宿主（`ypbin-iot`、`ypbin-access`）升级后两者**都**出现 `bound to Micrometer`；
+3. 单测/门禁钉住：① 条件未命中且 classpath 有 micrometer ⇒ 至少 WARN；② 顺序颠倒的场景（用一个
+   在 `IotMicrometerAutoConfiguration` 之前定义 `MeterRegistry` 的自动配置夹具）要能被覆盖；
+4. 变异验证：把 (a) 的 `after` 去掉或把入参改回 `MeterRegistry`（非 `ObjectProvider`）时，用例必须转红。
+
+### 本仓不做的事（刻意）
+**不在 `ypbin-access` 自建 `MetricsRecorder` bean 去抢**，也不加 `ypbin-iot` 那样的自定义指标配置来「碰巧命中」——
+那会让「顺序敏感」这一根因继续存在，只是本宿主看不见。本仓只做**如实登记 + 反哺**。
+
+---
+
+## UP-12（中｜可用性/可观测性）`ypbin-iot-starter`：补充缓冲没人 drain 时仍**每帧**计数并 WARN，`droppedFrames` 的措辞让值班误判为数据丢失
+
+> 提出时间：2026-09-27（生产实测 + 字节码证伪「丢数据」）｜定位：**框架侧（`ypbin-iot-transport` 的 `NettyChannelConnection` 语义/日志）**
+> 状态：⬜ 未修（本仓**无需绕**：push 路径经实测无丢失；另加对账判据 L1b 兜「真丢数据」）
+> issue：**https://github.com/wenbin-wb/ypbin-iot-starter/issues/17**（标题与本节同，2026-09-27 已开）
+
+### 现象
+生产 access 日志每 ~2 秒一条、计数器单调增长（与设备 2s/帧 的帧率同步）：
+
+```
+[ypbin-iot] inbound buffer overflow on connection t1-d9300012; dropped frames=257 → … → 288
+```
+
+### 证据（一手）
+1. **字节码**（`ypbin-iot-transport-0.1.0.jar`，`javap -c NettyChannelConnection.onFrame`）：
+   缓冲满时 `pollFirst()`（淘汰**最老的**）→ `droppedFrames.incrementAndGet()` → WARN →
+   `addLast(新帧)` → **随后无条件遍历 `frameListeners` 把新帧交给每个监听器**
+   （字节码 98–134：`frameListeners.iterator()` → `Consumer.accept(frame)`）。
+2. **补充缓冲有唯一出口但宿主没有消费者**：该类提供 `public List<byte[]> drainFrames()`；
+   本仓 access 的 TCP 适配器**只挂 push 监听、从不调用 `drainFrames()`** ⇒ deque 填满后
+   **每来一帧就淘汰一帧** ⇒ `droppedFrames` 与帧率同步单调增长、WARN 每帧一条。
+3. **证伪「真丢数据」**（生产同一 61s 窗口，两组计数独立对账）：
+
+   | 指标 | t0 → t1 | Δ |
+   |---|---|---|
+   | `iot.access.egress.accepted`（access 受理） | 2015 → 2046 | **+31** |
+   | `iot.access.egress.sent`（access 发出） | 1991 → 2022 | **+31** |
+   | `iot.timeseries.write.rows`（iot 落库） | 1281 → 1312 | **+31** |
+   | `iot.timeseries.points.collected` | 1281 → 1312 | **+31** |
+
+   ⇒ 受理 == 发出 == 落库，且与设备帧率（2s/帧）一致 ⇒ **push 路径一条都没丢**；
+   被淘汰的是**没人读的补充缓冲里的旧副本**。
+
+### 影响
+- **日志淹没**：每个设备的每一帧一条 WARN。真实故障（断链、解码失败、写失败）会被这几百条噪声埋掉；
+- **方向误导**：`dropped frames=` / `droppedFrames()` 的措辞让人以为数据面在丢帧，值班会去查
+  「是不是丢数据」，而实际丢的是没人消费的辅助缓冲 —— 本仓为此专门做了一次对账实验才证伪；
+- 该计数器与 WARN 都不受「是否存在 drain 消费者」约束，属**无消费者也要报警**的语义错位。
+
+### 期望能力
+- **无 drain 消费者时不入队、不计数、不 WARN**（例如首次 `addFrameListener` 时按「仅 push 模式」禁用该缓冲）；
+- 若必须保留缓冲：**每个连接只 WARN 一次**（首次溢出）后续降 DEBUG，并在日志里给出
+  「谁应该调用 `drainFrames()`，本次没有」的指引；
+- 计数/指标**改名或注解写明语义**（如 `auxBufferEvicted`、注释「淘汰的是辅助缓冲副本，不代表投递丢失」），
+  避免与「投递失败/数据丢失」混淆。
+
+### 验收标准
+1. 一个只挂 push 监听、不调用 `drainFrames()` 的宿主连续跑 ≥5 分钟：**不产生每帧 WARN**，
+   `droppedFrames`/替代指标**不随时间线性增长**（有界或为 0）；
+2. 同一宿主上 push 监听仍收到**全部**帧（用帧计数与上游发送数对账，容差 0）；
+3. 若确实存在 drain 消费者且长期不排空：仍应能观测到（保留指标），但日志不得每帧一条；
+4. 单测钉住 1/2 两条，并做变异验证（把「无消费者时不入队」改回无条件入队 ⇒ 用例转红）。
+
+### 本仓侧配套（本轮已做）
+- **不改** access 的消费方式（push 是对的）；
+- 给 `deploy/feeder-watch.sh` 增加 **L1b 对账判据**：同一窗口比较
+  `iot.access.egress.accepted` 与 `iot.timeseries.write.rows` 的**增量**，差值超容差才告警
+  ⇒ 于是「辅助缓冲 WARN 噪声」不会触发告警，而**真丢数据**会（见 `docs/PROD-OPS-NOTES.md` §5.2）。
