@@ -35,6 +35,9 @@
 #        --mw-ssh "root@43.242.200.8 -p 61260 -i ~/.ssh/id_ed25519_ypbin_mw" \
 #        --prod-ssh "root@113.142.217.58 -i ~/.ssh/id_ed25519_iot_test" \
 #        --mw-host 43.242.200.8 --device 9300012 --tenant 1 --property temperature
+#
+#   平台 `EmqxRestAdminClient` 的 HTTP/2 缺陷修复**部署之后**，请加 `--no-warm-emqx-admin` 再跑一遍
+#   （不带任何绕过的 ⑥ PASS 才是"平台已修"的证据）；未修复的平台保持默认即可。
 # =============================================================================
 set -uo pipefail
 
@@ -50,6 +53,9 @@ TMP=/tmp/ypbin-ext-$$
 VALUE=23.4
 # 凭据同步到 EMQX 的等待窗口（秒）：轮换后平台要 POST 到 EMQX，立刻连可能撞上同步延迟
 SYNC_WAIT=6
+# 第 6 步是否"预热"平台管理面连接（绕过平台 HTTP/2 缺陷）。默认 1（行为不变）；
+# 平台修复部署后用 `--no-warm-emqx-admin` 跑，才能证明"不带绕过也 PASS"。
+WARM_ADMIN=1
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -63,6 +69,8 @@ while [ $# -gt 0 ]; do
     --other-device) OTHER_DEVICE="$2"; shift 2 ;;
     --prod-env) PROD_ENV="$2"; shift 2 ;;
     --sync-wait) SYNC_WAIT="$2"; shift 2 ;;
+    --warm-emqx-admin) WARM_ADMIN=1; shift ;;
+    --no-warm-emqx-admin) WARM_ADMIN=0; shift ;;
     *) echo "未知参数: $1" >&2; exit 1 ;;
   esac
 done
@@ -191,23 +199,29 @@ RECEIPT="$(prodr "umask 077; printf \"SELECT count(*) FROM iot_mqtt_ingest_recei
 
 echo "=== 6) ⑥ 下行：平台下发 ⇒ **外部**模拟设备真收到 ⇒ 回执 ⇒ 实例 succeeded ==="
 # ─────────────────────────────────────────────────────────────────────────────
-# 6a) **预热平台的 EMQX 管理面连接**（🔴 这是绕过平台已知缺陷，不是修复；缺陷已登记）
-#   平台 `EmqxRestAdminClient` 用 JDK `HttpClient` 的**默认 HTTP/2**。实测（本仓
-#   `deploy/emqx/diagnose-emqx-admin-h2c/` 可复跑）：
-#     · 某条**新连接**上第一个请求若是**带体**请求（POST /api/v5/publish），h2c upgrade 握手会被
-#       EMQX/Cowboy 直接断开 ⇒ `java.io.IOException: EOF reached while reading`
-#       ⇒ 平台把它判成 `EMQX_ERROR / EMQX 管理面不可达`（发布其实**根本没到** EMQX）。
-#     · 同一客户端改用 HTTP/1.1：3/3 成功；或先用一个**无体**请求把 h2c 连接建起来，再 POST：也成功。
-#   ⇒ 平台的发布在"连接刚建好就被带体请求触发"时必失败、在"连接已被无体请求预热过"时成功。
-#   🔴 **正解**是给 `EmqxRestAdminClient` 显式 `.version(HttpClient.Version.HTTP_1_1)`
-#      （或对新建连接上的 POST 重试一次）。本仓**未改平台代码**（超出本轮 `deploy/emqx/**`+`docs/**`
-#      的改动范围，已登记为待办）。这里用"签发凭据"（内部先做**无体** DELETE）把连接预热，
-#      以便把下行链路的**其余部分**（EMQX → 公网 → 外部设备 → 回执 → 实例 succeeded）真正验完。
+# 6a) **预热平台的 EMQX 管理面连接**（默认开；`--no-warm-emqx-admin` 可关）
+#
+# 🔴 背景（平台侧缺陷，另见 `deploy/emqx/diagnose-emqx-admin-h2c/`）：修复前，
+#   平台 `EmqxRestAdminClient` 用 JDK `HttpClient` 的**默认 HTTP/2**，当某条**新连接**上第一个请求是
+#   **带体**请求（POST /api/v5/publish）时，h2c upgrade 握手会被 EMQX/Cowboy 断开 ⇒
+#   `java.io.IOException: EOF reached while reading` ⇒ 平台判 `EMQX_ERROR / EMQX 管理面不可达`
+#   （发布其实**根本没到 EMQX**）。实测：HTTP/2 直接 POST = 3/3 失败；HTTP/1.1 = 3/3 成功；
+#   先用一个**无体**请求把连接建起来再 POST = 3/3 成功。
+#
+# 所以这里用"签发凭据"（内部先做**无体** DELETE）把连接预热，把下行链路其余部分验完。
+#
+# ✅ 平台修复（`EmqxRestAdminClient` 显式 `.version(HTTP_1_1)`）**部署之后**，本步骤不再必要，
+#    应该用 `--no-warm-emqx-admin` 跑一遍——**不带任何绕过**的 ⑥ PASS 才是"平台已修"的证据。
+#    默认保持开启，是为了让本脚本在"未修复的平台"上也能把链路验完（默认行为不变）。
 # ─────────────────────────────────────────────────────────────────────────────
-ISSUE2=/tmp/ypbin-mqtt-ext-issue2.json
-prodr "umask 077; curl -s -X POST -H 'X-User-Id: 1' -H 'X-User-Name: ops-ext-accept' -H 'X-Tenant-Id: $TENANT' -H 'X-Roles: super-admin' http://127.0.0.1:18084/devices/$DEVICE/credential > $ISSUE2; chmod 600 $ISSUE2"
-prodr "umask 077; python3 -c 'import json;print((json.load(open(\"$ISSUE2\")).get(\"data\") or {}).get(\"password\",\"\"),end=\"\")' > $PW_REMOTE; chmod 600 $PW_REMOTE; shred -u $ISSUE2 2>/dev/null || rm -f $ISSUE2"
-ok "已预热平台管理面连接（并同步刷新外部设备口令文件，长度 $(prodr "wc -c < $PW_REMOTE" | tr -dc '0-9')）"
+if [ "$WARM_ADMIN" -eq 1 ]; then
+  ISSUE2=/tmp/ypbin-mqtt-ext-issue2.json
+  prodr "umask 077; curl -s -X POST -H 'X-User-Id: 1' -H 'X-User-Name: ops-ext-accept' -H 'X-Tenant-Id: $TENANT' -H 'X-Roles: super-admin' http://127.0.0.1:18084/devices/$DEVICE/credential > $ISSUE2; chmod 600 $ISSUE2"
+  prodr "umask 077; python3 -c 'import json;print((json.load(open(\"$ISSUE2\")).get(\"data\") or {}).get(\"password\",\"\"),end=\"\")' > $PW_REMOTE; chmod 600 $PW_REMOTE; shred -u $ISSUE2 2>/dev/null || rm -f $ISSUE2"
+  ok "已预热平台管理面连接（并刷新外部设备口令文件，长度 $(prodr "wc -c < $PW_REMOTE" | tr -dc '0-9')）"
+else
+  info "**已按 --no-warm-emqx-admin 跳过预热**：此时 ⑥ 若 PASS，说明平台已不再需要绕过"
+fi
 
 DOWN_TOPIC="ypbin/v1/$TENANT/$DEVICE/down/#"
 REPLY_TOPIC="ypbin/v1/$TENANT/$DEVICE/up/reply"
