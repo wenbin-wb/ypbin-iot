@@ -9,10 +9,12 @@
 > - **段 B（下行 / 在线调试）已实现并生产实测通过**（`docs/EMQX-INTEGRATION.md` §6.2.3，2026-09-27）：`iot_command_instance` 六态状态机 + 下发/查询/手动重发端点 +
 >   周期超时扫描（不自动重试）+ `POST /internal/command-replies` 幂等回执 + `iot:debug:send/get` 权限码与菜单。
 >   契约口径（含设计留白的 payload 形态）见 `docs/EMQX-INGRESS-DESIGN.md` §7.6。
-> - **段 C（前端「在线调试」页）已上线**（`ypbin-iot-ui` PR #26，main `8bcc883`）：设备详情抽屉新增第 5 个页签
+> - **段 C（前端「在线调试」页）已上线**（`ypbin-iot-ui` PR #26 + 补丁 PR #27/#28，main `a4ddf3b`）：设备详情抽屉新增第 5 个页签
 >   「在线调试」——选设备→选动作（属性设置/属性读取/服务调用）→填参数→下发→**轮询**看状态与回执；
 >   历史分页 + 状态筛选 + 展开看下行 payload 与上行回执（设备 `code`/`message`/`data`、设备 `ts`、平台 `receivedAt`）；
 >   手动**重发同一 requestId**；三态如实展示（失败态原样显示后端 `message`，绝不画成「暂无记录」）。
+>   补丁 PR #27 补上菜单 320023 标题键 `page.iot.debug.get`（后端 `sys_menu.title` 就是 i18n 键，缺则显示原始 key）；
+>   PR #28 让轮询失败时停止自动刷新并保留原始 `code`/信封（否则全局提示会每 2 秒弹一次）。
 >   前端入口状态与契约限制见 `docs/EMQX-INTEGRATION.md` §6.2.1。
 > - **仍未做**：真设备 1883 对外暴露（当前只绑中间件机回环）、TLS/8883、EMQX 集群。
 
