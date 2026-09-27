@@ -36,7 +36,7 @@
 | `emqx-mqtt-expose.sh` | 中间件机 | MQTT 1883 **对外放行 / 撤销 / 巡检**（`open`/`close`/`status`；只碰 tcp/1883，不碰 18093/8883/8083/8084） |
 | `emqx-mqtt-expose-firewall.service` | 中间件机 | 幂等维护 tcp/1883 的 INPUT 放行（`-C` 命中不重复插；`ExecStop` 即回滚）。⚠️ **对 Docker 发布端口这是纵深防御，不是有效闸门**——见 `docs/EMQX-DEPLOY.md` §3.1 |
 | `emqx-mqtt-expose-watch.sh` + `.service` / `.timer` | 中间件机 | 1883 暴露面判据 A1–A5（匿名计数恒 0 / 管理面未对外 / 8883-8084 无监听 / 声明与现实一致），**只告警不自愈**，每 5 分钟 |
-| `expose-evidence/` | 仓库 | 本轮暴露面与端到端验收的**原始输出**（`accept-external-run-pass.log`、`reachability-from-prod.txt`、`diagnose-emqx-admin-h2c.log`） |
+| `expose-evidence/` | 仓库 | 本轮暴露面与端到端验收的**原始输出**（`accept-external-run-pass.txt`、`reachability-from-prod.txt`、`diagnose-emqx-admin-h2c.txt`）。⚠️ 用 `.txt` 而不是 `.log`：根 `.gitignore` 有 `*.log`，否则这些证据会被静默排除在提交之外（实测踩过） |
 | `diagnose-emqx-admin-h2c/` | 运维机 + 生产机 | 复跑判据：平台 `EmqxRestAdminClient` 在 **JDK HttpClient HTTP/2** 下 `POST /api/v5/publish` 必失败（h2c upgrade EOF），HTTP/1.1 或预热连接则成功。**平台侧缺陷，与暴露面无关** |
 | `accept-emqx-ingress.sh` | 运维机 | 入站端到端验收 ①–⑤（可复跑；越权判据用 **EMQX 指标差值**，因为 `deny_action=ignore` 下客户端看不出被拒） |
 | `latency-probe.py` | 中间件机 | 只读订阅端延迟观测器（逐条统计 p50/p95/p99；**不产生负载**） |
