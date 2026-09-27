@@ -55,6 +55,20 @@ public class IotDevice extends TenantBaseEntity {
     /** 凭据引用（不透明，access 本地解析，§4.2；明文永不下发）。 */
     private String credentialRef;
 
+    /**
+     * 凭据版本号：每次签发/轮换 +1；{@code null} 表示**从未签发**。
+     *
+     * <p>与 {@code iot_device_credential.credential_version} 必须一致——两者不一致时以
+     * 「凭据不可用」处理（版本号是防止「旧哈希被当成新凭据用」的唯一凭据）。</p>
+     */
+    private Integer credentialVersion;
+
+    /** 当前凭据签发时刻；{@code null} 表示从未签发。 */
+    private LocalDateTime credentialIssuedAt;
+
+    /** 凭据吊销时刻；{@code null} 表示未吊销。非空即「该设备不得再认证成功」。 */
+    private LocalDateTime credentialRevokedAt;
+
     /** 在线状态：online | offline | unknown（§4.3）。 */
     private String onlineStatus;
 
