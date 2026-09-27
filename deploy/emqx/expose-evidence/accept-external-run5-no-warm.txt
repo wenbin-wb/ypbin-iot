@@ -1,0 +1,53 @@
+=== 0) 前置：探针上生产机（含完整性自证）+ 现签设备凭据（只落生产机 600 文件）===
+  ·  探针语法自检通过
+  ✅ 探针上传完整（md5 一致 21dfdb87efc8c7c4b03a2363d1a61d3a）
+  ·  R.code=200 username=1.9300012 version=29 pwlen=43 pw_sha8=6a8f7de0
+  ·  口令已落生产机 /tmp/ypbin-mqtt-ext-pw（600，长度 43）
+  ·  EMQX 侧账号： ['1.9300012']
+  ·  等待凭据同步 6s 再连（避免撞同步延迟造成假红）
+=== 1) 可达性：**外部视角**（生产机）探 43.242.200.8:1883 ===
+  ✅ TCP 43.242.200.8:1883 从外部可达（这才是「对外暴露」的实测证据）
+=== 2) ⑤ 无凭据（匿名）连接必须被拒（指标差值 + 退出码）===
+  ·  AUTH_REFUSED connack_rc=4
+  ·  __EXIT=2
+  ✅ 匿名连接被拒：探针退出码=2（AUTH_REFUSED）
+  ✅ ⑤ connack.auth_error +1（broker 侧确认拒绝）
+  ✅ client.auth.anonymous 恒 0（0→0：没人以匿名身份通过认证）
+=== 3) ④ 越权发布（用自己的凭据发别人的主题）必须被拒 ===
+  ·  发往 ypbin/v1/1/9300013/up/property（不是本设备的主题）
+  ·  CONNECTED connack_rc=0
+  ·  PUBLISHED topic_len=30 payload_len=72 qos=1 puback_id=1
+  ·  __EXIT=0
+  ·  探针退出码=0：**deny_action=ignore 下客户端看不出被拒（照常 PUBACK）**，故判据只能用指标
+  ✅ ④ 越权发布被拒：publish.auth_error +1、authorization.nomatch +1
+=== 4) 正向：从外部发自己的 up/property（① 落库 + ② 曲线）===
+  ·  requestId=ext-e2e-1790511901883 ts=1790511901883 value=23.4
+  ·  CONNECTED connack_rc=0
+  ·  PUBLISHED topic_len=30 payload_len=138 qos=1 puback_id=1
+  ·  __EXIT=0
+  ✅ 外部发布成功（PUBACK，退出码 0）
+  ✅ 平台入站受理 iot.mqtt.ingest.accepted +1
+  ✅ ① IoTDB 本消息恰好 1 行（ts+value 精确归属，与 access 通道的 23.5 可区分）
+  ✅ ② series 返回该点：{"code":200,"data":[{"ts":"1790511900998","value":"23.5","quality":"GOOD"},{"ts":"1790511901883","value":"23.4","quality":"GOOD"},{"ts":"1790511902999","value":"23.5","quality":"GOOD"}],"message":"\u6
+=== 5) ③ 幂等：同一 requestId 从外部重投 ===
+  ✅ ③ iot.mqtt.ingest.duplicated +1
+  ✅ ③ 重投后按 ts+value 仍为 1 行（未新增时序行）
+  ✅ ③ MySQL 幂等回执行数=1
+=== 6) ⑥ 下行：平台下发 ⇒ **外部**模拟设备真收到 ⇒ 回执 ⇒ 实例 succeeded ===
+  ·  **已按 --no-warm-emqx-admin 跳过预热**：此时 ⑥ 若 PASS，说明平台已不再需要绕过
+started
+  ✅ 外部模拟设备已订阅 down/#（先等订阅再下发，避免竞态假红）
+  ·  下发响应 statusCode=sent errorCode=None errorMsg=None
+  ·  topic=ypbin/v1/1/9300012/down/property/set payload={"requestId":"cmd-2104185719038144513","properties":{"switchState":26.5}}
+  ✅ 平台返回 requestId=cmd-2104185719038144513
+  ·  SUBSCRIBED topic=ypbin/v1/1/9300012/down/# granted_qos=1
+  ·  RECEIVED topic=ypbin/v1/1/9300012/down/property/set qos=1 payload={"requestId":"cmd-2104185719038144513","properties":{"switchState":26.5}}
+  ·  REPLY_SENT requestId=cmd-2104185719038144513 code=0 puback_id=1
+  ✅ ⑥ 外部模拟设备**真收到**下行报文
+  ✅ ⑥ 外部模拟设备已回执（code=0）
+  ✅ ⑥ 实例终态 = succeeded
+=== 7) 收尾：清理生产机的临时口令与探针 ===
+cleaned
+  ✅ 生产机已清理（口令文件与探针均已删除，回读无残留）
+
+结论: PASS（从外部网络经公网 1883 的 ①–⑥ 全部命中）

@@ -1,0 +1,29 @@
+=== 0) 传源码 + 在生产机编译（本地低配机器不参与构建）===
+EmqxAdminH2cProbe.class
+  ·  class 已放入容器
+
+=== mode=h2 ===
+mode=h2 version=HTTP_2
+  #0 POST /api/v5/publish -> EXC java.io.IOException: EOF reached while reading
+  #1 POST /api/v5/publish -> EXC java.io.IOException: EOF reached while reading
+  #2 POST /api/v5/publish -> EXC java.io.IOException: EOF reached while reading
+
+=== mode=h1 ===
+mode=h1 version=HTTP_1_1
+  #0 POST /api/v5/publish -> HTTP 202 ver=HTTP_1_1 body={"message":"no_matching_subscribers","reason_code":16}
+  #1 POST /api/v5/publish -> HTTP 202 ver=HTTP_1_1 body={"message":"no_matching_subscribers","reason_code":16}
+  #2 POST /api/v5/publish -> HTTP 202 ver=HTTP_1_1 body={"message":"no_matching_subscribers","reason_code":16}
+
+=== mode=warm ===
+mode=warm version=HTTP_2
+  warmup GET /status -> HTTP 200 ver=HTTP_2
+  #0 POST /api/v5/publish -> HTTP 202 ver=HTTP_2 body={"message":"no_matching_subscribers","reason_code":16}
+  #1 POST /api/v5/publish -> HTTP 202 ver=HTTP_2 body={"message":"no_matching_subscribers","reason_code":16}
+  #2 POST /api/v5/publish -> HTTP 202 ver=HTTP_2 body={"message":"no_matching_subscribers","reason_code":16}
+
+=== 清理 ===
+  ·  生产机临时目录已删
+  ·  容器内 class 已删
+
+判据：h2 ⇒ 3/3 EXC(EOF) 且 h1 ⇒ 3/3 HTTP 202 且 warm ⇒ 3/3 HTTP 202
+      ⇒ 平台的 EMQX 管理面客户端在 HTTP/2 下发布必失败；HTTP/1.1 或预热后正常。
