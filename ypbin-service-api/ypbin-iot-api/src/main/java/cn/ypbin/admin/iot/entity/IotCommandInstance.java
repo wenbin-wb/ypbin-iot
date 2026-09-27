@@ -70,7 +70,7 @@ public class IotCommandInstance extends TenantBaseEntity {
     /** 失败说明（面向人的文案，**不含凭据**；设备回执失败时保留设备给的 message）。 */
     private String errorMsg;
 
-    /** 超时（毫秒；取物模型 timeout_ms，缺省用全局默认）。 */
+    /** 超时（毫秒；取下发请求的 timeoutMs，缺省用全局默认 ypbin.emqx.default-command-timeout-ms）。 */
     private Integer timeoutMs;
 
     /** 已重发次数（仅手动重发计数，不做自动重试）。 */

@@ -30,6 +30,11 @@ BASE_URL=http://127.0.0.1:18093
 INGRESS_URL=http://172.28.0.1:18084/internal/mqtt/readings
 BRIDGE_NAME=ypbin-ingress
 RULE_NAME=ypbin_up_property
+# 回执链路（段 B）：up/reply → /internal/command-replies。
+# ⚠️ **必须与属性上报分开**：动作的 URL 是固定的（bridge 的 url 不能用模板），而回执要打到另一个路径。
+REPLY_BRIDGE_NAME=ypbin-reply
+REPLY_RULE_NAME=ypbin_up_reply
+REPLY_URL=http://172.28.0.1:18084/internal/command-replies
 UP_TOPIC_FILTER='ypbin/v1/+/+/up/property'
 # H6：默认 256MB 在中间件机上过大（阶段②压测时容器 mem_limit=2g），显式下调到 16MB
 MAX_BUFFER_BYTES=16MB
@@ -40,6 +45,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --env-file)   ENV_FILE="$2"; shift 2 ;;
     --token-file) TOKEN_FILE="$2"; shift 2 ;;
+    --reply-url)  REPLY_URL="$2"; shift 2 ;;
     --base-url)   BASE_URL="$2"; shift 2 ;;
     --ingress-url) INGRESS_URL="$2"; shift 2 ;;
     *) echo "未知参数: $1" >&2; exit 1 ;;
@@ -243,6 +249,82 @@ if not any(a.endswith(suffix) for a in acts):
     print("  ❌ 规则未挂上动作：" + str(acts)); sys.exit(3)
 print("  ✅ 规则 id=%s enable=%s actions=%s" % (r["id"], r["enable"], acts))
 ' "$RULE_NAME" "$BRIDGE_NAME" || fail=1
+
+# ── B3 回执链路：up/reply → /internal/command-replies ─────────────────────────────
+# 为什么 body 用 `${payload}` 原样透传：回执契约（设计 §7.1）就是设备发的 JSON，
+# 逐字段模板会在 message/data/ts 缺省时渲染出**非法 JSON**（模板不支持条件字段）。
+# ⚠️ 但"透传"意味着 deviceId 来自**载荷**（不可信）⇒ 因此额外用 header 把**主题派生的认证设备**
+#    传给平台（headers 支持模板），平台侧做一致性校验（见 InternalCommandReplyController）：
+#    载荷声称的设备必须等于主题里的设备，否则丢弃（防同租户/跨租户替别人回执）。
+api DELETE "/api/v5/bridges/webhook:$REPLY_BRIDGE_NAME"
+case "$API_CODE" in 204|404) ok "DELETE bridges/webhook:$REPLY_BRIDGE_NAME（幂等前置清理，HTTP $API_CODE）";; *) bad "DELETE reply bridge：HTTP $API_CODE";; esac
+python3 - "$PRIV/reply-bridge.json" "$REPLY_URL" "$TOKEN_FILE" "$MAX_BUFFER_BYTES" "$REQUEST_TTL" "$MAX_RETRIES" <<'PYB'
+import json, sys
+out, url, token_file, maxbuf, ttl, retries = sys.argv[1:7]
+token = open(token_file).read().strip()
+payload = {
+    "type": "webhook",
+    "name": "ypbin-reply",
+    "url": url,
+    "method": "post",
+    "headers": {
+        "content-type": "application/json",
+        "X-Internal-Token": token,
+        # 主题段派生的认证设备（EMQX 从 MQTT 主题取值，不受载荷影响）
+        "X-Mqtt-Device": "${deviceId}",
+    },
+    "body": "${payload}",
+    "max_retries": int(retries),
+    "connect_timeout": "5s",
+    "resource_opts": {
+        "max_buffer_bytes": maxbuf,
+        "query_mode": "async",
+        "request_ttl": ttl,
+        "inflight_window": 1,
+        "health_check_interval": "15s",
+    },
+}
+open(out, "w").write(json.dumps(payload))
+PYB
+chmod 600 "$PRIV/reply-bridge.json"
+api POST /api/v5/bridges "$PRIV/reply-bridge.json"
+expect "POST bridges（回执动作：body 原样透传 + X-Mqtt-Device 头）" 201
+
+api GET /api/v5/rules
+reply_rule_id="$(printf '%s' "$API_BODY" | python3 -c '
+import json, sys
+try:
+    rules = json.load(sys.stdin).get("data", [])
+except Exception:
+    rules = []
+print(next((r["id"] for r in rules if r.get("name") == sys.argv[1]), ""))
+' "$REPLY_RULE_NAME")"
+if [ -n "$reply_rule_id" ]; then
+  api DELETE "/api/v5/rules/$reply_rule_id"
+  case "$API_CODE" in 204|404) ok "DELETE rules/$reply_rule_id（幂等前置清理，HTTP $API_CODE）";; *) bad "DELETE reply rule：HTTP $API_CODE";; esac
+fi
+python3 - "$PRIV/reply-rule.json" "$REPLY_RULE_NAME" "$REPLY_BRIDGE_NAME" <<'PYC'
+import json, sys
+out, rule_name, bridge_name = sys.argv[1:4]
+# WHERE 与属性规则同一身份一致性口径（纵深防御；真正的绑定靠 X-Mqtt-Device 头）
+sql = (
+    "SELECT nth(4, tokens(topic, '/')) AS deviceId, payload"
+    ' FROM "ypbin/v1/+/+/up/reply"'
+    " WHERE nth(3, tokens(topic, '/')) = nth(1, tokens(username, '.'))"
+    " AND nth(4, tokens(topic, '/')) = nth(2, tokens(username, '.'))"
+)
+payload = {
+    "name": rule_name,
+    "sql": sql,
+    "actions": [f"webhook:{bridge_name}"],
+    "enable": True,
+    "description": "ypbin 设备命令回执 up/reply → 平台 /internal/command-replies（段 B）",
+}
+open(out, "w").write(json.dumps(payload))
+PYC
+chmod 600 "$PRIV/reply-rule.json"
+api POST /api/v5/rules "$PRIV/reply-rule.json"
+expect "POST rules（回执：up/reply → 回执动作）" 201
 
 echo
 echo "=== C. 自检：动作健康状态（走真实链路打平台端点）==="

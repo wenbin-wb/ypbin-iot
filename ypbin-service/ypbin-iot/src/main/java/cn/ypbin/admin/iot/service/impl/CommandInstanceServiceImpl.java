@@ -299,7 +299,14 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public CommandReplyResult applyReply(CommandReplyReq req) {
+    public CommandReplyResult applyReply(CommandReplyReq req, Long authenticatedDevice) {
+        if (authenticatedDevice != null && !Objects.equals(authenticatedDevice, req.getDeviceId())) {
+            // 载荷声称的设备必须等于**主题派生的认证设备**：否则同租户可替别人回执、跨租户可伪造（载荷不可信）
+            replyDiscardedCounter.increment();
+            log.warn("[iot] 回执声称的设备与认证主题不一致，已丢弃：载荷={} 认证={}",
+                LogSanitizer.sanitize(req.getDeviceId()), LogSanitizer.sanitize(authenticatedDevice));
+            return CommandReplyResult.of(false, false, true, "回执设备与认证主题不一致");
+        }
         if (req.getDeviceId() == null || req.getDeviceId() <= 0) {
             replyDiscardedCounter.increment();
             return CommandReplyResult.of(false, false, true, "设备 ID 非法");
@@ -425,8 +432,13 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
      */
     private void publishAndPersist(IotCommandInstance row, String topic, String payload,
                                    boolean isResend) {
+        // ⚠️ from 必须是**本次尝试的起点**，不是"库里当前的状态"：
+        //    重发把 failed/timeout 重新打开为 sent（resend() 已用 requireTransition 校验过这一步），
+        //    本次投递的起点因此是 SENT。若这里仍取库里的 FAILED/TIMEOUT，投递再失败时
+        //    SENT→FAILED 之外的 FAILED→FAILED / TIMEOUT→FAILED 不在转换表里 ⇒ 抛"非法状态转换"，
+        //    连带 retry_count/error_* 全部回滚（独立复核实测到的真缺陷 M2）。
         CommandInstanceStatus from = isResend
-            ? CommandInstanceStatus.ofCode(row.getStatusCode()) : CommandInstanceStatus.PENDING;
+            ? CommandInstanceStatus.SENT : CommandInstanceStatus.PENDING;
         LocalDateTime now = LocalDateTime.now();
         CommandInstanceStatus target;
         CommandErrorCode errorCode = null;
@@ -451,7 +463,12 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
                 LogSanitizer.sanitize(row.getDeviceId()), LogSanitizer.sanitize(row.getRequestId()),
                 ex.getErrorCode().getCode(), ex);
         }
-        requireTransition(from, target);
+        if (target != from) {
+            // 只对**真正的状态变化**做转换校验：target == from 表示本次投递没有改变状态
+            // （重发成功时就是 SENT→SENT，它不在转换表里也不该在——转换表描述的是"状态迁移"）。
+            // 起点合法性由调用方保证：send 从 PENDING、resend 已校验 current→SENT。
+            requireTransition(from, target);
+        }
         LocalDateTime sentAt = target == CommandInstanceStatus.SENT ? now : null;
         LocalDateTime finishedAt = target == CommandInstanceStatus.SENT ? null : now;
         row.setStatusCode(target.getCode());

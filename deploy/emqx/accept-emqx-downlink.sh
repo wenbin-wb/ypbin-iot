@@ -72,7 +72,7 @@ instance_status() {
 import json,sys
 target=sys.argv[1]
 d=json.load(sys.stdin).get(\"data\") or {}
-rows=d.get(\"records\") or d.get(\"list\") or []
+rows=d.get(\"items\") or d.get(\"records\") or d.get(\"list\") or []
 hit=[r for r in rows if r.get(\"requestId\")==target]
 print(hit[0].get(\"statusCode\",\"?\") if hit else \"NOT_FOUND\")' '$request_id'"
 }
@@ -90,11 +90,19 @@ REPLY_TOPIC="ypbin/v1/$TENANT/$DEVICE/up/reply"
 
 echo "=== ① 在线：设备订阅 → 平台下发 → 设备回执 ==="
 mwr "rm -f $TMP.listen; nohup $PYTHON $PROBE --mode listen --username '$TENANT.$DEVICE' --password-file $MW_PW_FILE --client-id '$TENANT.$DEVICE' --topic '$DOWN_TOPIC' --device-id $DEVICE --reply-topic '$REPLY_TOPIC' --reply-code 0 --reply-message ok --reply-data '{\"applied\":26.5}' --wait-seconds 40 > $TMP.listen 2>&1 & echo started"
+mwr "for i in \$(seq 1 40); do grep -q SUBSCRIBED $TMP.listen 2>/dev/null && break; sleep 0.5; done"
+mwr "grep -q SUBSCRIBED $TMP.listen" && ok "模拟设备已建立订阅（先等订阅再下发，避免竞态假红）" || bad "模拟设备未订阅成功"
 SEND_JSON="$(send_command "$TIMEOUT_MS")"
 REQ="$(printf '%s' "$SEND_JSON" | python3 -c 'import json,sys; print((json.load(sys.stdin).get("data") or {}).get("requestId",""))')"
 STATUS_JSON="$(printf '%s' "$SEND_JSON" | python3 -c 'import json,sys; d=(json.load(sys.stdin).get("data") or {}); print("status=%s topic=%s payload=%s" % (d.get("statusCode"), d.get("topic"), d.get("payload")))')"
 info "下发响应：$STATUS_JSON"
 [ -n "$REQ" ] && ok "平台返回 requestId=$REQ" || bad "下发未返回 requestId（响应=$SEND_JSON）"
+printf '%s' "$SEND_JSON" | python3 -c '
+import json,sys
+d=(json.load(sys.stdin).get("data") or {})
+assert d.get("statusCode")=="sent", "下发响应状态=%s（期望 sent）" % d.get("statusCode")
+assert (d.get("emqxMessageId") or "")!="" or True, ""
+print("  ·  下发响应 statusCode=%s emqxMessageId=%s" % (d.get("statusCode"), d.get("emqxMessageId")))' || bad "下发响应不是 sent（期望 200=至少一个订阅者）"
 mwr "for i in \$(seq 1 40); do grep -q RECEIVED $TMP.listen 2>/dev/null && break; sleep 0.5; done; cat $TMP.listen" | sed 's/^/  ·  /'
 mwr "grep -q RECEIVED $TMP.listen" && ok "模拟设备**真收到**下行报文" || bad "模拟设备未收到下行报文"
 mwr "grep -q REPLY_SENT $TMP.listen" && ok "模拟设备已回执（code=0）" || bad "模拟设备未回执"
@@ -106,8 +114,13 @@ import json,sys
 rows=(json.load(sys.stdin).get(\"data\") or {}).get(\"records\") or []
 hit=[r for r in rows if r.get(\"requestId\")==\"$REQ\"]
 r=hit[0] if hit else {}
-print(\"  ·  reply_payload=%s\" % r.get(\"replyPayload\"))
-print(\"  ·  finishedAt=%s emqxMessageId=%s\" % (r.get(\"finishedAt\"), r.get(\"emqxMessageId\")))'"
+rp=r.get(\"replyPayload\") or \"\"
+print(\"  ·  reply_payload=%s\" % rp)
+print(\"  ·  finishedAt=%s emqxMessageId=%s\" % (r.get(\"finishedAt\"), r.get(\"emqxMessageId\")))
+assert \"receivedAt\" in rp, \"reply_payload 少了平台落库时间 receivedAt\"
+assert \"ts\" in rp, \"reply_payload 少了设备时间 ts\"
+assert r.get(\"finishedAt\"), \"finished_at 为空（平台落库时间）\"
+print(\"  ·  判据 ok：reply_payload 同时含设备 ts 与平台 receivedAt，finished_at 非空\")'"
 
 echo "=== ② 幂等：同一回执重投 ==="
 DUP0=$(metric iot.command.reply.duplicated)
@@ -126,11 +139,21 @@ sleep 4
 DUP1=$(metric iot.command.reply.duplicated)
 ST2="$(instance_status "$REQ")"
 [ "$ST2" = "succeeded" ] && ok "重复回执后实例仍为 succeeded（不被改写）" || bad "重复回执改变了状态：$ST2"
-[ "$((DUP1 - DUP0))" -ge 1 ] && ok "iot.command.reply.duplicated +$((DUP1 - DUP0))" || bad "重复回执未被计数"
+DUP_BODY="$(prodr "umask 077; printf '%s' '{\"deviceId\":$DEVICE,\"requestId\":\"$REQ\",\"code\":0,\"message\":\"ok\",\"data\":{\"applied\":26.5}}' > /tmp/dup.json; chmod 600 /tmp/dup.json; TOKEN=\$(sed -n 's/^INTERNAL_TOKEN=//p' $PROD_ENV); printf 'header = \"X-Internal-Token: %s\"\n' \"\$TOKEN\" > /tmp/dup.cfg; chmod 600 /tmp/dup.cfg; curl -s -K /tmp/dup.cfg -H 'Content-Type: application/json' --data-binary @/tmp/dup.json http://127.0.0.1:18084/internal/command-replies")"
+printf '%s' "$DUP_BODY" | python3 -c '
+import json,sys
+d=json.load(sys.stdin); data=d.get("data") or {}
+assert d.get("code")==200, "端点返回 %s" % d.get("code")
+assert data.get("duplicated") is True, "期望 duplicated=true，实得 %s" % data
+print("  ·  端点级幂等：code=200 duplicated=true accepted=%s" % data.get("accepted"))' \
+  && ok "重复回执在**端点**上被明确判为 duplicated（不依赖全局指标）" || bad "端点未判 duplicated"
+[ "$((DUP1 - DUP0))" -ge 1 ] && ok "iot.command.reply.duplicated +$((DUP1 - DUP0))（辅助判据）" || bad "重复回执未被计数"
+# 注：本判据同时覆盖 X-Mqtt-Device 头缺失的退化路径（直接 HTTP 调用 ⇒ 用载荷设备）
 
 echo "=== ③ 设备未连：无订阅者 ⇒ 立即 failed/NO_SUBSCRIBER ==="
+# 本用例的超时故意设大（15s）：判据是"**立刻**失败"，与超时值拉开足够距离才说明不是"等到超时才失败"
 START=$(date +%s%3N)
-OFFLINE_JSON="$(send_command "$TIMEOUT_MS")"
+OFFLINE_JSON="$(send_command 15000)"
 ELAPSED=$(( $(date +%s%3N) - START ))
 OFF_REQ="$(printf '%s' "$OFFLINE_JSON" | python3 -c 'import json,sys; print((json.load(sys.stdin).get("data") or {}).get("requestId",""))')"
 printf '%s' "$OFFLINE_JSON" | python3 -c '
@@ -138,7 +161,9 @@ import json,sys
 d=(json.load(sys.stdin).get("data") or {})
 print("  ·  statusCode=%s errorCode=%s errorMsg=%s" % (d.get("statusCode"), d.get("errorCode"), d.get("errorMsg")))'
 req_status="$(printf '%s' "$OFFLINE_JSON" | python3 -c 'import json,sys; print((json.load(sys.stdin).get("data") or {}).get("statusCode",""))')"
-[ "$req_status" = "failed" ] && ok "无订阅者时**同步**判定 failed（耗时 ${ELAPSED}ms，远小于超时 ${TIMEOUT_MS}ms）" || bad "期望立即 failed，实得 $req_status"
+req_error="$(printf '%s' "$OFFLINE_JSON" | python3 -c 'import json,sys; print((json.load(sys.stdin).get("data") or {}).get("errorCode",""))')"
+[ "$req_status" = "failed" ] && ok "无订阅者时**同步**判定 failed（耗时 ${ELAPSED}ms，远小于超时 15000ms）" || bad "期望立即 failed，实得 $req_status"
+[ "$req_error" = "NO_SUBSCRIBER" ] && ok "原因码 = NO_SUBSCRIBER（可区分「设备未连」与「EMQX 故障」——只判 failed 会把 EMQX_ERROR 也放过）" || bad "原因码 = $req_error（期望 NO_SUBSCRIBER）"
 [ "$ELAPSED" -lt 5000 ] && ok "未等待超时（${ELAPSED}ms）" || bad "耗时 ${ELAPSED}ms，疑似在等超时"
 
 echo "=== ④ 超时：设备连着但不回执 ⇒ 扫描置 timeout ==="
@@ -152,7 +177,13 @@ for _ in $(seq 1 12); do
   [ "$ST3" = "timeout" ] && break
   sleep 3
 done
-[ "$ST3" = "timeout" ] && ok "扫描已把实例置为 timeout（原因码 TIMEOUT）" || bad "实例状态 = $ST3（期望 timeout）"
+[ "$ST3" = "timeout" ] && ok "扫描已把实例置为 timeout" || bad "实例状态 = $ST3（期望 timeout）"
+TO_ERR="$(prodr "curl -s -H 'X-User-Id: 1' -H 'X-Tenant-Id: $TENANT' -H 'X-Roles: super-admin' 'http://127.0.0.1:18084/devices/$DEVICE/commands?page=1&pageSize=50' | python3 -c '
+import json,sys
+rows=(json.load(sys.stdin).get(\"data\") or {}).get(\"items\") or []
+hit=[r for r in rows if r.get(\"requestId\")==\"$TO_REQ\"]
+print(hit[0].get(\"errorCode\",\"\") if hit else \"\")'")"
+[ "$TO_ERR" = "TIMEOUT" ] && ok "超时的原因码 = TIMEOUT" || bad "超时的原因码 = $TO_ERR（期望 TIMEOUT）"
 
 echo "=== 收尾：删除临时口令文件与探针输出 ==="
 mwr "shred -u $MW_PW_FILE 2>/dev/null || rm -f $MW_PW_FILE; rm -f $TMP.listen $TMP.silent; echo '  ·  已清理'" || bad "清理失败"

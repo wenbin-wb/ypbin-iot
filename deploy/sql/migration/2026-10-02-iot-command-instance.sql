@@ -20,7 +20,7 @@ CREATE TABLE iot_command_instance
     status_code      VARCHAR(16)  NOT NULL COMMENT '状态码（枚举 code）：pending|sent|succeeded|failed|timeout|cancelled',
     error_code       VARCHAR(32)  NULL     COMMENT '可区分失败原因码：DEVICE_OFFLINE|NO_SUBSCRIBER|EMQX_ERROR|DEVICE_REJECTED|TIMEOUT',
     error_msg        VARCHAR(500) NULL COMMENT '失败说明（面向人的文案，不含凭据）',
-    timeout_ms       INT          NOT NULL COMMENT '超时（毫秒；取物模型 timeout_ms，缺省用全局默认）',
+    timeout_ms       INT          NOT NULL COMMENT '超时（毫秒；取下发请求的 timeoutMs，缺省用全局默认）',
     retry_count      INT          NOT NULL DEFAULT 0 COMMENT '已重发次数（仅手动重发计数，不做自动重试）',
     emqx_message_id  VARCHAR(64)  NULL     COMMENT 'EMQX publish 返回的消息 ID（溯源用）',
     source           VARCHAR(16)  NOT NULL COMMENT '来源码：console|rule|api',

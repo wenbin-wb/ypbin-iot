@@ -68,8 +68,9 @@ public interface CommandInstanceService {
     /**
      * 受理设备回执（幂等：重复回执不改终态）。
      *
-     * @param req 回执（{@code up/reply} 的载荷）
+     * @param req                 回执（{@code up/reply} 的载荷）
+     * @param authenticatedDevice 主题派生的认证设备 ID（可空 = 直接 HTTP 调用；非空时必须与载荷一致）
      * @return 受理结果
      */
-    CommandReplyResult applyReply(CommandReplyReq req);
+    CommandReplyResult applyReply(CommandReplyReq req, Long authenticatedDevice);
 }

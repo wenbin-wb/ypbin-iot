@@ -14,7 +14,6 @@ import cn.ypbin.admin.iot.enums.CommandKind;
 import cn.ypbin.admin.iot.timeseries.PropertyIdRules;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.core.exception.GlobalErrorCode;
-import java.util.List;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ArrayNode;
@@ -171,13 +170,4 @@ public final class CommandPayloads {
         }
     }
 
-    /**
-     * 可读属性集合是否为空（供调用方判断"全部可读属性"是否有意义）。
-     *
-     * @param readableIdentifiers 可读属性标识
-     * @return 空返回 {@code true}
-     */
-    public static boolean noReadableProperty(List<String> readableIdentifiers) {
-        return readableIdentifiers.isEmpty();
-    }
 }

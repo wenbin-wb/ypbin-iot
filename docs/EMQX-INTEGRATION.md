@@ -327,7 +327,7 @@ bash deploy/emqx/accept-emqx-ingress.sh \
 |---|---|---|
 | 状态机 | 6×6=36 种转换逐个断言（非法被拒）；`failed`/`timeout` 可重发、其余不可 | ✅ `CommandInstanceStatusTest` 4 用例 |
 | 下发成功 | 实例 `pending→sent`；payload/topic 与契约一致；`qos=1`/`retain=false` | ✅ `CommandInstanceServiceImplTest` |
-| 设备未连 | `202` ⇒ **立即** `failed/NO_SUBSCRIBER`（不等超时） | ✅ 单测 + 生产实测（见 §6.2.3） |
+| 设备未连 | `202` ⇒ **立即** `failed/NO_SUBSCRIBER`（不等超时） | 单测 ✅；**生产实测待合并部署后回填**（见 §6.2.3） |
 | 校验不发布 | 未知标识 / 属性不可写 / 未知命令 / 非法 kind / `writeDesired=true` / params 非法 ⇒ 业务错误且 `verify(never()) publish` | ✅ 4 用例 |
 | 重发 | 同 requestId、`retry_count+1`、失败原因被清空（显式 set） | ✅ |
 | 回执 | `code=0→succeeded`（`reply_payload` 原样含 data/ts）；非 0→`failed`（保留 code/message）；重复→`duplicated` 不更新；设备不一致/未知 requestId/设备不存在→丢弃 | ✅ 4 用例 |
@@ -337,16 +337,20 @@ bash deploy/emqx/accept-emqx-ingress.sh \
 
 ### 6.2.3 端到端（模拟设备真收指令并回执）
 
-见 `deploy/emqx/accept-emqx-downlink.sh`（可复跑）：模拟设备用平台签发的凭据订阅
-`ypbin/v1/{t}/{d}/down/#` → 平台下发 → 设备收到并回 `up/reply` → 实例变 `succeeded`；
-另跑一次"设备不在线"（不订阅）⇒ 平台**立即**得到 `failed/NO_SUBSCRIBER`。
+脚本：`deploy/emqx/accept-emqx-downlink.sh`（可复跑）。流程：模拟设备用平台签发的凭据订阅
+`ypbin/v1/{t}/{d}/down/#`（**先等 `SUBSCRIBED` 再下发**，避免订阅未完成即发布的竞态）→ 平台下发 →
+设备收到并回 `up/reply` → 实例变 `succeeded`；另跑"设备不在线"（不订阅）⇒ 平台**立即**得到
+`failed/NO_SUBSCRIBER`（耗时 <5s，而该用例超时设 15s ⇒ 证明不是等超时）；再加"连着但不回执"⇒ 扫描置 `timeout`。
 
-**实测结果（2026-10-02，PASS — 原始输出见 PR #X 回执）**：
-- 在线：下发后实例 `sent`（`emqx_message_id` 非空）→ 设备收到 payload（含同一 `requestId`）→ 回执 `code=0`
-  → 实例 `succeeded`、`reply_payload` 含设备 `data` 与 `ts`、`finished_at` 为平台时间；
-- 重复回执：再次投同一回执 ⇒ `duplicated=true`、实例状态不变、`iot.command.reply.duplicated` +1；
-- 不在线：`202` ⇒ 实例**立刻** `failed/NO_SUBSCRIBER`（日志与指标同时可见），**未**等到 30s 超时；
-- 超时：下发到不存在的订阅者之外的场景（设备连上但不回执）⇒ 扫描在 `timeout_ms` 后置 `timeout`（原因码 TIMEOUT）。
+**状态：未验证（R1）**。段 B 按"先合并再部署"的纪律**尚未部署到生产**，因此本节的四项判据
+**没有**生产实测数据；原始输出会在合并、按 main 部署后**回填到本节**（含 artifact 三元组）。
+在此之前不得把本节读作"已通过"。
+
+脚本判据（每条都刻意避免假绿）：
+① 下发响应必须 `statusCode=sent`，且 `reply_payload` 同时含**设备 ts**与**平台 receivedAt**、`finished_at` 非空；
+② 重复回执在**端点**上必须返回 `duplicated=true`（不依赖全局指标差值）；
+③ 无订阅者时必须 `errorCode=NO_SUBSCRIBER`（只判 `failed` 会把 `EMQX_ERROR` 也放过）且耗时 <5s；
+④ 超时必须 `statusCode=timeout` **且** `errorCode=TIMEOUT`。
 
 ### 6.2.4 回滚（段 B）
 

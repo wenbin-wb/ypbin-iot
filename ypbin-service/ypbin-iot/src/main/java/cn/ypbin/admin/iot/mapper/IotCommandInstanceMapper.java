@@ -22,7 +22,7 @@ import org.apache.ibatis.annotations.Update;
  *
  * <p><b>租户条件</b>：{@link #selectByRequestId} 与 {@link #markTimeout} 都**不手写** {@code tenant_id}
  * （由租户插件按上下文注入）；{@link #selectTimeoutCandidates} 是**跨租户**候选扫描，调用方必须用
- * {@code TenantContext.runIgnore} 包住（与断档扫描同一做法），随后的 {@link #markTimeout} 按**主键**更新
+ * {@code TenantContext.executeIgnore} 包住（与断档扫描同一做法），随后的 {@link #markTimeout} 按**主键**更新
  * ——主键唯一，因此跨租户批量更新不会串租户。</p>
  *
  * <p><b>超时判据用数据库时钟</b>（{@code #{now}} 由服务层传入一次算好的值），逐条用自己的

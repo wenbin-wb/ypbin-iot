@@ -50,9 +50,12 @@ class IotCommandControllerGateTest {
     @Test
     @DisplayName("回执内部端点：无权限码，且不得出现原始响应对象（真状态码例外不得扩散）")
     void internalReplyEndpointMustStayInsideTheConvention() throws Exception {
-        Method reply = InternalCommandReplyController.class.getMethod("reply", CommandReplyReq.class);
+        Method reply = InternalCommandReplyController.class.getMethod("reply", CommandReplyReq.class,
+            Long.class);
         assertThat(reply.getAnnotation(SaCheckPermission.class))
             .as("内部端点没有登录态，标权限码会让规则回流永远 403").isNull();
+        assertThat(reply.getReturnType().getSimpleName())
+            .as("回执端点也必须返回 R 信封（真状态码例外只在 /internal/mqtt/**）").isEqualTo("R");
         for (Method method : InternalCommandReplyController.class.getDeclaredMethods()) {
             for (Class<?> type : method.getParameterTypes()) {
                 assertThat(type.getSimpleName())

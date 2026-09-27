@@ -19,6 +19,7 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -261,6 +262,39 @@ class CommandInstanceServiceImplTest {
     }
 
     @Test
+    @DisplayName("重发又失败：不得抛'非法状态转换'，retry_count+1、error_code 更新为本次失败原因（复核 M2）")
+    void resendThatFailsAgainMustRecordTheNewFailure() {
+        IotCommandInstance row = instance(CommandInstanceStatus.FAILED, 0);
+        when(deviceMapper.selectById(DEVICE)).thenReturn(device());
+        when(instanceMapper.selectByRequestId("cmd-1")).thenReturn(row);
+        when(emqxAdminClient.publish(any(), any(), anyInt(), anyBoolean()))
+            .thenReturn(new EmqxPublishOutcome(EmqxPublishResult.NO_SUBSCRIBER, null));
+        when(instanceMapper.update(isNull(), any())).thenReturn(1);
+
+        CommandInstanceResp resp = service.resend(DEVICE, "cmd-1");
+
+        assertThat(resp.getRetryCount()).as("重发计数必须 +1（回滚会让运维看不到重发过）").isEqualTo(1);
+        assertThat(resp.getStatusCode()).isEqualTo(CommandInstanceStatus.FAILED.getCode());
+        assertThat(resp.getErrorCode()).isEqualTo("NO_SUBSCRIBER");
+        assertThat(resp.getFinishedAt()).isNotNull();
+    }
+
+    @Test
+    @DisplayName("回执 CAS：更新影响 0 行（并发/已终态）⇒ duplicated，且 WHERE 必须限定 pending/sent")
+    void replyCasMustBeGuardedByStatusCode() {
+        stubInstanceLookup(instance(CommandInstanceStatus.SENT, 0));
+        when(instanceMapper.update(isNull(), any())).thenReturn(0);
+
+        CommandReplyResult result = replyFromAuthenticatedTopic(DEVICE, "cmd-1", 0, "ok", null, null);
+
+        assertThat(result.isDuplicated()).as("CAS 落空必须判重复，不能当受理").isTrue();
+        LambdaUpdateWrapper<IotCommandInstance> wrapper = captureUpdate();
+        assertThat(wrapper.getSqlSegment())
+            .as("CAS 的 WHERE 必须限定 status_code IN (pending, sent)（否则终态会被覆盖）")
+            .contains("status_code");
+    }
+
+    @Test
     @DisplayName("只有失败/超时可重发：已成功/待投递/已取消一律业务错误")
     void resendOnlyAllowedFromFailedOrTimeout() {
         for (CommandInstanceStatus status : List.of(CommandInstanceStatus.SUCCEEDED,
@@ -279,8 +313,8 @@ class CommandInstanceServiceImplTest {
         stubInstanceLookup(instance(CommandInstanceStatus.SENT, 0));
         when(instanceMapper.update(isNull(), any())).thenReturn(1);
 
-        CommandReplyResult result = service.applyReply(reply(DEVICE, "cmd-1", 0, "ok",
-            "{\"temp\":26}", 1758768000000L));
+        CommandReplyResult result = replyFromAuthenticatedTopic(DEVICE, "cmd-1", 0, "ok",
+            "{\"temp\":26}", 1758768000000L);
 
         assertThat(result.isAccepted()).isTrue();
         LambdaUpdateWrapper<IotCommandInstance> wrapper = captureUpdate();
@@ -299,7 +333,7 @@ class CommandInstanceServiceImplTest {
         stubInstanceLookup(instance(CommandInstanceStatus.SENT, 0));
         when(instanceMapper.update(isNull(), any())).thenReturn(1);
 
-        service.applyReply(reply(DEVICE, "cmd-1", 7, "阀位超限", null, null));
+        replyFromAuthenticatedTopic(DEVICE, "cmd-1", 7, "阀位超限", null, null);
 
         LambdaUpdateWrapper<IotCommandInstance> wrapper = captureUpdate();
         String params = wrapper.getParamNameValuePairs().toString();
@@ -312,7 +346,7 @@ class CommandInstanceServiceImplTest {
     void duplicateReplyMustNotUpdate() {
         stubInstanceLookup(instance(CommandInstanceStatus.SUCCEEDED, 0));
 
-        CommandReplyResult result = service.applyReply(reply(DEVICE, "cmd-1", 0, "ok", null, null));
+        CommandReplyResult result = replyFromAuthenticatedTopic(DEVICE, "cmd-1", 0, "ok", null, null);
 
         assertThat(result.isDuplicated()).isTrue();
         assertThat(result.isAccepted()).isFalse();
@@ -325,20 +359,41 @@ class CommandInstanceServiceImplTest {
     @DisplayName("回执不信任报文：设备与实例不一致 / 未知 requestId / 设备不存在 ⇒ 丢弃")
     void replyMustBeValidatedAgainstInstance() {
         stubInstanceLookup(instance(CommandInstanceStatus.SENT, 0));
-        assertThat(service.applyReply(reply(OTHER_DEVICE, "cmd-1", 0, "ok", null, null)).isDiscarded())
+        assertThat(replyFromAuthenticatedTopic(OTHER_DEVICE, "cmd-1", 0, "ok", null, null).isDiscarded())
             .as("同租户内 A 设备替 B 设备回执必须丢弃").isTrue();
 
         stubInstanceLookup(null);
-        assertThat(service.applyReply(reply(DEVICE, "cmd-unknown", 0, "ok", null, null)).isDiscarded())
+        assertThat(replyFromAuthenticatedTopic(DEVICE, "cmd-unknown", 0, "ok", null, null).isDiscarded())
             .isTrue();
 
         when(deviceMapper.selectBatchIds(anyList())).thenReturn(List.of());
-        assertThat(service.applyReply(reply(DEVICE, "cmd-1", 0, "ok", null, null)).isDiscarded())
+        assertThat(replyFromAuthenticatedTopic(DEVICE, "cmd-1", 0, "ok", null, null).isDiscarded())
             .isTrue();
 
-        assertThat(service.applyReply(reply(DEVICE, "bad/id", 0, "ok", null, null)).isDiscarded())
+        assertThat(replyFromAuthenticatedTopic(DEVICE, "bad/id", 0, "ok", null, null).isDiscarded())
             .as("requestId 形态非法必须丢弃").isTrue();
         verify(instanceMapper, never()).update(isNull(), any());
+    }
+
+    @Test
+    @DisplayName("回执的认证设备（EMQX 模板头）必须与载荷一致：不一致即丢弃（防替别人回执）")
+    void replyMustMatchAuthenticatedDeviceFromTopic() {
+        stubInstanceLookup(instance(CommandInstanceStatus.SENT, 0));
+
+        // 认证设备来自主题（不可被载荷影响），载荷却声称另一台设备 ⇒ 丢弃
+        CommandReplyResult mismatch = service.applyReply(reply(OTHER_DEVICE, "cmd-1", 0, "ok", null, null),
+            OTHER_DEVICE + 1);
+        assertThat(mismatch.isDiscarded()).isTrue();
+        assertThat(mismatch.getReason()).contains("认证主题");
+
+        // 一致时正常受理
+        when(instanceMapper.update(isNull(), any())).thenReturn(1);
+        assertThat(service.applyReply(reply(DEVICE, "cmd-1", 0, "ok", null, null), DEVICE).isAccepted())
+            .isTrue();
+        // 头缺失（直接 HTTP 自测）时退化为用载荷设备，仍按实例校验 ⇒ 正常受理
+        assertThat(service.applyReply(reply(DEVICE, "cmd-1", 0, "ok", null, null), null).isAccepted())
+            .as("头缺失时退化为用载荷设备（只有 EMQX 动作会带头；直接 HTTP 自测无头）").isTrue();
+        verify(instanceMapper, times(2)).update(isNull(), any());
     }
 
     @Test
@@ -409,6 +464,19 @@ class CommandInstanceServiceImplTest {
     }
 
     /**
+     * 构造设备（租户上下文用）。
+     *
+     * @return 设备
+     */
+    private static IotDevice device() {
+        IotDevice device = new IotDevice();
+        device.setId(DEVICE);
+        device.setTenantId(TENANT);
+        device.setProductId(PRODUCT);
+        return device;
+    }
+
+    /**
      * 桩：实例按 requestId 查得到（{@code null} = 查不到）。
      *
      * @param row 实例
@@ -442,6 +510,33 @@ class CommandInstanceServiceImplTest {
      * 构造回执。
      *
      * @param deviceId  设备
+     * @param requestId 请求 ID
+     * @param code      结果码
+     * @param message   说明
+     * @param data      数据
+     * @param ts        设备时间
+     * @return 回执
+     */
+    /**
+     * 以「主题派生的认证设备 = 载荷设备」应用回执（EMQX 模板头与载荷一致时的正常形态）。
+     *
+     * @param deviceId  设备 ID
+     * @param requestId 请求 ID
+     * @param code      结果码
+     * @param message   说明
+     * @param data      数据
+     * @param ts        设备时间
+     * @return 受理结果
+     */
+    private CommandReplyResult replyFromAuthenticatedTopic(Long deviceId, String requestId, int code,
+                                                          String message, String data, Long ts) {
+        return service.applyReply(reply(deviceId, requestId, code, message, data, ts), deviceId);
+    }
+
+    /**
+     * 便捷重载：直接按字段构造回执（认证设备默认 = 载荷设备，除专门的不一致用例外）。
+     *
+     * @param deviceId  载荷设备
      * @param requestId 请求 ID
      * @param code      结果码
      * @param message   说明

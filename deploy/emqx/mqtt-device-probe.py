@@ -98,6 +98,8 @@ def listen(args, password):
         print("AUTH_REFUSED connack_rc=%s" % outcome.connack_rc)
         return EXIT_AUTH_REFUSED
     client.subscribe(args.topic, qos=args.qos)
+    # 打印订阅已建立：验收脚本据此**先等 SUBSCRIBED 再下发**，否则会在订阅完成前发布（假红）
+    print("SUBSCRIBED topic=%s" % args.topic, flush=True)
     deadline = time.time() + args.wait_seconds
     while time.time() < deadline and "payload" not in received:
         time.sleep(0.05)
