@@ -326,11 +326,17 @@ bash deploy/emqx/accept-emqx-ingress.sh \
 （`tools/check-iot-sql-equivalence.sh` 绿）。
 
 **前端入口状态（2026-10-02，段 C）**：`ypbin-iot-ui` 侧已上线——设备详情抽屉第 5 个页签「在线调试」
-（`views/iot/devices/modules/detail-debug.vue` + `api/iot/command.ts`，PR #26，main `8bcc883`），
+（`views/iot/devices/modules/detail-debug.vue` + `api/iot/command.ts`，PR #26 + 补丁 PR #27/#28，main `a4ddf3b`），
 **只调上面这三个端点**（不新增后端字段/端点）：下发 → 2s 轮询（**不引入 ws/SSE**）看状态与回执；
 历史分页 + 状态筛选 + 展开看下行 payload 与上行回执（设备 `code`/`message`/`data`、设备 `ts`、平台 `receivedAt`）；
 手动重发**同一 `requestId`**（不新生成）；门禁用 `iot:debug:get`（页签）与 `iot:debug:send`（下发/重发按钮）；
 失败态**原样显示后端 `message`** 并保留原始 `code` 可展开，绝不画成空态。
+
+> **两处与菜单 i18n 键相关的现实**（前端已闭合，登记以免后人重踩）：
+> 320022/320023 两个 button 菜单的 `sys_menu.title` **就是 i18n 键** `page.iot.debug.send` / `page.iot.debug.get`
+> ⇒ 前端两份语言包必须同时存在这两个键，否则菜单/角色授权树会显示**原始 key**（补丁 PR #27）。
+> 同类缺口仍有 `page.iot.credential.{get,issue,revoke}`（设备凭据那条线，前端**尚未**补键）——`sys_menu.title`
+> 是 i18n 键这件事只有 `check-iot-i18n-keys.mjs` 扫不到（它只扫代码里的 `$t()` 字面量），故属**已知门禁盲区**。
 
 > **契约限制（前端已如实标注，不作为后端缺陷）**：后端一条指令只接受**一个** `identifier`
 > （`CommandPayloads` 对 `property_get` 只放一个元素；`PropertyIdRules` 白名单不含逗号）⇒ 页面的「多点位」
