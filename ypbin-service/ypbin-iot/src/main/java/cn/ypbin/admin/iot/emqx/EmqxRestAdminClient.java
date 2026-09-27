@@ -112,6 +112,27 @@ public class EmqxRestAdminClient implements EmqxAdminClient {
             .encodeToString((key + ':' + secret).getBytes(StandardCharsets.UTF_8));
         this.httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofMillis(properties.getConnectTimeoutMs()))
+            // 🔴 **必须显式 HTTP/1.1**，不要用 JDK 默认的 HTTP/2（2026-10-03 生产实测，勿删勿改）。
+            //
+            // 症状：`POST /api/v5/publish` 在「带体请求是某条新连接上的第一个请求」时抛
+            //   java.io.IOException: EOF reached while reading（Http2Connection$Http2TubeSubscriber）
+            //   ⇒ 本类把它映射成 UNREACHABLE ⇒ 平台显示「EMQX 管理面不可达」、命令实例 failed/EMQX_ERROR。
+            //   极具误导性：**管理面其实是健康的**、同容器 curl 正常、隧道正常、import_users 同步也正常，
+            //   只有走 h2c 的 JDK 客户端会失败 ⇒ 极易被误判成网络/隧道/暴露面问题。
+            //
+            // 判据（可复跑，见 deploy/emqx/diagnose-emqx-admin-h2c/）：JDK 客户端 HTTP/2 直接 POST
+            //   `/api/v5/publish` = **3/3 EOF**；强制 HTTP/1.1 = **3/3 HTTP 202**；先发一个**无体** GET 把
+            //   h2c 连接建起来再 POST = **3/3 HTTP 202**。即失败点是 **h2c upgrade 握手与"带体请求"的交互**。
+            //
+            // 为什么选"固定 1.1"而不是别的做法：
+            //   · 加重试 ⇒ 只是掩盖（每次新连接的第一次带体请求仍会失败），且把一次用户可见的失败变成
+            //     不可解释的延迟；
+            //   · 先发无体请求"预热"连接 ⇒ 只是碰巧能过（依赖连接存活时间，空闲后照样失败），
+            //     而且在每次发布前多一次往返；
+            //   · 固定 HTTP/1.1 ⇒ 与 **EMQX 自身的 REST 也是 HTTP/1.1 语义**一致，去掉一整类未知，
+            //     且已由上述判据证明 3/3 成功。
+            // EMQX 5.8.9 的 Dashboard/REST 由 Cowboy 提供；同版本下 curl（HTTP/1.1）实测完全正常。
+            .version(HttpClient.Version.HTTP_1_1)
             .build();
     }
 

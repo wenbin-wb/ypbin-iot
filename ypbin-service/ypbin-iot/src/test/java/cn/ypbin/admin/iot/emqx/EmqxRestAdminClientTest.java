@@ -15,10 +15,13 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.net.InetSocketAddress;
+import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -51,6 +54,12 @@ class EmqxRestAdminClientTest {
     private final List<String> requests = new ArrayList<>();
 
     private final List<String> bodies = new ArrayList<>();
+
+    /** 每个请求在**线上**声明的 HTTP 版本（例如 {@code HTTP/1.1}）。 */
+    private final List<String> requestProtocols = new ArrayList<>();
+
+    /** 每个请求的**请求头名**（小写）；用于检出 h2c upgrade 相关头部。 */
+    private final List<List<String>> requestHeaderNames = new ArrayList<>();
 
     private String responseBody = "{\"success\":1,\"failed\":0,\"skipped\":0,\"total\":1}";
 
@@ -160,6 +169,49 @@ class EmqxRestAdminClientTest {
     }
 
     @Test
+    @DisplayName("🔴 客户端必须显式配置为 HTTP/1.1：JDK 默认 HTTP/2 会在 h2c upgrade 上被 EMQX 断开")
+    void httpClientMustBeConfiguredForHttp11() throws Exception {
+        EmqxAdminClient client = new EmqxRestAdminClient(properties, new ObjectMapper());
+
+        Field field = EmqxRestAdminClient.class.getDeclaredField("httpClient");
+        field.setAccessible(true);
+        HttpClient httpClient = (HttpClient) field.get(client);
+
+        // 为什么这条断言值得存在：这是**配置级**的防回归。JDK 的 HttpClient 默认 HTTP/2（h2c），
+        // 而 EMQX/Cowboy 在「带体请求是新连接上第一个请求」时会断开（见类内注释与
+        // deploy/emqx/diagnose-emqx-admin-h2c/）。有人把 .version(...) 删掉时，这条会立刻转红。
+        // 注：这里刻意先取成局部变量再比，不用 `assertThat(httpClient.version()).contains(...)`——
+        //     本仓的 AssertJ 在 `HttpClient.Version`（枚举 ⇒ Comparable）上会解析到 Comparable 重载，
+        //     `.contains(...)` **编译不过**（实测踩过），而 `isEqualTo(...)` 在两个重载上都可用。
+        //     另：`HttpClient#version()` 返回的就是 `Version`（不是 Optional），别多写 orElse。
+        HttpClient.Version configured = httpClient.version();
+        assertThat(configured)
+            .as("必须显式 HTTP_1_1；HTTP_2 会让带体 POST 在新连接上抛 EOF（平台侧显示「管理面不可达」）")
+            .isEqualTo(HttpClient.Version.HTTP_1_1);
+    }
+
+    @Test
+    @DisplayName("🔴 带体 POST 作为**新连接上第一个请求**时不得尝试 h2c upgrade（否则被断开 ⇒ 假「不可达」）")
+    void bodyCarryingPostOnFreshConnectionMustNotAttemptH2cUpgrade() {
+        // 新构造客户端 = 空连接池 ⇒ 这次 publish 就是某条新连接上的**第一个**请求，
+        // 正是生产上失败的那个形态（EMQX_ERROR / 管理面不可达）。
+        EmqxAdminClient client = new EmqxRestAdminClient(properties, new ObjectMapper());
+        responseStatus = 202;
+
+        client.publish("ypbin/v1/1/9300012/down/property/set", "{\"requestId\":\"t\"}", 1, false);
+
+        assertThat(requests).hasSize(1);
+        assertThat(requestProtocols).isNotEmpty();
+        assertThat(requestHeaderNames).isNotEmpty();
+        // 承重判据：只有**请求 HTTP/2（h2c upgrade）**时才会带这两个头。
+        // 注意不能只断言 exchange.getProtocol()：JDK 内建 HttpServer 只会用 1.1 应答，
+        // 即使客户端发起了 upgrade，服务端看到的协议也仍是 HTTP/1.1 ⇒ 那样断言会**恒真**（假绿）。
+        assertThat(requestHeaderNames.get(0))
+            .as("不得出现 h2c upgrade 相关请求头（upgrade / http2-settings）——它们正是被 EMQX 断开的触发点")
+            .doesNotContain("upgrade", "http2-settings");
+    }
+
+    @Test
     @DisplayName("启用管理面却缺凭据：构造即失败（启动期暴露，而不是第一次签发才炸）")
     void missingCredentialFailsFast() {
         properties.setApiKey(" ");
@@ -178,6 +230,10 @@ class EmqxRestAdminClientTest {
         // 用 getRawPath()：认证链 id 里的冒号必须**在线上**是 %3A（路径段编码），getPath() 会把它解码掉
         requests.add(exchange.getRequestMethod() + " " + exchange.getRequestURI().getRawPath());
         importPath = exchange.getRequestURI().getRawPath();
+        requestProtocols.add(exchange.getProtocol());
+        List<String> headerNames = new ArrayList<>();
+        exchange.getRequestHeaders().forEach((name, values) -> headerNames.add(name.toLowerCase(Locale.ROOT)));
+        requestHeaderNames.add(headerNames);
         String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
         bodies.add(body);
         byte[] payload = responseBody.getBytes(StandardCharsets.UTF_8);
