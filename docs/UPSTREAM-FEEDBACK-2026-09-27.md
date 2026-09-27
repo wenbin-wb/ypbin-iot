@@ -410,7 +410,7 @@ curl -s -m 8 -w "\nhttp=%{http_code}\n" http://127.0.0.1:18080/iot/actuator/metr
 #   {"code":401,"data":null,"message":"未提供登录凭证","success":false,"timestamp":"2026-09-27 11:22:22"}
 #   http=200
 # ⑥ 生产实测（只读）：**直连服务端口、完全不带任何认证头**也能拿到指标 ⇒ 服务侧对该端点无任何认证
-curl -s -m 8 -o /tmp/m.json -w "http=%{http_code}\n" http://127.0.0.1:18084/actuator/metrics
+curl -s -m 8 -o /tmp/m.json -w "http=%{http_code}\n" http://127.0.0.1:18084/actuator/metrics; rm -f /tmp/m.json
 #   http=200
 #   {"names":["application.ready.time","application.started.time","disk.free","disk.total",
 #             "executor.active","executor.completed","executor.pool.core",…]}
@@ -479,7 +479,7 @@ sed -n '1275,1299p' deploy/install.sh
 ```bash
 # 上游 main 当前的占位符分布：全部在「配置行」，注释行 0 命中（⇒ 现状是潜在风险）
 grep -rn "^\s*#.*\${" deploy/nacos/                 # ⇒ 无输出
-grep -rn '\${[A-Z_]*}' deploy/nacos/ | wc -l          # ⇒ 5（common:3 / gateway:1 / system:1 / ai:1）
+grep -rn '\${[A-Z_]*}' deploy/nacos/ | wc -l          # ⇒ 6（common:3 / gateway:1 / system:1 / ai:1，跨 4 个文件）
 ```
 **我们 fork 里的真实事故（同一段脚本）**：`ypbin-iot/deploy/nacos/ypbin-iot.yaml:88-90` 在**注释**里写了
 `${IOTDB_PASSWORD}` / `${GATEWAY_SIGN_TOKEN}` ⇒ 全局 sed 会把真实网关签名标记写进 Nacos 活配置的注释里。
@@ -663,6 +663,24 @@ printf '123456' | sha256sum
 本 fork 记录的生产事实：`docs/microservice-deployment.md:69` 明确写着
 「XXL-JOB 控制台仍是镜像默认 `admin/123456`（**未加固**）」。
 
+**「该哈希就是登录时做的校验」已由 xxl-job 官方源码核实**（一手；访问日期 2026-09-27；tag `3.4.2`，
+即本仓 compose 里 `xuxueli/xxl-job-admin:3.4.2` 的版本）：
+```bash
+curl -sS --http1.1 \
+  https://raw.githubusercontent.com/xuxueli/xxl-job/3.4.2/xxl-job-admin/src/main/java/com/xxl/job/admin/framework/controller/LoginController.java \
+  | grep -n "Sha256Tool.sha256"
+#  10:import com.xxl.tool.crypto.Sha256Tool;
+#  67:		String passwordHash = Sha256Tool.sha256(password);
+#  68:		if (!passwordHash.equals(xxlJobUser.getPassword())) {
+curl -sS --http1.1 https://raw.githubusercontent.com/xuxueli/xxl-job/3.4.2/doc/db/tables_xxl_job.sql \
+  | sed -n '184,185p'
+#  INSERT INTO `xxl_job_user`(...)
+#  VALUES (1, 'admin', '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92', 1, NULL);
+```
+⇒ **上游官方仓库自己的 SQL 就是这一行**（本仓 `deploy/sql/005-xxl-job.sql` 系逐字继承），
+且登录用 `Sha256Tool.sha256(password)` 与该列直接比对 ⇒「默认口令 = `123456`」链路完整。
+来源：`xuxueli/xxl-job` tag `3.4.2`（官方仓库，一手），文件路径与行号如上，访问 2026-09-27。
+
 ### 影响
 若 XXL-JOB 控制台可达（本仓 compose 里 `18085:8080`，`INTERNAL_BIND_ADDR` 默认 `0.0.0.0`），
 攻击者用公开默认口令即可登录调度中心 ⇒ 可管理/触发任务（进一步影响业务系统）。
@@ -739,7 +757,8 @@ sed -n '124,135p' ypbin-starter-web/src/main/java/cn/ypbin/starter/web/handler/G
 grep -rn "throw-exception-if-no-handler" . | grep -v '/target/' | grep -v tools/
 # ⇒ docs/MODULES.md:53、…/GlobalExceptionHandler.java:129（其余命中在 tools/ 的元数据 JSON）
 ```
-`WebDefaultsEnvironmentPostProcessor.java:52` 实际只注入 `spring.web.resources.add-mappings=false`，
+`WebDefaultsEnvironmentPostProcessor` 实际注入两项（与 404 陷阱**均无关**）：
+`spring.web.resources.add-mappings=false`（`:52`）与 `spring.threads.virtual.enabled=true`（`:55`）；
 **没有**设置 `throw-exception-if-no-handler-found`。行为在 Spring Boot 4.1.1 下仍成立
 （Framework 默认对无处理器抛 `NoResourceFoundException`），但**断言与配置不符**，会让读者以为该属性可依赖。
 
@@ -802,7 +821,7 @@ grep -rn "throw-exception-if-no-handler" . | grep -v '/target/' | grep -v tools/
 | A3 | UP-2 `bind` 阻塞调用方线程 | iot-starter | `IotLifecycle.java:73`（`BIND_TIMEOUT=10s`）、`:214-224`（`.join()`） | `sed -n '210,224p' …IotLifecycle.java` | **已核实** |
 | A3 | UP-2 生产线程/节奏旁证 | 生产实例 | `docker logs ypbin-access`（线程 `scheduling-1`；每 2 分钟 9 台一轮） | `grep "failed to bind device"` + `grep -oE` 计数 | **已核实**（今日） |
 | A3 | UP-2 `ConnectTimeoutException after 10000 ms` 原始形态 | iot | `docs/STARTER-FEEDBACK.md` §UP-2 证据段（2026-09-26 记录） | —（**当前生产已打补丁，无法再现**） | **已核实（历史记录，不可再现）** |
-| A4 | SF-4 未修 | starter | `IdentityStpLogic.java:63/90-96/109-111` | `sed -n '57,63p;89,96p;104,111p' …` | **已核实** |
+| A4 | SF-4 未修（**仅限 starter 侧这半条**） | starter | `IdentityStpLogic.java:63/90-96/109-111` | `sed -n '57,63p;89,96p;104,111p' …` | **已核实**（starter 侧代码；sa-token「`distUsableToken` 要求 `== null`」半条系引自 `docs/STARTER-FEEDBACK.md` 的既有字节码实证，本轮**未**重做） |
 | A4 | SF-5 未修 | starter | `IdentityHeaderFilter.java:57-94`（无签名校验）；`FeignHeaderInterceptor.java:128-134`（仅 Feign 透传侧、默认 fail-open）；`GatewayProperties.java:223/226` | `grep -n "Signed\|trustedSource" …IdentityHeaderFilter.java` ⇒ 0 | **已核实** |
 | A5 | UP-5 网关只认证不授权 | starter | `GatewayAuthGlobalFilter.java:76-84`（仅 `authenticate`） | `sed -n '76,84p' …` | **已核实** |
 | A5 | UP-5 路由与白名单 | iot | `deploy/nacos/ypbin-gateway.yaml:49-54`（`/iot/**`+StripPrefix）、`:57-82`（白名单无 `actuator`）；`deploy/nacos/ypbin-system.yaml:90-94`（服务侧 `excludes: /actuator/**`） | `grep -n "Path=/iot/\*\*" -A 4 …` | **已核实** |
@@ -810,7 +829,7 @@ grep -rn "throw-exception-if-no-handler" . | grep -v '/target/' | grep -v tools/
 | A5 | UP-5 服务侧直连**零认证** | 生产实例 | `curl http://127.0.0.1:18084/actuator/metrics`（不带任何认证头）⇒ HTTP 200 + `{"names":[…]}` | 同上 ⑥ | **已核实** |
 | A5 | UP-5「非管理员账号**经网关**实测可读」 | — | — | 未使用账号口令 | **未核实** |
 | B6 | UP-6 全局 `sed` | admin | `deploy/install.sh:1286-1298` | `sed -n '1275,1299p' deploy/install.sh` | **已核实** |
-| B6 | UP-6 上游当前无注释占位符（潜在） | admin | `deploy/nacos/`（5 处占位符全在配置行） | `grep -rn "^\s*#.*\${" deploy/nacos/` ⇒ 无输出 | **已核实** |
+| B6 | UP-6 上游当前无注释占位符（潜在） | admin | `deploy/nacos/`（**6 处**占位符，跨 4 个文件，全在配置行） | `grep -rn "^\s*#.*\${" deploy/nacos/` ⇒ 无输出；`grep -rn '\${[A-Z_]*}' deploy/nacos/ \| wc -l` ⇒ **6** | **已核实** |
 | B6 | UP-6 本 fork 的真实事故 | iot | `deploy/nacos/ypbin-iot.yaml:88-90`；物证 `docs/DEPLOY-BACKEND.md:233-240` | `grep -rn "^\s*#.*\${" deploy/nacos/` ⇒ 3 命中 | **已核实** |
 | B7 | UP-7 `NACOS_DIR` 写死 | admin | `deploy/install.sh:1278`（+`:913/963` 克隆名、`:1280` 无 else） | `grep -n "NACOS_DIR=" deploy/install.sh` | **已核实** |
 | B7 | UP-7 生产路径判定 | 生产实例 | 两种 ROOT 下 fork 的两份模板均 `NO` | `for R in …; do [ -f … ]` | **已核实** |
@@ -822,13 +841,16 @@ grep -rn "throw-exception-if-no-handler" . | grep -v '/target/' | grep -v tools/
 | B10 | UP-10 处理器源码 | starter | `GlobalExceptionHandler.java:131-135`；`GatewayExceptionHandler.java:91/98`；`R.java:36` | `sed -n '124,135p' …` | **已核实** |
 | B10 | UP-10 文档断言与代码不一致 | starter | `docs/MODULES.md:53`、`GlobalExceptionHandler.java:129` vs `WebDefaultsEnvironmentPostProcessor.java:52` | `grep -rn "throw-exception-if-no-handler" .` | **已核实** |
 
-**明确未核实项（不掩盖）**：
-1. **UP-5 的单次越权读实证**：只证到「鉴权层无权限码、登录是唯一门槛」，未用非管理员账号实测读取指标（未使用账号口令）。
+**未核实项（不掩盖）**：
+1. **UP-5「经网关」的非管理员越权读实证**：已证「网关仅认证、无权限码」+「服务侧 `18084` 直连**零认证**」，
+   但**未**用非管理员账号**经网关**实测读取指标（未使用任何账号口令）。
 2. **UP-2 的原始 `ConnectTimeoutException after 10000 ms` 生产日志**：为本仓 2026-09-26 的记录，
    当前生产已把 endpoint 改为快速失败，**无法再现**；今日仅取得「`scheduling-1` 线程 + 每轮 9 台」的旁证。
-3. **UP-9 中 XXL-JOB 镜像对该哈希的校验算法**：哈希值与 `sha256("123456")` **逐字相等**已复算，
-   但「镜像确实以 SHA-256 校验该列」未从镜像字节码层核实（本仓文档与 xxl-job 镜像默认口令的既有事实一致，
-   仅作线索强度）；**不影响**「默认口令为 `123456`」这一结论。
+3. **（原第 3 条已补证、不再是未核实项）UP-9 的「镜像校验算法」**：`xuxueli/xxl-job` tag `3.4.2` 的
+   `LoginController.java:67-68` 用 `Sha256Tool.sha256(password)` 与 `xxl_job_user.password` 列直接比对，
+   官方 `doc/db/tables_xxl_job.sql:184-185` 就是本仓继承的同一行 ⇒ 链路完整（一手来源与访问日期见 UP-9 正文）。
+   > 说明：本条原标「未核实」是**偏保守**的写法（只差官方源码这一步）；经独立复核者指出后已补齐证据并升级为**已核实**。
+   > 保留此记录是为了让「标注如何被订正」本身可追溯。
 
 ---
 
