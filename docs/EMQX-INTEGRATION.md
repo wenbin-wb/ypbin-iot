@@ -144,6 +144,12 @@ WHERE 是**纵深防御**：ACL 已挡住越权发布（实测 §6 ⑤），这�
 不改默认策略。规则由我们自己的 systemd 单元幂等维护（`iptables -C` 命中则不重复插），
 回滚时随 `ExecStop` 删除。
 
+> ⚠️ **别把这条规则与 `EMQX-DEPLOY.md` §3.1 的结论搞混**（两者方向不同，结论也不同）：
+> 本节的 18084 是「**容器 → 宿主**」方向、属于**真的 INPUT 路径**，所以 INPUT 放行**有效且必需**；
+> 而 §3.1 讲的是「**外部 → Docker 发布端口**」（如 1883），那条路径在 `nat/PREROUTING` 就被 DNAT、
+> 由 `filter/FORWARD -j DOCKER` 放行，**根本不经过 INPUT** ⇒ 在那里写 INPUT/ufw 规则**无效**。
+> 一句话：**"INPUT 规则有用没用"取决于流量走 INPUT 还是 FORWARD，不能一概而论。**
+
 ### 3.3 幂等与顺序（两个实测坑）
 
 1. **先删规则，再删动作**：EMQX **拒绝删除仍被规则引用的桥接**（实测 `DELETE /bridges/webhook:…`
