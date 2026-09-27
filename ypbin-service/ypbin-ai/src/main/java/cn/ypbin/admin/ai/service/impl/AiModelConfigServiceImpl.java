@@ -48,6 +48,50 @@ public class AiModelConfigServiceImpl implements AiModelConfigService {
     /** 向量化模型 */
     public static final String MODEL_TYPE_EMBEDDING = "EMBEDDING";
 
+    /** 连接超时（秒）——**显式**取值，禁止无超时的默认客户端（仓内铁律）。 */
+    static final int CONNECT_TIMEOUT_SECONDS = 5;
+    /** 读超时（秒）——同上，显式取值。 */
+    static final int READ_TIMEOUT_SECONDS = 15;
+
+    /**
+     * 共享的 HTTP 客户端（**进程内单例，必须复用**）。
+     *
+     * <p><b>为什么是静态单例而不是每次调用 {@code HttpClient.newBuilder()} 新建</b>：
+     * JDK 的 {@code HttpClient} 自带连接池与 selector 线程；每次新建等于**丢掉连接池**，
+     * 还会让超时/协议策略散落到各调用点（历史上 {@code testConnection} 就是每次新建）。
+     * 抽到一处后，"超时是多少、用哪个协议版本"只有一个答案。</p>
+     *
+     * <p><b>为什么显式指定 HTTP/1.1</b>：JDK 的默认是 HTTP/2（明文下走 h2c upgrade）。
+     * **已实测的失败只发生在"服务端接受 h2c upgrade 随后断开"的那类服务端上**：2026-09-27 用同款 JDK 客户端
+     * 对 EMQX/Cowboy（{@code /api/v5/publish}）实测，<b>带体 POST 作为某条新连接上的第一个请求</b>会抛
+     * {@code java.io.IOException: EOF reached while reading}，强制 HTTP/1.1 则正常
+     * （判据可复跑，见 {@code deploy/emqx/diagnose-emqx-admin-h2c/}）。</p>
+     *
+     * <p>⚠️ <b>不要读成"明文 {@code http://} 必踩坑"</b>：若服务端不对这个 upgrade 做 h2c 切换，JDK 会
+     * **优雅回落 HTTP/1.1 并成功**（独立复核用朴素 JDK {@code HttpServer} 实测即如此）。
+     * ⇒ 本隐患**取决于服务端如何处理"带体 h2c upgrade"，对其它明文服务端未实测**。
+     * 本类的连通性测试恰好是"新连接 + 带体 POST"，且 {@code baseUrl} **允许用户填明文 {@code http://}**
+     * （本机模型/内网网关常见）⇒ 只要对端属于"接受 upgrade 再断"那一类就会踩到；固定 1.1 可一次消掉这一类。</p>
+     *
+     * <p>关于 HTTPS：实测只到「默认客户端可用且**回落** HTTP/1.1」（自签 {@code HttpsServer} 下
+     * status=200、proto=HTTP/1.1）；**h2-over-TLS 未实测**，也**未查到** JDK 21 文档里关于客户端 ALPN
+     * 协商细节的一手说明（独立复核在 {@code HttpClient}/{@code Builder} 文档 grep "ALPN" = 0 命中）
+     * ⇒ 此处**不做**"HTTPS 一样正确"的断言。统一固定 HTTP/1.1 的目的是**少一类未知**，对 OpenAI 兼容接口足够。</p>
+     */
+    private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
+        .connectTimeout(Duration.ofSeconds(CONNECT_TIMEOUT_SECONDS))
+        .version(HttpClient.Version.HTTP_1_1)
+        .build();
+
+    /**
+     * 取共享客户端（包级可见，仅为让测试能断言"同一个实例 + 协议版本/超时已显式设置"，不做真实网络调用）。
+     *
+     * @return 进程内共享的 {@link HttpClient}
+     */
+    static HttpClient httpClient() {
+        return HTTP_CLIENT;
+    }
+
     private final AiModelConfigMapper modelConfigMapper;
     private final AiKeyCipher keyCipher;
 
@@ -177,14 +221,12 @@ public class AiModelConfigServiceImpl implements AiModelConfigService {
         String apiKey = keyCipher.decrypt(config.getApiKey());
         long start = System.currentTimeMillis();
         try {
-            HttpClient client = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(5))
-                .build();
+            HttpClient client = httpClient();
             String payload = """
                 {"model":"%s","messages":[{"role":"user","content":"ping"}],"max_tokens":5}
                 """.formatted(config.getModelName());
             HttpRequest.Builder builder = HttpRequest.newBuilder()
-                .timeout(Duration.ofSeconds(15))
+                .timeout(Duration.ofSeconds(READ_TIMEOUT_SECONDS))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8));
             if (apiKey != null && !apiKey.isBlank()) {
