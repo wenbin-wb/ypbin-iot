@@ -380,60 +380,70 @@ TCP 文本帧按 `KEY=VALUE` 解析、键由点位映射 `raw_address` 声明，
 
 #### 6.3.1 修后验收证据（2026-09-27，生产）
 
-**部署**（只重建两个容器，服务器未跑 `mvn`）：
+> **两轮部署**：第一轮 `01:45Z`（合并候选的**代码主体** `caa7107`），第二轮 `02:16Z`（**只重建 access**，
+> 纳入 CodeQL 整改 `2015daf` + 测试整改 `13891e1`，即最终合并内容）。**以第二轮为准**，第一轮证据保留作对照。
+
+**部署**（只重建容器，服务器未跑 `mvn`）：
 
 | 项 | 证据 |
 |---|---|
-| 构建机 jar md5 | access `7d276c6bed66e712d29763e153ba7fb4`；iot `7be779309c7aafd195f2e8bf5cdd71a9` |
+| 构建机 jar md5（第 1 轮） | access `7d276c6bed66e712d29763e153ba7fb4`；iot `7be779309c7aafd195f2e8bf5cdd71a9` |
+| 构建机 jar md5（**第 2 轮 = 合并候选**） | access **`bb8b3ee2a75862cf850894973a49e7bd`**（对应 `13891e1`）；iot 未重建，仍 `7be779309c7aafd195f2e8bf5cdd71a9` |
 | 容器内 jar md5 | `docker exec ypbin-access md5sum /app/app.jar` / `ypbin-iot …` **与上逐字一致** |
-| 只重建这两个 | access `StartedAt=2026-09-27T01:45:03Z`、iot `01:45:38Z`；其余容器仍是 `Up 4 hours`/`Up 6 hours` |
+| 只重建这两个 | 第 1 轮：access `StartedAt=2026-09-27T01:45:03Z`、iot `01:45:38Z`；第 2 轮：access `02:16:10Z`（iot 保持 `01:45:38Z`）；其余容器全程仍是 `Up 5 hours`/`Up 7 hours` |
 | 演示点位修正 | `iot_point_mapping.id=9500011` 的 `raw_address`：`holding:0` → **`TEMP`**（**回读确认**，脚本见 `deploy/sql/fixes/2026-09-27-iot-demo-tcp-frame-key.sql`） |
 
 **过渡窗口（新 access + 旧 iot）**：旧 iot 不下发 `data_type` ⇒ 新 access 按设计**丢弃并计数**（不是乱写）：
 `09:45:35.487–09:46:03.491`（本地 CST）共 **15 条** `reason=unknown-data-type` WARN（15 条全是同一原因）；
 iot 重启后**归零**（近 5 分钟 0 条，最后一次 WARN 停在 `09:46:03`）。
+第二轮（access 单独重启、iot 已是新版）**重启后解码失败 0 条**、订阅成功。
 > 修正记录（R6 复核点名）：本行初版写 `09:45:55` 起，复核者实测**首条是 `09:45:35.487`**——8 秒窗口放不下 15 条 2s 节拍的记录；
 > 已按 `docker logs | grep 读数解码失败 | head -1` 的真值更正（计数 15 本就正确）。
 
-**① `iot.reading` 该设备新行**（`SELECT time, property_id, value_double, value_text, quality`）：
+**① `iot.reading` 该设备新行**（`SELECT time, property_id, value_double, value_text, quality`，第 2 轮部署后）：
 
 ```
-2026-09-27T01:52:35.689Z | temperature | 23.5 | null | GOOD
-2026-09-27T01:52:33.689Z | temperature | 23.5 | null | GOOD
-2026-09-27T01:52:31.688Z | temperature | 23.5 | null | GOOD
-2026-09-27T01:52:29.688Z | temperature | 23.5 | null | GOOD
-2026-09-27T01:52:27.688Z | temperature | 23.5 | null | GOOD
+2026-09-27T02:18:06.934Z | temperature | 23.5 | null | GOOD
+2026-09-27T02:18:04.934Z | temperature | 23.5 | null | GOOD
+…（第 1 轮同样形态：01:52:27.688Z ~ 01:52:35.689Z 五行均 23.5 / null / GOOD）
 ```
 
+列分布（第 2 轮部署后）：`temperature` `total=1239 / count(value_double)=1239 / count(value_text)=0`（随时间按 2s 节拍增长）。
 文本点对照（`serialNo`，种子行）：`value_double=null`、`value_text='SN-DEMO-0001'` ⇒ **文本仍落文本列**。
 全表 `value_text LIKE '[B@%'` 计数 = **0**（不再有任何 `[B@…` 垃圾）。
+`/latest`：`temperature` = `23.5`（时刻为当天最新），其余点位仍是种子值。
 
-**② `/series` 取到数值点**（`X-User-Id/ X-Tenant-Id` 头，iot 直连 18084）：
+**② `/series` 取到数值点**（`X-User-Id/ X-Tenant-Id` 头，iot 直连 18084；**第 2 轮部署后**）：
 
-- 近 1 小时、`limit=5000`：`R.code=200`、**total 192 / numeric 192**，前 3 点
-  `{'ts':1790473587605,'value':'23.5','quality':'GOOD'}`、`…589605`、`…591605`；
-- **UI 默认窗口**（近 24 小时、`limit=1000`）：`total 193 / numeric 193` ⇒ 前端 `numericCount>0`，**曲线可画**；
+- 近 1 小时、`limit=5000`：`R.code=200`、**total 1042 / numeric 1042**（复核者同时点实测 1047 点，全为 `"23.5"`），
+  前 3 点 `{'ts':1790473587605,'value':'23.5','quality':'GOOD'}`、`…589605`、`…591605`；
+- **UI 默认窗口**（近 24 小时、`limit=1000`）：`total 933 / numeric 933`（复核者复测已顶到 limit：`1000/1000`、非数值 0）
+  ⇒ 前端 `numericCount>0`，**曲线可画**；
+- 第 1 轮部署时同口径为 192/192 与 193/193（快照），形态一致；
 - `/latest`：`temperature` 为 `23.5`（时刻为当天最新），其余点位仍是种子值（TCP 只交付订阅地址列表第 0 个点位，见 §3.1）。
 
 **③ 指标无异常增长**（`iot` 侧经 actuator；间隔 60s 两次采样）：
 
-| 指标 | T0 → T1 | 判读 |
-|---|---|---|
-| `iot.timeseries.write.attempted` / `.rows` | 213 → 243（+30/60s） | 与模拟器 2s 节拍一致（=0.5/s） |
-| `iot.timeseries.write.failed` | 0 → 0 | 无失败 |
-| `iot.ingest.latest.failed` / `iot.ingest.propertyid.orphan` | 0 → 0 | 入站无异常 |
-| `iot.access.decode.failure{reason=unknown-data-type}` | 累计 15（全是过渡窗口），近 5 分钟 **0** | 不增长 |
+| 指标 | T0 → T1（第 1 轮） | 第 2 轮抽查 | 判读 |
+|---|---|---|---|
+| `iot.timeseries.write.attempted` / `.rows` | 213 → 243（+30/60s） | `rows=933`（与 `/series` 24h 点位数一致） | 与模拟器 2s 节拍一致（=0.5/s） |
+| `iot.timeseries.write.failed` | 0 → 0 | **0** | 无失败 |
+| `iot.ingest.latest.failed` / `iot.ingest.propertyid.orphan` | 0 → 0 | **0 / 0** | 入站无异常 |
+| `iot.access.decode.failure{reason=unknown-data-type}` | 累计 15（全是过渡窗口），近 5 分钟 **0** | 第 2 轮重启后 **0 条** | 不增长 |
+| access 日志 ERROR | — | 近 10 分钟 36 条，**全部**是 `failed to bind device`（11 台不可达演示设备，§6.2 既有噪声）；解码相关 **0**、`读数上报失败` **0** | 无新增异常 |
 
 > ⚠️ **发现（非本次引入）**：`ypbin-access` 的 actuator **只暴露 `health`**（未配
 > `management.endpoints.web.exposure.include`），所以 `iot.access.*` 全部指标在生产**取不到 HTTP 读数**
 > ——本轮解码计数只能靠 WARN 日志与单测证明。是否给 access 开 `metrics` 端点属**对外暴露面变更**，
 > 本轮**未改**（端口当前仅 `127.0.0.1` 可达，见 `ss -ltnp`），登记为待决项。
 >
-> ⚠️ **两条 R6 复核登记的边界（已修文档，未改行为）**：
+> ⚠️ **R6 复核登记的三条边界（已修文档，未改行为）**：
 > ① 兜底闸门只在默认出口 `HttpAccessReadingSink` 上，3a 的日志占位出口 `LoggingAccessReadingSink`
 >    **没有**同类闸门（它只打 INFO 日志、不落库，故无数据完整性影响）；
-> ② MQTT `payload-format=binary` 的 `byte[]` 会被该闸门**丢弃**（不再是落 `[B@…` 文本行）——
->    属有意的行为变更，已在 `docs/VALUE-DECODE-DESIGN.md` §3/§4.2 登记（当前生产 access 无 mqtt 模块，影响为 0）。
+> ② **凡交付 `byte[]` 的路径**都会被该闸门**丢弃并计数**（不再是落 `[B@…` 文本行）——已识别三条：
+>    TCP 全帧（本层解码）、MQTT `payload-format=binary`、OPC UA `ByteString` 节点（后者为**源码推断**，无模块/设备未实机验证）；
+>    属有意的行为变更，已在 `docs/VALUE-DECODE-DESIGN.md` §3/§4.2 登记（当前生产 access 无 mqtt/opcua 模块，影响为 0）；
+> ③ access 未暴露 metrics 端点（见上）。
 
 **④ 历史垃圾行清理（本次一并做，含理由与回滚物）**：
 
@@ -452,6 +462,21 @@ iot 重启后**归零**（近 5 分钟 0 条，最后一次 WARN 停在 `09:46:0
 （该文件当时只在本地仓），`docker exec -i … < 路径` 读空输入仍 `exit 0`，脚本照常打印 "sql applied"；
 **靠回读 `iot_point_mapping` 才发现 `raw_address` 仍是 `holding:0`**。第二次改为经 ssh stdin 投递并回读确认。
 ⇒ 与母仓教训三十三同型：**「脚本说成功」不算落地，产物必须独立回读**。
+
+**⑥ 回滚物清单（本次改动，一行一件）**：
+
+| 对象 | 回滚物 |
+|---|---|
+| access 镜像/产物（第 2 轮，合并候选） | 旧镜像 tag `ypbin/ypbin-access:rollback-decode2-20260927-021548`；旧 jar `/root/ypbin-access-jar-rollback-decode2-20260927-021548.jar`（= 第 1 轮的 `7d276c6b…`） |
+| access 镜像/产物（第 1 轮） | 更旧的 tag `ypbin/ypbin-access:rollback-decode-20260927-014340`；jar `/root/ypbin-access-jar-rollback-decode-20260927-014340.jar`（= 修复前） |
+| iot 镜像/产物 | tag `ypbin/ypbin-iot:rollback-decode-20260927-014340`；jar `/root/ypbin-iot-jar-rollback-decode-20260927-014340.jar`（= 修复前） |
+| 点位映射数据 | `deploy/sql/rollback/2026-09-27-iot-demo-tcp-frame-key-rollback.sql`（仓内）+ `/opt/ypbin/rollback-demo-tcp-frame-key.sql`（0600）+ 变更前快照 `/opt/ypbin/rollback-demo-tcp-frame-key-tsv-20260927-014340.txt` |
+| IoTDB 历史垃圾行 | `/root/garbage-backup.tsv`（24127 行时间戳）+ `/root/garbage-deletes-executed.sql`（md5 `6939787d877067ef12c646e129b8d8b4`） |
+| 重启动作本身 | `docker compose -f docker-compose.yml -f docker-compose.override.yml up -d --no-deps ypbin-access`（回滚 = 把上面任一份旧 jar `install` 回 `ypbin-service/ypbin-access/target/` 后同命令重建） |
+
+> ⚠️ 回滚「解码层」时注意：只回滚 jar 而不回滚 `raw_address`，会回到「帧里的键是 `TEMP`、映射却声明 `holding:0`」
+> ⇒ 未映射地址（`PointMappingDataListener` 的 unmapped 计数）；只回滚 `raw_address` 而不回滚 jar，
+> 会回到「有值但无语义（`[B@…`）」的旧行为。两者要一起回。
 
 ### 6.4 对演示数据的影响（**必须知悉**）
 真实链路已**改动**演示数据，`docs/DEMO-DATA.md` 中 9300012（`demo-dev-curve`）的以下原定口径**已不再成立**：
