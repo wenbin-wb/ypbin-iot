@@ -383,12 +383,18 @@ HTTP=200
 > 这由 `no_subscribers` 在 92 个采样点上前后期持平（6342 → 6342）直接证明。
 > 即：**该历史值不是本次压测的产物**，本阶段的压测本身零丢弃。
 
-> ✅ **清理的机器可核实证据**：脚本 `cleanup()` 现在会逐条打印删除结果（stderr），实测为
+> ✅ **清理的机器可核实证据**：脚本 `cleanup()` 现在会逐条打印删除结果，实测为
 > `认证用户 9001.9001 已清理（HTTP 204）` / `认证用户 svc-load 已清理（HTTP 204）` /
-> `ACL 规则 svc-load 已清理（HTTP 204）` / `授权缓存 已清理（HTTP 204）`；
-> 跑完后实测 `GET /api/v5/authentication/.../users` → `count=0`、`rules/users` → 恰
+> `ACL 规则 svc-load 已清理（HTTP 204）` / `授权缓存 已清理（HTTP 204）`。
+> **成功行走 stdout、失败行走 stderr**（失败必须显眼）；它们**不会**进 `summary.txt`（没 `tee -a`），
+> 所以看 summary 看不到这四条——要看 stderr 或直接查 REST。
+> 跑完后实测：`GET /api/v5/authentication/.../users` → `count=0`、`rules/users` → 恰
 > `svc-ingress` + `svc-egress`、全机 `*.inspect.json` = **0**、无遗留压测容器。
-> （该四条打印在 stderr 而非 summary.txt，故 summary 里看不到——这是刻意的：删除失败要显眼。）
+>
+> ⚠️ **精度口径**：`summary.txt` 里的峰值百分比是脚本 `printf '%.0f'` **取整**后的值（13% / 14%），
+> 而本文档 §7.1/§7.2 写的是从 `samples.csv` **逐点重算**的两位小数（13.30% / 14.14%）——
+> 两者同源不矛盾；引用时请注明取自哪一份。同理 §7.2 的「≈239MiB/≈257MiB 稳态」是**稳态**读数，
+> 与紧邻的**峰值**百分比（对应 ≈272/290MiB）不是同一个统计量。
 
 ### 7.2 关键观测数据
 

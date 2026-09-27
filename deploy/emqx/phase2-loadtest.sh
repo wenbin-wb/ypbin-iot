@@ -81,6 +81,9 @@ set -a; . "$ENV_FILE"; set +a
 : "${EMQX_API_KEY:?}"; : "${EMQX_API_SECRET:?}"
 
 # ── 凭据不进 argv：curl 从**私有 700 目录里的 600 配置文件**读（argv 里只有文件路径）──
+# 远程调用必须显式超时（仓内铁律）
+CURL_MAXTIME=10
+CURL_CONNECT_TIMEOUT=3
 PRIV="$(mktemp -d)"; chmod 700 "$PRIV"
 printf 'user = "%s:%s"\n' "$EMQX_API_KEY" "$EMQX_API_SECRET" >"$PRIV/curlrc"; chmod 600 "$PRIV/curlrc"
 
@@ -100,7 +103,8 @@ mkdir -p "$BENCH_OUT"; chmod 700 "$BENCH_OUT"
 
 api() {  # 回显 HTTP 状态码（调用方可判定失败；**不再一律丢弃**）
   local method="$1" path="$2" data="${3:-}"
-  local args=(-s -K "$PRIV/curlrc" -o /dev/null -w '%{http_code}' -X "$method"
+  local args=(-s --max-time "$CURL_MAXTIME" --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+              -K "$PRIV/curlrc" -o /dev/null -w '%{http_code}' -X "$method"
               -H 'Content-Type: application/json')
   if [ -n "$data" ]; then
     # 用 `--data-binary @file`：body 走**私有 600 文件**，不出现在 argv（口令/用户名不进 /proc）
@@ -111,7 +115,8 @@ api() {  # 回显 HTTP 状态码（调用方可判定失败；**不再一律丢�
 }
 # 一次取回本轮需要的全部 EMQX 指标（避免逐指标多次 curl 拖慢采样周期）
 m_snapshot() {
-  curl -s -K "$PRIV/curlrc" "$BASE_URL/api/v5/metrics?aggregate=true" \
+  curl -s --max-time "$CURL_MAXTIME" --connect-timeout "$CURL_CONNECT_TIMEOUT" -K "$PRIV/curlrc" \
+    "$BASE_URL/api/v5/metrics?aggregate=true" \
     | python3 -c '
 import json,sys
 d=json.load(sys.stdin)

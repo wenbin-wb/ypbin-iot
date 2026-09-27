@@ -40,6 +40,9 @@ set -a; . "$ENV_FILE"; set +a
 # ── 凭据不进 argv ────────────────────────────────────────────────────────────
 # `curl -u "$KEY:$SECRET"` 会把密钥写进进程命令行（/proc/<pid>/cmdline 本机任何用户可读）。
 # 改用**私有 700 目录里的 600 配置文件** + `curl -K`（argv 里只有文件路径）。
+# 远程调用必须显式超时（仓内铁律）
+CURL_MAXTIME=10
+CURL_CONNECT_TIMEOUT=3
 PRIV="$(mktemp -d)"; chmod 700 "$PRIV"
 curlrc() { printf 'user = "%s:%s"\n' "$EMQX_API_KEY" "$EMQX_API_SECRET" >"$PRIV/curlrc"; chmod 600 "$PRIV/curlrc"; }
 curlrc
@@ -55,7 +58,8 @@ info() { printf '  ·  %s\n' "$1"; }
 api() {
   local method="$1" path="$2" data="${3:-}"
   local body="$PRIV/body"
-  local args=(-s -K "$PRIV/curlrc" -o "$body" -w '%{http_code}' -X "$method"
+  local args=(-s --max-time "$CURL_MAXTIME" --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+              -K "$PRIV/curlrc" -o "$body" -w '%{http_code}' -X "$method"
               -H 'Content-Type: application/json')
   if [ -n "$data" ]; then
     # 本脚本的 body 只是 ACL 规则（不含凭据），但仍统一走**私有 600 文件** +

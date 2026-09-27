@@ -19,7 +19,7 @@
 | `gen-env.sh` | 中间件机 | 就地生成 `.env`（600）与 API Key 预置文件（400，属主给容器 uid）——**值不回显，只打印长度与指纹** |
 | `emqx-init.sh` | 中间件机 | 配置红线**断言** + ACL 规则**幂等 upsert** + 调自检（失败即 exit 1） |
 | `emqx-selfcheck.sh` | 中间件机 | 阶段① 验收自检（19 项，含匿名/越权/放行正负用例，用 EMQX 指标前后差值判定） |
-| `emqx-tunnel.service` | 生产机 | `autossh` 隧道单元（`Restart=always`、开机自启、主机密钥 pin、算法 pin、只转发 18093） |
+| `emqx-tunnel.service` | 生产机 | `autossh` 隧道单元（`Restart=always`、开机自启、主机密钥 pin、算法 pin；以 `-N` 只做转发、**转发目标**由中间件机侧 `permitopen` 钉死在 `127.0.0.1:18093`。⚠️ 注意「目标钉死」≠「只能转发」——反向转发未被禁止，见 `docs/EMQX-DEPLOY.md` §6.1 的 R8 残留风险） |
 | `emqx-tunnel-install.sh` | 生产机 | 幂等安装器：生成**专用受限**密钥、pin 主机密钥、装单元与告警 timer |
 | `emqx-tunnel-watch.sh` | 生产机 | 「隧道停摆」判据（四级，**只告警不自愈**；不使用任何凭据） |
 | `emqx-tunnel-watch.service` / `.timer` | 生产机 | 每 2 分钟触发一次判据；失败即单元 `failed` + journald 明确告警 |

@@ -19,10 +19,13 @@
 #   S11 服务账号（username 无点）subscribe 通配 `ypbin/v1/+/+/up/#` 必须放行
 #       —— 同时验证 `client_attrs_init` 的 `nth` 越界不会让服务账号路径失效（设计 U6/U19）
 #
-# 凭据纪律：临时测试账号的口令**不落盘、不回显**；所有带口令的 HTTP body 用
-#           `--data-binary @<私有 600 文件>` 传（**不进 argv**），脚本退出时 trap 删除
-#           全部临时账号与临时 ACL 规则。⚠️ 不要写成"只在进程内存"——建号与登录的 JSON
-#           若用 `-d '<json>'` 会出现在 /proc/<pid>/cmdline（本机非 root 用户可读）。
+# 凭据纪律（**措辞要紧贴事实，别再说成"不落盘"**）：
+#   · 口令**不会**出现在任何进程 argv（所有带口令的 HTTP body 走 `--data-binary @<私有文件>`）；
+#   · 但口令**会短暂落在磁盘上**——`$PRIV`（mktemp -d 的 700 目录）里的 600 `data.json`/`login-ok.json`
+#     与 `curlrc`（内含真实 API Key+Secret）；正常路径下 `cleanup()` 在退出时**连同账号一起删除**；
+#   · `--keep-probe-users` 是**排查开关**：它保留临时账号与规则（因此口令仍然有效），此时
+#     `cleanup()` 会**明确告警**并要求人工清理，但 **`$PRIV` 仍然会被删掉**（不留 API Key）。
+#   · ⚠️ 不要写成"只在进程内存/不落盘"——前者是错的（body 会写文件），后者也不准确。
 #
 # 退出码：0 = 全部 PASS；1 = 有 FAIL
 # 用法：bash emqx-selfcheck.sh [--env-file /opt/emqx/.env] [--base-url http://127.0.0.1:18093]
@@ -68,6 +71,9 @@ set -a; . "$ENV_FILE"; set +a
 # ── 凭据不进 argv、中间文件不落世界可读目录 ──────────────────────────────────
 # · `curl -u` 会把密钥写进 /proc/<pid>/cmdline ⇒ 改用 700 目录里的 600 `-K` 配置文件；
 # · Dashboard 登录响应含 JWT，**不能**放 /tmp（默认 umask 644）⇒ 一律落在 $PRIV（700）。
+# 远程调用必须显式超时（仓内铁律）：REST 调用全部带这两个上限，避免 cleanup 里挂死
+CURL_MAXTIME=10
+CURL_CONNECT_TIMEOUT=3
 PRIV="$(mktemp -d)"; chmod 700 "$PRIV"
 printf 'user = "%s:%s"\n' "$EMQX_API_KEY" "$EMQX_API_SECRET" >"$PRIV/curlrc"; chmod 600 "$PRIV/curlrc"
 
@@ -81,7 +87,8 @@ note() { printf '     · %s\n' "$1"; }
 api() { # api <method> <path> [json] → API_CODE / API_BODY
   local method="$1" path="$2" data="${3:-}"
   local body="$PRIV/api-body"
-  local args=(-s -K "$PRIV/curlrc" -o "$body" -w '%{http_code}' -X "$method"
+  local args=(-s --max-time "$CURL_MAXTIME" --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+              -K "$PRIV/curlrc" -o "$body" -w '%{http_code}' -X "$method"
               -H 'Content-Type: application/json')
   if [ -n "$data" ]; then
     # 用 `--data-binary @file`：body（可能含口令）走私有 600 文件，**不进 argv**
@@ -94,11 +101,13 @@ api() { # api <method> <path> [json] → API_CODE / API_BODY
 
 # metrics <key> → 数值（读不到输出 -1）
 metrics() {
-  curl -s -K "$PRIV/curlrc" "$BASE_URL/api/v5/metrics?aggregate=true" \
+  curl -s --max-time "$CURL_MAXTIME" --connect-timeout "$CURL_CONNECT_TIMEOUT" -K "$PRIV/curlrc" \
+    "$BASE_URL/api/v5/metrics?aggregate=true" \
     | python3 -c "import json,sys;print(json.load(sys.stdin).get('$1',-1))" 2>/dev/null || echo -1
 }
 metric_snapshot() {
-  curl -s -K "$PRIV/curlrc" "$BASE_URL/api/v5/metrics?aggregate=true" \
+  curl -s --max-time "$CURL_MAXTIME" --connect-timeout "$CURL_CONNECT_TIMEOUT" -K "$PRIV/curlrc" \
+    "$BASE_URL/api/v5/metrics?aggregate=true" \
     | python3 -c '
 import json,sys
 d=json.load(sys.stdin)
@@ -111,15 +120,35 @@ for k in ["packets.connack.auth_error","packets.publish.auth_error","packets.sub
 
 CLEANED=0
 cleanup() {
-  [ "$CLEANED" -eq 1 ] && return
+  [ "$CLEANED" -eq 1 ] && return   # EXIT 与 INT/TERM 都会触发；幂等重入保护
   CLEANED=1
-  [ "$KEEP" -eq 1 ] && { echo "（--keep-probe-users：保留临时账号与规则以便排查）"; return; }
-  for u in "$DEV_A" "$DEV_B" "$SVC_PROBE"; do
-    api DELETE "/api/v5/authentication/$AUTH_ID/users/$u" >/dev/null 2>&1
-  done
-  api DELETE "/api/v5/authorization/sources/built_in_database/rules/users/$SVC_PROBE" >/dev/null 2>&1
-  api DELETE /api/v5/authorization/cache >/dev/null 2>&1
+
+  # ⚠️ 两条铁律（都被独立复核抓过，别再犯）：
+  #   ① `api` 依赖 `$PRIV/curlrc` ⇒ **必须先把删除做完，最后才删 $PRIV**；
+  #   ② 删除**必须可见**（`>/dev/null 2>&1` 会让"清理失败"变成静默，等于账号残留没人知道）。
+  del_or_warn() { # del_or_warn <说明> <path>
+    # ⚠️ 本脚本的 `api` **不向 stdout 回显状态码**，它把码写进全局 `API_CODE`
+    #    ⇒ 不能用 `rc=$(api ...)`（那样 rc 恒为空，会打印**假的"清理失败"**并掩盖真实结果）。
+    #    （`phase2-loadtest.sh` 的 `api` 是会回显的，两脚本此处**刻意不同**，别照抄。）
+    api DELETE "$2"
+    case "$API_CODE" in
+      204|404) printf '  %-24s 已清理（HTTP %s）\n' "$1" "$API_CODE" ;;
+      *)       printf '  ⚠️ %-21s 清理失败（HTTP %s）—— 临时对象可能残留，请手工检查\n' "$1" "$API_CODE" >&2 ;;
+    esac
+  }
+  if [ "$KEEP" -eq 1 ]; then
+    echo "⚠️ --keep-probe-users：**保留**临时账号（$DEV_A / $DEV_B / $SVC_PROBE）与临时 ACL 规则供排查；" >&2
+    echo "   这些账号的口令在删除前**仍然有效**，请务必手工清理：查 /api/v5/authentication 与 rules/users。" >&2
+  else
+    del_or_warn "认证用户 $DEV_A"    "/api/v5/authentication/$AUTH_ID/users/$DEV_A"
+    del_or_warn "认证用户 $DEV_B"    "/api/v5/authentication/$AUTH_ID/users/$DEV_B"
+    del_or_warn "认证用户 $SVC_PROBE" "/api/v5/authentication/$AUTH_ID/users/$SVC_PROBE"
+    del_or_warn "ACL 规则 $SVC_PROBE" "/api/v5/authorization/sources/built_in_database/rules/users/$SVC_PROBE"
+    del_or_warn "授权缓存"            "/api/v5/authorization/cache"
+  fi
+  # 无条件删除私有目录（里面有 600 的 curlrc = 真实 API Key）——**在删除之后**
   rm -rf "$PRIV"
+  unset -f del_or_warn
 }
 trap cleanup EXIT
 trap 'cleanup; exit 130' INT TERM
@@ -144,14 +173,14 @@ for p in "$MQTT_PORT" 18093; do
 done
 
 echo "=== S3/S4 Health 与 REST 鉴权 ==="
-code="$(curl -s -o "$PRIV/health" -w '%{http_code}' "$BASE_URL/status")"
+code="$(curl -s --max-time "$CURL_MAXTIME" --connect-timeout "$CURL_CONNECT_TIMEOUT" -o "$PRIV/health" -w '%{http_code}' "$BASE_URL/status")"
 body="$(cat "$PRIV/health")"; rm -f "$PRIV/health"
 if [ "$code" = 200 ] && printf '%s' "$body" | grep -q "is started"; then
   pass "GET /status = 200 且含 'is started'"
 else
   fail "GET /status = $code（正文=$body）"
 fi
-code="$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/api/v5/status")"
+code="$(curl -s --max-time "$CURL_MAXTIME" --connect-timeout "$CURL_CONNECT_TIMEOUT" -o /dev/null -w '%{http_code}' "$BASE_URL/api/v5/status")"
 [ "$code" = 200 ] && pass "GET /api/v5/status（免鉴权）= 200" || fail "GET /api/v5/status = $code"
 api GET /api/v5/authorization/settings
 [ "$API_CODE" = 200 ] && pass "GET /authorization/settings（API Key 鉴权）= 200" \
@@ -159,14 +188,14 @@ api GET /api/v5/authorization/settings
 
 echo "=== S5 Dashboard 口令（H2）==="
 printf '%s' '{"username":"admin","password":"public"}' >"$PRIV/login-bad.json"; chmod 600 "$PRIV/login-bad.json"
-code="$(curl -s -o "$PRIV/login-bad" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+code="$(curl -s --max-time "$CURL_MAXTIME" --connect-timeout "$CURL_CONNECT_TIMEOUT" -o "$PRIV/login-bad" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
   --data-binary "@$PRIV/login-bad.json" "$BASE_URL/api/v5/login")"
 [ "$code" = 401 ] && pass "旧默认口令 admin/public 被拒（HTTP 401）" \
                   || fail "旧默认口令 admin/public **未被拒**（HTTP $code）⇒ 口令没改到位"
 rm -f "$PRIV/login-bad"
 printf '{"username":"admin","password":"%s"}' "$EMQX_DASHBOARD_PASSWORD" >"$PRIV/login-ok.json"
 chmod 600 "$PRIV/login-ok.json"
-code="$(curl -s -o "$PRIV/login-ok" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+code="$(curl -s --max-time "$CURL_MAXTIME" --connect-timeout "$CURL_CONNECT_TIMEOUT" -o "$PRIV/login-ok" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
   --data-binary "@$PRIV/login-ok.json" "$BASE_URL/api/v5/login")"
 if [ "$code" = 200 ]; then
   TOKLEN="$(LOGIN_JSON="$PRIV/login-ok" python3 -c 'import json,os;print(len(json.load(open(os.environ["LOGIN_JSON"])).get("token","")))' 2>/dev/null)"
