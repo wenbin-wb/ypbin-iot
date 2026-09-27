@@ -40,6 +40,15 @@ public class AccessPointMappingDto {
     /** 地址类型：holding | input | coil | discrete | nodeid | topic。 */
     private String addressType;
 
+    /**
+     * 物模型属性数据类型（{@code iot_property.data_type} 的 code，如 {@code int}/{@code decimal}/
+     * {@code string}/{@code bool}）。
+     *
+     * <p>采集侧解码**必须**按它决定规范值形态（数值 ⇒ 数值、布尔 ⇒ true/false、文本 ⇒ 原样）：
+     * 单靠帧内容猜类型会把 {@code serialNo} 这类编号写进数值列（或反之），属静默改语义。</p>
+     */
+    private String dataType;
+
     /** 采集周期（毫秒；空表示用设备级默认）。 */
     private Integer intervalMs;
 

@@ -9,6 +9,8 @@
  */
 package cn.ypbin.admin.access.config;
 
+import cn.ypbin.admin.access.decode.TextFrameValueDecoder;
+import cn.ypbin.admin.access.decode.ValueDecoder;
 import cn.ypbin.admin.access.egress.AccessReadingSink;
 import cn.ypbin.admin.access.egress.LoggingDataSink;
 import cn.ypbin.admin.access.lease.AccessLeaseManager;
@@ -27,6 +29,7 @@ import cn.ypbin.iot.spring.autoconfigure.IotLifecycle;
 import tools.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Clock;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Supplier;
@@ -126,6 +129,8 @@ public class AccessIotProtocolConfiguration {
      * @param lifecycleProvider 协议栈生命周期（由 iot-starter 装配）
      * @param objectMapper      点位清单反序列化
      * @param readingSink       映射后读数出口
+     * @param valueDecoders     原始值解码器（Spring 收集全部 {@link ValueDecoder} bean；空的协议码按原样透传）
+     * @param meterRegistry     指标
      * @return 订阅规划器
      */
     @Bean
@@ -133,14 +138,30 @@ public class AccessIotProtocolConfiguration {
     public SubscriptionPlanner accessSubscriptionPlanner(ObjectProvider<IotLifecycle> lifecycleProvider,
                                                         ObjectMapper objectMapper,
                                                         AccessReadingSink readingSink,
+                                                        List<ValueDecoder> valueDecoders,
                                                         MeterRegistry meterRegistry) {
         Supplier<Map<String, DeviceSession>> sessions = () -> {
             IotLifecycle lifecycle = lifecycleProvider.getIfAvailable();
             return lifecycle == null ? Map.of() : lifecycle.sessions();
         };
         // Clock 给系统时钟：订阅失败退避的时间基准，单测里注入可推进的假时钟
-        return new AccessSubscriptionPlanner(sessions, objectMapper, readingSink, meterRegistry,
-            Clock.systemUTC());
+        return new AccessSubscriptionPlanner(sessions, objectMapper, readingSink, valueDecoders,
+            meterRegistry, Clock.systemUTC());
+    }
+
+    /**
+     * TCP 透传文本帧解码器（过渡实现，见 {@code docs/STARTER-FEEDBACK.md} SF-6）。
+     *
+     * <p>用 {@code @Bean + @ConditionalOnMissingBean} 而不是给实现类标 {@code @Component}：前者才真的可替换
+     * （宿主自定义同类型 bean 时优雅退让），后者会在宿主再定义时抛 {@code NoUniqueBeanDefinitionException}
+     * ——这是母仓教训三十一，源码门禁 {@code IotSeamConventionTest} 也守着。</p>
+     *
+     * @return 解码器
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public ValueDecoder tcpTextFrameValueDecoder() {
+        return new TextFrameValueDecoder();
     }
 
     /**

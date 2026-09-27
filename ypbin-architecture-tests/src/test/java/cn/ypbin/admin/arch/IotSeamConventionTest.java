@@ -36,8 +36,13 @@ class IotSeamConventionTest {
 
     private static final Path REPO_ROOT = Path.of("..").toAbsolutePath().normalize();
 
-    /** 已知的可替换端口（新增端口时同步扩展本清单，并保留「至少扫到一个」的自检）。 */
-    private static final List<String> REPLACEABLE_PORTS = List.of("TenantLinkManager");
+    /**
+     * 已知的可替换端口（新增端口时同步扩展本清单，并保留「至少扫到一个」的自检）。
+     *
+     * <p>2026-09-27 增补 {@code ValueDecoder}（读数解码钩子，见 `docs/VALUE-DECODE-DESIGN.md`）：
+     * 它是 R6 复核点名的遗漏——当时文档声称「该接缝由本门禁守着」，但清单里没有它 ⇒ 主张大于事实。</p>
+     */
+    private static final List<String> REPLACEABLE_PORTS = List.of("TenantLinkManager", "ValueDecoder");
 
     @Test
     @DisplayName("可替换端口的实现不得标 @Component（否则 @ConditionalOnMissingBean 会被静默顶掉）")

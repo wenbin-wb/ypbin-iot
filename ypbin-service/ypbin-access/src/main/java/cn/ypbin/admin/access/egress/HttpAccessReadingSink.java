@@ -39,7 +39,8 @@ import org.springframework.scheduling.annotation.Scheduled;
  *       丢一批会让缺口被算长一些，但绝不能因此把服务拖垮）——`iot.access.egress.failed` 就是它的账。</li>
  * </ol>
  *
- * <p>只用「质量 + 时刻」上报（不含读数**值**）：值的存储属数据面（IoTDB/Redis，依赖 Q8）。</p>
+ * <p>上报「设备/点位/值/质量/时刻/周期」（Q8/D0.7 起含读数**值**，值为字符串化后的规范值——
+ * 数值形态由上游解码层保证，见 {@code docs/VALUE-DECODE-DESIGN.md}）。</p>
  *
  * @author wenbin
  * @since 2026-09-22
@@ -152,7 +153,8 @@ public class HttpAccessReadingSink implements AccessReadingSink {
     }
 
     /**
-     * 读数 → 上报观察；不可用（设备号非数字、缺时刻/质量）时计数并返回 {@code null}。
+     * 读数 → 上报观察；不可用（设备号非数字、缺时刻/质量、**值仍是未解码的原始字节**）时计数并返回
+     * {@code null}。
      *
      * @param reading 读数
      * @return 观察；不可用返回 {@code null}
@@ -162,6 +164,16 @@ public class HttpAccessReadingSink implements AccessReadingSink {
             || reading.quality().isBlank()) {
             invalidCounter.increment();
             log.warn("[access] 读数缺少时刻/质量，已丢弃：device={}", reading == null ? null : reading.deviceId());
+            return null;
+        }
+        if (reading.value() instanceof byte[]) {
+            // 兜底闸门（2026-09-27）：`String.valueOf(byte[])` 会得到 `[B@<hash>` 这种无值语义的文本，
+            // 写进库后曲线只能落文本列（画不出来）。解码应由解码层完成；这里再拦一道，保证
+            // 「垃圾形态绝不入库」不依赖单条路径的自觉。
+            invalidCounter.increment();
+            log.warn("[access] 读数值仍是未解码的原始字节，已丢弃（应由解码层处理；见 iot.access.decode.* 指标）："
+                    + "device={} property={} 载荷长度={}",
+                reading.deviceId(), reading.propertyId(), ((byte[]) reading.value()).length);
             return null;
         }
         Long deviceId = parseDeviceId(reading.deviceId());

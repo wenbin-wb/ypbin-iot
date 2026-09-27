@@ -26,6 +26,7 @@ import cn.ypbin.admin.iot.availability.ReadingIngestReq;
 import cn.ypbin.admin.iot.availability.ReadingObservationDto;
 import cn.ypbin.starter.core.model.R;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -144,6 +145,18 @@ class HttpAccessReadingSinkTest {
 
         assertThat(meterRegistry.get("iot.access.egress.invalid").counter().count()).isEqualTo(3.0d);
         assertThat(sink.pendingCount()).isZero();
+    }
+
+    @Test
+    @DisplayName("★ 值仍是未解码的原始字节：计数并丢弃（绝不让 [B@<hash> 这种无值语义的文本入库）")
+    void rawByteValueMustBeDroppedNotStringified() {
+        HttpAccessReadingSink sink = sink();
+
+        sink.accept(new AccessReading(DEVICE, "temperature",
+            "TEMP=23.5".getBytes(StandardCharsets.UTF_8), "GOOD", TS, 5_000));
+
+        assertThat(sink.pendingCount()).as("原始字节能落库的唯一形态是 [B@…，属垃圾 ⇒ 丢弃").isZero();
+        assertThat(meterRegistry.get("iot.access.egress.invalid").counter().count()).isEqualTo(1.0d);
     }
 
     @Test

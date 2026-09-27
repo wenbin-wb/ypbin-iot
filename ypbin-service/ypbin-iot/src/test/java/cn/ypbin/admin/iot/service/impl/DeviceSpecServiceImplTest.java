@@ -135,6 +135,8 @@ class DeviceSpecServiceImplTest {
         assertThat(spec.getPoints().get(0).getAddress()).isEqualTo("holding:1");
         assertThat(spec.getPoints().get(0).getPropertyId()).isEqualTo("900");
         assertThat(spec.getPoints().get(0).getRw()).isEqualTo("RW");
+        assertThat(spec.getPoints().get(0).getDataType())
+            .as("数据类型必须随点位下发（采集侧解码据此产出数值/布尔/文本）").isEqualTo("decimal");
     }
 
     @Test
@@ -176,10 +178,28 @@ class DeviceSpecServiceImplTest {
         return mapping;
     }
 
+    @Test
+    @DisplayName("★ 物模型数据类型随点位一起下发：采集侧解码靠它决定规范值形态（不许靠帧内容猜类型）")
+    void dataTypeMustBeDeliveredWithPoints() {
+        when(deviceMapper.selectList(any())).thenReturn(List.of(device(100L)));
+        when(mappingMapper.selectList(any())).thenReturn(List.of(mapping(100L, 900L, "TEMP", 1000)));
+        when(propertyMapper.selectBatchIds(any())).thenReturn(List.of(property(900L, "temperature", "decimal")));
+
+        AccessDeviceSpecResp spec = service.listByTenant(TENANT).getFirst();
+
+        assertThat(spec.getPoints()).singleElement()
+            .satisfies(point -> assertThat(point.getDataType()).isEqualTo("decimal"));
+    }
+
     private static IotProperty property(Long id, String identifier) {
+        return property(id, identifier, "decimal");
+    }
+
+    private static IotProperty property(Long id, String identifier, String dataType) {
         IotProperty property = new IotProperty();
         property.setId(id);
         property.setIdentifier(identifier);
+        property.setDataType(dataType);
         return property;
     }
 }
