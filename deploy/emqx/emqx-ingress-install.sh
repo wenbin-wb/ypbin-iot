@@ -68,14 +68,14 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
 fi
 
 echo "=== 1) 分发单元文件 ==="
+# 用 `ssh 'cat > 目标' < 本地文件` 而不是 scp：scp 的目标必须带 `host:`，
+# 而本脚本的 ssh 参数（`--mw-ssh "root@host -p 61260 -i …"`）里 host 与选项混在一起，
+# 想拆出 host 只能靠字符串解析（易错）。走 stdin 既不解析参数，也不把内容落进 argv。
 for f in emqx-ingress-firewall.service emqx-ingress-relay.socket emqx-ingress-relay.service; do
-  # shellcheck disable=SC2086
-  scp -q -o BatchMode=yes -o StrictHostKeyChecking=accept-new $MW_SSH "$DIR/$f" ":/etc/systemd/system/$f" \
+  mwr "umask 022; cat > /etc/systemd/system/$f" < "$DIR/$f" \
     && ok "→ 中间件机 $f" || bad "拷贝 $f 到中间件机失败"
 done
-# shellcheck disable=SC2086
-scp -q -o BatchMode=yes -o StrictHostKeyChecking=accept-new $PROD_SSH "$DIR/emqx-ingress-tunnel.service" \
-  ":/etc/systemd/system/emqx-ingress-tunnel.service" \
+prodr "umask 022; cat > /etc/systemd/system/emqx-ingress-tunnel.service" < "$DIR/emqx-ingress-tunnel.service" \
   && ok "→ 生产机 emqx-ingress-tunnel.service" || bad "拷贝隧道单元到生产机失败"
 
 echo "=== 2) 启用（中间件机：先防火墙放行，再听端口）==="
