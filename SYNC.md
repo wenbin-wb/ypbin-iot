@@ -26,7 +26,7 @@ mvn -B -ntp -fae clean verify               # 同步后必须重跑门禁
 IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，改动要尽量是「加法一行」。
 **本清单与 `.github/workflows/sync-whitelist.yml` 里的白名单必须保持一致**（改了这里就改那里）。
 
-> **白名单膨胀要记账**：目前 9 个文件。每增加一个都是「以后同步时的潜在冲突点」；
+> **白名单膨胀要记账**：目前 **10** 个文件。每增加一个都是「以后同步时的潜在冲突点」；
 > 加之前先问：能不能用新文件/新模块实现？只能改既有文件时才加，并在提交信息里写明理由。
 
 | 文件 | 改动 | 说明 |
@@ -39,6 +39,7 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 | `deploy/nacos/ypbin-gateway.yaml` | routes 加 `iot` 一段（`Path=/iot/**` + `StripPrefix=1`） | 网关路由（IoT 路由也进仓，便于与其它服务同构） |
 | `deploy/.env.example` | 端口段注释加 18084 | 环境变量示例（纯注释） |
 | `ypbin-architecture-tests/src/test/java/cn/ypbin/admin/arch/SourceConventionTest.java` | `LOOP_DB_EXEMPTIONS` **加一条误报豁免**（类名#接收者.方法 + 理由） | **唯一的上游测试类例外**，理由见下方专条 |
+| `ypbin-service/ypbin-ai/src/main/java/cn/ypbin/admin/ai/service/impl/AiModelConfigServiceImpl.java` | `testConnection` 的 HTTP 客户端改为**复用单个实例 + 显式 `HTTP/1.1` + 具名超时常量** | **2026-09-27 加**：修 admin 既有代码里的**缺陷**——该方法**每次调用新建 `HttpClient`**（丢掉连接池、超时策略散落）且**未指定协议版本**（JDK 默认 HTTP/2）。而它的调用形态恰是「新连接 + 带体 POST」，`baseUrl` 又允许明文 `http://` ⇒ 会踩已在 `ypbin-iot` 实测到的 h2c 坑（带体 POST 作为新连接首个请求 ⇒ `EOF reached while reading`）。**为什么不能用新文件**：问题就在这一行上，改的必须是这个既有方法。⚠️ **更好的长期做法是改上游 admin 仓**（本仓下次同步自然继承、分歧面回到 9）——本轮受「改动落在 ypbin-iot」的范围约束才走白名单。 |
 | `docs/microservice-deployment.md` | 「初始口令」一句话更正 | **2026-09-26 加**：该句原写「Nacos 控制台默认 `nacos/nacos`」，而本仓已改为随机口令 + 开 auth（`NACOS-AUTH.md`）。留着一句**已不成立**的口令说明会误导运维，故只能改既有文件（无法用新文件表达「原句作废」） |
 | `deploy/sql/006-iot-schema.sql`、`007-iot-data.sql` | **新文件** | 全新安装用 |
 | `deploy/sql/migration/*-iot-*.sql` | **新文件**（命名必须含 `-iot-`） | 已上线库用；按文件名排序拼接后与 `006+007` **语句等价**（有 CI 校验）。顺序即结构演进顺序：`device-schema` → `lease-schema` → `menu-data` |
