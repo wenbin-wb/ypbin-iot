@@ -307,3 +307,72 @@ SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (3205, 3206);
 -- 租户可授菜单补授：**只含 platform_only=0 的 3205**（3206 是平台级，绝不进租户模板）
 INSERT INTO sys_template_menu (template_id, menu_id)
 SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (3205);
+
+-- =============================================================
+-- 设备凭据生命周期（G10 / 设计 P0-A-3，2026-09-27 追加）
+-- 覆盖：iot_device 三列凭据元信息 + iot_device_credential（秘密侧）+ 三个权限码与授权。
+--
+-- 为什么秘密单独一张表（**与设计 §5.3 的一处有意差异**，见 docs/DEVICE-CREDENTIAL.md）：
+--   设计假设「哈希只存在 EMQX 内置库」⇒ 平台侧不存任何秘密。但本环境**未部署 EMQX**
+--   （资源决策见 EMQX-INGRESS-DESIGN.md 末节），照设计实现会得到「库里只有引用、没有任何可校验的东西」
+--   ⇒ 「吊销后设备不得再认证成功」**没有任何可执行的判据**。因此平台侧自持哈希
+--   （sha256 + salt 后缀，与 EMQX 内置库同口径，将来可直接 import 进 EMQX），
+--   而把秘密放进**从不参与设备查询**的独立表：iot_device 的读路径（分页/详情/接入规格下发）
+--   结构上拿不到秘密列。
+--
+-- iot_device_credential 是**租户表**：不要加进 ypbin.tenant.ignore-tables（fail-on-missing-tenant: true）。
+-- 每设备一行（唯一键 tenant_id+device_id）：轮换=原地更新版本与秘密；吊销=清空秘密列
+--   （空哈希不可能匹配任何口令）⇒ 本表不需要删除语义，也不依赖逻辑删除。
+--
+-- 等价性：本段（菜单 + DDL 两截）与 migration/2026-09-30-iot-credential-{menu,schema}.sql 按文件名排序拼接后语句等价
+--   （跑 tools/check-iot-sql-equivalence.sh）。⚠️ **顺序不能改**：等价性脚本按文件名排序拼接迁移，
+--   `-menu` 排在 `-schema` 之前 ⇒ 007 的追加顺序也必须是「先菜单、后 DDL」。
+--   另一条约束：真库 IT 的建表助手 ItSchema 只加载 006 + 本功能的 `-schema` 迁移（006 不含本功能的结构），
+--   因此 **DDL 必须独立成一个 `-schema.sql` 文件**，不能与菜单混在同一个迁移里。
+-- 回滚：deploy/sql/rollback/2026-09-30-iot-device-credential-rollback.sql。
+-- ⚠️ 排序约束：本段在 007 末尾，迁移文件名必须排在 `2026-09-29-iot-menu-onboarding-ledger.sql` 之后。
+-- =============================================================
+
+-- 权限码与菜单（设计 P0-8 的凭据三项；id 段沿用设计附录 A：320019/320020/320021，
+-- 挂在 3200「设备台账」下；platform_only=0 ⇒ 按 IotMaintenanceAdminGateTest 口径
+-- 必须同时进 sys_role_menu 与 sys_template_menu）
+INSERT INTO sys_menu (id, pid, name, type, platform_only, auth_code, title, sort, create_time, status, is_deleted)
+VALUES (320019, 3200, 'IotCredentialGet', 'button', 0, 'iot:credential:get', 'page.iot.credential.get', 19, NOW(), 1, 0);
+
+INSERT INTO sys_menu (id, pid, name, type, platform_only, auth_code, title, sort, create_time, status, is_deleted)
+VALUES (320020, 3200, 'IotCredentialIssue', 'button', 0, 'iot:credential:issue', 'page.iot.credential.issue', 20, NOW(), 1, 0);
+
+INSERT INTO sys_menu (id, pid, name, type, platform_only, auth_code, title, sort, create_time, status, is_deleted)
+VALUES (320021, 3200, 'IotCredentialRevoke', 'button', 0, 'iot:credential:revoke', 'page.iot.credential.revoke', 21, NOW(), 1, 0);
+
+-- 显式授权给平台管理员角色（role 1）与租户可授菜单（sys_template_menu）
+INSERT INTO sys_role_menu (role_id, menu_id)
+SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (320019, 320020, 320021);
+
+INSERT INTO sys_template_menu (template_id, menu_id)
+SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (320019, 320020, 320021);
+
+ALTER TABLE iot_device
+    ADD COLUMN credential_version    INT      NULL COMMENT '凭据版本号（每次签发/轮换 +1；null=从未签发）',
+    ADD COLUMN credential_issued_at  DATETIME NULL COMMENT '当前凭据签发时刻（null=从未签发）',
+    ADD COLUMN credential_revoked_at DATETIME NULL COMMENT '凭据吊销时刻（null=未吊销）';
+
+CREATE TABLE iot_device_credential
+(
+    id                 BIGINT       NOT NULL COMMENT '主键',
+    tenant_id          BIGINT       NOT NULL COMMENT '租户 ID',
+    device_id          BIGINT       NOT NULL COMMENT '设备 ID（iot_device.id）',
+    credential_version INT          NOT NULL COMMENT '本行凭据对应的版本号（与 iot_device.credential_version 一致）',
+    username           VARCHAR(64)  NOT NULL COMMENT 'MQTT 用户名（{tenantId}.{deviceId}）',
+    password_algo      VARCHAR(32)  NOT NULL COMMENT '口令哈希算法（含盐位置）：sha256-suffix',
+    password_salt      VARCHAR(64)  NOT NULL COMMENT '盐（hex）；吊销后为空串',
+    password_hash      VARCHAR(128) NOT NULL COMMENT '口令哈希（hex）= sha256(password + salt)；吊销后为空串',
+    create_user        BIGINT       NULL COMMENT '创建人',
+    create_time        DATETIME     NULL COMMENT '创建时间',
+    update_user        BIGINT       NULL COMMENT '更新人',
+    update_time        DATETIME     NULL COMMENT '更新时间',
+    status             TINYINT      NOT NULL DEFAULT 1 COMMENT '状态：1 启用 0 停用',
+    is_deleted         TINYINT      NOT NULL DEFAULT 0 COMMENT '逻辑删除',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_iot_device_credential_device (tenant_id, device_id)
+) COMMENT 'IoT 设备凭据秘密侧（只存哈希；明文只在签发响应出现一次）';

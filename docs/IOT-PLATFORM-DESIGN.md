@@ -769,7 +769,7 @@ UI/OpenAPI → business(core.device)
 | 域 | 端点（前缀） | 说明 |
 |---|---|---|
 | 产品/物模型 | `/iot/products` `/iot/products/{id}/tsl` | CRUD + TSL 导入导出 + 版本发布 |
-| 设备 | `/iot/devices` | 台账 CRUD + 绑定产品 + 凭据管理 |
+| 设备 | `/iot/devices` | 台账 CRUD + 绑定产品 + 凭据管理（`POST/GET/DELETE /iot/devices/{id}/credential`、`GET /iot/devices/{id}/connection`，见 `docs/DEVICE-CREDENTIAL.md`） |
 | 点位映射 | `/iot/devices/{id}/points` | 点位映射 CRUD |
 | 影子 | `/iot/devices/{id}/shadow` | 影子读写 |
 | 命令 | `/iot/devices/{id}/commands/{commandId}` | 命令下发（§6.1） |
@@ -777,6 +777,7 @@ UI/OpenAPI → business(core.device)
 | 规则/告警 | `/iot/rules` `/iot/alarms` | 规则 CRUD / 告警列表与处理 |
 | 开放 API | `/openapi/**` | API Key 认证 |
 | 内部 | `/internal/lease/**` | 租约（已落地，仅 access） |
+| 内部 | `/internal/device-credential/verify` | 设备凭据校验（已落地，2026-09-27；供排障与将来 EMQX HTTP 认证源使用，见 `docs/DEVICE-CREDENTIAL.md`） |
 | 内部（入站适配） | `/internal/mqtt/**` | EMQX 上行入站适配端点（`POST /internal/mqtt/readings`）—— **唯一允许返回真 HTTP 状态码的内部端点**，见下方专条 |
 | 通用 | 统一 HTTP 200 + `R.code`；集合永不 null；分页 `PageResult`；时间 `yyyy-MM-dd HH:mm:ss`（GMT+8）；Long 转字符串 | 母仓铁律 |
 
