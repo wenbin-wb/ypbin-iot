@@ -34,7 +34,10 @@ BAK_DIR = "/opt/ypbin"
 
 APPLY = "--apply" in sys.argv
 
-# 与仓库 deploy/nacos/ypbin-access.yaml 的 management 段**逐字一致**（改一处就要改两处）。
+# 本 BLOCK 是 2026-09-27 **首次发布到 live 的那一版**（含当时的注释）。
+# ⚠️ 仓库模板 `deploy/nacos/ypbin-access.yaml` 之后又加了一行 `management.health.redis.enabled: false`
+#   （access 不用 Redis 但那项健康项会挂死聚合 health，见 deploy/PROD-OPS-NOTES.md 陷阱 5）
+#   ⇒ 两者只在「新增那一段 + 注释」上有差异；**新环境请以仓库模板为准**，本脚本只用于补首次那段。
 BLOCK = """
 # ---------- 可观测（Spring Boot Actuator，2026-09-27 新增，对齐 ypbin-iot.yaml）----------
 # 为什么要有这一段：access 已经带了大量指标（iot.access.egress.* / iot.access.lease.* /

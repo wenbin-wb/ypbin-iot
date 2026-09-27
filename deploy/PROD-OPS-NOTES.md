@@ -175,9 +175,37 @@ systemctl reboot
    不是放宽安全策略。
 3. **更彻底（需与 starter 侧一起定）**：确认 access 确实不需要 Redis 后，把 Redis 自动装配从 access 排除
    （`spring.autoconfigure.exclude`）或从依赖里去掉 `spring-data-redis`；**不要**在没确认前删依赖。
-4. **闭环验证（下一步，两次配置改动 + 两次重启足够）**：加 `health.redis.enabled=false` 后
-   `/actuator/health` 应立刻返回 200 ⇒ 证明聚合挂起**唯一**由 redis 引起（当前证据是「其余组件全快 +
-   redis 无限阻塞」的强相关，**尚未做该闭环**）。
+4. **闭环验证（2026-09-27 已完成，见下）**：加 `health.redis.enabled=false` 后 `/actuator/health`
+   **确实**转 200 ⇒ 因果闭环成立。
+
+**✅ 闭环证据（2026-09-27 06:01–06:04 窗口，两次配置 + 两次重启）**
+
+```
+# ① 临时打开组件访问 + 新增 health.redis.enabled=false → 重启
+聚合 /actuator/health : {"components":{"discoveryComposite":{...},"diskSpace":{...},
+   "livenessState":{"status":"UP"},"ping":{"status":"UP"},"readinessState":{"status":"UP"},
+   "refreshScope":{"status":"UP"},"ssl":{...}},"groups":["liveness","readiness"],"status":"UP"}
+   HTTP=200 t=0.400s          ← 修复前是 HTTP=000（≥120s 不返回）
+组件逐个：ping 0.011s / diskSpace 0.008s / discoveryComposite 0.020s / refreshScope 0.007s / ssl 0.007s 全部 200
+redis 组件路径：HTTP=404      ← 健康项已注销（不再出现在 components 里）
+# ② 把 show-details/show-components 改回 never（保留 redis 修复）→ 重启
+最终配置：/actuator/health → {"groups":["liveness","readiness"],"status":"UP"} HTTP=200 t=0.347s
+          组件路径 → 404（细节仍隐藏）  liveness/readiness → UP   metrics → 200  decode.failure → 可读
+```
+
+**已实施的修复（live 配置）**：`deploy/nacos/ypbin-access.yaml` 等价内容 + `management.health.redis.enabled: false`
+（live sha256 `e2f732251db7c4a7`）。**仓库模板里也补了同一行**（见 §5.2 之后）。
+> 注意：这是**关掉一个本服务不需要的健康项**，不是放宽安全策略；`show-details/show-components` 仍是 `never`。
+
+**更深一条（已登记，未做）**：既然 access **不使用 Redis**，比「关健康项」更干净的做法是**排除 Redis 自动配置**
+（`spring.autoconfigure.exclude` 掉 `RedisAutoConfiguration` 与 `DataRedisHealthContributorAutoConfiguration`，
+或从依赖里去掉 `spring-data-redis`）。**排除后是否有副作用的判据**（全部要过）：
+① 服务正常启动（若 starter 某组件依赖 `RedisTemplate`/`RedisConnectionFactory` bean，会在**启动期**以
+`NoSuchBeanDefinitionException` 暴露 —— fail-fast，不会静默）；② `/actuator/health` 200 且 `components` 里没有 `redis`；
+③ 既有内部端点继续可用（`/internal/lease/**`、access→iot 的 `/internal/readings`）；④ 日志无 `Lettuce`/`Redis` 相关 ERROR；
+⑤ `iot.access.*` 指标与喂数（`write.rows`）持续增长；⑥ **前提写进文档**：将来若 access 真要用 Redis（例如缓存租约），
+必须撤销该排除 —— 否则会以「用了 Redis 却没有 bean」的形式失败（fail-fast，可发现）。
+**Lettuce 连接对象创建为何阻塞：仍未查明**（需线程栈；本机 JRE 无 jcmd，按约定不换 JDK 镜像）。
 
 **窗口纪律（本轮实际执行）**：改前声明 artifact 三元组（image `4bc3178ff0aa…` / jar md5
 `74fb9ac1e8929658a572aaf18e115a26` / StartedAt `2026-09-27T03:48:48Z`）；`docker events` 审计（只计数）
@@ -258,6 +286,27 @@ systemctl list-timers feeder-watch.timer          # 应能看到 NEXT/LAST
 2. **只告警、不自愈**：本单元**不做任何写操作**、**不重启喂数源**。
    喂数源的崩溃恢复由它自己的 `Restart=always` + `StartLimitIntervalSec=0` 负责
    —— 「告警」与「自愈」分离，避免看门狗与单元互相打架。
+
+---
+
+## 5.4 ⚠️ 改 `/usr/local/sbin` 下脚本的前后纪律（并发会话踩出来的）
+
+**发现方式**：2026-09-27 本机同时有**两条线**在动（本轮的运维线 + EMQX 部署线的
+`emqx-tunnel-watch.timer`/worktree），`feeder-watch.sh` 被替换的瞬间恰好被 timer 触发 ⇒ journal 里出现
+三条**行号对不上任何现存副本**的错误（`line 76: *：小流量下: command not found`、
+`line 104: ACT_ACCESS: unbound variable`、`line 122: RECONCILE: unbound variable`），
+而当时文件里该文本在第 50 行、`ACT_ACCESS` 在第 47 行且已定义，直接执行该文件完全正常。
+**不是数据面问题，是并发替换窗口的瞬态**（后一次运行 `判定: OK`、单元自愈、`systemctl --failed` 为空）。
+
+**约定（改系统路径下脚本时按序做）**：
+1. **改前**跑一次 `systemctl --failed` 与 `sha256sum /usr/local/sbin/<脚本>`（记下旧哈希）；
+2. 用 `install -m 0755 <仓库文件> /usr/local/sbin/<脚本>`（**原子替换**，不要 `cp` 到运行中的文件上）；
+3. **改后**立刻**原地执行一次**该脚本（小窗口，如 `--window 5 --db-window 5`）确认可用，并再跑一次
+   `systemctl --failed`；
+4. 若同一时刻别的线也在动这台机器，**先对齐「谁什么时候改哪个文件」**，避免把「文件被替换瞬间被执行」
+   误判成脚本缺陷（本轮就差点误判）。
+5. 真出现「行号对不上任何现存副本」的错误时，**先比对 `sha256sum` 与 `git show` 的历史版本**再下结论 ——
+   这比读 journal 猜要快，也不会把并发瞬态写成脚本 bug。
 
 ---
 
@@ -381,6 +430,19 @@ systemctl reboot
 | 镜像 rollback tag | **最新 5 个** + **当前运行镜像**（无论新旧） | 18 个 | 待清点脚本列出 |
 | `/root` 下 rollback jar | **最新 2 个** | 4 个 | 待清点脚本列出 |
 | 配置 / SQL / Nacos 快照 | **全部保留**（体积小、且是唯一的人工回滚手段） | ≈35 项 | 无 |
+
+**🔴 清单本身有盲区 ⇒ 等于没有策略（2026-09-27 实测）**：原清点脚本的 jar 一节只 glob
+`/root/ypbin-iot-jar-rollback-*.jar`，于是两类文件**永远不会出现在清单里**，既不被保留也不被列为过期候选：
+
+| 漏掉的对象 | 为什么漏 | 量 |
+|---|---|---|
+| `/root/ypbin-access-jar-*.jar` | 另一个服务的 jar 备份，**整个服务都没被覆盖** | 3 个 / ~247MB |
+| `/root/ypbin-iot-jar-rollback2-*.jar`、`rollback3-*.jar` | `rollback-` 后面不是连字符 ⇒ glob 不匹配 | 2 个 / ~274MB |
+
+**已修**（2026-09-27）：jar 一节改为**按服务**分组（`ypbin-iot` 留最新 **2** 个、`ypbin-access` 留最新 **1** 个），
+并加**盲区自检**——`/root` 下凡 `*jar*.jar` 未被任何服务 glob 命中的，一律显式打印
+「⚠️ **未纳入策略**」（而不是静默漏掉）；清单末尾给出「另有 N 个未纳入策略」。
+**规则**：新增任何「按服务保留」的资产类别时，**必须同时写一条自检**，证明「没被覆盖的对象会被报出来」。
 
 **只读清点工具**：`bash /usr/local/sbin/rollback-asset-inventory.sh`
 （按上述规则逐条给出 `保留` / `**过期候选**（等用户决定）`，并列出已知危险资产、`df`、`docker system df`；

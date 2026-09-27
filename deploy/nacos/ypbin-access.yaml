@@ -85,6 +85,13 @@ ypbin:
 #      判活请用 `/actuator/health/liveness` 与 `/actuator/health/readiness`（均 {"status":"UP"}，毫秒级返回）。
 #      `info` 会回 process 段（pid/工作目录/堆/GC/uptime）——与 ypbin-iot 的既有口径一致，不含凭据。
 management:
+  # ⚠️ access **不使用 Redis**（无 spring.data.redis.*、无 Redis 用法），但依赖组合会装配出
+  #    RedisConnectionFactory + Redis 健康项；该健康项在生产**无限阻塞**（连连接对象创建阶段都没发起 TCP），
+  #    使**聚合** `/actuator/health` 挂死（≥120s 不返回）⇒ 必须显式关掉它。
+  #    判活用 `/actuator/health/liveness|readiness`；定位与闭环证据见 deploy/PROD-OPS-NOTES.md 陷阱 5。
+  health:
+    redis:
+      enabled: false
   endpoints:
     web:
       exposure:

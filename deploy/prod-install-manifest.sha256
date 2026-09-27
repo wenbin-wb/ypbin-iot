@@ -16,4 +16,4 @@ d86d0a1f06d6cc03c0f062712cfc50d4ce68b3226f7e2970e1ca4dcab8176f0f  /etc/sysctl.d/
 49c168455b6c0c3891576812874ff73464bfb3c4628b7c381cf8c7e0d77aa90c  /etc/systemd/system/feeder-watch.service  deploy/feeder-watch.service
 cde99c26df21cd48876c5ee475bd87be099219c50f39e5b0eb86c78e6a715266  /etc/systemd/system/feeder-watch.timer  deploy/feeder-watch.timer
 b53ba459fe2b5a02880b6ff73e133508e2bab1941ccb5210113d8cfc30f46fc4  /usr/local/sbin/post-reboot-check.sh  deploy/post-reboot-check.sh
-3c3f5a5ae357db246426faa27bd351dd02c17792990e76a5335d7621d29e5559  /usr/local/sbin/rollback-asset-inventory.sh  deploy/rollback-asset-inventory.sh
+059c4e5b5a49fd1914ae017e8054c57e1f9cd6d0e0adaf2a36e61b98b384dbca  /usr/local/sbin/rollback-asset-inventory.sh  deploy/rollback-asset-inventory.sh
