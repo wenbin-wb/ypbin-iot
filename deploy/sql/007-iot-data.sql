@@ -402,3 +402,61 @@ CREATE TABLE iot_mqtt_ingest_receipt
     PRIMARY KEY (id),
     UNIQUE KEY uk_iot_mqtt_ingest_receipt_request (tenant_id, device_id, request_id)
 ) COMMENT 'IoT MQTT 入站幂等回执（同一设备同一 requestId 只落一行）';
+
+-- =============================================================
+-- 运行期命令实例（段 B 下行/在线调试；设计 §7.1）
+-- 与 iot_command（**物模型定义**，挂 service_id）是两回事：这里记「这一次下发的请求与回执」。
+-- 幂等键 (tenant_id, request_id)：requestId 由**平台**生成（与设备侧上报的 requestId 不同——
+-- 那张表 iot_mqtt_ingest_receipt 的键含 device_id，因为那是设备生成的）。
+-- ⚠️ 本表是**租户表**：回执端点（只有 X-Internal-Token、无租户身份）必须先按 device_id 反查租户再进租户上下文；
+--    **不要**把它加进 ypbin.tenant.ignore-tables（那会让唯一键的租户维度失去意义并绕过隔离）。
+-- 终态（succeeded/failed/timeout/cancelled）**可被人工重发重新打开**（同 requestId、retry_count+1），
+-- 这是设计 §7.2 的显式语义：不自动重试，只有人能在页面上重发。
+-- =============================================================
+
+CREATE TABLE iot_command_instance
+(
+    id               BIGINT       NOT NULL COMMENT '主键',
+    tenant_id        BIGINT       NOT NULL COMMENT '租户 ID',
+    device_id        BIGINT       NOT NULL COMMENT '设备 ID（iot_device.id）',
+    command_id       BIGINT       NULL     COMMENT '物模型命令定义 ID（iot_command.id；属性类为空）',
+    identifier       VARCHAR(64)  NOT NULL COMMENT '命令/属性标识（冗余自物模型，便于无关联查询与审计）',
+    kind             VARCHAR(16)  NOT NULL COMMENT '类型码（枚举 code）：property_set|property_get|service_call',
+    request_id       VARCHAR(64)  NOT NULL COMMENT '请求 ID（幂等键；平台生成，随 payload 下发）',
+    topic            VARCHAR(255) NOT NULL COMMENT '下行主题（定向靠主题；官方无按 clientid 定向的端点）',
+    payload          TEXT         NULL     COMMENT '下行报文体（JSON，含 requestId）',
+    reply_payload    TEXT         NULL     COMMENT '上行回执体（JSON；不含凭据）',
+    status_code      VARCHAR(16)  NOT NULL COMMENT '状态码（枚举 code）：pending|sent|succeeded|failed|timeout|cancelled',
+    error_code       VARCHAR(32)  NULL     COMMENT '可区分失败原因码：DEVICE_OFFLINE|NO_SUBSCRIBER|EMQX_ERROR|DEVICE_REJECTED|TIMEOUT',
+    error_msg        VARCHAR(500) NULL COMMENT '失败说明（面向人的文案，不含凭据）',
+    timeout_ms       INT          NOT NULL COMMENT '超时（毫秒；取物模型 timeout_ms，缺省用全局默认）',
+    retry_count      INT          NOT NULL DEFAULT 0 COMMENT '已重发次数（仅手动重发计数，不做自动重试）',
+    emqx_message_id  VARCHAR(64)  NULL     COMMENT 'EMQX publish 返回的消息 ID（溯源用）',
+    source           VARCHAR(16)  NOT NULL COMMENT '来源码：console|rule|api',
+    operator_user_id BIGINT       NULL     COMMENT '下发人（来源为 console 时）',
+    sent_at          DATETIME     NULL     COMMENT '实际投递到 EMQX 的时刻',
+    finished_at      DATETIME     NULL     COMMENT '终态时刻',
+    create_user      BIGINT       NULL     COMMENT '创建人',
+    create_time      DATETIME     NULL     COMMENT '创建时间',
+    update_user      BIGINT       NULL     COMMENT '更新人',
+    update_time      DATETIME     NULL     COMMENT '更新时间',
+    status           TINYINT      NOT NULL DEFAULT 1 COMMENT '状态：1 启用 0 停用',
+    is_deleted       TINYINT      NOT NULL DEFAULT 0 COMMENT '逻辑删除',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_iot_command_instance_request (tenant_id, request_id),
+    KEY idx_iot_command_instance_device (tenant_id, device_id, create_time),
+    KEY idx_iot_command_instance_status (status_code, sent_at)
+) COMMENT 'IoT 运行期命令实例（下行请求与回执）';
+
+-- 权限码与菜单（设计 P0-8；沿用 3200 段：320022/320023 为 iot:debug 的两个按钮）
+INSERT INTO sys_menu (id, pid, name, type, platform_only, auth_code, title, sort, create_time, status, is_deleted)
+VALUES (320022, 3200, 'IotDebugSend', 'button', 0, 'iot:debug:send', 'page.iot.debug.send', 22, NOW(), 1, 0);
+
+INSERT INTO sys_menu (id, pid, name, type, platform_only, auth_code, title, sort, create_time, status, is_deleted)
+VALUES (320023, 3200, 'IotDebugGet', 'button', 0, 'iot:debug:get', 'page.iot.debug.get', 23, NOW(), 1, 0);
+
+INSERT INTO sys_role_menu (role_id, menu_id)
+SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (320022, 320023);
+
+INSERT INTO sys_template_menu (template_id, menu_id)
+SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (320022, 320023);

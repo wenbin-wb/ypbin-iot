@@ -38,7 +38,7 @@ public class DisabledEmqxAdminClient implements EmqxAdminClient {
     }
 
     @Override
-    public EmqxPublishResult publish(String topic, String payload, int qos, boolean retain) {
+    public EmqxPublishOutcome publish(String topic, String payload, int qos, boolean retain) {
         throw new EmqxClientException(EmqxErrorCode.REJECTED, MESSAGE);
     }
 }

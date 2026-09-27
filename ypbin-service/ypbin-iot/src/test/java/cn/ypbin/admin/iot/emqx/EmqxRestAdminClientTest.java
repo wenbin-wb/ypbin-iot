@@ -152,10 +152,10 @@ class EmqxRestAdminClientTest {
     void publishMapping() {
         EmqxAdminClient client = new EmqxRestAdminClient(properties, new ObjectMapper());
         responseStatus = 200;
-        assertThat(client.publish("ypbin/v1/1/9300012/down/property/set", "{}", 1, false))
+        assertThat(client.publish("ypbin/v1/1/9300012/down/property/set", "{}", 1, false).result())
             .isEqualTo(EmqxPublishResult.DELIVERED);
         responseStatus = 202;
-        assertThat(client.publish("ypbin/v1/1/9300012/down/property/set", "{}", 1, false))
+        assertThat(client.publish("ypbin/v1/1/9300012/down/property/set", "{}", 1, false).result())
             .isEqualTo(EmqxPublishResult.NO_SUBSCRIBER);
     }
 

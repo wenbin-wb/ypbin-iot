@@ -54,7 +54,8 @@ public interface EmqxAdminClient {
      * @param payload 载荷
      * @param qos     QoS（0/1/2）
      * @param retain  是否保留
-     * @return 投递结果（{@link EmqxPublishResult#NO_SUBSCRIBER} = 设备未连接）
+     * @return 投递结果 + EMQX 消息 ID（{@link EmqxPublishOutcome#result()} 为
+     *         {@link EmqxPublishResult#NO_SUBSCRIBER} = 设备未连接）
      */
-    EmqxPublishResult publish(String topic, String payload, int qos, boolean retain);
+    EmqxPublishOutcome publish(String topic, String payload, int qos, boolean retain);
 }

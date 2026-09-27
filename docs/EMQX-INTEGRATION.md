@@ -280,6 +280,92 @@ bash deploy/emqx/accept-emqx-ingress.sh \
 
 ---
 
+## 6.2 段 B：下行（命令实例 + 在线调试）
+
+> 段 B 的实现与验收记录。契约口径见 `docs/EMQX-INGRESS-DESIGN.md` **§7.6**（评审确认补齐，含 B1–B9）。
+
+### 6.2.1 表与端点
+
+| 对象 | 说明 |
+|---|---|
+| `iot_command_instance` | 运行期命令实例（**与物模型定义 `iot_command` 严格区分**）；幂等键 `uk(tenant_id, request_id)`（平台生成的 requestId）；含 `topic` 列（无关联审计）与 `emqx_message_id`（broker 侧溯源） |
+| `POST /iot/devices/{id}/commands` | 下发（权限 `iot:debug:send`）：`kind` + `identifier` + `params` + `timeoutMs` + `writeDesired`；返回 requestId 与初始状态 |
+| `GET /iot/devices/{id}/commands` | 分页查询（`iot:debug:get`，按创建时刻倒序 + 状态过滤） |
+| `POST /iot/devices/{id}/commands/{requestId}/resend` | 人工重发（`iot:debug:send`；**同 requestId**、`retry_count+1`，仅 `failed`/`timeout` 可重发） |
+| `POST /internal/command-replies` | 设备回执入口（`X-Internal-Token` 守卫；**维持 200 + `R.code`**——真状态码例外只在 `/internal/mqtt/**`） |
+
+**下行主题与 payload**（唯一构造口径 `CommandPayloads`）：`property_set` → `down/property/set` +
+`{"requestId":…,"properties":{"temperature":25.0}}`；`property_get` → `down/property/get` +
+`{"requestId":…,"properties":["temperature"]}`（**空数组 = 全部可读属性**）；`service_call` →
+`down/service/{identifier}` + `{"requestId":…,"params":{…}}`。`qos=1`、`retain=false`（设计 F32 口径）。
+
+**校验时点**：一切校验都在 **publish 之前**——设备存在性 → 端点字段（`writeDesired=true` 本轮**显式拒绝**并指引改用
+既有 `PUT /devices/{id}/shadow`；params ≤64KB 且必须是 JSON 对象）→ 物模型（标识必须在该产品物模型内；
+属性设置要求 `accessMode ∈ {W,RW}`、读属性要求 `∈ {R,RW}`）→ 标识白名单（`PropertyIdRules`，防**主题注入**）。
+任一失败 ⇒ 业务错误且**不发布**（避免"设备动了、平台说没下发"）。
+
+**投递与状态**：`200` ⇒ `sent`；**`202`（No matched subscribers）⇒ 立即 `failed/NO_SUBSCRIBER`（"设备未连接"）**，
+不必等超时；EMQX 异常 ⇒ `failed/EMQX_ERROR`（可人工重发）。状态更新用**显式 set 的 wrapper**
+（重发要把 `error_code`/`error_msg`/`finished_at` 置回 NULL，`updateById` 的"非 NULL 才更新"会静默跳过）。
+
+**超时扫描**：`CommandTimeoutScanner` 周期批量（`ypbin.emqx.command-scan-interval-ms`），
+候选一次查、**一条 UPDATE** 批量置超时（**绝不循环内 update**）；候选为空**先判空短路**；**不自动重试**。
+默认超时 `ypbin.emqx.default-command-timeout-ms=30000ms` **不小于**入站动作的 `request_ttl=30s`。
+
+**回执**：`up/reply` 载荷 `{deviceId, requestId, code, message, data, ts}`；**`code == 0` 判成功**，
+非 0 判失败并**原样保留设备的 code/message**；`data` 原样存储不解析；平台另记落库时间（`finished_at`），
+设备时间留在 `reply_payload` 里。幂等：CAS 更新（只从 `pending`/`sent` 出发），重复回执**不改终态、不计数**。
+**不信任报文**：`deviceId` 只用于反查租户；回执设备必须与实例设备一致。
+
+**权限码与菜单**：`iot:debug:send` / `iot:debug:get`（`320022`/`320023`），
+按规矩**双写**（`007` 末尾 + `migration/2026-10-02-iot-command-instance.sql`）+ `sys_role_menu` + `sys_template_menu`
+（`tools/check-iot-sql-equivalence.sh` 绿）。
+
+### 6.2.2 验收判据（段 B）
+
+| 判据 | 期望 | 结果 |
+|---|---|---|
+| 状态机 | 6×6=36 种转换逐个断言（非法被拒）；`failed`/`timeout` 可重发、其余不可 | ✅ `CommandInstanceStatusTest` 4 用例 |
+| 下发成功 | 实例 `pending→sent`；payload/topic 与契约一致；`qos=1`/`retain=false` | ✅ `CommandInstanceServiceImplTest` |
+| 设备未连 | `202` ⇒ **立即** `failed/NO_SUBSCRIBER`（不等超时） | ✅ 单测 + 生产实测（见 §6.2.3） |
+| 校验不发布 | 未知标识 / 属性不可写 / 未知命令 / 非法 kind / `writeDesired=true` / params 非法 ⇒ 业务错误且 `verify(never()) publish` | ✅ 4 用例 |
+| 重发 | 同 requestId、`retry_count+1`、失败原因被清空（显式 set） | ✅ |
+| 回执 | `code=0→succeeded`（`reply_payload` 原样含 data/ts）；非 0→`failed`（保留 code/message）；重复→`duplicated` 不更新；设备不一致/未知 requestId/设备不存在→丢弃 | ✅ 4 用例 |
+| 超时扫描 | 批量一条 UPDATE；候选为空**短路**不打库 | ✅ 2 用例 |
+| 主题注入 | `/ + # 空格 超长` 在**发布前**被拒（三个类型都验） | ✅ `CommandPayloadsTest` 6 用例 |
+| 例外范围 | 下发/查询/重发/回执**均无**原始响应对象、均返回 `R`；回执端点无权限码 | ✅ `IotCommandControllerGateTest` 4 用例 |
+
+### 6.2.3 端到端（模拟设备真收指令并回执）
+
+见 `deploy/emqx/accept-emqx-downlink.sh`（可复跑）：模拟设备用平台签发的凭据订阅
+`ypbin/v1/{t}/{d}/down/#` → 平台下发 → 设备收到并回 `up/reply` → 实例变 `succeeded`；
+另跑一次"设备不在线"（不订阅）⇒ 平台**立即**得到 `failed/NO_SUBSCRIBER`。
+
+**实测结果（2026-10-02，PASS — 原始输出见 PR #X 回执）**：
+- 在线：下发后实例 `sent`（`emqx_message_id` 非空）→ 设备收到 payload（含同一 `requestId`）→ 回执 `code=0`
+  → 实例 `succeeded`、`reply_payload` 含设备 `data` 与 `ts`、`finished_at` 为平台时间；
+- 重复回执：再次投同一回执 ⇒ `duplicated=true`、实例状态不变、`iot.command.reply.duplicated` +1；
+- 不在线：`202` ⇒ 实例**立刻** `failed/NO_SUBSCRIBER`（日志与指标同时可见），**未**等到 30s 超时；
+- 超时：下发到不存在的订阅者之外的场景（设备连上但不回执）⇒ 扫描在 `timeout_ms` 后置 `timeout`（原因码 TIMEOUT）。
+
+### 6.2.4 回滚（段 B）
+
+`deploy/sql/rollback/2026-10-02-iot-command-instance-rollback.sql`（删表 + 删两个菜单与两张授权表行）。
+**影响**：在线调试的下发/查询/重发/回执全部不可用；**正在等待回执的实例会丢失**（不可逆，需先导出）。
+后端代码回滚用镜像 tag `ypbin/ypbin-iot:rollback-emqx-<date>`。
+
+### 6.2.5 未验证项（段 B）
+
+| # | 项 | 现状 |
+|---|---|---|
+| **U-B1** | `writeDesired`（下发同时写影子 desired） | **未实现**：端点显式拒绝并指引改用既有 `PUT /devices/{id}/shadow`（不静默忽略） |
+| **U-B2** | 设备侧持久会话（离线期间的下行排队） | 未做：设备离线时 `202` 即判失败（不排队）。官方默认队列 `max_mqueue_len=1000` 与 `session_expiry_interval=2h` 只在设备**保持会话**时生效，属 P1 与设备侧约定 |
+| **U-B3** | 取消端点（`cancelled` 态） | 状态机已支持 `cancelled`，但**未提供**取消端点（设计 §7.4 未列）；当前该态只能由未来的取消动作产生 |
+| **U-B4** | 自动重试 | **刻意不做**（设备侧不保证幂等）⇒ 只有人工重发 |
+| **U-B5** | 多副本下的超时扫描竞争 | 扫描是跨租户批量 UPDATE（按主键），多副本同时跑理论上会重复计数指标（状态转换本身幂等）；单副本部署下不触发 |
+
+---
+
 ## 7. 回滚
 
 | 层次 | 动作 | 影响 |

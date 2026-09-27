@@ -130,9 +130,13 @@ public class EmqxRestAdminClient implements EmqxAdminClient {
             + "Content-Type: text/csv\r\n\r\n"
             + csv
             + "\r\n--" + boundary + "--\r\n";
-        String response = sendForBody("POST", authPath() + IMPORT_USERS_PATH_SUFFIX, body,
-            "multipart/form-data; boundary=" + boundary);
-        assertImportSucceeded(username, response);
+        SendResult imported = sendWithBody("POST", authPath() + IMPORT_USERS_PATH_SUFFIX, body,
+            "multipart/form-data; boundary=" + boundary, false);
+        if (imported.status() < 200 || imported.status() >= 300) {
+            throw new EmqxClientException(EmqxErrorCode.fromHttpStatus(imported.status()),
+                "EMQX 导入设备账号失败：HTTP " + imported.status());
+        }
+        assertImportSucceeded(username, imported.body());
         log.info("[iot] 设备账号已同步到 EMQX（import_users，仅上报哈希与盐）：user={}",
             LogSanitizer.sanitize(username));
     }
@@ -175,55 +179,89 @@ public class EmqxRestAdminClient implements EmqxAdminClient {
     }
 
     @Override
-    public EmqxPublishResult publish(String topic, String payload, int qos, boolean retain) {
+    public EmqxPublishOutcome publish(String topic, String payload, int qos, boolean retain) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("topic", topic);
         body.put("payload", payload);
         body.put("qos", qos);
         body.put("retain", retain);
-        int status = send("POST", PUBLISH_PATH, toJson(body), true);
-        if (status == 200) {
-            return EmqxPublishResult.DELIVERED;
+        SendResult sent = sendWithBody("POST", PUBLISH_PATH, toJson(body), "application/json", true);
+        if (sent.status() == 200) {
+            return new EmqxPublishOutcome(EmqxPublishResult.DELIVERED, extractMessageId(sent.body()));
         }
-        if (status == 202) {
+        if (sent.status() == 202) {
             // 官方语义：No matched subscribers ⇒ 立即判「设备未连接」，不必等超时（设计 §7.2）
-            return EmqxPublishResult.NO_SUBSCRIBER;
+            return new EmqxPublishOutcome(EmqxPublishResult.NO_SUBSCRIBER, null);
         }
-        throw new EmqxClientException(EmqxErrorCode.fromHttpStatus(status),
-            "EMQX 下行发布失败：topic=" + LogSanitizer.sanitize(topic) + " HTTP " + status);
+        throw new EmqxClientException(EmqxErrorCode.fromHttpStatus(sent.status()),
+            "EMQX 下行发布失败：topic=" + LogSanitizer.sanitize(topic) + " HTTP " + sent.status());
     }
 
     /**
-     * 发一次请求并返回响应体（用于需要读响应内容的接口，如导入结果）。
+     * 从 publish 响应体里取消息 ID（形如 {@code {"id":"..."}}；取不到返回 {@code null}）。
      *
-     * @param method      HTTP 方法
-     * @param path        路径
-     * @param body        请求体
-     * @param contentType Content-Type（含 multipart boundary）
-     * @return 响应体文本
+     * @param body 响应体
+     * @return 消息 ID；解析不出返回 {@code null}
      */
-    private String sendForBody(String method, String path, String body, String contentType) {
-        HttpRequest request = HttpRequest.newBuilder()
+    private String extractMessageId(String body) {
+        if (body == null || body.isBlank()) {
+            return null;
+        }
+        try {
+            JsonNode node = objectMapper.readTree(body).path("id");
+            return node.isMissingNode() || node.isNull() ? null : node.asString();
+        } catch (RuntimeException ex) {
+            // 消息 ID 只是溯源字段：解析不出来不该把一次成功投递判成失败（但必须可见，故记 debug 全栈）
+            log.debug("[iot] EMQX publish 响应体无法解析出消息 ID（不影响投递结果判定）", ex);
+            return null;
+        }
+    }
+
+    /**
+     * 发一次请求并返回「状态码 + 响应体」。
+     *
+     * @param method         HTTP 方法
+     * @param path           路径
+     * @param body           请求体（可为 null）
+     * @param contentType    Content-Type（multipart 需含 boundary）
+     * @param logBodyOnError 非 2xx 时是否允许把响应体写进日志（仅发布接口允许——用户接口的响应体可能回显哈希）
+     * @return 状态码 + 响应体
+     */
+    private SendResult sendWithBody(String method, String path, String body, String contentType,
+                                    boolean logBodyOnError) {
+        HttpRequest.Builder builder = HttpRequest.newBuilder()
             .uri(URI.create(baseUrl + path))
             .timeout(Duration.ofMillis(properties.getReadTimeoutMs()))
             .header("Authorization", authorization)
-            .header("Content-Type", contentType)
-            .method(method, HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
-            .build();
+            .header("Content-Type", contentType);
+        if (body == null) {
+            builder.method(method, HttpRequest.BodyPublishers.noBody());
+        } else {
+            builder.method(method, HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8));
+        }
         HttpResponse<String> response;
         try {
-            response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            response = httpClient.send(builder.build(), HttpResponse.BodyHandlers.ofString());
         } catch (IOException ex) {
             throw new EmqxClientException(EmqxErrorCode.UNREACHABLE, "EMQX 管理面不可达：" + path, ex);
         } catch (InterruptedException ex) {
             Thread.currentThread().interrupt();
             throw new EmqxClientException(EmqxErrorCode.UNREACHABLE, "EMQX 管理面调用被中断：" + path, ex);
         }
-        if (response.statusCode() < 200 || response.statusCode() >= 300) {
-            throw new EmqxClientException(EmqxErrorCode.fromHttpStatus(response.statusCode()),
-                "EMQX 调用失败：" + path + " HTTP " + response.statusCode());
+        if (response.statusCode() >= 300 && logBodyOnError) {
+            log.warn("[iot] EMQX 调用失败：path={} HTTP {} 响应={}", LogSanitizer.sanitize(path),
+                response.statusCode(), LogSanitizer.sanitize(truncate(response.body())));
         }
-        return response.body();
+        return new SendResult(response.statusCode(), response.body());
+    }
+
+    /**
+     * HTTP 调用结果（状态码 + 响应体）。
+     *
+     * @param status 状态码
+     * @param body   响应体
+     */
+    private record SendResult(int status, String body) {
     }
 
     /**
