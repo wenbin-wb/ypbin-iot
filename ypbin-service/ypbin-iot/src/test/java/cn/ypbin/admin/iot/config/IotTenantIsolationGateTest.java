@@ -57,7 +57,10 @@ class IotTenantIsolationGateTest {
         "iot_event", "iot_point_mapping", "iot_device_group", "iot_device_group_member",
         "iot_device_tag", "iot_shadow",
         // G6（2026-09-28 追加）：新增租户表必须补进本清单，否则这个清单式门禁不覆盖它
-        "iot_event_log");
+        "iot_event_log",
+        // 告警与阈值（2026-10-03 追加）：四张表都是租户表；漏登记会让「跨租户读别人告警」
+        // 这条最危险的路径**不受本门禁覆盖**（设计 §3.5-N4 明确要求补进本清单）
+        "iot_alert_rule", "iot_alert_rule_point", "iot_alert_instance", "iot_alert_notification");
 
     /** 平台表（不继承租户基类，必须被忽略——作为「ignoreTable 能返回 true」的自检锚点）。 */
     /**

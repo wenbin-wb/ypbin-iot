@@ -39,6 +39,18 @@ class IotEnumRulesTest {
         OnlineStatus.class,
         PointRefType.class,
         AddressType.class,
+        // 告警与阈值（2026-10-03 追加）：状态/级别/比较符/渠道等一律存 code，必须先过同一套门禁
+        AlertScopeType.class,
+        AlertSeverity.class,
+        AlertTriggerMode.class,
+        AlertOperator.class,
+        AlertValueType.class,
+        AlertState.class,
+        AlertChannel.class,
+        AlertNotifyEvent.class,
+        AlertNotifyStatus.class,
+        AlertReason.class,
+        AlertRulePreset.class,
     };
 
     @Test
