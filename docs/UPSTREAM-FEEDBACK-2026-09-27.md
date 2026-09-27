@@ -505,7 +505,9 @@ sed -e "/^[[:space:]]*#/! s/\${MYSQL_ROOT_PASSWORD}/${MYSQL_ROOT_PASSWORD}/g" \
 ### 我方临时处置与替换路径
 本 fork 已按上述修法改完（`ypbin-iot/deploy/install.sh:1357-1378`），并在
 `docs/DEPLOY-BACKEND.md` §5.5/§5.6 登记了残留清理（22 个 `/tmp` 渲染残留已清、两枚 token 已轮换）。
-上游采用后，本 fork 可在下次同步时删除本地差异（**该文件不在 Sync 白名单内，需上游先落地**）。
+上游采用后，本 fork 可在下次同步时删除本地差异
+（**订正**：`deploy/install.sh` **在** Sync 白名单内——见 `.github/workflows/sync-whitelist.yml` 的 `ALLOWED` 正则，
+故本 fork 允许改它；此前草稿误写「不在白名单」，以工作流为准）。
 
 ---
 
@@ -596,8 +598,11 @@ grep -n "redis-cli\|mysqladmin" deploy/docker-compose.yml
 74:      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_ROOT_PASSWORD}"]
 ```
 Docker 的 healthcheck 以 `exec` 形式执行 ⇒ 该命令的 **argv 会出现在 `docker top` / 宿主进程列表**，
-且每次探测都触发一次 `exec_create/exec_start` 事件，**`docker events` 的属性里带命令行**
-（`docker events --filter event=exec_create` 可观察到 `exec_cmd`）。每 10 s 一轮 ⇒ 口令在事件流里**持续**出现。
+且每次探测都触发一次 `exec_create/exec_start` 事件，**`docker events` 的属性里带命令行**。每 10 s 一轮 ⇒ 口令在事件流里**持续**出现。
+> **暴露面的本仓实测记录**（此机制不是我推断的、也不是只靠逻辑）：`ypbin-iot` 侧的
+> `docs/DEPLOY-CREDENTIAL-HYGIENE.md` §5「argv / 凭据暴露面清点（`docker inspect` 全部容器 + `docker events` 采样 + 仓库值级 grep）」
+> 把 healthcheck/脚本 argv 列为**本轮已修**项，并逐容器清点了暴露面与修法（Redis 配置化、MySQL `MYSQL_PWD`/`-e` 等）。
+> 本条（UP-8）就是把那份处置**回推到上游模板**。
 
 ### 影响
 真实 MySQL root / Redis 口令持续出现在进程参数与 Docker 事件流（可被同宿主低权限用户、
@@ -620,7 +625,8 @@ Docker 的 healthcheck 以 `exec` 形式执行 ⇒ 该命令的 **argv 会出现
 ### 我方临时处置与替换路径
 本 fork 已改为不带凭据的探活（`ypbin-iot/deploy/docker-compose.yml:70-79`（Redis，`nc -z`）、
 `:99-106`（MySQL，`mysqladmin ping -h 127.0.0.1`），并在注释里写明「为什么不是 `-a <口令>`」）。
-上游同步后，本 fork 的差异可在下次同步时消除（**该文件不在 Sync 白名单内，需上游先落地**）。
+上游同步后，本 fork 的差异可在下次同步时消除
+（`deploy/docker-compose.yml` **在** Sync 白名单内，见 `.github/workflows/sync-whitelist.yml` 的 `ALLOWED` 正则）。
 
 ---
 
@@ -715,7 +721,8 @@ sed -n '124,135p' ypbin-starter-web/src/main/java/cn/ypbin/starter/web/handler/G
 134      return R.fail(GlobalErrorCode.NOT_FOUND.getCode(), "接口不存在");   ← 直接返回 R ⇒ HTTP 200
 ```
 网关侧同构：`GatewayExceptionHandler.java:91/98` 同样 `return R.fail(NOT_FOUND, "接口不存在")`。
-`R` 类无 `@ResponseStatus`（`R.java:36`，字段仅 `code/message/data/success`）⇒ 默认 200。
+`R` 类无 `@ResponseStatus`（`R.java:36`；字段为 `code/message/data/success/timestamp`，
+处理器所在类只有 `@RestControllerAdvice`）⇒ 默认 200。
 
 **顺带发现的文档与代码不一致（建议随本条订正）**：
 `docs/MODULES.md:53` 与 `GlobalExceptionHandler.java:129` 都写「（本模块）默认已开启
