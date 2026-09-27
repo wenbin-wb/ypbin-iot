@@ -373,15 +373,16 @@ HTTP=200
 > 中间件机上还有**别人的项目**：`aicomic-mysql`、`aicomic-minio`（compose 项目 `middleware`）、
 > `sub2api`（compose 项目 `app`）、宝塔（`baota_net`、80/443 在听）。**一律不许碰。**
 
-| 证据 | 内容 |
-|---|---|
-| 容器身份未变 | 三个容器的 `Id` / `Image`(sha256) / `Created` / `StartedAt` 与本阶段开始前一致；`RestartCount` 未因本次部署变化（`aicomic-mysql`、`aicomic-minio` 为 0；`sub2api` 的高 `RestartCount` 是**其自身长期状态**，`StartedAt=2026-08-14`，早于本阶段） |
-| 网络零共享 | 本项目只创建 `emqx-edge`；`emqx-edge` 成员**只有** `ypbin-emqx`。`middleware_default` / `app_default` / `baota_net` 成员与部署前一致 |
-| 卷未动 | 未删除/未重建任何别人的卷；本项目只用自建的 `emqx-data` / `emqx-log`（新建）。**未执行** `docker volume prune` / `docker network prune` / `docker system prune -a` |
-| 镜像未删 | 部署前的镜像清单全部仍在（含 `registry.cn-hangzhou.aliyuncs.com/wenbi/aicomic:latest`），仅**新增** `emqx/emqx:5.8.9` 与 `emqx/emqtt-bench:0.6.2` |
-| 端口未动 | 宝塔 nginx 仍在 `0.0.0.0:80/443/888`；未改任何 vhost / 反代配置 |
-| 系统服务未动 | 未改 `sshd_config`（只**追加**一条 `authorized_keys` 条目）、未改 `ufw` 规则、未改 `/etc/docker/daemon.json` |
-| compose 项目 | `docker compose ls` 三个项目共存：`app`(1)、`emqx-edge`(1)、`middleware`(2) |
+| 证据 | 内容 | 原始输出（2026-09-27 实测） |
+|---|---|---|
+| 容器身份未变 | 三个容器的 `Id` / `Image`(sha256) / `StartedAt` 与本阶段开始前一致；`RestartCount` 未因本次部署变化 | `aicomic-mysql` id=`4821473c97ca…fcdd3` started=`2026-08-13T03:36:42Z` restarts=**0**<br>`aicomic-minio` id=`f31ab83c6d7e…d292b` started=`2026-08-13T03:36:42Z` restarts=**0**<br>`sub2api` id=`aefd4c65e02e…4f0e7` started=`**2026-08-14**T14:59:33Z` restarts=913（**自身长期状态**；`StartedAt` 早于本阶段 6 周）<br>本项目：`ypbin-emqx` id=`e610704ae169…4fcfe` started=`2026-09-27T04:04:49Z` restarts=0 |
+| 网络零共享 | 本项目只创建 `emqx-edge`；其成员**只有** `ypbin-emqx`。别人的网络成员与部署前一致 | `middleware_default`: `aicomic-mysql aicomic-minio`；`app_default`: `sub2api`；`baota_net`:（空）；`emqx-edge`: `ypbin-emqx 172.28.0.2/16` |
+| 卷未动 | 未删除/未重建任何别人的卷；本项目只用自建的 `emqx-data` / `emqx-log` | `docker volume ls` 里原有 5 个匿名卷 + `emailserver_email-data` **全部仍在**，仅**新增** `emqx-data` / `emqx-log`。**未执行** `docker volume prune` / `docker network prune` / `docker system prune -a` |
+| 镜像未删 | 部署前的镜像清单全部仍在（含 `registry.cn-hangzhou.aliyuncs.com/wenbi/aicomic:latest`） | 镜像数 **13**（部署前 11 + 新增 `emqx/emqx:5.8.9`、`emqx/emqtt-bench:0.6.2`） |
+| 端口未动 | 宝塔 nginx 仍在 `0.0.0.0:80/443/888`；未改任何 vhost / 反代配置 | `ss -ltn` 实测 80/443/888 仍在听；ufw 规则清单未变（仅**原有**条目） |
+| 系统服务未动 | 未改 `sshd_config`（只**追加**一条 `authorized_keys` 条目）、未改 `ufw` 规则、未改 `/etc/docker/daemon.json` | `authorized_keys` 由 2 行变 3 行（新增项带 `restrict,port-forwarding,permitopen="127.0.0.1:18093"`），原有两条**逐字保留** |
+| compose 项目 | 三个项目共存，别人的两个未受影响 | `app` running(1) / `emqx-edge` running(1) / `middleware` running(2) |
+| 生产机平台栈未动 | 本阶段**没有**改生产机的 Nacos / compose / 平台容器 | `ypbin-auth`/`ypbin-gateway` Up 8h；`ypbin-iotdb`/`ypbin-nacos`/`ypbin-mysql`/`ypbin-redis`/`ypbin-iot-ui`/`1Panel-openresty-*` 均 Up 10h（**未重启**）；`/opt/ypbin/ypbin-iot/` 顶层目录 mtime 仍为 `2026-09-26 17:29` |
 
 ---
 
