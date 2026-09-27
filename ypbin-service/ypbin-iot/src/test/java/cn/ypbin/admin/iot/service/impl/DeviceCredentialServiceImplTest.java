@@ -14,10 +14,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import cn.ypbin.admin.iot.credential.DeviceCredentialVerifyReq;
@@ -25,6 +27,9 @@ import cn.ypbin.admin.iot.credential.DeviceCredentialVerifyResp;
 import cn.ypbin.admin.iot.credential.DeviceMqttNaming;
 import cn.ypbin.admin.iot.credential.DevicePasswordGenerator;
 import cn.ypbin.admin.iot.credential.DevicePasswordHasher;
+import cn.ypbin.admin.iot.emqx.EmqxAdminClient;
+import cn.ypbin.admin.iot.emqx.EmqxClientException;
+import cn.ypbin.admin.iot.emqx.EmqxErrorCode;
 import cn.ypbin.admin.iot.emqx.EmqxProperties;
 import cn.ypbin.admin.iot.entity.IotDevice;
 import cn.ypbin.admin.iot.entity.IotDeviceCredential;
@@ -40,6 +45,7 @@ import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.conditions.Wrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -82,8 +88,10 @@ class DeviceCredentialServiceImplTest {
 
     private final EmqxProperties emqxProperties = new EmqxProperties();
 
-    private final DeviceCredentialServiceImpl service =
-        new DeviceCredentialServiceImpl(deviceMapper, emqxProperties);
+    private final EmqxAdminClient emqxAdminClient = mock(EmqxAdminClient.class);
+
+    private final DeviceCredentialServiceImpl service = new DeviceCredentialServiceImpl(
+        deviceMapper, emqxProperties, emqxAdminClient, new SimpleMeterRegistry());
 
     @BeforeAll
     static void initTableInfo() {
@@ -339,6 +347,68 @@ class DeviceCredentialServiceImplTest {
         assertThat(TenantContext.getTenantId())
             .as("校验结束后必须还原（不得把租户泄漏给同一线程上的后续调用）")
             .isEmpty();
+    }
+
+    @Test
+    @DisplayName("签发时同步 EMQX：上报的哈希/盐与库里落下的逐字一致（同口径），绝不传明文")
+    void issueMustSyncHashAndSaltToEmqx() {
+        emqxProperties.setEnabled(true);
+        when(deviceMapper.selectById(DEVICE_ID)).thenReturn(device(null, null, null));
+        when(credentialMapper.selectOne(any(), anyBoolean())).thenReturn(null);
+
+        DeviceCredentialIssuedResp resp = service.issue(DEVICE_ID);
+
+        ArgumentCaptor<IotDeviceCredential> row = ArgumentCaptor.forClass(IotDeviceCredential.class);
+        verify(credentialMapper).insert(row.capture());
+        verify(emqxAdminClient).upsertPasswordUser(
+            DeviceMqttNaming.username(TENANT_ID, DEVICE_ID),
+            row.getValue().getPasswordHash(), row.getValue().getPasswordSalt());
+        assertThat(row.getValue().getPasswordHash())
+            .as("上报 EMQX 的必须是哈希（平台口令是自持哈希，明文永不出平台）")
+            .isNotEqualTo(resp.getPassword())
+            .isEqualTo(DevicePasswordHasher.hashHex(resp.getPassword(), row.getValue().getPasswordSalt()));
+    }
+
+    @Test
+    @DisplayName("EMQX 同步失败时签发 fail-closed：抛业务异常（事务回滚），不交付明文口令")
+    void issueMustFailClosedWhenEmqxSyncFails() {
+        emqxProperties.setEnabled(true);
+        when(deviceMapper.selectById(DEVICE_ID)).thenReturn(device(null, null, null));
+        when(credentialMapper.selectOne(any(), anyBoolean())).thenReturn(null);
+        doThrow(new EmqxClientException(EmqxErrorCode.UNREACHABLE, "down"))
+            .when(emqxAdminClient).upsertPasswordUser(any(), any(), any());
+
+        assertThatThrownBy(() -> service.issue(DEVICE_ID))
+            .as("返回一把连不上的口令是最难排查的静默故障 ⇒ 必须整笔失败")
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("EMQX");
+    }
+
+    @Test
+    @DisplayName("未启用 EMQX（降级形态）时签发照常可用，且完全不触碰管理面客户端")
+    void issueMustSkipEmqxWhenDisabled() {
+        emqxProperties.setEnabled(false);
+        when(deviceMapper.selectById(DEVICE_ID)).thenReturn(device(null, null, null));
+        when(credentialMapper.selectOne(any(), anyBoolean())).thenReturn(null);
+
+        service.issue(DEVICE_ID);
+
+        verifyNoInteractions(emqxAdminClient);
+    }
+
+    @Test
+    @DisplayName("吊销时 EMQX 删除失败**只告警**：平台侧吊销仍生效、不抛异常（残留交给对账任务）")
+    void revokeMustNotFailWhenEmqxDeleteFails() {
+        emqxProperties.setEnabled(true);
+        when(deviceMapper.selectById(DEVICE_ID)).thenReturn(device(1, null, "emqx:ref"));
+        when(credentialMapper.selectOne(any(), anyBoolean())).thenReturn(credentialRow(1, "s", "h", 31L));
+        doThrow(new EmqxClientException(EmqxErrorCode.UNREACHABLE, "down"))
+            .when(emqxAdminClient).deleteUser(any());
+
+        service.revoke(DEVICE_ID);
+
+        verify(deviceMapper).update(isNull(), any());
+        verify(credentialMapper).updateById(any(IotDeviceCredential.class));
     }
 
     @Test

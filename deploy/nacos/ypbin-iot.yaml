@@ -31,6 +31,35 @@ ypbin:
   security:
     interceptor: false
 
+  # EMQX 接入（设计 §8.4，落地形态见 docs/EMQX-INTEGRATION.md §2 的拓扑与方向）
+  # ⚠️ api-key/api-secret 写的是**占位符**：真值只在 deploy/.env(600) 与容器 env 里，
+  #    由 Spring 读取本配置时从 Environment 解析（方案 α）。**不要把真值填进本文件**——
+  #    本文件会进 Nacos 配置库（= 落库），而这是能改 ACL/建用户的全权凭据（见 .env.example 的说明）。
+  # base-url 指向**生产机上的出向隧道**：隧道把 EMQX 管理面绑到 docker 网桥网关 172.20.0.1:18093
+  #    （容器到不了宿主回环；绑 0.0.0.0 会把 EMQX 管理面暴露到公网）。方向见 docs/EMQX-INTEGRATION.md §2。
+  emqx:
+    # false 时装配「不可用实现」：调用点显式报错（不静默降级），但平台侧凭据的签发/校验照常可用
+    enabled: true
+    base-url: http://172.20.0.1:18093
+    api-key: ${EMQX_API_KEY}
+    api-secret: ${EMQX_API_SECRET}
+    # 远程调用必须显式超时（仓内铁律；禁止无超时默认客户端）
+    connect-timeout-ms: 2000
+    read-timeout-ms: 5000
+    # 「接入信息」端点回给前端的 broker 地址（只用于展示与二维码，不含口令）。
+    # ⚠️ 这是**中间件机**上 EMQX 的真实地址；但 1883 **当前只绑该机回环**（未对设备开放，
+    #    见 docs/EMQX-INTEGRATION.md §8 U-A1）⇒ 此处是"登记的真实地址"，不是"已验证可接入"。
+    #    不用 ${...} 占位符：本文件也过 install.sh 的 sed，而它只替换 4 个固定键，
+    #    新占位符既不会被替换也不会报错，只会多一层"以为配了、其实没配"的错觉（同 IoTDB 口令的取舍）。
+    broker-host: 43.242.200.8
+    broker-port: 1883
+    broker-tls-enabled: false
+    # 设备口令随机字节数（32 字节 = 256 位熵）
+    credential-password-length: 32
+    # 下行发布（段 B 使用；本段先登记默认值，避免两批各写一份）
+    downlink-qos: 1
+    downlink-retain: false
+
   # 数据保留（D0.8）：断档事件与维护窗口按 13 个月清理（**不可逆**，天数必须为正，启动自检会拒绝非法值）。
   # 只删**已闭合**的行：进行中的断档/维护窗口是活数据，删掉会让可用率 fail-open。
   retention:

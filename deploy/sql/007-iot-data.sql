@@ -376,3 +376,29 @@ CREATE TABLE iot_device_credential
     PRIMARY KEY (id),
     UNIQUE KEY uk_iot_device_credential_device (tenant_id, device_id)
 ) COMMENT 'IoT 设备凭据秘密侧（只存哈希；明文只在签发响应出现一次）';
+
+-- =============================================================
+-- MQTT 入站幂等回执（EMQX 入站链路，设计 §6.5 方案 A / P0-B-2）
+-- 一条 MQTT 上行消息 = 一台设备的一小批读数 = 一个 requestId；
+-- 幂等键 (tenant_id, device_id, request_id)：QoS1 重发/桥接 max_retries 重投时，同一行只落一次，
+-- 第二次起不再调用落库链路（Redis 最新值 / IoTDB 时序 / 活性 / 影子都不会被重复写）。
+-- ⚠️ 唯一键含 device_id：requestId 由**设备**生成，跨设备不保证唯一（平台下发的 requestId 才是
+--    平台生成的全局唯一值，见 iot_command_instance 的 (tenant_id, request_id)）。
+-- =============================================================
+
+CREATE TABLE iot_mqtt_ingest_receipt
+(
+    id          BIGINT      NOT NULL COMMENT '主键',
+    tenant_id   BIGINT      NOT NULL COMMENT '租户 ID（由设备行解析，不信任报文声明）',
+    device_id   BIGINT      NOT NULL COMMENT '设备 ID（iot_device.id；来自主题段，非报文声明）',
+    request_id  VARCHAR(64) NOT NULL COMMENT '设备侧请求 ID（幂等键；MQTT 上行报文体携带）',
+    item_count  INT         NOT NULL COMMENT '首次受理时通过校验的读数条数（重投时原样读回，不重算）',
+    create_user BIGINT      NULL COMMENT '创建人',
+    create_time DATETIME    NULL COMMENT '创建时间',
+    update_user BIGINT      NULL COMMENT '更新人',
+    update_time DATETIME    NULL COMMENT '更新时间',
+    status      TINYINT     NOT NULL DEFAULT 1 COMMENT '状态：1 启用 0 停用',
+    is_deleted  TINYINT     NOT NULL DEFAULT 0 COMMENT '逻辑删除',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_iot_mqtt_ingest_receipt_request (tenant_id, device_id, request_id)
+) COMMENT 'IoT MQTT 入站幂等回执（同一设备同一 requestId 只落一行）';

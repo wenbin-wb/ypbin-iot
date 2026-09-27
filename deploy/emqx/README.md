@@ -24,7 +24,32 @@
 | `emqx-tunnel-watch.sh` | 生产机 | 「隧道停摆」判据（四级，**只告警不自愈**；不使用任何凭据） |
 | `emqx-tunnel-watch.service` / `.timer` | 生产机 | 每 2 分钟触发一次判据；失败即单元 `failed` + journald 明确告警 |
 | `phase2-loadtest.sh` | 中间件机 | 阶段② 限内存 OOM/存活实测（100/500 连接两档，判据 + 阈值对照 + 清理） |
+| `emqx-ingress-tunnel.service` | 生产机 | **入站/出向双向隧道**（段 A 新增）：`-L 172.20.0.1:18093`（容器可达的管理面）+ `-R 127.0.0.1:18084`（EMQX 回平台）；与既有 `emqx-tunnel.service` **并存**、互不影响 |
+| `emqx-ingress-relay.socket` / `.service` | 中间件机 | **入站中继**：`systemd-socket-proxyd` 把 `172.28.0.1:18084` 转到宿主回环（EMQX 容器到不了宿主回环） |
+| `emqx-ingress-firewall.service` | 中间件机 | 幂等放行「emqx-edge 网桥 → 本机 18084」（宿主 INPUT 策略是 DROP，不放行则容器连不上） |
+| `emqx-ingress-install.sh` | 运维机 | 幂等安装/核验上述三份单元 + 落 `ingress/internal-token`(600) |
+| `emqx-ingress-init.sh` | 中间件机 | 幂等 upsert **规则 + Webhook 动作**（含 `max_buffer_bytes=16MB`）+ 动作 `connected` 自检 |
+| `emqx-ingress-rollback.sh` | 中间件机 | 撤销入站（**先删规则再删动作**——EMQX 拒绝删除被引用的桥接） |
+| `mqtt-device-probe.py` | 中间件机 | 模拟 MQTT 设备（用平台签发的凭据；只依赖 `/opt/emqx/venv` 里既有的 paho-mqtt） |
+| `accept-emqx-ingress.sh` | 运维机 | 入站端到端验收 ①–⑤（可复跑；越权判据用 **EMQX 指标差值**，因为 `deny_action=ignore` 下客户端看不出被拒） |
 | `latency-probe.py` | 中间件机 | 只读订阅端延迟观测器（逐条统计 p50/p95/p99；**不产生负载**） |
+
+## 平台侧集成（段 A）
+
+入站（设备 → EMQX → 平台）与出向（平台 → EMQX 管理面）**两条方向**、以及为什么必须用反向隧道 + 中继，
+见 **`../../docs/EMQX-INTEGRATION.md` §2**（含拓扑图与逐条理由）。最短上手顺序：
+
+```bash
+# ① 通道（幂等）：三份单元 + 内部凭证落位 + 双向连通性核验
+bash deploy/emqx/emqx-ingress-install.sh --mw-ssh "<mw ssh>" --prod-ssh "<prod ssh>"
+# ② 规则/动作（幂等）：在中间件机跑
+ssh <mw> 'bash /opt/emqx/emqx-ingress-init.sh'
+# ③ 端到端验收 ①–⑤（可复跑）
+bash deploy/emqx/accept-emqx-ingress.sh --mw-ssh "<mw ssh>" --prod-ssh "<prod ssh>"
+# 回滚
+ssh <mw> 'bash /opt/emqx/emqx-ingress-rollback.sh'
+ssh <prod> 'systemctl disable --now emqx-ingress-tunnel.service'
+```
 
 ## 凭据纪律
 

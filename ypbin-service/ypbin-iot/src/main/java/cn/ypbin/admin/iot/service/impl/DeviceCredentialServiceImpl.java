@@ -14,6 +14,8 @@ import cn.ypbin.admin.iot.credential.DeviceCredentialVerifyResp;
 import cn.ypbin.admin.iot.credential.DeviceMqttNaming;
 import cn.ypbin.admin.iot.credential.DevicePasswordGenerator;
 import cn.ypbin.admin.iot.credential.DevicePasswordHasher;
+import cn.ypbin.admin.iot.emqx.EmqxAdminClient;
+import cn.ypbin.admin.iot.emqx.EmqxClientException;
 import cn.ypbin.admin.iot.emqx.EmqxProperties;
 import cn.ypbin.admin.iot.entity.IotDevice;
 import cn.ypbin.admin.iot.entity.IotDeviceCredential;
@@ -31,6 +33,8 @@ import cn.ypbin.starter.tenant.core.TenantContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.time.LocalDateTime;
 import java.util.Objects;
 import java.util.Optional;
@@ -49,6 +53,20 @@ import org.springframework.transaction.annotation.Transactional;
  * <p><b>秘密的可见面</b>：明文只在 {@link #issue} 的返回值里出现一次；库中只有
  * {@code sha256(password + salt)}；日志只记设备 id 与版本号。校验失败的原因用枚举码记录，
  * 口令本身**从不**进入任何日志/异常消息（{@code DeviceCredentialSecretLeakTest} 钉住这一点）。</p>
+ *
+ * <p><b>EMQX 侧同步（设计 §5.3 的「签发 ⇒ 建用户、吊销 ⇒ 删用户」）</b>：平台口令是**自持哈希**
+ * （{@code sha256(password + salt)}，与 EMQX 内置库同口径），因此同步只需把哈希与盐上报，不经手明文。
+ * 失败语义刻意**两侧不同</b>：
+ * <ul>
+ *   <li><b>签发/轮换：fail-closed</b>——同步失败即抛错、事务回滚、**不返回明文口令**。
+ *       若"先返回口令、同步失败只记日志"，设备会拿到一把永远连不上的口令，而平台侧一切"正常"，
+ *       这是最难排查的一类静默故障。代价：EMQX 不可用时无法签发（如实报错，不静默降级）。</li>
+ *   <li><b>吊销：平台侧必成、EMQX 侧尽力而为</b>——平台侧吊销（清空秘密列 + 置吊销时刻）**不因
+ *       EMQX 不可达而回滚**（否则安全动作被可用性绑架）；EMQX 侧失败记 ERROR 日志 + 指标
+ *       {@value #METRIC_SYNC_FAILED}，残留账号由对账任务（P1-7）清理。这是设计 RK16 已登记的残留风险。</li>
+ * </ul>
+ * 尚有**未覆盖的窗口**（如实登记）：EMQX 上报成功但数据库事务最终提交失败时，EMQX 侧会留下一个
+ * 平台不认的账号——窗口极小，且再次签发同一设备会把哈希覆盖成新的，不影响正确性。</p>
  *
  * <p><b>为什么不推进 config_epoch</b>：凭据不是采集参数（{@code credential_ref} 对 access 是不透明值，
  * 不影响「采什么」），推进 {@code config_epoch} 会让 access 无谓地重建设备链路——反而在变更窗口内
@@ -73,6 +91,18 @@ public class DeviceCredentialServiceImpl
     /** 吊销后的秘密列取值（空字符串 ⇒ 任何口令都算不出来）。 */
     private static final String REVOKED_SECRET = "";
 
+    /** EMQX 侧同步失败的计数（按操作分档：签发侧失败会回滚，吊销侧失败只告警 ⇒ 指标是唯一可靠出口）。 */
+    public static final String METRIC_SYNC_FAILED = "iot.emqx.credential.sync.failed";
+
+    /** 指标 tag：操作类型。 */
+    private static final String TAG_OPERATION = "operation";
+
+    /** 操作类型：签发/轮换。 */
+    private static final String OPERATION_ISSUE = "issue";
+
+    /** 操作类型：吊销。 */
+    private static final String OPERATION_REVOKE = "revoke";
+
     /** 校验通过/拒绝的结果码（对齐 EMQX HTTP 认证源的 result 语义）。 */
     private static final String RESULT_ALLOW = "allow";
 
@@ -82,10 +112,26 @@ public class DeviceCredentialServiceImpl
 
     private final EmqxProperties emqxProperties;
 
+    /** EMQX 管理面客户端（enabled=false 时是不可用实现，调用点先判 enabled，不会误用）。 */
+    private final EmqxAdminClient emqxAdminClient;
+
+    private final Counter syncFailedOnIssue;
+
+    private final Counter syncFailedOnRevoke;
+
     public DeviceCredentialServiceImpl(IotDeviceMapper iotDeviceMapper,
-                                       EmqxProperties emqxProperties) {
+                                       EmqxProperties emqxProperties,
+                                       EmqxAdminClient emqxAdminClient,
+                                       MeterRegistry meterRegistry) {
         this.iotDeviceMapper = iotDeviceMapper;
         this.emqxProperties = emqxProperties;
+        this.emqxAdminClient = emqxAdminClient;
+        this.syncFailedOnIssue = Counter.builder(METRIC_SYNC_FAILED)
+            .description("设备凭据同步 EMQX 失败的次数（签发侧失败会回滚；吊销侧失败只告警）")
+            .tag(TAG_OPERATION, OPERATION_ISSUE).register(meterRegistry);
+        this.syncFailedOnRevoke = Counter.builder(METRIC_SYNC_FAILED)
+            .description("设备凭据同步 EMQX 失败的次数（签发侧失败会回滚；吊销侧失败只告警）")
+            .tag(TAG_OPERATION, OPERATION_REVOKE).register(meterRegistry);
     }
 
     @Override
@@ -117,6 +163,8 @@ public class DeviceCredentialServiceImpl
         }
         updateDeviceCredentialState(deviceId, DeviceMqttNaming.credentialRef(tenantId, deviceId),
             version, issuedAt, null);
+        // 同步 EMQX 在**事务内、返回明文之前**：失败即回滚（否则会交付一把连不上的口令）
+        upsertEmqxUser(row.getUsername(), row.getPasswordHash(), salt, deviceId, version);
 
         // 只记设备 id 与版本号：明文口令与哈希**不进日志**（这是本条链路上最容易被顺手写坏的地方）
         log.info("[iot] 设备凭据已签发/轮换：deviceId={} version={}（明文仅在响应中出现一次）",
@@ -166,6 +214,9 @@ public class DeviceCredentialServiceImpl
         }
         updateDeviceCredentialState(deviceId, null, device.getCredentialVersion(),
             device.getCredentialIssuedAt(), LocalDateTime.now());
+        // EMQX 侧删除**尽力而为**：平台侧吊销不能被 broker 可用性绑架（残留账号由对账任务清理，RK16）
+        deleteEmqxUser(DeviceMqttNaming.username(device.getTenantId(), deviceId), deviceId,
+            device.getCredentialVersion());
         log.info("[iot] 设备凭据已吊销：deviceId={} version={}（此后该设备不得再认证成功）",
             deviceId, device.getCredentialVersion());
     }
@@ -294,6 +345,59 @@ public class DeviceCredentialServiceImpl
         LambdaQueryWrapper<IotDeviceCredential> wrapper = Wrappers.lambdaQuery(IotDeviceCredential.class)
             .eq(IotDeviceCredential::getDeviceId, deviceId);
         return getOne(wrapper, false);
+    }
+
+    /**
+     * 把设备账号同步到 EMQX（**fail-closed**：失败即抛 BusinessException，事务回滚）。
+     *
+     * @param username     MQTT 用户名
+     * @param passwordHash 口令哈希（hex）
+     * @param salt         盐（hex）
+     * @param deviceId     设备 ID（仅日志）
+     * @param version      凭据版本（仅日志）
+     */
+    private void upsertEmqxUser(String username, String passwordHash, String salt, Long deviceId,
+                                int version) {
+        if (!emqxProperties.isEnabled()) {
+            // 降级形态（本环境没有 broker）：平台侧凭据照常签发，但**不假装同步过**
+            log.info("[iot] 未启用 EMQX 管理面（ypbin.emqx.enabled=false），本次只做平台侧签发："
+                + "deviceId={} version={}", deviceId, version);
+            return;
+        }
+        try {
+            emqxAdminClient.upsertPasswordUser(username, passwordHash, salt);
+        } catch (EmqxClientException ex) {
+            syncFailedOnIssue.increment();
+            // 完整堆栈进日志（禁静默吞异常）；异常消息里没有口令/哈希，可安全记
+            log.error("[iot] 设备凭据同步 EMQX 失败，本次签发回滚（不会返回明文口令）："
+                    + "deviceId={} version={} 原因码={}",
+                deviceId, version, ex.getErrorCode().getCode(), ex);
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "同步 EMQX 失败（" + ex.getErrorCode().getDesc() + "），本次签发已回滚，请稍后重试");
+        }
+    }
+
+    /**
+     * 从 EMQX 删除设备账号（**尽力而为**：失败只告警，不影响平台侧吊销）。
+     *
+     * @param username MQTT 用户名
+     * @param deviceId 设备 ID（仅日志）
+     * @param version  凭据版本（仅日志）
+     */
+    private void deleteEmqxUser(String username, Long deviceId, Integer version) {
+        if (!emqxProperties.isEnabled()) {
+            log.info("[iot] 未启用 EMQX 管理面（ypbin.emqx.enabled=false），本次只做平台侧吊销："
+                + "deviceId={} version={}", deviceId, version);
+            return;
+        }
+        try {
+            emqxAdminClient.deleteUser(username);
+        } catch (EmqxClientException ex) {
+            syncFailedOnRevoke.increment();
+            log.error("[iot] 吊销时删除 EMQX 账号失败（**平台侧吊销已生效**，broker 侧残留需对账清理）："
+                    + "deviceId={} version={} 原因码={}",
+                deviceId, version, ex.getErrorCode().getCode(), ex);
+        }
     }
 
     /**

@@ -1,0 +1,33 @@
+[Unit]
+Description=ypbin MQTT 入站中继的防火墙放行（只放行 emqx-edge 网桥 → 本机 18084）
+Documentation=file:///opt/emqx/README.md
+# 在 socket 之前跑完：放行规则没生效时，容器发出的连接会被主机 INPUT 策略 DROP 掉，
+# 而 EMQX 侧只会看到「连不上」——先装规则，再听端口。
+Before=emqx-ingress-relay.socket
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+
+# ---------------------------------------------------------------------------
+# 为什么需要这条规则（不是"顺手开个口子"）
+# ---------------------------------------------------------------------------
+# 中间件机宿主 iptables 的 INPUT 策略实测是 **DROP**（只显式放行了别人的 18080/8080），
+# 而 EMQX 跑在独立网桥 emqx-edge（172.28.0.0/16，网关 172.28.0.1）里、**不是 host 网络**
+# ⇒ 容器访问宿主网关地址属于 INPUT 路径，不加规则会被 DROP，表现为 EMQX 的 HTTP 动作
+# 「连接超时」（而不是 4xx），排障时极易被误判成平台没起。
+#
+# 规则范围刻意收到最窄：
+#   · 只放行**本网桥**的源（别人的 app_default / middleware_default 一律不在此列）；
+#   · 只放行**本端口**（18084）；
+#   · 只放行 TCP。
+# 不放行任何出口方向（那是 OUTPUT），也不改 INPUT 的默认策略。
+#
+# 幂等：先 `-C` 检查再 `-I`；重复执行不会堆叠规则（重复插规则会让回滚时删不干净）。
+# ---------------------------------------------------------------------------
+ExecStart=/bin/bash -c 'iptables -C INPUT -s 172.28.0.0/16 -p tcp --dport 18084 -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -s 172.28.0.0/16 -p tcp --dport 18084 -j ACCEPT'
+ExecStop=/bin/bash -c 'while iptables -C INPUT -s 172.28.0.0/16 -p tcp --dport 18084 -j ACCEPT 2>/dev/null; do iptables -D INPUT -s 172.28.0.0/16 -p tcp --dport 18084 -j ACCEPT; done'
+
+[Install]
+WantedBy=multi-user.target

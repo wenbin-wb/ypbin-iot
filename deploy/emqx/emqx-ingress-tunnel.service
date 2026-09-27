@@ -1,0 +1,59 @@
+[Unit]
+Description=ypbin MQTT 入站双向隧道（生产机 → 中间件机：管理面 18093 出向 + 入站 18084 反向）
+Documentation=file:///opt/ypbin/ypbin-iot/deploy/emqx/README.md
+After=network-online.target
+Wants=network-online.target
+# 隧道是「断了必须自己回来」的长跑进程：禁用启动速率限制，否则崩溃重启 5 次/10 秒会被判定
+# failed 而**永久停止重试**（与既有 emqx-tunnel.service 同一处理）。
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+
+# ===========================================================================
+# 与既有 emqx-tunnel.service 的关系（为什么是**两个**单元而不是给老的加一行）
+# ===========================================================================
+# emqx-tunnel.service 是阶段②已验收的生产资产（隧道自愈 <3s、有独立停摆告警）。本单元只增加
+# 「平台侧集成」需要的两条转发，**不动**既有单元 ⇒ 老链路的行为与告警口径不变；两者失败互不牵连。
+#
+# 两条转发的方向（务必看清，它们方向相反）：
+#   `-L 172.20.0.1:18093:127.0.0.1:18093`  **出向**（平台 → EMQX 管理面）
+#       · 平台（ypbin-iot 容器，172.20.0.24）要调 EMQX REST 做凭据同步/下行 publish；
+#       · 容器**到不了宿主回环**（宿主上已有的 127.0.0.1:18093 隧道对容器不可见），
+#         因此把它**再绑一份到 docker 网桥网关 172.20.0.1** —— 只有本机容器网络可达，公网不可达；
+#       · `-L` 的目标 `127.0.0.1:18093` 由**中间件机侧**拨，仍受 authorized_keys 的
+#         `permitopen="127.0.0.1:18093"` 约束（绑定地址是本机地址，不受 permitopen 限制）。
+#   `-R 127.0.0.1:18084:127.0.0.1:18084`  **反向**（EMQX → 平台入站端点）
+#       · 中间件机的 sshd 是 `GatewayPorts no` ⇒ 远端转发**只能绑回环**，所以这里绑
+#         `127.0.0.1:18084`，再由中间件机的 `emqx-ingress-relay.socket`（systemd-socket-proxyd）
+#         把 emqx-edge 网桥网关 172.28.0.1:18084 的连接转给它；
+#       · `-R` 的目标由**本机（生产机）**拨到 `127.0.0.1:18084`（docker-proxy → ypbin-iot 容器）。
+#       · 该 key 的 authorized_keys 里有 `restrict,port-forwarding,permitopen=...`：
+#         `permitopen` 只约束 **-L 的目标**，`permitlisten` 未设置 ⇒ **反向转发未被禁止**
+#         （这一点见 docs/EMQX-DEPLOY.md §6.1 的 R8 残留风险，勿写成"只能出向"）。
+#
+# 其余选项（-M 0 / -N / 主机密钥 pin / 算法 pin / 专用受限密钥）与既有单元逐字一致，理由见该单元注释。
+ExecStart=/usr/bin/autossh -M 0 -N \
+  -o ExitOnForwardFailure=yes \
+  -o ServerAliveInterval=15 \
+  -o ServerAliveCountMax=3 \
+  -o TCPKeepAlive=yes \
+  -o BatchMode=yes \
+  -o PreferredAuthentications=publickey \
+  -o IdentityAgent=none \
+  -o StrictHostKeyChecking=yes \
+  -o UserKnownHostsFile=/etc/ypbin/emqx-tunnel.known_hosts \
+  -o KexAlgorithms=curve25519-sha256 \
+  -o HostKeyAlgorithms=ssh-ed25519 \
+  -o Compression=no \
+  -i /etc/ypbin/emqx-tunnel.key \
+  -p 61260 \
+  -L 172.20.0.1:18093:127.0.0.1:18093 \
+  -R 127.0.0.1:18084:127.0.0.1:18084 \
+  root@43.242.200.8
+
+Restart=always
+RestartSec=100ms
+
+[Install]
+WantedBy=multi-user.target
