@@ -204,6 +204,78 @@ done
 curl -s -m 5 -o /dev/null -w '%{http_code}\n' http://113.142.217.58:18084/actuator/metrics   # 期望连不上/超时
 ```
 
+### 5.7 `ypbin-access` 的对齐（2026-09-27）
+
+**结论**：access 与 iot 用**同一份最小暴露集合**（`health,metrics,info` + 关掉 health 细节/组件），
+并把它**只绑回环**。差别只有端口（18086）与绑定变量名（`ACCESS_BIND_ADDR`）。
+
+**为什么必须补**：access 本来就带了一整套指标（`iot.access.egress.*` / `iot.access.lease.*` /
+`iot.access.config.*` / `iot.access.subscribe.*` / `iot.access.spec.*` / `iot.access.connection.*` /
+`iot.access.decode.failure`），但 `management.endpoints.web.exposure.include` 默认只有 `health`
+⇒ 生产里它们**只能靠 WARN 日志看**。上一轮新增的 `iot.access.decode.failure` 正是这个缺口的实例。
+
+配置落在 `deploy/nacos/ypbin-access.yaml`（Data ID `ypbin-access.yaml`），键与 §5.1 逐字相同：
+
+```yaml
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics,info   # ⚠️ 最小集合，绝不用 '*'
+  endpoint:
+    health:
+      show-details: never
+      show-components: never
+    metrics:
+      enabled: true
+```
+
+**绑定地址必须与 `INTERNAL_BIND_ADDR` 解耦**：`deploy/docker-compose.yml` 里 access 的映射是
+`"${ACCESS_BIND_ADDR:-127.0.0.1}:18086:18086"`（同 `IOT_BIND_ADDR` / `IOTDB_BIND_ADDR` 先例）。
+不设它时只监听宿主机回环 ⇒ 公网与服务网段都打不通；把它设成 `0.0.0.0` 等于把这套无认证端点放到公网。
+
+**「解耦」怎么复现证明**（生产机上 `INTERNAL_BIND_ADDR` 恰好已是 `127.0.0.1`，新旧表达式结果相同、
+无法动态区分——所以要在**渲染层**做差分）：
+
+```bash
+cd <只放 deploy/ 的临时目录或部署机 deploy 目录>
+env INTERNAL_BIND_ADDR=0.0.0.0 <其余必填键...> \
+  docker compose -f docker-compose.yml -f docker-compose.override.yml config \
+  | python3 -c 'import sys,yaml; s=yaml.safe_load(sys.stdin)["services"]; \
+      print({n: s[n].get("ports") for n in ["ypbin-access","ypbin-iot","mysql"]})'
+# 期望（2026-09-27 实测）：ypbin-access = host_ip 127.0.0.1；ypbin-iot = 127.0.0.1；mysql = 0.0.0.0
+# 即「18086 的回环只由 ACCESS_BIND_ADDR 决定」，不再跟着 INTERNAL_BIND_ADDR 走。
+```
+
+**指标零值也要可观测（本轮新增的代码改动）**：Micrometer 计数器是**惰性**创建的，若把建 meter 留在
+失败路径里，「一条都没失败过」时 `/actuator/metrics/iot.access.decode.failure` 会回 **404 而不是 0**，
+值班无法区分「没有解码失败」与「指标没上报」。因此 access 启动期会把 `iot.access.decode.failure`
+按全部原因码**预注册为 0**（`AccessMetricsConfiguration` + `DecodeFailureMetrics`），失败路径只自增。
+
+**判据（与 §5.4 完全一致，判据必须看响应体）**：
+
+```bash
+# ✅ 指标清单可读，且含 iot.access.decode.failure（8 个 reason 标签）
+curl -s http://127.0.0.1:18086/actuator/metrics | python3 -c 'import sys,json;print([n for n in json.load(sys.stdin)["names"] if n.startswith("iot.access")])'
+# ✅ 零值可观测（实测：8 个 reason 全为 0.0）
+curl -s http://127.0.0.1:18086/actuator/metrics/iot.access.decode.failure
+# ✅ 敏感端点必须**没有暴露**（看响应体是不是 404 业务信封，别看状态码）
+for e in env configprops heapdump threaddump beans loggers mappings; do
+  body="$(curl -s http://127.0.0.1:18086/actuator/$e)"
+  case "$body" in *'"code":404'*) echo "$e 未暴露（OK）";; *) echo "$e ⚠️ 疑似已暴露";; esac
+done
+# ✅ 公网不可达（在**非服务器的外部主机**上）：18086/18084 期望 000 / curl exit 7；19000/18080 期望 200
+```
+
+> ⚠️ **live 配置里的这段注释是发布当时的版本**（脚本 `tools/patch-nacos-access-actuator.py` 的 `BLOCK` 与仓库 yaml 已按复核意见补上 health 挂起的事实；live 的注释差异不影响行为）。
+
+> ⚠️ **access 的 `/actuator/health` 会挂起**（2026-09-27 部署前后各测一次，均 >6s 无响应；`PROD-OPS-NOTES.md`
+> §6.3 早已登记同类现象）。**不是本次改动引入**（改前改后同样挂起），且与 metrics 暴露无关。
+> 需要判活时用 `/actuator/health/liveness` 与 `/actuator/health/readiness`（均为 `{"status":"UP"}`，毫秒级）。
+> 根因**未查明**（请求跑在虚拟线程上，JRE 镜像里没有 jcmd/虚拟线程 dump 手段）⇒ 登记为未决项。
+> 线上对应的另外两条已知问题（同一窗口观测到，非本次引入）：`NettyChannelConnection: inbound buffer overflow
+> on connection t1-d9300012` 持续增长、`IotLifecycle: failed to bind device` 360 次 —— 已在本轮回执里登记。
+
 ### 5.5 部署脚本的「渲染后配置」不得留在盘上（凭据卫生）
 
 `deploy/install.sh` 导入 Nacos 前的 sed 渲染产物**含真实口令与网关签名标记**。已改为
