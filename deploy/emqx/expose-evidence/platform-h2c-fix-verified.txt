@@ -1,0 +1,32 @@
+# 平台 EMQX 管理面 HTTP/2 缺陷 —— 修复（PR #90）部署后的验证
+# 采集于 2026-09-27（真实 UTC；与 api.github.com / Google 的 Date 头一致）
+#
+# 一、部署 artifact（判断"线上到底跑的是哪一版"的唯一口径）
+#   合并提交      main = ff4c04a（PR #90 squash）
+#   本地构建 jar  md5 = 0ae4c7042c8342d28e36adbe8da6b7ef  size=137780172
+#   生产机 target md5 = 0ae4c7042c8342d28e36adbe8da6b7ef   ← 与本地逐字节一致（上传自证）
+#   容器内 jar    md5 = 0ae4c7042c8342d28e36adbe8da6b7ef   ← 与上传件一致（确实生效）
+#   image id      = sha256:d955784d1fad3b444a8ab8330e60a8baf1e808da30a147aacb2e71f7bda9224e
+#   StartedAt     = 2026-09-27T12:23:19.242824641Z
+#   （部署前：容器 jar md5 = efc9103a872e503be61d084b5464e22b，image sha256:69ca8d25…）
+#
+# ⚠️ jar 的 md5 会随构建变化（Spring Boot 打包含时间戳等）⇒ 判据应是
+#    "容器内 md5 == 你刚上传的那个文件的 md5"，不要拿两次独立构建的 md5 互比。
+#
+# 二、行为级 A/B（**不预热**、无订阅者下发，看 errorCode 区分"发布有没有到 EMQX"）
+#   修复前（2026-09-27 11:33/11:50 UTC 实测）：
+#     #1 status=failed errorCode=EMQX_ERROR
+#     #2 status=failed errorCode=EMQX_ERROR
+#     #3 status=failed errorCode=EMQX_ERROR
+#     → 发布**根本没到** EMQX（h2c upgrade EOF）
+#   修复后（同日 12:2x UTC 实测）：
+#     #1 status=failed errorCode=NO_SUBSCRIBER
+#     #2 status=failed errorCode=NO_SUBSCRIBER
+#     #3 status=failed errorCode=NO_SUBSCRIBER
+#     → 发布**到了** EMQX（HTTP 202 no_matching_subscribers）；只是当时无订阅者
+#   近 5 分钟平台日志里 "EOF reached while reading" 次数 = 0
+#
+# 三、外部端到端（**不带任何绕过**）
+#   见同目录 accept-external-run5-no-warm.txt：以 --no-warm-emqx-admin 跑
+#   deploy/emqx/accept-emqx-external.sh ⇒ ①–⑥ 全 PASS（⑥ statusCode=sent、
+#   外部模拟设备真收到 → 回执 → 实例 succeeded）。

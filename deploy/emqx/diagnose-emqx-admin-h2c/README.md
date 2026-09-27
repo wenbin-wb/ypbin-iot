@@ -80,7 +80,7 @@ Caused by: java.io.EOFException: EOF reached while reading
 - **不受影响**：`curl`（默认 HTTP/1.1，或 `--http2-prior-knowledge` 走先验知识路径）3/3 正常；
   这解释了"为什么手工测都是好的、只有平台会失败"。
 
-## 正解（**已在 PR #90 落地**；部署状态见该 PR）
+## 正解（**已在 PR #90 落地，并已部署验证**）
 
 在 `ypbin-service/ypbin-iot` 的 `EmqxRestAdminClient` 构造里显式指定协议版本：
 
