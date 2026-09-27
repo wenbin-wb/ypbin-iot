@@ -16,6 +16,8 @@ set -uo pipefail
 say() { printf '%s\n' "$*"; }
 KEEP_TAGS=5
 KEEP_JARS=2
+# access 的 jar 备份：策略「按服务各留最新」——access 只需 1 个（它是被 iot 内部调用的采集单元）
+KEEP_JARS_ACCESS=1
 
 say "==================== 回滚资产清点 @ $(date -u +%FT%TZ) ===================="
 
@@ -51,20 +53,48 @@ rm -f /tmp/.rb-tags.$$
 [ "$n" -eq 0 ] && say "  （无 rollback tag）"
 say "  合计 $n 个 rollback tag；其中 **$used 个**指向**正在运行的镜像**（按 image ID 判定 ⇒ 必须保留）"
 
-# ── B. /root 下的 rollback jar ───────────────────────────────────────────────
+# ── B. /root 下的 rollback jar（**按服务各自**保留最新 N 个）─────────────────
+#
+# ⚠️ 为什么必须按服务分组、并且**自检盲区**（2026-09-27 实测教训）：
+#   原实现只 glob `/root/ypbin-iot-jar-rollback-*.jar`，于是两类文件**永远不出现**在清单里：
+#     · `/root/ypbin-access-jar-*.jar`（另一个服务的 jar 备份，**整个服务都没被覆盖**）
+#     · `/root/ypbin-iot-jar-rollback2-*.jar` / `rollback3-*.jar`（`rollback-` 后面不是连字符 ⇒ glob 不匹配）
+#   ⇒ 它们既不会被保留、也不会被列为过期候选，**只能靠人偶然发现**。
+#   **清单不覆盖的对象等于没有策略**：所以本节末尾有一段自检，凡 `/root/*jar*.jar` 里没被
+#   本节任何服务 glob 命中的，一律**显式打出来**（而不是静默漏掉）。
 say
-say "── B. /root 下的 rollback jar（策略：保留最新 $KEEP_JARS 个）──"
+say "── B. /root 下的 rollback jar（策略：**按服务**各留最新 N 个）──"
 n=0
-if compgen -G "/root/ypbin-iot-jar-rollback-*.jar" > /dev/null; then
-  for f in $(ls -1t /root/ypbin-iot-jar-rollback-*.jar); do
-    n=$((n+1))
-    if [ "$n" -le "$KEEP_JARS" ]; then verdict="保留（最新 $KEEP_JARS 内）"; else verdict="**过期候选**（等用户决定）"; fi
+for spec in "ypbin-iot:${KEEP_JARS}" "ypbin-access:${KEEP_JARS_ACCESS}"; do
+  svc="${spec%%:*}"; keep="${spec##*:}"
+  # shellcheck disable=SC2086
+  files=$(ls -1t /root/${svc}-jar-*.jar 2>/dev/null)
+  if [ -z "$files" ]; then
+    say "  -- $svc（保留最新 $keep 个）：无"
+    continue
+  fi
+  say "  -- $svc（保留最新 $keep 个）--"
+  i=0
+  for f in $files; do
+    i=$((i+1)); n=$((n+1))
+    if [ "$i" -le "$keep" ]; then verdict="保留（最新 $keep 内）"; else verdict="**过期候选**（等用户决定）"; fi
     printf '  [%2d] %-58s %-10s %s\n' "$n" "$(basename "$f")" "$(du -h "$f" | cut -f1)" "$verdict"
   done
-else
-  say "  （无 rollback jar）"
-fi
-say "  合计 $n 个"
+done
+
+# 盲区自检：/root 下所有 *jar*.jar 必须被上面的服务 glob 命中，否则显式报出（不静默漏）
+blind=0
+for f in $(ls -1 /root/*jar*.jar 2>/dev/null); do
+  hit=0
+  for svc in ypbin-iot ypbin-access; do
+    case "$f" in /root/${svc}-jar-*.jar) hit=1 ;; esac
+  done
+  if [ "$hit" -eq 0 ]; then
+    say "  ⚠️ **未纳入策略**：$f —— 清单的 glob 没覆盖它 ⇒ 按「等于没有策略」处理，请把它补进本节的服务清单"
+    blind=$((blind+1))
+  fi
+done
+say "  合计 $n 个（另有 $blind 个**未纳入策略**，见上）"
 
 # ── C. 配置 / SQL / Nacos 快照（全留）────────────────────────────────────────
 say

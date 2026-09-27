@@ -12,6 +12,9 @@
         --key management.endpoint.health.show-details --value always              # dry-run
     python3 patch-nacos-yaml-value.py --data-id ypbin-access.yaml \
         --key management.endpoint.health.show-details --value always --apply      # 发布 + 回读校验
+    # 键**尚不存在**时用 --add（在最近的已存在祖先下按缩进插入，中间层一并补齐）：
+    python3 patch-nacos-yaml-value.py --data-id ypbin-access.yaml \
+        --key management.health.redis.enabled --value false --add --apply
 
 安全：口令经 stdin 传 curl（不进 argv）；accessToken 只写 600 的 curl 配置文件（`-K`）；
 配置正文（含 `INTERNAL_TOKEN` 等真值）**不打印**，只打印长度、sha256 前缀与「被改的那一行」。
@@ -115,7 +118,7 @@ def replace_scalar(content: str, key_path: str, value: str):
         if not rest.strip() or rest.strip().startswith("#"):
             stack.append((indent, key))
     if len(hits) != 1:
-        raise SystemExit(f"!! 期望恰好命中 1 行，实际 {len(hits)} 行 ⇒ 拒绝改动（避免改错键）")
+        return None, None, None, hits
     index, indent, rest = hits[0]
     comment = ""
     value_part = rest.strip()
@@ -125,7 +128,44 @@ def replace_scalar(content: str, key_path: str, value: str):
     old_line = lines[index]
     new_line = " " * indent + key_path.split(".")[-1] + ": " + value + comment
     lines[index] = new_line
-    return "\n".join(lines), old_line, new_line
+    return "\n".join(lines), old_line, new_line, hits
+
+
+def insert_scalar(content: str, key_path: str, value: str):
+    """键不存在时插入（在**最近的已存在祖先**下按缩进插入，中间层一并补齐）。
+
+    @return (new_content, inserted_lines) 或 (None, None) 表示祖先也不存在
+    """
+    wanted = key_path.split(".")
+    stack = []            # [(indent, key, line_index)]
+    lines = content.split("\n")
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or ":" not in stripped:
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        key = stripped.partition(":")[0].strip()
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        path = [entry[1] for entry in stack] + [key]
+        if path == wanted[:len(path)]:
+            stack.append((indent, key, index))
+    # 找最深的已存在祖先
+    for depth in range(len(wanted) - 1, 0, -1):
+        ancestor = wanted[:depth]
+        for indent, key, index in reversed(stack):
+            if [entry[1] for entry in stack[:stack.index((indent, key, index)) + 1]] == ancestor:
+                missing = wanted[depth:]
+                inserted = []
+                cursor = index + 1
+                for offset, name in enumerate(missing):
+                    pad = " " * (indent + 2 * (offset + 1))
+                    new_line = f"{pad}{name}: {value}" if offset == len(missing) - 1 else f"{pad}{name}:"
+                    lines.insert(cursor, new_line)
+                    inserted.append(new_line)
+                    cursor += 1
+                return "\n".join(lines), inserted
+    return None, None
 
 
 def main() -> int:
@@ -133,6 +173,7 @@ def main() -> int:
     parser.add_argument("--data-id", required=True)
     parser.add_argument("--key", required=True, help="点分键路径，例如 management.endpoint.health.show-details")
     parser.add_argument("--value", required=True)
+    parser.add_argument("--add", action="store_true", help="键不存在时按缩进插入（默认拒绝新增）")
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
 
@@ -144,9 +185,18 @@ def main() -> int:
     try:
         before = dump_live(args.data_id, header)
         print(f"    live before: bytes={len(before)} lines={before.count(chr(10)) + 1} sha256[:16]={sha(before)}")
-        after, old_line, new_line = replace_scalar(before, args.key, args.value)
-        print(f"    改动行 before : {old_line.strip()}")
-        print(f"    改动行 after  : {new_line.strip()}")
+        after, old_line, new_line, hits = replace_scalar(before, args.key, args.value)
+        if after is None:
+            if not args.add:
+                raise SystemExit(f"!! 期望恰好命中 1 行，实际 {len(hits)} 行 ⇒ 拒绝改动"
+                                 f"（要新增键请显式加 --add）")
+            after, inserted = insert_scalar(before, args.key, args.value)
+            if after is None:
+                raise SystemExit("!! 键与祖先都不存在，拒绝插入（避免把配置插到错误层级）")
+            print("    新增行：" + " / ".join(line.strip() for line in inserted))
+        else:
+            print(f"    改动行 before : {old_line.strip()}")
+            print(f"    改动行 after  : {new_line.strip()}")
         print(f"    live after : bytes={len(after)} lines={after.count(chr(10)) + 1} sha256[:16]={sha(after)}")
         if after == before:
             print("    值未变化 ⇒ 无需发布")
