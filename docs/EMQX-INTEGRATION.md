@@ -1,0 +1,296 @@
+# EMQX 平台侧集成（MQTT 入站 + 凭据同步）
+
+> 状态：**段 A 已落地并验收通过**（2026-10-01）。段 B（下行命令/在线调试）与段 C（前端）**未做**，见 §8。
+> 设计依据：`docs/EMQX-INGRESS-DESIGN.md`（入站主推、破例范围 D2、H6/H10、§6.5）；部署形态：`docs/EMQX-DEPLOY.md`（中间件机独立 compose + 隧道）。
+> 本文件只写**本回合新增的东西**：薄适配端点契约、双向通道的**方向**、规则/动作落成资产、凭据同步、回滚与未验证项。
+
+---
+
+## 0. 结论先行
+
+| # | 结论 | 证据强度 |
+|---|---|---|
+| **A1** | 入站链路**已端到端打通**：模拟设备（平台签发的凭据）发 `ypbin/v1/1/9300012/up/property` → EMQX 规则 → HTTP 动作 → `POST /internal/mqtt/readings` → `AvailabilityService.ingest` → Redis 最新值 / IoTDB 时序 / 活性 / 影子。 | 生产实测（`deploy/emqx/accept-emqx-ingress.sh` 五项判据全绿） |
+| **A2** | 入站端点按决策 D2 返回**真 HTTP 状态码**（非法 400 / 可重试 503 / 成功 200），且**只有 `/internal/mqtt/**`** 破例（其余 `/internal/**` 与网关 API 维持 200 + `R.code`）。 | 单测断言原始状态码（`InternalMqttReadingControllerTest`）+ 生产实测 401/400 |
+| **A3** | 设备凭据**签发/轮换 ⇒ EMQX 建账号（只上报哈希与盐）**、**吊销 ⇒ 删账号**已打通；`EMQX_API_KEY` 经容器 env 注入、Nacos 里只是 `${…}` 占位符（**不入库**）。 | 生产实测：签发后 EMQX 内置库出现 `1.9300012`；且用同口径哈希可认证成功 |
+| **A4** | 🔴 **实测更正设计 §3.3 F11 的一处**：`POST /api/v5/authentication/{id}/users` **只收明文 `password`**（传 `password_hash`/`salt` 会 400 `unknown_fields`）；带哈希的导入必须走 **`POST .../import_users`**（multipart，字段名 `filename`，CSV 列 `user_id,password_hash,salt,is_superuser`）。 | 生产实测三种请求体的响应体（见 §4.2） |
+| **A5** | 🔴 **ACL 拒绝在客户端看来是"成功"**：`deny_action=ignore`（H1 要求）⇒ 越权 publish 照常收到 PUBACK。**越权判据只能用 EMQX 指标差值**，用客户端退出码会得到假绿。 | 生产实测：越权发布退出码 0，但 `publish.auth_error`/`nomatch` 各 +1 |
+| **A6** | 反向通道方案：**生产机发起** SSH 反向隧道（`-R 127.0.0.1:18084`）+ 中间件机 **systemd-socket-proxyd** 中继（`172.28.0.1:18084 → 127.0.0.1:18084`）。原因：中间件机 sshd 是 `GatewayPorts no`（反向转发只能绑回环），而 EMQX 容器**到不了宿主回环**。 | 实测：容器内 `curl http://172.28.0.1:18084/...` 有响应；动作状态 `connected` |
+| **A7** | 中间件机宿主 **INPUT 策略是 DROP**（与设计 F44 记的生产机情况相同）⇒ 必须显式放行「emqx-edge 网桥 → 本机 18084」这一条，否则容器发出的连接被丢，表现为 EMQX「连接超时」。放行范围收到最窄（本网桥 + 本端口 + TCP），由 `emqx-ingress-firewall.service` 幂等维护。 | 实测：`iptables -L INPUT -n` 前后 |
+
+---
+
+## 1. 端点契约（新增的唯一后端入口）
+
+### 1.1 `POST /internal/mqtt/readings`
+
+| 项 | 值 |
+|---|---|
+| 守卫 | 头 `X-Internal-Token`（与既有 `/internal/**` 同一凭证）；**失败返回原始 401**（`InternalMqttTokenFilter`，不走全局异常处理器） |
+| 请求体 | `{"requestId":"…","items":[{"deviceId":"9300012","propertyId":"temperature","value":"23.4","quality":"GOOD","ts":1758768000000,"pollIntervalMs":30000}]}` |
+| 约束 | `requestId` `[A-Za-z0-9_.:-]{1,64}` 必填；`items` 1–50 条且**必须同属一台设备**；`propertyId` 走 `PropertyIdRules`（1–128，字符集白名单）；`quality` 走 `ReadingQuality` 白名单（`GOOD\|UNCERTAIN\|BAD\|STALE\|NOT_CONNECTED\|CONFIG_ERROR`，**大小写敏感**）；`value` 非空且 ≤4096 字符；`ts` 为正且不超前 `RedisLatestValueWriter.MAX_FUTURE_SKEW_MS`（5 分钟，与最新值写入器同一口径）；`pollIntervalMs` 为正且 ≤24h；报文 ≤64KB |
+| 响应 | 成功/幂等重投 **200** + `R` 信封（`data.accepted/dropped/duplicated`）；契约非法 **400** + `{"code":"<原因码>","message":"…"}`；其它异常 **503**（EMQX 判 recoverable 会重试） |
+| 租户 | **按设备行反查**（`TenantContext.executeIgnore` → `iot_device.tenant_id`），**不信任报文体里的任何 tenant 字段**；报文体带 `tenantId` 会被忽略（有实测用例） |
+| 幂等 | 表 `iot_mqtt_ingest_receipt`，唯一键 `(tenant_id, device_id, request_id)`；命中即**整批跳过**（不调用 `ingest`，因此不会重复写最新值/时序/活性/影子） |
+| 落库 | **完全复用** `AvailabilityService.ingest`（本端点不新增任何落库链路；点位**映射**校验仍由该服务的既有实现承担） |
+
+**为什么 `requestId` 必填、且唯一键含 `device_id`**：`requestId` 由**设备**生成，跨设备不保证唯一
+（现场很可能每台都从 1 开始计数），所以不能照抄 `iot_command_instance` 的 `(tenant_id, request_id)`
+——那是**平台生成**的 requestId。这一点是有意为之，写在 `IotMqttIngestReceipt` 的类注释里。
+
+**为什么校验不用 Bean Validation**：`@Valid` 失败会被全局异常处理器转成 HTTP 200 + `R.code`，
+而 EMQX 只看状态码 ⇒ 会变成「双端都绿、数据不存在」的静默丢数据（设计 C9/H10）。因此控制器接**原始字符串**、
+由服务层解析并逐条校验，控制器只把结果/拒绝映射成原始状态码。
+
+### 1.2 破例范围的守门
+
+- 过滤器只注册在 `/internal/mqtt/*`（`InternalMqttGuardWebConfig.MQTT_INGRESS_URL_PATTERN`），
+  **不存在**任何放行 `/internal/**` 全体的写法；
+- 该路径仍在既有 `InternalTokenGuardInterceptor` 的 `/internal/**` 拦截范围内（纵深防御，行为一致）；
+- 单测直接断言 `status().isUnauthorized()` / `isBadRequest()` / `isServiceUnavailable()`
+  ——断言的是**原始 HTTP 状态**而不是 `R.code`（若有人改回 200 信封，用例会转红）。
+
+---
+
+## 2. 拓扑与**方向**（最容易搞反的一段）
+
+```
+                    中间件机 43.242.200.8                                   生产机 113.142.217.58
+  ┌──────────────────────────────────────────┐        ┌──────────────────────────────────────────────┐
+  │ EMQX 5.8.9（容器 ypbin-emqx，独立网络       │        │ ypbin-iot 容器 172.20.0.24:18084              │
+  │ emqx-edge 172.28.0.0/16，网关 172.28.0.1） │        │   ↑ docker-proxy 只绑宿主 127.0.0.1           │
+  │  ├ 1883  → 127.0.0.1:1883（只绑回环）      │        │                                              │
+  │  └ REST → 127.0.0.1:18093（只绑回环）      │        │                                              │
+  └──────────────────────────────────────────┘        └──────────────────────────────────────────────┘
+        ▲                                    ▲                    │
+        │ ①入站：动作 POST                    │ ②出向：Java 调 REST  │
+        │   http://172.28.0.1:18084/...      │   http://172.20.0.1:18093/api/v5/...
+        │                                    │                    │
+  ┌─────┴──────────────────────┐   ┌─────────┴────────────────────┴───────────────────────────────────────┐
+  │ emqx-ingress-relay.socket  │   │ emqx-ingress-tunnel.service（生产机，autossh，**由生产机发起**）        │
+  │ 172.28.0.1:18084           │   │   -L 172.20.0.1:18093:127.0.0.1:18093   ← 出向（容器可达地址）        │
+  │   ↓ systemd-socket-proxyd  │   │   -R 127.0.0.1:18084:127.0.0.1:18084   → 反向（EMQX 回平台）          │
+  │ 127.0.0.1:18084 ←──────────┼───┘        （另一端在中间件机回环；sshd GatewayPorts=no ⇒ 只能绑回环）    │
+  └────────────────────────────┘                                                                          │
+```
+
+**逐条说清方向与理由**：
+
+1. **入站（EMQX → 平台）**：EMQX 的 HTTP 动作目标 = `http://172.28.0.1:18084/internal/mqtt/readings`。
+   - 为什么不是 `127.0.0.1:18084`：那是**宿主回环**，容器里的回环是它自己，**连不上**。
+   - 为什么不是 `172.28.0.1:1883` 那种「直接绑宿主」：宿主 INPUT 策略是 **DROP**，不放行就连不上（见 §3.2），
+     所以放行规则与监听地址必须**成对**存在。
+2. **出向（平台 → EMQX 管理面）**：Java 客户端 base-url = `http://172.20.0.1:18093`（docker 网桥网关）。
+   - 既有的 `127.0.0.1:18093` 隧道**对容器不可见**（同样是回环问题），所以这条 `-L` 把同一个目标**再绑一份到网关地址**；
+   - 只有本机容器网络可达，**公网不可达**（没有绑 0.0.0.0）。
+3. **反向转发的授权事实**：隧道用的受限私钥在中间件机 `authorized_keys` 里是
+   `restrict,port-forwarding,permitopen="127.0.0.1:18093"`。`permitopen` 只约束 **`-L` 的目标**，
+   未设 `permitlisten` ⇒ **`-R` 未被禁止**（`docs/EMQX-DEPLOY.md` §6.1 已登记的残留风险，勿写成"只能出向"）。
+4. **两条转发都在同一个新单元里**（`emqx-ingress-tunnel.service`），既有 `emqx-tunnel.service` **未改动** ⇒
+   阶段②已验收的自愈与告警口径不变，两者失败互不牵连。
+
+---
+
+## 3. 部署资产（`deploy/emqx/` 增补）
+
+| 文件 | 跑在哪 | 作用 |
+|---|---|---|
+| `emqx-ingress-tunnel.service` | 生产机 | autossh：出向 `-L 172.20.0.1:18093` + 反向 `-R 127.0.0.1:18084`（见 §2 的方向说明） |
+| `emqx-ingress-relay.socket` / `.service` | 中间件机 | `systemd-socket-proxyd`：`172.28.0.1:18084 → 127.0.0.1:18084`（空转 5 分钟自动退出，由 socket 激活） |
+| `emqx-ingress-firewall.service` | 中间件机 | 幂等维护一条 INPUT 放行：`-s 172.28.0.0/16 -p tcp --dport 18084`；`ExecStop` 会删掉它 |
+| `emqx-ingress-install.sh` | 运维机 | 分发并启用上述单元 + 落 `/opt/emqx/ingress/internal-token`(600) + 双向连通性核验（值经 stdin 管道，不打印） |
+| `emqx-ingress-init.sh` | 中间件机 | 幂等 upsert **规则 + Webhook 动作**，回读断言（含 `max_buffer_bytes=16MB`），动作状态 `connected` 自检 |
+| `emqx-ingress-rollback.sh` | 中间件机 | 撤销规则/动作/中继/放行（**顺序硬约束**：先删规则再删动作，见 §3.3） |
+| `mqtt-device-probe.py` | 中间件机 | 模拟设备（用平台凭据连接/发布；只用 `/opt/emqx/venv` 里既有的 paho-mqtt） |
+| `accept-emqx-ingress.sh` | 运维机 | 端到端验收 ①–⑤（可复跑，见 §6） |
+
+### 3.1 规则与动作（REST 落成，幂等）
+
+**动作（v1 bridges API，type=webhook）**：`POST /api/v5/bridges`
+
+| 键 | 值 | 依据 |
+|---|---|---|
+| `url` | `http://172.28.0.1:18084/internal/mqtt/readings` | §2；HTTP 动作的 scheme/host/port 不能用模板（设计 F24） |
+| `method` | `post` | 同上 |
+| `headers` | `content-type: application/json` + `X-Internal-Token: <deploy/.env 的同名值>` | 既有守卫头名 |
+| `body` | `{"requestId":"${requestId}","items":[{"deviceId":"${deviceId}","propertyId":"${propertyId}","value":"${value}","quality":"${quality}","ts":${ts},"pollIntervalMs":${pollIntervalMs}}]}` | 一条消息 = 一台设备的一小批 |
+| `max_retries` | `2`（默认） | 重试是**重复投递**的来源，故入站必须幂等 |
+| `resource_opts.max_buffer_bytes` | **`16MB`**（默认 **256MB**，实测回读确认） | H6：中间件机 mem_limit=2g，256MB 缓冲是危险值 |
+| `resource_opts.query_mode` | `async`（默认） | 异步下"订阅方可能已收到而外部系统尚未写入"（F28） |
+| `resource_opts.inflight_window` | `1` | 官方原文：同客户端严格有序必须设 1；把乱序窗口压到最小 |
+| `resource_opts.request_ttl` | `30s`（默认 45s） | 缩短"迟到重放"窗口 |
+
+**规则**：`POST /api/v5/rules`（`actions: ["webhook:ypbin-ingress"]`）
+
+```sql
+SELECT nth(6, tokens(topic, '/')) AS kind,
+       nth(3, tokens(topic, '/')) AS tenantId,
+       nth(4, tokens(topic, '/')) AS deviceId,
+       payload.requestId AS requestId, payload.propertyId AS propertyId,
+       payload.value AS value, payload.quality AS quality,
+       payload.ts AS ts, payload.pollIntervalMs AS pollIntervalMs
+FROM "ypbin/v1/+/+/up/property"
+WHERE nth(3, tokens(topic, '/')) = nth(1, tokens(username, '.'))
+  AND nth(4, tokens(topic, '/')) = nth(2, tokens(username, '.'))
+```
+
+WHERE 是**纵深防御**：ACL 已挡住越权发布（实测 §6 ⑤），这里是防「ACL 配置漂移导致越权写」。
+
+### 3.2 中间件机为什么需要一条防火墙规则
+
+宿主 INPUT 策略实测 **DROP**（只显式放行了别人的 18080/8080）。EMQX 容器要访问宿主网关地址属于
+**INPUT 路径**，不放行就被丢——而 EMQX 侧只显示"连接超时/ refused"，很容易被误判成"平台没起"。
+放行范围收到最窄：**只本网桥来源（172.28.0.0/16）+ 只本端口（18084）+ 只 TCP**，不放行出口方向、
+不改默认策略。规则由我们自己的 systemd 单元幂等维护（`iptables -C` 命中则不重复插），
+回滚时随 `ExecStop` 删除。
+
+### 3.3 幂等与顺序（两个实测坑）
+
+1. **先删规则，再删动作**：EMQX **拒绝删除仍被规则引用的桥接**（实测 `DELETE /bridges/webhook:…`
+   返回 **400** 而不是 204）。所以 upsert 顺序固定为「找同名规则 → 删规则 → 删桥接 → 建桥接 → 建规则」。
+2. **动作名会被归一**：POST 时写 `webhook:ypbin-ingress`，回读是 `http:ypbin-ingress`（v2 名）。
+   断言按"后缀同名"判定，写死前缀会假红。
+
+---
+
+## 4. 设备凭据与 EMQX 的同步
+
+### 4.1 同步规则（幂等、可区分失败）
+
+| 平台动作 | EMQX 侧动作 | 失败语义 |
+|---|---|---|
+| 签发 / 轮换（`POST /devices/{id}/credential`） | `DELETE`（404 视为成功）+ `POST .../import_users` | **fail-closed**：同步失败 ⇒ 抛业务异常、**事务回滚**、**不返回明文口令**。理由：返回一把连不上的口令是最难排查的静默故障 |
+| 吊销（`DELETE /devices/{id}/credential`） | `DELETE /users/{username}` | **平台侧必成、EMQX 侧尽力而为**：失败记 ERROR 日志 + 指标 `iot.emqx.credential.sync.failed{operation=revoke}`，残留账号交给对账任务（设计 RK16/P1-7）。理由：安全动作不应被 broker 可用性绑架 |
+| `ypbin.emqx.enabled=false`（降级形态） | 不调用管理面 | 平台侧签发/校验照常可用（哈希自持），日志如实说明"只做平台侧" |
+
+**先删后导的理由（实测）**：`import_users` 对已存在的 `user_id` 是 **`skipped`**
+（`{"success":0,"skipped":1}`，HTTP 仍 200）⇒ 不先删，轮换会**静默不生效**（旧口令继续可用）。
+客户端因此**按计数断言**（`success==1 && failed==0`），只看 200 会假绿。
+
+**只上报哈希**：平台口令是自持哈希（`sha256(password + salt)`，与 EMQX 内置库同口径），
+同步只把 `password_hash` + `salt` 放进 CSV ⇒ **明文不出平台**。有真 HTTP 往返单测断言报文里
+只有哈希与盐、且不含明文口令字段。
+
+### 4.2 🔴 实测更正（与设计 §3.3 F11 不一致）
+
+| 请求 | 结果 |
+|---|---|
+| `POST /api/v5/authentication/password_based%3Abuilt_in_database/users`，体 `{user_id, password_hash, salt, is_superuser}` | **HTTP 400** `{"unmatched":"password","unknown":"password_hash,salt","reason":"unknown_fields"}` |
+| 同上，体 `{user_id, password}`（明文） | **HTTP 201**（可用，但明文会离开平台 ⇒ **不采用**） |
+| `POST …/import_users`，multipart 字段名 **`file`** | **HTTP 400** `Missing required parameter: filename` |
+| `POST …/import_users`，multipart 字段名 **`filename`**，CSV `user_id,password_hash,salt,is_superuser` | **HTTP 200** `{"total":1,"success":1,"failed":0,"override":0,"skipped":0}` |
+| 同一用户**未先删**再 import | **HTTP 200** `{"success":0,"skipped":1}`（不覆盖） |
+| 删后 import 新哈希 + 用**旧口令**连接 | **认证被拒**（`connack_rc=134`） |
+| 用**新口令**连接 | **认证通过**（连接成功、可发布自己主题） |
+
+⇒ 结论：**平台侧凭据同步走 `import_users`（哈希 import），并先 DELETE**；设计里"User Management API 收 password_hash"
+这一句在本镜像上不成立，属**已实测更正**（不是本仓的偏差）。
+
+### 4.3 凭据落位（不入库/不入日志）
+
+- `EMQX_API_KEY`/`EMQX_API_SECRET`：**只在**中间件机 `/opt/emqx/.env`(600) 与生产机 `deploy/.env`(600)+容器 env；
+  Nacos 活配置里写的是 `${EMQX_API_KEY}` 占位符（Spring 读取时从容器 env 解析）⇒ **不进 Nacos 配置库**。
+  ⚠️ OSS 版 API Key **无角色约束**（官方：role-based API credentials 仅企业版），能改 ACL/建用户/删规则，
+  比 `INTERNAL_TOKEN` 权限更大 ⇒ 18083/18093 永远只绑回环。
+- `X-Internal-Token`（入站动作的 headers 里必须有）：以 600 文件落在中间件机
+  `/opt/emqx/ingress/internal-token`，由 `emqx-ingress-install.sh` 经 **stdin 管道**写入（不进 argv/不打印）。
+  这是**已登记的残留风险**（RK9/P1-5）：它就是平台 `/internal/**` 的同一把凭证。
+- 一切排查**只比长度/指纹**；`emqx-ingress-init.sh` 的所有回显都过 `redact()`（把 token 值替换成 `***`），
+  因为动作的 `headers` 里就含它——直接打印桥接 JSON 等于把内部凭证写进终端与日志。
+
+---
+
+## 5. 配置与开关
+
+| 层 | 键 | 值 |
+|---|---|---|
+| Nacos 活配置（`ypbin-iot.yaml`） | `ypbin.emqx.enabled` | `true` |
+| | `ypbin.emqx.base-url` | `http://172.20.0.1:18093` |
+| | `ypbin.emqx.api-key` / `api-secret` | `${EMQX_API_KEY}` / `${EMQX_API_SECRET}`（占位符） |
+| | `connect-timeout-ms` / `read-timeout-ms` | `2000` / `5000`（远程调用必须显式超时） |
+| | `broker-host` / `broker-port` | 中间件机地址 / `1883`（**接入信息展示用**；当前 1883 只绑回环，见 §8） |
+| compose（`ypbin-iot.environment`） | `EMQX_API_KEY` / `EMQX_API_SECRET` | `${…:?}`（缺键让 compose 解析期就失败） |
+| `deploy/.env`(600) | 同名键 | 真值（与中间件机 `/opt/emqx/.env` 同一把） |
+
+活配置由 **`tools/patch-nacos-iot-emqx.py`** 幂等写入（默认 dry-run，`--apply` 才发布；
+改前 dump live 到 600 备份、改后断言"除该段外逐字未变"）。**`enabled=true` 但缺 base-url/API Key 时
+应用启动即失败**（fail-fast，不等到第一次签发才炸）。
+
+---
+
+## 6. 端到端验收（可复跑）
+
+```bash
+bash deploy/emqx/emqx-ingress-install.sh \
+     --mw-ssh "root@43.242.200.8 -p 61260 -i ~/.ssh/id_ed25519_ypbin_mw" \
+     --prod-ssh "root@113.142.217.58 -i ~/.ssh/id_ed25519_iot_test"     # ① 通道就绪（幂等）
+ssh <mw> 'bash /opt/emqx/emqx-ingress-init.sh'                          # ② 规则/动作（幂等）
+bash deploy/emqx/accept-emqx-ingress.sh \
+     --mw-ssh "root@43.242.200.8 -p 61260 -i ~/.ssh/id_ed25519_ypbin_mw" \
+     --prod-ssh "root@113.142.217.58 -i ~/.ssh/id_ed25519_iot_test"     # ③ 五项判据
+```
+
+`accept-emqx-ingress.sh` 的判据与实测结果（2026-10-01，**PASS**）：
+
+| 判据 | 期望 | 实测 |
+|---|---|---|
+| ① 数值落库 | IoTDB `iot.reading` 出现**本条消息**的 time+value | `23.4` 行与 ts 精确一致（与 access 通道并行的 `23.5` 可区分） |
+| ② 曲线点 | `GET /devices/9300012/series?propertyId=temperature` 返回该点 | 返回 `{"ts":"…","value":"23.4","quality":"GOOD"}` |
+| ③ 指标增长 | `iot.mqtt.ingest.accepted`、`iot.timeseries.write.rows` 增长 | `+1` / `+13`（后者含 access 并行写入，只作增长判据） |
+| ④ 幂等 | 同一 `requestId` 重投 ⇒ `duplicated+1`、**不新增时序行**、MySQL 回执仍 1 行 | 全部命中（按 ts+value 精确定位仍为 1 行） |
+| ⑤ ACL 负向 | 匿名连接被拒、发别人主题被拒 | `connack.auth_error +1`；`publish.auth_error +1`、`nomatch +1` |
+
+**另两条独立用例**（直接打端点，证明「不信任报文」与「非法即 4xx」）：
+
+| 用例 | 实测 |
+|---|---|
+| 租户伪装：报文体带 `tenantId:9`，设备真实租户=1 | 受理成功，且回执行 `tenant_id=1`（伪造值被忽略） |
+| 非法质量码 `"good"`（小写） | **HTTP 400** `{"code":"QUALITY_INVALID"}`；EMQX 侧判不可重试、不重放 |
+| 未映射点位 `no_such_point` | **HTTP 400** `{"code":"NO_ACCEPTED_ITEM"}` + `iot.ingest.propertyid.unmapped +1` |
+| 凭证缺失/错误 | **HTTP 401**（原始状态码，不是 200 + `R.code`） |
+
+---
+
+## 7. 回滚
+
+| 层次 | 动作 | 影响 |
+|---|---|---|
+| EMQX 入站配置 | 中间件机 `bash /opt/emqx/emqx-ingress-rollback.sh`（先删规则再删动作 + 停中继/放行；**默认保留** EMQX 认证与 ACL） | MQTT 入站停；**下行与凭据同步不受影响**（若段 B 已上） |
+| 反向通道 | 生产机 `systemctl disable --now emqx-ingress-tunnel.service` | 出向 18093 也没了 ⇒ EMQX 管理面调用（凭据同步/下行）同时停；既有 `emqx-tunnel.service`（127.0.0.1:18093）**仍在** |
+| 平台配置 | Nacos 里 `ypbin.emqx.enabled: false` → 重启 `ypbin-iot`（或回滚 live 配置：`tools/patch-nacos-iot-emqx.py` 的 600 dump 就在工作目录里） | 入站端点仍在（可继续收），但**凭据不再同步**、接入信息回 `emqxEnabled=false` |
+| 平台代码 | `ypbin/ypbin-iot:rollback-emqx-<date>` 镜像 tag + 旧 jar 重新 `up -d --no-deps ypbin-iot` | 回到没有 MQTT 入站端点的版本（旧容器对端点的请求会 404） |
+| 数据 | `deploy/sql/rollback/2026-10-01-iot-mqtt-ingest-receipt-rollback.sql`（`DROP TABLE iot_mqtt_ingest_receipt`） | 只丢幂等回执，无业务数据；**必须先停入站**（否则重投会重复写最新值/时序） |
+| 设备侧 | 上报切回既有 HTTP 通道（`POST /internal/readings`） | 入站停掉后设备不能只靠 MQTT |
+
+> **回滚顺序**：先停 EMQX 侧入站（规则/动作）→ 再停设备 MQTT 上报（切回 HTTP）→ 最后才动平台配置与表。
+> 反过来做会留下"设备在发、平台已不认"的空窗。
+
+---
+
+## 8. 未验证项与后续（**不得当作已做**）
+
+| # | 项 | 现状 | 影响 / 触发条件 |
+|---|---|---|---|
+| **U-A1** | **真设备接入面**：1883 仍只绑中间件机回环 | 本轮验收用「在中间件机上跑的模拟设备」+ 平台签发凭据；**没有**从外部网络连 1883 | 真设备上不了；开放 1883 属 P1 的独立决策（设计 §8.2/P1-2），必须与 TLS(8883) 一起评估 |
+| **U-A2** | **TLS / 8883** | 未启用 | 明文口令只在隧道内传输；对外接入前必须启用 |
+| **U-A3** | **集群 / 高可用** | EMQX 单节点 | broker 挂 ⇒ MQTT 入站全断（既有 HTTP 通道仍在）；集群化的内置库复制语义未核实（设计 U11） |
+| **U-A4** | `value` 里含双引号/反斜杠 | 规则 body 模板直插在 `"value":"${value}"` 里，**未做 JSON 转义** | 该条会变成非法 JSON ⇒ 平台 400（EMQX 侧计失败），**不会静默丢**；P1 可在规则里用 `json_encode` 修 |
+| **U-A5** | 平台侧 503 重试的可观测性 | 本轮未构造 503 场景（需停平台或塞慢查询） | 503 路径只有单测覆盖（`InternalMqttReadingControllerTest`），**生产未实测** |
+| **U-A6** | EMQX 侧 `dropped.*` / 动作级 metrics | v1 bridges API 回读的 `metrics` 为空（实测），因此"EMQX 侧丢弃计数"本轮**没拿到直接读数** | 判据改用了规则/动作的回读配置 + 平台侧指标；P1-8 的巡检要另找读数口径（如 `/api/v5/metrics` 的 `dropped.*`） |
+| **U-A7** | 属性批量上报（一条消息多点位） | 未做（P0 契约一条消息一个点位） | 规则 body 模板是否支持数组展开未核实（设计 U24） |
+| **U-A8** | 入站凭证最小化 | 入站动作复用全局 `INTERNAL_TOKEN`（RK9） | 泄露它 = 拿到 `/internal/**` 写权限；P1-5 |
+| **U-A9** | 凭据对账任务（平台台账 ↔ EMQX 用户差集） | 未做（P1-7） | 吊销时 EMQX 不可达会留残留账号；吊销路径已记 ERROR + 指标 |
+| **U-A10** | 现网设备 9300012 的**演示数据**与 access 通道并行写入 | 验收期间 access 通道每 2s 也在写同一设备同一温度点位（值 23.5） | 判据因此改为"按 ts+value 精确定位"，**不是**按设备总行数；读"最新值"时可能看到 access 的 23.5（属预期，不是 MQTT 丢数据） |
+| **U-A11** | 中间件机防火墙规则的持久性 | 由 `emqx-ingress-firewall.service` 幂等维护，`systemctl enable` 后开机自启 | 若有人在宝塔面板里重置 iptables 规则，本服务不会自动重跑 ⇒ 归 P1-8 巡检（与隧道停摆告警同类） |
+
+---
+
+## 9. 与设计文档的差异登记（本回合新增）
+
+| 设计处 | 设计写法 | 实测/落地 | 处置 |
+|---|---|---|---|
+| §3.3 F11 | User Management API 收 `password_hash` + `salt` | 只收明文 `password`；哈希导入要走 `import_users`（multipart `filename`） | 已按实测实现（§4.2），并在代码 Javadoc 与本节登记 |
+| §6.1 主题 | `…/up/property` | 一致（任务书里写的 `…/up/property/set` 未采用，ACL 的 `up/#` 两种都放行，但契约以设计为准） | 已按设计落地 |
+| §5.1 payload | `{propertyId,value,quality,ts,pollIntervalMs}` | **新增必填 `requestId`**（幂等键；QoS1 重发与桥接重试必然产生重复） | 契约变更已在 §1.1 写清；`requestId` 幂等键落在 `iot_mqtt_ingest_receipt` |
+| §6.5 propertyId 白名单落点 | 建议放"入站适配层" | 现状在**服务层** `AvailabilityServiceImpl`（上一批已按用户任务书提前吃掉 P2-7，MQTT 与 HTTP 通道共用） | 未改设计文档；本端点因此**不重复实现**映射校验（避免第二份真源） |
+| §8.5 初始化脚本 | 建议扩展 `emqx-init.sh` | 入站单独成 `emqx-ingress-init.sh`（职责分离，既有脚本一行未改） | 二者都幂等、都可单独回滚 |

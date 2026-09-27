@@ -1,0 +1,16 @@
+[Unit]
+Description=ypbin MQTT 入站中继监听（172.28.0.1:18084 → 本机回环 18084 → 生产机平台）
+Documentation=file:///opt/emqx/README.md
+# 监听地址只取 emqx-edge 网桥网关：EMQX 容器可达，公网与别人的网桥都不可达。
+# 中间件机 INPUT 策略是 DROP ⇒ 需要 emqx-ingress-firewall.service 先放行本端口（见该单元注释）。
+After=network-online.target
+Wants=network-online.target
+
+[Socket]
+ListenStream=172.28.0.1:18084
+# Accept=no：监听套接字由 systemd 持有并交给 relay 服务（每个连接一个实例语义由 proxyd 处理）
+Accept=no
+Backlog=128
+
+[Install]
+WantedBy=sockets.target

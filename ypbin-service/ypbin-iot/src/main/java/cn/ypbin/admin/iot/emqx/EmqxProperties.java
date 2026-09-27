@@ -44,8 +44,48 @@ public class EmqxProperties {
     /** 默认设备口令长度（字节）：32 字节 = 256 位熵 ⇒ base64url 43 字符（设计 §5.3/§8.4）。 */
     public static final int DEFAULT_CREDENTIAL_PASSWORD_LENGTH = 32;
 
+    /** 内置库认证链的 id（官方形如 {@code password_based:built_in_database}；冒号在 URL 里需转义）。 */
+    public static final String DEFAULT_AUTHENTICATION_ID = "password_based:built_in_database";
+
+    /** 默认连接超时（毫秒）。 */
+    public static final int DEFAULT_CONNECT_TIMEOUT_MS = 2000;
+
+    /** 默认读超时（毫秒）。 */
+    public static final int DEFAULT_READ_TIMEOUT_MS = 5000;
+
+    /** 默认下行 QoS（QoS1 = 至少一次，官方语义可能重复，靠 requestId 幂等）。 */
+    public static final int DEFAULT_DOWNLINK_QOS = 1;
+
     /** 本环境是否已接入 MQTT broker。 */
     private boolean enabled = false;
+
+    /** 管理面基址（生产机侧出向隧道的地址，见 docs/EMQX-INTEGRATION.md §2）。 */
+    private String baseUrl;
+
+    /** 管理面 API Key（真实凭据：只允许来自容器 env，不入库/不入日志）。 */
+    private String apiKey;
+
+    /** 管理面 API Secret（同上）。 */
+    private String apiSecret;
+
+    /** 内置库认证链 id。 */
+    private String authenticationId = DEFAULT_AUTHENTICATION_ID;
+
+    /** 连接超时（毫秒；远程调用必须显式超时）。 */
+    @Min(100)
+    private int connectTimeoutMs = DEFAULT_CONNECT_TIMEOUT_MS;
+
+    /** 读超时（毫秒）。 */
+    @Min(100)
+    private int readTimeoutMs = DEFAULT_READ_TIMEOUT_MS;
+
+    /** 下行发布 QoS（默认 1）。 */
+    @Min(0)
+    @Max(2)
+    private int downlinkQos = DEFAULT_DOWNLINK_QOS;
+
+    /** 下行发布是否 retain（默认 false：命令类消息不该变成保留消息）。 */
+    private boolean downlinkRetain = false;
 
     /** broker 主机（供接入信息装配；未接入时为空）。 */
     private String brokerHost;

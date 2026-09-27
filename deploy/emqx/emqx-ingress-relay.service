@@ -1,0 +1,20 @@
+[Unit]
+Description=ypbin MQTT 入站中继（systemd-socket-proxyd：网桥网关 → 反向隧道回环端口）
+Documentation=file:///opt/emqx/README.md
+Requires=emqx-ingress-relay.socket emqx-ingress-firewall.service
+After=emqx-ingress-relay.socket emqx-ingress-firewall.service
+
+[Service]
+# 方向说明（**这条链路的方向必须写清楚，否则排障时会把两个方向搞反**）：
+#   ① 反转隧道由**生产机**发起（emqx-ingress-tunnel.service 的 `-R 127.0.0.1:18084`）
+#      ⇒ 中间件机回环 18084 上出现监听，流量最终由生产机侧拨到平台 127.0.0.1:18084；
+#   ② EMQX 容器**到不了宿主回环**（容器回环是它自己）⇒ 本中继把「网桥网关地址」上的连接
+#      转给宿主回环 18084，等价于把同一个端口"暴露到 emqx-edge 网桥里"。
+# 中继本身**不做任何认证**（纯 TCP 转发）；认证在平台侧的 X-Internal-Token（原始 401 语义）。
+# `--exit-idle-time`：空闲即退出，由 socket 激活按需再起（不常驻浪费内存，符合本机余量紧张的前提）。
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd --exit-idle-time=5min 127.0.0.1:18084
+# systemd-socket-proxyd 必须用 NonBlocking=yes（官方要求）
+NonBlocking=yes
+
+[Install]
+WantedBy=multi-user.target

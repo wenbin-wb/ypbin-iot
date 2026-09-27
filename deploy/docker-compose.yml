@@ -413,6 +413,13 @@ services:
       # （install.sh 会生成该键、.env.example 已列；旧 .env 由 env_key_backfill 补齐。）
       SPRING_CLOUD_NACOS_USERNAME: ${NACOS_ADMIN_USERNAME:-nacos}
       SPRING_CLOUD_NACOS_PASSWORD: ${NACOS_ADMIN_PASSWORD:?请在deploy/.env设置NACOS_ADMIN_PASSWORD}
+      # EMQX 管理面 API Key/Secret（凭据同步 + 下行 publish；设计 §8.4 方案 α）。
+      # 为什么不直接写进 Nacos：这是**真实可用凭据**（能改 ACL/建用户/发消息），一旦进 Nacos 活配置
+      # 就等于落进数据库与配置快照 ⇒ 违反「凭据不入库」。因此只在 .env(600) 与容器 env 里存在，
+      # Nacos 里写的是 `${EMQX_API_KEY}` 占位符，由 Spring 在**读取配置时**用容器 env 解析。
+      # 用 `:?` 而非空兜底：缺了它「签发凭据」会在运行时才失败，宁可让 compose 解析期就报缺键。
+      EMQX_API_KEY: ${EMQX_API_KEY:?请在deploy/.env设置EMQX_API_KEY}
+      EMQX_API_SECRET: ${EMQX_API_SECRET:?请在deploy/.env设置EMQX_API_SECRET}
     ports:
       # ⚠️ 绑定地址**刻意与 INTERNAL_BIND_ADDR 分开**（同 IoTDB 的 IOTDB_BIND_ADDR 先例，2026-09-26）。
       # 原因：18084 现在暴露 `/actuator/metrics` 与 `/actuator/health`（可观测缺口补齐，见
