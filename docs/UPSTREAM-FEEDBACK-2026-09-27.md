@@ -145,8 +145,10 @@ sed -n '212,227p' \
 - 类级 Javadoc 第 70-71 行亦自述地址「即调用方给出的订阅地址**之一**」——即**该行为是已知且刻意的窄口径**，
   但它没有替代入口：宿主没有任何办法在一帧里寻址到第 2..N 个点位（除非自己拆帧，而帧键又不在框架侧约定）。
 - **行号在 tag `v0.1.0`（`878a493`）与 `master`（`de296e2`）上一致**（`git show v0.1.0:… | grep -n` ⇒ `219/221/295` 同号）。
-- 顺带：`addresses().get(0)` 对**空列表**会抛 `IndexOutOfBoundsException`（无前置判空），
-  属健壮性小缺口，可与本条一并处理（建议 `IllegalArgumentException("TCP 订阅至少需要一个地址")`）。
+- **（自我订正，2026-09-27）** 曾怀疑 `addresses().get(0)` 对空列表会抛 `IndexOutOfBoundsException`；
+  复核后**该担心不成立**：`SubscribeRequest` 的紧凑构造器已保证非空
+  （`SubscribeRequest.java:48-53`：`Objects.requireNonNull` + `if (addresses.isEmpty()) throw new IllegalArgumentException("addresses must not be empty")`）
+  ⇒ 经合法 `SubscribeRequest` 进到 `subscribe()` 的列表**必非空**。此处不需要额外判空，**本条不构成缺陷**。
 
 ### 影响
 - 同一 TCP 设备的多点位采集**静默少采**：本仓生产演示设备 `9300012` 订阅 **4 个点位**
@@ -169,7 +171,8 @@ sed -n '212,227p' \
 ### 验收标准
 1. 订阅 3 个点位时，模拟器发 3 种不同帧内容，断言**三个点位各自产生新值**（A 方案）；
 2. 若采用 B 方案：`addresses().size() > 1` 时 `subscribe()` **异常完成**，且异常消息可读、有单测钉住；
-3. `addresses()` 为空时给出**显式异常**（不是 `IndexOutOfBoundsException`），有单测；
+3. （**已移除**）原第 3 条「`addresses()` 为空时给出显式异常」经复核**不适用**：`SubscribeRequest.java:48-53`
+   已在构造期拒绝空列表 ⇒ 无此缺口，不应作为验收项；
 4. 宿主（本仓 access）在框架支持后，演示设备 4 个点位**全部**有新数据（端到端）。
 
 ### 我方临时处置与替换路径
