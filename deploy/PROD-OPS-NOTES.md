@@ -219,6 +219,62 @@ redis 组件路径：HTTP=404      ← 健康项已注销（不再出现在 comp
 
 ---
 
+## 陷阱 6 · 两条常用命令会把 `.env` 里的**口令明文回显**（凭据卫生，通用）
+
+排障时很容易顺手敲这两条，**它们都会把真实口令打到终端 / 日志 / 会话记录里**：
+
+| 命令 | 回显什么 |
+|---|---|
+| `docker compose config`（等价 `--format json`） | **整个 `.env` 展开后的全部值**，含 `EMQX_DASHBOARD_PASSWORD` 等 |
+| `emqx ctl conf show dashboard` | `dashboard.default_password = "<明文口令>"` |
+
+**纪律**：
+
+```bash
+# 只想看结构 / 服务名（安全）
+docker compose config --services
+# 只看端口映射（安全；不经 config 展开 .env）
+docker compose ps --format '{{.Ports}}'
+# 只想确认容器内真实生效的 jar/镜像（安全）
+docker image inspect -f '{{.Id}}' <image>; docker inspect -f '{{.Image}}' <container>
+```
+
+- 需要看 `.env` 的**键名与长度**时：`awk -F= '{printf "%s len=%d\n", $1, length($2)}' .env`
+  （⚠️ 用 `. .env` 再 `echo` 会把值带进环境与输出，别这么干）。
+- **一旦回显过 ⇒ 视为已暴露 ⇒ 轮换**（本轮实测踩过：原作者用 `emqx ctl conf show dashboard`、
+  独立复核者用 `docker compose config`，各一次）⇒ 已按此纪律轮换 EMQX Dashboard 口令。
+- 同类坑：`git credential fill`、`mysql -p<口令>`、`curl -u user:pw`、`java -Dxxx=口令` 都会进
+  **argv**（宿主 `/proc` 无 hidepid ⇒ 同机其它用户可见）。一律改用 `-K <600 文件>` /
+  `--data-binary @<600 文件>` / `-p"$(cat <600文件>)"` 之类不落 argv 的形态。
+
+## 陷阱 7 · 文档里的**日期可能超前于真实日期** ⇒ 判断时间线别只看文档日期
+
+本仓为 IoT 项目留下的一部分产物（例如 `deploy/sql/migration/2026-10-0{1,2}-*.sql`、部分测试的
+`@since 2026-10-01`）用的是**比真实时间超前 1–6 天**的日期。2026-09-27 由独立复核用**两个外部权威源**
+（`api.github.com` 与 Google 的 `Date` 响应头，均为 `Sun, 27 Sep 2026`）核对确认：**真实日期是 09-27**。
+
+**约定**：
+
+- 判断"某事发生在什么时候"，以 ① **外部权威源**（HTTP `Date` 头 / NTP 校时后的 `date -u`）或
+  ② **文件 mtime / 容器 `StartedAt` / journald 时间戳**为准；**不要**用文档标题或文件名里的日期。
+- 新写的文档/证据**一律用真实日期**；发现旧产物日期超前时**只登记、不擅自改别人的文件**
+  （全仓纠正不在本轮范围）。
+
+---
+
+## EMQX REST Key/Secret 的**双份持有**（刻意保留，轮换必须两侧同改）
+
+平台（生产机 `/opt/ypbin/ypbin-iot/deploy/.env`）与中间件机（`/opt/emqx/.env`）
+**各持有一份、且是同一对** EMQX REST API Key/Secret（本轮核对指纹一致）。这是**刻意的**：
+平台要调 EMQX 管理面（发下行、同步设备账号）就必须有；中间件机的部署脚本/自检也需要。
+
+- ⚠️ **轮换时必须两侧同改**，否则平台或中间件机的脚本会立刻 401（表现为"平台不可达"或自检失败）。
+  改完用两侧各自的 `GET /api/v5/status`（或 `emqx-init.sh` 的 A00）确认。
+- ⚠️ 不要把它当成"只在一处"的凭据来评估影响面；也不要因为"生产机不该有 EMQX 凭据"而误删它
+  （`emqx-tunnel-watch.sh` 头部那句"不落任何凭据"**只描述那个脚本自身不用凭据**，不是"生产机没有"）。
+
+---
+
 ## 5. 「喂数停摆」定时告警：怎么开、怎么看
 
 **两件套**（仓库 `deploy/`，已装 `/etc/systemd/system/`）：

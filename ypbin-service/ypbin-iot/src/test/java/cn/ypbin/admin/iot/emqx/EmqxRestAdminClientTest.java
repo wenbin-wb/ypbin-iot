@@ -55,7 +55,14 @@ class EmqxRestAdminClientTest {
 
     private final List<String> bodies = new ArrayList<>();
 
-    /** 每个请求在**线上**声明的 HTTP 版本（例如 {@code HTTP/1.1}）。 */
+    /**
+     * 每个请求在**线上**声明的 HTTP 版本（例如 {@code HTTP/1.1}）。
+     *
+     * <p>⚠️ **不承重**：JDK 内建 {@code HttpServer} 只用 HTTP/1.1 应答，因此**即使客户端发起了
+     * h2c upgrade，这里也永远只会看到 HTTP/1.1**（独立复核实测三种配置皆如此）⇒ 拿它做"客户端是不是
+     * HTTP/2"的断言会**恒真（假绿）**。真正承重的是 {@link #requestHeaderNames} 上"不得出现
+     * {@code upgrade}/{@code http2-settings}"的断言。保留它只为**失败时能打印出服务端视角**、方便排障。</p>
+     */
     private final List<String> requestProtocols = new ArrayList<>();
 
     /** 每个请求的**请求头名**（小写）；用于检出 h2c upgrade 相关头部。 */
