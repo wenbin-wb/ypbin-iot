@@ -58,6 +58,18 @@ public interface IotAlertInstanceMapper extends BaseMapper<IotAlertInstance> {
     List<IotAlertInstance> selectActiveInTenant();
 
     /**
+     * 本租户**断档类**的活动实例（{@code rule_id = 0}）。
+     *
+     * <p>断档类告警不由点评估器推进状态，而由断档映射链路负责建/收口 —— 它需要一次把自己的活动实例
+     * 全部取回，才能判断「这个断档事件是不是已经有实例了」「这条实例对应的事件是否已闭合」。</p>
+     *
+     * @return 断档类活动实例
+     */
+    @Select("SELECT " + COLUMNS + " FROM iot_alert_instance "
+        + "WHERE is_deleted = 0 AND rule_id = 0 AND active_dedup_key IS NOT NULL")
+    List<IotAlertInstance> selectActiveOutageAlerts();
+
+    /**
      * 指定规则的活动实例（停用规则时用于收口）。
      *
      * @param ruleIds 规则 ID（调用方必须先判空短路）

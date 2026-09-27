@@ -917,3 +917,31 @@ core 也无宿主可插的解码 SPI ⇒ **框架侧能力缺口**（不是本�
 3a 的 `LoggingTenantLinkManager` 已去掉 `@Component`，由 `AccessLeaseConfiguration`（`@AutoConfiguration`
 + `@Bean @ConditionalOnMissingBean`）装配，并有源码门禁守着（四处变异全咬）。⇒ 3b-2 提供真实现时
 **只需新增一个 `@AutoConfiguration` + `@Bean`**，判定逻辑（`AccessLeaseManager`）一行不动。
+
+### 四点二十二、告警与阈值能力（段 C：C1 后端核心 + C2 通知/离线映射，2026-10-03）
+
+**状态**：C1 + C2 **已实现并本机门禁全绿**；C3（前端）随后。设计契约与偏差逐条回写在
+`docs/ALERTING-DESIGN.md`（§7），本节只登记状态与证据口径。
+
+**交付物**：
+- 四张表 `iot_alert_rule` / `iot_alert_rule_point` / `iot_alert_instance` / `iot_alert_notification`
+  + 迁移（`2026-10-03-iot-alert-menu.sql` < `-schema.sql`）+ rollback + 007 双写（等价性校验 OK）；
+- 独立评估器（`@Scheduled` 15s，第 6 个同类扫描器）：Redis 最新值快路判定 + 候选批量一次查
+  （设备解析统一走 `AlertDeviceCursor` 游标分页，**跨轮滚动**）+ 4 态状态机 + 连续 N 次抖动抑制
+  + 严格「不可判定」语义；持续模式回查时序库并校验**窗口覆盖**；
+- 通知：站内信（复用 `sys_message`）+ 邮件（复用既有 JavaMail，经 system 内部端点），
+  幂等键 + 退避（1 首发 + 3 重试）+ 全局限流（延后不丢弃）+ 投递与状态分开；
+- 断档 → 告警映射（复用 `outage_event` + `OutageScanner`，**不新造判定**；同一事件不重复建实例、闭合即同步恢复）；
+- 保留清理（活动永久 + 已恢复 180 天可配，批量删除、只删已恢复）；
+- 4 个权限码 + 菜单（`3207/320701~320703`）+ `sys_role_menu`/`sys_template_menu` 授权；
+  四张表补进 `IotTenantIsolationGateTest` 与 `ItSchema.EXTRA_SCHEMA_SCRIPTS`。
+
+**门禁（本机实跑，2026-10-03）**：IoT `Tests run: 595, Failures: 0, Errors: 0`；`ypbin-iot-api` 8/0；
+架构模块 48/0（基线）；`mvn -o test`（全反应堆）BUILD SUCCESS；SQL 等价性 OK。
+
+**独立复核**：段 C1 首轮复核判 **FAIL**（阻断两项：跨轮滚动名不副实、T10/U2/读取器无用例），
+整改项与整改方式逐条登记在 `docs/ALERTING-DESIGN.md` §7.3；C2 与整改后代码的复核结论见任务回执。
+
+**已知限制（如实登记）**：真库行为（`CASE` 批量更新、`ON DUPLICATE KEY UPDATE`、并发去重、
+NULL 唯一索引）只在 CI 的 `-Pit` 与生产演示验证；`/actuator/metrics` 未在真实进程逐条读值；
+多实例部署未加分布式锁；一轮评估的量级未用真实租户数据校准；DURATION 模式的时序查询随候选数线性增长。

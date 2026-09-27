@@ -53,6 +53,12 @@ public class AlertMetrics {
     /** 距最近一次成功轮次的时长（毫秒）——可直接对着评估周期看是否卡死。 */
     public static final String METRIC_LAG = "iot.alert.evaluate.lag";
 
+    /** 轮次**不健康**计数（有租户失败或 Redis 失败 ⇒ 不刷新 last_success_ts）。 */
+    public static final String METRIC_ROUND_FAILED = "iot.alert.evaluate.round.failed";
+
+    /** 持续窗口**未被数据覆盖**（点数截断 / 首尾缺口 / 中间断档）导致的不可求值计数。 */
+    public static final String METRIC_WINDOW_UNCOVERED = "iot.alert.evaluate.window_uncovered";
+
     /** 本轮评估的设备数。 */
     public static final String METRIC_DEVICES = "iot.alert.evaluate.devices";
 
@@ -114,6 +120,8 @@ public class AlertMetrics {
     public static final String METRIC_RETENTION_DELETED = "iot.alert.retention.deleted";
 
     private final Counter rounds;
+    private final Counter roundFailed;
+    private final Counter windowUncovered;
     private final Timer roundDuration;
     private final Counter devices;
     private final Counter triggered;
@@ -149,6 +157,10 @@ public class AlertMetrics {
      */
     public AlertMetrics(MeterRegistry registry) {
         this.rounds = Counter.builder(METRIC_ROUNDS).description("告警评估轮次").register(registry);
+        this.roundFailed = Counter.builder(METRIC_ROUND_FAILED)
+            .description("告警评估轮次不健康（有租户失败或 Redis 读取失败）").register(registry);
+        this.windowUncovered = Counter.builder(METRIC_WINDOW_UNCOVERED)
+            .description("持续窗口未被数据覆盖，无法判定「持续 N 秒」").register(registry);
         this.roundDuration = Timer.builder(METRIC_ROUND_DURATION).description("告警评估单轮耗时")
             .register(registry);
         this.devices = Counter.builder(METRIC_DEVICES).description("告警评估处理的设备数（按轮累计）")
@@ -220,9 +232,26 @@ public class AlertMetrics {
         roundDuration.record(duration);
     }
 
-    /** 记录一轮评估成功（更新活性时刻）。 */
+    /**
+     * 记录一轮评估成功（更新活性时刻）。
+     *
+     * <p><b>只有「没有任何租户失败、也没有 Redis 读取失败」才算成功</b>（独立复核 2026-10-03 指出：
+     * 原实现无条件刷新，导致「所有租户都失败」时 {@code last_success_ts} 仍显示刚跑过、{@code lag} 恒小，
+     * 这正是设计 §2.2.4 要防的「评估器悄悄死了」）。失败时**不刷新**活性时刻 ⇒ {@code lag} 持续增长，
+     * 值班据此判「评估器不健康」。</p>
+     */
     public void roundSucceeded() {
         lastSuccessTs.set(System.currentTimeMillis());
+    }
+
+    /** 记录一轮评估**不健康**（不刷新活性时刻，让 lag 增长成为可见信号）。 */
+    public void roundFailed() {
+        roundFailed.increment();
+    }
+
+    /** 记录持续窗口未被数据覆盖。 */
+    public void windowUncovered() {
+        windowUncovered.increment();
     }
 
     /** 记录处理设备数。 */

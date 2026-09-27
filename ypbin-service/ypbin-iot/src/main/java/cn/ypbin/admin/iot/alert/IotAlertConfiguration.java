@@ -71,10 +71,7 @@ public class IotAlertConfiguration implements InitializingBean {
         requirePositive(properties.getMaxPageSize(), "max-page-size");
         requireCode(AlertSeverity.of(properties.getDefaultSeverity()) != null,
             "default-severity 只能是 INFO / WARNING / CRITICAL");
-        requireCode(AlertSeverity.of(properties.getOutageSeverity()) != null,
-            "outage-severity 只能是 INFO / WARNING / CRITICAL");
         requireChannels(properties.getDefaultNotifyChannels(), "default-notify-channels");
-        requireChannels(properties.getOutageNotifyChannels(), "outage-notify-channels");
         requirePositive(properties.getRetentionResolvedDays(), "retention-resolved-days");
         requirePositive(properties.getRetentionCleanupIntervalMs(), "retention-cleanup-interval-ms");
         requireNonNegative(properties.getRetentionInitialDelayMs(), "retention-initial-delay-ms");

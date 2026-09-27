@@ -17,6 +17,9 @@ import cn.ypbin.admin.iot.enums.AlertNotifyEvent;
 import cn.ypbin.admin.iot.enums.AlertNotifyStatus;
 import cn.ypbin.starter.data.core.EntityStatus;
 import com.baomidou.mybatisplus.core.toolkit.IdWorker;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -95,6 +98,9 @@ public class AlertNotifyPlanner {
         return rows;
     }
 
+    /** 幂等键列宽（{@code idempotent_key VARCHAR(191)}）。 */
+    private static final int MAX_IDEMPOTENT_KEY_LENGTH = 191;
+
     /** 正常待投递行。 */
     private IotAlertNotification pending(IotAlertInstance instance, AlertChannel channel, String target,
                                          AlertNotifyEvent event, LocalDateTime now) {
@@ -147,8 +153,15 @@ public class AlertNotifyPlanner {
         int round = instance.getNotifyCount() == null ? 0 : instance.getNotifyCount();
         String key = instance.getId() + ":" + event.getCode() + ":" + channel.getCode() + ":" + target
             + ":" + round;
-        // 列宽 191：邮箱 + id 的组合一般远小于它；超长时按末尾截断会丢失轮次语义，故按前缀截断
-        return key.length() <= 191 ? key : key.substring(0, 191);
+        if (key.length() <= MAX_IDEMPOTENT_KEY_LENGTH) {
+            return key;
+        }
+        // 列宽 191：**不能简单截断**——末尾恰好是「轮次」，截掉会让不同 REPEAT 轮次撞成同一个键
+        // （重复提醒会被幂等键挡掉，表现为「活动告警再也不提醒」）。故改为「前缀 + 全键哈希」：
+        // 前缀保留可读性（能看出是哪个实例/事件/渠道），哈希保证唯一性。
+        String hash = sha256Hex(key);
+        int prefixLength = MAX_IDEMPOTENT_KEY_LENGTH - hash.length() - 1;
+        return key.substring(0, prefixLength) + ":" + hash;
     }
 
     /** 拆收件人原文（逗号分隔、去空白、去重、保序）。 */
@@ -224,6 +237,22 @@ public class AlertNotifyPlanner {
         }
         int max = properties.getNotifyMaxErrorLength();
         return text.length() <= max ? text : text.substring(0, max);
+    }
+
+    /** 全键的 SHA-256 十六进制（前 32 位足够区分同实例同轮的不同收件人；碰撞概率可忽略）。 */
+    private static String sha256Hex(String raw) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] bytes = digest.digest(raw.getBytes(StandardCharsets.UTF_8));
+            StringBuilder out = new StringBuilder(32);
+            for (int index = 0; index < 16; index++) {
+                out.append(String.format("%02x", bytes[index]));
+            }
+            return out.toString();
+        } catch (NoSuchAlgorithmException ex) {
+            // SHA-256 是 JDK 必备算法；取不到属环境异常，必须暴露（不能静默退化成截断）
+            throw new IllegalStateException("SHA-256 不可用，无法生成告警通知幂等键", ex);
+        }
     }
 
     /**

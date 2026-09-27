@@ -466,7 +466,8 @@ SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (320022, 320023);
 -- 内容：告警页菜单与四个权限码 + 四张表（规则主表/点位条件行/告警实例/通知投递记录）。
 -- ⚠️ 顺序约束：迁移文件名 `2026-10-03-iot-alert-menu.sql` < `2026-10-03-iot-alert-schema.sql`
 --    ⇒ 本段的**菜单段必须在 DDL 段之前**（等价性校验按文件名排序拼接，与先例 2026-09-30 凭据段同款）。
--- 回滚：deploy/sql/rollback/2026-10-03-iot-alert-rollback.sql（只回滚表结构与菜单，不删告警数据）。
+-- 回滚：deploy/sql/rollback/2026-10-03-iot-alert-rollback.sql（DROP 四张表 + 删菜单；
+--   告警数据会**永久丢失**，执行前先导出——脚本头注释给了导出语句）。
 -- =============================================================
 
 INSERT INTO sys_menu (id, pid, name, type, platform_only, path, component, auth_code, title, icon, sort, create_time, status, is_deleted)

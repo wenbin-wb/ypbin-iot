@@ -2,7 +2,7 @@
 -- 与 deploy/sql/007-iot-data.sql 的**告警菜单段**语句等价（由 tools/check-iot-sql-equivalence.sh 校验）。
 -- 权限码四个：iot:alert:list（查告警）| iot:alert:ack（确认与静默）|
 --             iot:alert:rule-list（查规则）| iot:alert:rule-save（建/改/启停规则）
--- id 段：3207 = 告警页（IoT 段内的新页面菜单）；320701~320704 = 该页下的按钮。
+-- id 段：3207 = 告警页（IoT 段内的新页面菜单）；320701~320703 = 该页下的按钮。
 --   2026-10-03 查仓内 SQL 与既有菜单段确认 3200~3206 与 320001~320023/320101~/320201~/320301~ 已占用。
 -- platform_only=0 ⇒ 按 IotMaintenanceAdminGateTest 口径必须**同时**进 sys_role_menu 与 sys_template_menu
 --   （后者是租户可授菜单与「防孤儿」父目录补授的依据）。

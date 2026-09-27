@@ -84,7 +84,14 @@ public class AlertProperties {
     /** 单页最大条数（列表接口）。 */
     private int maxPageSize = 200;
 
-    /** 断档 → 告警映射总开关（**平台级**；关掉即完全不做断档类告警）。 */
+    /**
+     * 断档 → 告警映射总开关（**平台级**；关掉即完全不做断档类告警）。
+     *
+     * <p><b>opt-in 语义（刻意如此）</b>：断档类告警**只在设备被某条「启用且没有点位条件」的规则覆盖时**
+     * 才产生（作用域四级照旧：POINT/DEVICE &gt; PRODUCT &gt; TENANT）。级别、通知渠道、重复间隔、静默窗口
+     * 全部取自那条规则。理由：默认对全量设备产生离线告警会在一次部署后立刻改变线上通知量
+     * （设计 §3.6 要求「回滚不改动既有能力」的同一条思路），而一键模板让开通只需要点一下。</p>
+     */
     private boolean outageEnabled = true;
 
     /** 断档映射扫描周期（毫秒；与 {@code OutageScanner} 同量级即可）。 */
@@ -95,15 +102,6 @@ public class AlertProperties {
 
     /** 断档映射单轮最多处理的断档事件数（超出跨轮滚动）。 */
     private int outageBatchSize = 200;
-
-    /** 断档类告警的默认级别码（**没有覆盖规则时**用它）。 */
-    private String outageSeverity = "CRITICAL";
-
-    /** 断档类告警无覆盖规则时的通知渠道（逗号分隔）。 */
-    private String outageNotifyChannels = "INBOX,EMAIL";
-
-    /** 断档类告警无覆盖规则时的重复通知间隔（秒）。 */
-    private int outageRepeatIntervalSec = 1800;
 
     /** 已恢复告警的保留天数（**活动告警永久保留**；默认 180 天）。 */
     private int retentionResolvedDays = 180;
@@ -120,10 +118,17 @@ public class AlertProperties {
     /** 是否投递通知（关闭时判定照常、只不投递）。 */
     private boolean notifyEnabled = true;
 
-    /** 单条通知最多尝试次数（含首次）。 */
-    private int notifyMaxAttempt = 3;
+    /**
+     * 单条通知最多尝试次数（**含首次**）。
+     *
+     * <p>默认 4 = 1 次首发 + 3 次重试，因此 {@link #notifyBackoffSeconds} 的三级退避
+     * （30s → 2min → 10min）**全部生效**。设计 §2.4 写的是「最多 3 次，退避 30s→2min→10min」——
+     * 那两个数字自相矛盾（3 次尝试只会用到前两级退避，第三级永远走不到），本实现取「3 次**重试**」
+     * 的读法并在此登记。</p>
+     */
+    private int notifyMaxAttempt = 4;
 
-    /** 重试退避（秒；第 N 次失败后用第 N 个值）。 */
+    /** 重试退避（秒；第 N 次尝试失败后用第 N 个值；步数应等于 {@link #notifyMaxAttempt} - 1）。 */
     private List<Long> notifyBackoffSeconds = List.of(30L, 120L, 600L);
 
     /** 每渠道每分钟的通知上限（超出的通知置为 PENDING **延后**，不丢弃）。 */

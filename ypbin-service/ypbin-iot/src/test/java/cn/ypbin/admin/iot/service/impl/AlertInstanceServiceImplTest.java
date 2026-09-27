@@ -22,6 +22,7 @@ import static org.mockito.Mockito.when;
 import cn.ypbin.admin.iot.alert.AlertGate;
 import cn.ypbin.admin.iot.alert.AlertMetrics;
 import cn.ypbin.admin.iot.alert.AlertNotifyPlanner;
+import cn.ypbin.admin.iot.alert.AlertNotifyScheduler;
 import cn.ypbin.admin.iot.alert.AlertProperties;
 import cn.ypbin.admin.iot.alert.AlertRules;
 import cn.ypbin.admin.iot.alert.AlertSilencePolicy;
@@ -93,14 +94,17 @@ class AlertInstanceServiceImplTest {
         MaintenanceWindowMapper windowMapper = mock(MaintenanceWindowMapper.class);
         when(livenessMapper.selectNow()).thenReturn(NOW);
         when(windowMapper.selectList(any())).thenReturn(List.of());
-        when(notificationMapper.insertBatchIgnore(anyList())).thenAnswer(invocation -> {
+        when(notificationMapper.insertBatchIdempotent(anyList())).thenAnswer(invocation -> {
             List<IotAlertNotification> rows = invocation.getArgument(0);
             queued.addAll(rows);
             return rows.size();
         });
+        AlertMetrics metrics = new AlertMetrics(new SimpleMeterRegistry());
+        AlertSilencePolicy silencePolicy = new AlertSilencePolicy(windowMapper);
         service = new AlertInstanceServiceImpl(instanceMapper, notificationMapper, ruleMapper, deviceMapper,
-            livenessMapper, new AlertSilencePolicy(windowMapper), new AlertNotifyPlanner(properties),
-            new AlertMetrics(new SimpleMeterRegistry()), new AlertGate(properties), properties);
+            livenessMapper, silencePolicy, new AlertNotifyPlanner(properties),
+            new AlertNotifyScheduler(silencePolicy, new AlertNotifyPlanner(properties), metrics, properties),
+            metrics, new AlertGate(properties), properties);
     }
 
     private static IotAlertInstance instance(AlertState state) {
@@ -281,10 +285,14 @@ class AlertInstanceServiceImplTest {
     void disabledGateFails() {
         AlertProperties disabled = new AlertProperties();
         disabled.setEnabled(false);
+        AlertMetrics disabledMetrics = new AlertMetrics(new SimpleMeterRegistry());
+        AlertSilencePolicy disabledSilence = new AlertSilencePolicy(mock(MaintenanceWindowMapper.class));
         AlertInstanceServiceImpl gated = new AlertInstanceServiceImpl(instanceMapper, notificationMapper,
-            ruleMapper, deviceMapper, mock(DeviceLivenessMapper.class),
-            new AlertSilencePolicy(mock(MaintenanceWindowMapper.class)), new AlertNotifyPlanner(disabled),
-            new AlertMetrics(new SimpleMeterRegistry()), new AlertGate(disabled), disabled);
+            ruleMapper, deviceMapper, mock(DeviceLivenessMapper.class), disabledSilence,
+            new AlertNotifyPlanner(disabled),
+            new AlertNotifyScheduler(disabledSilence, new AlertNotifyPlanner(disabled), disabledMetrics,
+                disabled),
+            disabledMetrics, new AlertGate(disabled), disabled);
         assertThatThrownBy(() -> gated.page(new AlertInstanceQuery()))
             .isInstanceOf(BusinessException.class).hasMessageContaining("告警能力未启用");
         assertThatThrownBy(() -> gated.summary(null)).isInstanceOf(BusinessException.class);
@@ -299,9 +307,12 @@ class AlertInstanceServiceImplTest {
         when(livenessMapper.selectNow()).thenReturn(NOW);
         MaintenanceWindowMapper windowMapper = mock(MaintenanceWindowMapper.class);
         when(windowMapper.selectList(any())).thenReturn(windows);
+        AlertMetrics metrics = new AlertMetrics(new SimpleMeterRegistry());
+        AlertSilencePolicy silencePolicy = new AlertSilencePolicy(windowMapper);
         return new AlertInstanceServiceImpl(instanceMapper, notificationMapper, ruleMapper, deviceMapper,
-            livenessMapper, new AlertSilencePolicy(windowMapper), new AlertNotifyPlanner(properties),
-            new AlertMetrics(new SimpleMeterRegistry()), new AlertGate(properties), properties);
+            livenessMapper, silencePolicy, new AlertNotifyPlanner(properties),
+            new AlertNotifyScheduler(silencePolicy, new AlertNotifyPlanner(properties), metrics, properties),
+            metrics, new AlertGate(properties), properties);
     }
 
     private static IotDevice device() {

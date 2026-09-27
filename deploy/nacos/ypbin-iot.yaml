@@ -75,6 +75,53 @@ ypbin:
     cleanup-interval-ms: 86400000
     initial-delay-ms: 300000
 
+  # 告警与阈值（设计 docs/ALERTING-DESIGN.md；用户已批准口径见任务回执）。
+  # ⚠️ `enabled=false` 时**接口返回明确失败而不是空列表**（空列表会被读成「没有告警」= 最危险的假阴性）。
+  # 下面的数值都是「开箱可用」的那一档；改任何一个都会改变线上行为，故全部显式写出而不是靠代码默认值。
+  alert:
+    enabled: true
+    # 评估周期（15s 量级 = 用户批准的「触发到通知延迟」口径；与既有 OutageScanner 同量级）
+    evaluate-interval-ms: 15000
+    evaluate-initial-delay-ms: 10000
+    # 单轮最多评估的设备数（超出跨轮滚动并计数，不静默丢弃）
+    evaluate-batch-size: 500
+    # 陈旧判定：倍数 × 采集周期（取不到周期时用 fallback）；上限防「采集周期配成 1 小时」把陈旧判定废掉
+    staleness-interval-multiplier: 3
+    staleness-fallback-ttl-ms: 90000
+    staleness-max-ttl-ms: 3600000
+    # 默认抖动抑制：连续 3 次；缺省级别「警告」、渠道「站内信 + 邮件」
+    default-trigger-threshold: 3
+    default-pending-ttl-sec: 300
+    default-repeat-interval-sec: 1800
+    default-severity: WARNING
+    default-notify-channels: INBOX,EMAIL
+    max-points-per-rule: 50
+    max-page-size: 200
+    # 断档 → 告警映射（**opt-in**：只在设备被「启用且无点位条件」的规则覆盖时才产生离线告警）
+    outage-enabled: true
+    outage-scan-interval-ms: 15000
+    outage-initial-delay-ms: 20000
+    outage-batch-size: 200
+    # 保留：活动告警**永久保留**，已恢复按 180 天清理（告警是审计证据，故比时序数据保留更久）
+    retention-resolved-days: 180
+    retention-cleanup-interval-ms: 86400000
+    retention-initial-delay-ms: 300000
+    retention-batch-size: 1000
+    # 通知投递：1 次首发 + 3 次重试（三级退避 30s→2min→10min 全部生效）、每渠道每分钟 60 条
+    # （超出的**延后**不丢弃）
+    notify-enabled: true
+    notify-max-attempt: 4
+    notify-backoff-seconds: 30,120,600
+    notify-throttle-per-minute: 60
+    notify-dispatch-batch-size: 200
+    notify-dispatch-interval-ms: 10000
+    notify-initial-delay-ms: 15000
+    notify-max-error-length: 500
+    notify-max-text-length: 2000
+    # 兜底收件人（为空 = 只回落「规则创建者」）：规则没配收件人时用它，避免「通知了一条没人收的站内信」
+    notify-fallback-inbox-user-ids: []
+    notify-fallback-emails: []
+
   # 租约维护（增量 2）：契约与语义见 docs/LEASE.md。
   # ttl 必须大于 expected-renew-interval + 4s（一次内部调用最坏耗时），启动自检会拒绝不合法组合。
   lease:

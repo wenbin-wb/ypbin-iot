@@ -69,10 +69,10 @@ public interface IotAlertNotificationMapper extends BaseMapper<IotAlertNotificat
      * 批量写入待投递记录（幂等：重复的 {@code idempotent_key} 被 {@code INSERT IGNORE} 跳过）。
      *
      * @param notifications 待写入记录（非空）
-     * @return 实际插入行数（小于入参条数即说明命中了幂等键）
+     * @return 实际插入行数（小于入参条数即说明命中了幂等键；其它错误会抛出而不是被吞）
      */
     @Insert("<script>"
-        + "INSERT IGNORE INTO iot_alert_notification"
+        + "INSERT INTO iot_alert_notification"
         + " (id, tenant_id, instance_id, channel, target, event, notify_status, attempt, next_retry_ts,"
         + "  last_error, idempotent_key, create_user, create_time, update_user, update_time,"
         + "  status, is_deleted)"
@@ -83,8 +83,9 @@ public interface IotAlertNotificationMapper extends BaseMapper<IotAlertNotificat
         + "  #{n.idempotentKey}, #{n.createUser}, #{n.createTime,jdbcType=TIMESTAMP}, #{n.updateUser},"
         + "  #{n.updateTime,jdbcType=TIMESTAMP}, #{n.status}, #{n.isDeleted})"
         + "</foreach>"
+        + " ON DUPLICATE KEY UPDATE id = id"
         + "</script>")
-    int insertBatchIgnore(@Param("notifications") List<IotAlertNotification> notifications);
+    int insertBatchIdempotent(@Param("notifications") List<IotAlertNotification> notifications);
 
     /**
      * 批量更新投递记录（单条语句，按主键分别取新值）。

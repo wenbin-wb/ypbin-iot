@@ -13,6 +13,8 @@ import cn.ypbin.admin.system.model.dto.SysUserDto;
 import cn.ypbin.admin.system.model.dto.SysUserSocialDto;
 import cn.ypbin.admin.system.model.dto.ConfigValue;
 import cn.ypbin.admin.system.model.dto.SocialAuthConfig;
+import cn.ypbin.admin.system.model.req.InboxMessageSendReq;
+import cn.ypbin.admin.system.model.req.MailSendReq;
 import cn.ypbin.admin.system.model.resp.RouteResp;
 import cn.ypbin.starter.core.exception.GlobalErrorCode;
 import cn.ypbin.starter.core.model.R;
@@ -175,6 +177,16 @@ public class ISystemClientFallback implements ISystemClient {
 
     @Override
     public R<SysUserDto> updateUserProfile(Long userId, String nickname, String avatar, String phone) {
+        return unavailable();
+    }
+
+    @Override
+    public R<Void> sendInboxMessage(InboxMessageSendReq req) {
+        return unavailable();
+    }
+
+    @Override
+    public R<Void> sendMail(MailSendReq req) {
         return unavailable();
     }
 }

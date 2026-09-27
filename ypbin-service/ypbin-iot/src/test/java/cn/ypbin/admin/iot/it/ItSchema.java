@@ -48,7 +48,10 @@ final class ItSchema {
      * {@code Unknown column} 失败。顺序按文件名（与生产迁移顺序一致）。</p>
      */
     private static final List<String> EXTRA_SCHEMA_SCRIPTS = List.of(
-        "deploy/sql/migration/2026-09-30-iot-credential-schema.sql");
+        "deploy/sql/migration/2026-09-30-iot-credential-schema.sql",
+        // 告警与阈值（2026-10-03）：四张表只在 007 的追加段与这个 `-schema` 迁移里，
+        // 不加入本清单 ⇒ 真库 IT 里这四张表根本不建（独立复核 2026-10-03 指出的覆盖真空）
+        "deploy/sql/migration/2026-10-03-iot-alert-schema.sql");
 
     private ItSchema() {
     }

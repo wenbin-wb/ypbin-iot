@@ -14,6 +14,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -39,6 +40,7 @@ import cn.ypbin.admin.iot.mapper.DeviceLivenessMapper;
 import cn.ypbin.admin.iot.mapper.IotAlertInstanceMapper;
 import cn.ypbin.admin.iot.mapper.IotAlertNotificationMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
+import org.springframework.dao.DuplicateKeyException;
 import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesPointResp;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesQueryService;
@@ -97,6 +99,9 @@ class AlertTenantEvaluatorTest {
 
     private boolean redisDown;
 
+    /** 大于 0 时，下一次批量插入抛唯一键冲突（模拟并发轮次已建同键实例）。 */
+    private int insertConflicts;
+
     private AlertProperties properties;
 
     private SimpleMeterRegistry registry;
@@ -139,6 +144,10 @@ class AlertTenantEvaluatorTest {
         when(instanceMapper.selectActiveInTenant()).thenAnswer(invocation -> activeInstances());
         when(instanceMapper.insertBatch(anyList())).thenAnswer(invocation -> {
             List<IotAlertInstance> inserted = invocation.getArgument(0);
+            if (insertConflicts > 0) {
+                insertConflicts--;
+                throw new DuplicateKeyException("模拟并发插入命中 uk_alert_active");
+            }
             instances.addAll(inserted);
             return inserted.size();
         });
@@ -156,7 +165,7 @@ class AlertTenantEvaluatorTest {
         });
 
         notificationMapper = mock(IotAlertNotificationMapper.class);
-        when(notificationMapper.insertBatchIgnore(anyList())).thenAnswer(invocation -> {
+        when(notificationMapper.insertBatchIdempotent(anyList())).thenAnswer(invocation -> {
             List<IotAlertNotification> rows = invocation.getArgument(0);
             notifications.addAll(rows);
             return rows.size();
@@ -172,9 +181,12 @@ class AlertTenantEvaluatorTest {
 
         timeSeriesQueryService = mock(TimeSeriesQueryService.class);
 
-        evaluator = new AlertTenantEvaluator(new AlertCandidateResolver(deviceMapper), reader,
-            new AlertNotifyPlanner(properties), metrics, properties, instanceMapper, notificationMapper,
-            livenessMapper, new AlertSilencePolicy(windowMapper), timeSeriesQueryService);
+        AlertSilencePolicy silencePolicy = new AlertSilencePolicy(windowMapper);
+        evaluator = new AlertTenantEvaluator(new AlertCandidateResolver(deviceMapper, new AlertDeviceCursor()),
+            reader,
+            new AlertNotifyScheduler(silencePolicy, new AlertNotifyPlanner(properties), metrics, properties),
+            metrics, properties, instanceMapper, notificationMapper, livenessMapper, silencePolicy,
+            timeSeriesQueryService);
     }
 
     // ---------------------------------------------------------------- 夹具
@@ -462,9 +474,12 @@ class AlertTenantEvaluatorTest {
         clock.set(T0.plusSeconds(75));
         latestNow("35");
         long startMs = T0.atZone(AvailabilityRules.PLATFORM_ZONE).toInstant().toEpochMilli();
+        // 点需覆盖整个窗口（相邻间隔 ≤ 容忍度 30s），否则会先因「缺口」判成不可求值而不是「存在越界点」
         when(timeSeriesQueryService.query(anyLong(), any())).thenReturn(List.of(
             new TimeSeriesPointResp(startMs + 1_000, "35", AlertRules.QUALITY_GOOD),
-            new TimeSeriesPointResp(startMs + 30_000, "20", AlertRules.QUALITY_GOOD)));
+            new TimeSeriesPointResp(startMs + 30_000, "20", AlertRules.QUALITY_GOOD),
+            new TimeSeriesPointResp(startMs + 60_000, "35", AlertRules.QUALITY_GOOD),
+            new TimeSeriesPointResp(startMs + 74_000, "35", AlertRules.QUALITY_GOOD)));
         evaluate(rule, point);
 
         assertThat(instances).isEmpty();
@@ -705,7 +720,9 @@ class AlertTenantEvaluatorTest {
         points.put(rule.getId(), List.of(point("GT", "30"), point("LT", "5"), point("GTE", "1")));
         evaluator.evaluateTenant(TENANT, List.of(rule), points);
 
-        verify(deviceMapper, times(1)).selectList(any());
+        // 设备解析统一走 **selectPage**（游标跨轮滚动）；顺序无关的一次批量查询，与候选数无关
+        verify(deviceMapper, times(1)).selectPage(any(), any());
+        verify(deviceMapper, never()).selectList(any());
         verify(instanceMapper, times(1)).selectActiveInTenant();
         verify(livenessMapper, times(1)).selectList(any());
         verify(windowMapper, times(1)).selectList(any());
@@ -725,5 +742,155 @@ class AlertTenantEvaluatorTest {
         evaluator.evaluateTenant(TENANT, List.of(rule), pointsOf(rule, point("GT", "30")));
         verify(deviceMapper, times(1)).selectPage(any(), any());
         assertThat(instances).hasSize(1);
+    }
+
+    // ---------------------------------------------------------------- 复核补充（2026-10-03）
+
+    @Test
+    @DisplayName("★ U2 并发插入撞唯一键 ⇒ 重同步后**只重试剩余部分**（一条语句，不逐行插）")
+    void u2DedupConflictResyncsAndRetries() {
+        // 两条规则覆盖同一台设备的同一点位 ⇒ 两条实例（去重键不同）：
+        // 规则 7 的键（7:9:temperature）已被「另一轮」创建，规则 8 的键还没有
+        IotAlertRule second = rule(AlertTriggerMode.IMMEDIATE.getCode(), 0);
+        second.setId(8L);
+        IotAlertRulePoint point = point("GT", "30");
+        Map<Long, List<IotAlertRulePoint>> points = new LinkedHashMap<>();
+        points.put(7L, List.of(point));
+        points.put(8L, List.of(point));
+        latestNow("35");
+        insertConflicts = 1;
+        when(instanceMapper.selectByActiveDedupKeys(anyList()))
+            .thenReturn(List.of(existingKey("7:9:temperature")));
+
+        AlertTenantEvaluator.TenantOutcome outcome =
+            evaluator.evaluateTenant(TENANT, List.of(rule(AlertTriggerMode.IMMEDIATE.getCode(), 0), second),
+                points);
+
+        assertThat(outcome.fired()).isEqualTo(2);
+        // 第一条实例被唯一键挡住（并发去重生效），剩余那条被**第二次单语句批量插入**
+        assertThat(instances).hasSize(1);
+        assertThat(instances.get(0).getDedupKey()).isEqualTo("8:9:temperature");
+        assertThat(notifications).as("剩余实例的通知照常入队").isNotEmpty();
+        // 去重冲突必须被计数（否则「重复告警刷屏／漏建」都无从发现）
+        assertThat(registry.find(AlertMetrics.METRIC_DEDUP_CONFLICT).counter().count()).isEqualTo(1d);
+        // 两次插入调用：第一次（撞键）+ 第二次（剩余部分）
+        verify(instanceMapper, times(2)).insertBatch(anyList());
+    }
+
+    @Test
+    @DisplayName("并发冲突重试只针对剩余部分：两键都被占用时第二次插入不再发生（不空插）")
+    void u2AllConflictingDoesNotInsertAgain() {
+        IotAlertRule second = rule(AlertTriggerMode.IMMEDIATE.getCode(), 0);
+        second.setId(8L);
+        IotAlertRulePoint point = point("GT", "30");
+        Map<Long, List<IotAlertRulePoint>> points = new LinkedHashMap<>();
+        points.put(7L, List.of(point));
+        points.put(8L, List.of(point));
+        latestNow("35");
+        insertConflicts = 1;
+        when(instanceMapper.selectByActiveDedupKeys(anyList())).thenReturn(List.of(
+            existingKey("7:9:temperature"), existingKey("8:9:temperature")));
+
+        evaluator.evaluateTenant(TENANT,
+            List.of(rule(AlertTriggerMode.IMMEDIATE.getCode(), 0), second), points);
+
+        assertThat(instances).isEmpty();
+        verify(instanceMapper, times(1)).insertBatch(anyList());
+        assertThat(registry.find(AlertMetrics.METRIC_DEDUP_CONFLICT).counter().count()).isEqualTo(2d);
+    }
+
+    @Test
+    @DisplayName("★ 持续窗口「尾部缺口」⇒ 不可求值：保持 PENDING（停发数据不得被当成「持续越界」）")
+    void durationWindowGapKeepsPending() {
+        IotAlertRule rule = rule(AlertTriggerMode.DURATION.getCode(), 60);
+        IotAlertRulePoint point = point("GT", "30");
+        latestNow("35");
+        evaluate(rule, point);
+        assertThat(instances.get(0).getState()).isEqualTo(AlertState.PENDING.getCode());
+
+        clock.set(T0.plusSeconds(75));
+        latestNow("35");
+        long startMs = T0.atZone(AvailabilityRules.PLATFORM_ZONE).toInstant().toEpochMilli();
+        // 点只覆盖窗口前半段（最后一点距 now 45s > 容忍度 30s = max(2×15s, 15s)）⇒ 不声称「持续越界」
+        when(timeSeriesQueryService.query(anyLong(), any())).thenReturn(List.of(
+            new TimeSeriesPointResp(startMs + 1_000, "35", AlertRules.QUALITY_GOOD),
+            new TimeSeriesPointResp(startMs + 30_000, "35", AlertRules.QUALITY_GOOD)));
+        evaluate(rule, point);
+
+        assertThat(instances.get(0).getState()).as("窗口未被覆盖 ⇒ 不改状态").isEqualTo(
+            AlertState.PENDING.getCode());
+        assertThat(notifications).isEmpty();
+        assertThat(registry.find(AlertMetrics.METRIC_WINDOW_UNCOVERED).counter().count())
+            .isEqualTo(1d);
+    }
+
+    @Test
+    @DisplayName("★ 持续窗口点数达到查询上限 ⇒ 不可求值（无法确认没被截断，宁可不触发）")
+    void durationWindowTruncatedKeepsPending() {
+        IotAlertRule rule = rule(AlertTriggerMode.DURATION.getCode(), 60);
+        IotAlertRulePoint point = point("GT", "30");
+        latestNow("35");
+        evaluate(rule, point);
+
+        clock.set(T0.plusSeconds(75));
+        latestNow("35");
+        long startMs = T0.atZone(AvailabilityRules.PLATFORM_ZONE).toInstant().toEpochMilli();
+        List<TimeSeriesPointResp> many = new ArrayList<>();
+        for (int index = 0; index < cn.ypbin.admin.iot.timeseries.TimeSeriesQueryReq.MAX_LIMIT; index++) {
+            many.add(new TimeSeriesPointResp(startMs + index * 10L, "35", AlertRules.QUALITY_GOOD));
+        }
+        when(timeSeriesQueryService.query(anyLong(), any())).thenReturn(many);
+        evaluate(rule, point);
+
+        assertThat(instances.get(0).getState()).isEqualTo(AlertState.PENDING.getCode());
+        assertThat(registry.find(AlertMetrics.METRIC_WINDOW_UNCOVERED).counter().count())
+            .isEqualTo(1d);
+    }
+
+    @Test
+    @DisplayName("T6 加强：陈旧且**本应回落**的值不得让活动告警恢复（只测越界值咬不到这个方向）")
+    void t6StaleInRangeValueDoesNotResolve() {
+        seedActive(AlertState.FIRING);
+        Long staleTs = clock.get().minusMinutes(10)
+            .atZone(AvailabilityRules.PLATFORM_ZONE).toInstant().toEpochMilli();
+        latest("25", AlertRules.QUALITY_GOOD, staleTs);
+
+        AlertTenantEvaluator.TenantOutcome outcome =
+            evaluate(rule(AlertTriggerMode.IMMEDIATE.getCode(), 0), point("GT", "30"));
+
+        assertThat(outcome.resolved()).isZero();
+        assertThat(instances.get(0).getState()).as("陈旧 ≠ 恢复").isEqualTo(AlertState.FIRING.getCode());
+        assertThat(instances.get(0).getActiveDedupKey()).isNotNull();
+    }
+
+    @Test
+    @DisplayName("非法状态转换被拒绝（状态转换表在生产路径生效，不再是文档+死代码）")
+    void illegalTransitionIsRejected() {
+        // 造一条未开始的条件行（状态码非法）→ 不推进状态机，且计入 INVALID_CONDITION
+        IotAlertInstance broken = new IotAlertInstance();
+        broken.setId(901L);
+        broken.setTenantId(TENANT);
+        broken.setRuleId(7L);
+        broken.setDeviceId(DEVICE);
+        broken.setPropertyId("temperature");
+        broken.setDedupKey(AlertRules.dedupKey(7L, DEVICE, "temperature"));
+        broken.setActiveDedupKey(broken.getDedupKey());
+        broken.setState("SOMETHING_ELSE");
+        broken.setStartTs(T0.minusMinutes(1));
+        instances.add(broken);
+        latestNow("40");
+
+        evaluate(rule(AlertTriggerMode.IMMEDIATE.getCode(), 0), point("GT", "30"));
+
+        assertThat(instances.get(0).getState()).isEqualTo("SOMETHING_ELSE");
+        assertThat(counter("iot.alert.evaluate.skipped_invalid_condition")).isEqualTo(1d);
+    }
+
+    /** 造一条「已被别的轮次创建」的同键实例（用于 U2：只用于 selectByActiveDedupKeys 的返回值）。 */
+    private static IotAlertInstance existingKey(String dedupKey) {
+        IotAlertInstance instance = new IotAlertInstance();
+        instance.setId(-1L);
+        instance.setActiveDedupKey(dedupKey);
+        return instance;
     }
 }

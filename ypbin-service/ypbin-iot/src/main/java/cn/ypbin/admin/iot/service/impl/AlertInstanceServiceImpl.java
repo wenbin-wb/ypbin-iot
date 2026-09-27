@@ -12,6 +12,8 @@ package cn.ypbin.admin.iot.service.impl;
 import cn.ypbin.admin.iot.alert.AlertGate;
 import cn.ypbin.admin.iot.alert.AlertMetrics;
 import cn.ypbin.admin.iot.alert.AlertNotifyPlanner;
+import cn.ypbin.admin.iot.alert.AlertNotifyScheduler;
+import cn.ypbin.admin.iot.alert.AlertNotifyTask;
 import cn.ypbin.admin.iot.alert.AlertProperties;
 import cn.ypbin.admin.iot.alert.AlertRules;
 import cn.ypbin.admin.iot.alert.AlertSilencePolicy;
@@ -46,6 +48,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -79,6 +82,8 @@ public class AlertInstanceServiceImpl implements AlertInstanceService {
     private final DeviceLivenessMapper livenessMapper;
     private final AlertSilencePolicy silencePolicy;
     private final AlertNotifyPlanner notifyPlanner;
+
+    private final AlertNotifyScheduler notifyScheduler;
     private final AlertMetrics metrics;
     private final AlertGate gate;
     private final AlertProperties properties;
@@ -88,7 +93,8 @@ public class AlertInstanceServiceImpl implements AlertInstanceService {
                                     IotAlertRuleMapper ruleMapper, IotDeviceMapper deviceMapper,
                                     DeviceLivenessMapper livenessMapper,
                                     AlertSilencePolicy silencePolicy, AlertNotifyPlanner notifyPlanner,
-                                    AlertMetrics metrics, AlertGate gate, AlertProperties properties) {
+                                    AlertNotifyScheduler notifyScheduler, AlertMetrics metrics, AlertGate gate,
+                                    AlertProperties properties) {
         this.instanceMapper = instanceMapper;
         this.notificationMapper = notificationMapper;
         this.ruleMapper = ruleMapper;
@@ -96,6 +102,7 @@ public class AlertInstanceServiceImpl implements AlertInstanceService {
         this.livenessMapper = livenessMapper;
         this.silencePolicy = silencePolicy;
         this.notifyPlanner = notifyPlanner;
+        this.notifyScheduler = notifyScheduler;
         this.metrics = metrics;
         this.gate = gate;
         this.properties = properties;
@@ -199,7 +206,67 @@ public class AlertInstanceServiceImpl implements AlertInstanceService {
             return 0;
         }
         LocalDateTime now = livenessMapper.selectNow();
-        return instanceMapper.batchAck(ids, UserContext.getUserId(), now);
+        Long userId = UserContext.getUserId();
+        int acked = instanceMapper.batchAck(ids, userId, now);
+        if (acked == 0) {
+            return 0;
+        }
+        // 确认后**通知一次**（ACKED 事件）：让「我看到了、正在处理」被记录并让别人也知道；
+        // 之后不再按 repeat_interval 重复打扰（设计 §2.3/§3.4-S5 的「降级」语义）
+        notifyAcked(ids, userId, now);
+        return acked;
+    }
+
+    /**
+     * 确认事件的通知入队（静默同样生效：静默只影响通知，不影响确认这个事实）。
+     *
+     * <p>只对「本次真的被确认」的行发通知：用 {@code acked_by}/{@code acked_ts} 与本次调用对齐，
+     * 避免把「之前已被别人确认过」的行再喊一遍。</p>
+     */
+    private void notifyAcked(List<Long> ids, Long userId, LocalDateTime now) {
+        List<IotAlertInstance> acked = new ArrayList<>();
+        for (IotAlertInstance instance : instanceMapper.selectByIds(new ArrayList<>(ids))) {
+            if (AlertState.ACKED.getCode().equals(instance.getState())
+                && Objects.equals(instance.getAckedBy(), userId)
+                && now.equals(instance.getAckedTs())) {
+                acked.add(instance);
+            }
+        }
+        if (acked.isEmpty()) {
+            return;
+        }
+        Map<Long, IotAlertRule> rules = loadRules(acked);
+        List<MaintenanceWindow> windows = silencePolicy.loadActiveWindows(now);
+        List<AlertNotifyTask> tasks = new ArrayList<>();
+        for (IotAlertInstance instance : acked) {
+            notifyScheduler.schedule(instance, rules.get(instance.getRuleId()), instance.getDeviceId(),
+                AlertNotifyEvent.ACKED, now, windows, tasks);
+        }
+        List<IotAlertNotification> rows = notifyScheduler.planRows(tasks);
+        if (rows.isEmpty()) {
+            return;
+        }
+        instanceMapper.batchUpdate(acked);
+        int inserted = notificationMapper.insertBatchIdempotent(rows);
+        metrics.notifyQueued(inserted);
+    }
+
+    /** 批量取实例对应的规则（一次查询；断档类实例没有规则）。 */
+    private Map<Long, IotAlertRule> loadRules(List<IotAlertInstance> instances) {
+        Set<Long> ruleIds = new LinkedHashSet<>();
+        for (IotAlertInstance instance : instances) {
+            if (instance.getRuleId() != null && instance.getRuleId() != AlertRules.RULE_ID_OUTAGE) {
+                ruleIds.add(instance.getRuleId());
+            }
+        }
+        Map<Long, IotAlertRule> rules = new LinkedHashMap<>();
+        if (ruleIds.isEmpty()) {
+            return rules;
+        }
+        for (IotAlertRule rule : ruleMapper.selectByIds(new ArrayList<>(ruleIds))) {
+            rules.put(rule.getId(), rule);
+        }
+        return rules;
     }
 
     @Override
@@ -254,7 +321,7 @@ public class AlertInstanceServiceImpl implements AlertInstanceService {
         instanceMapper.batchUpdate(actives);
         metrics.resolvedBatch(actives.size());
         if (!rows.isEmpty()) {
-            int inserted = notificationMapper.insertBatchIgnore(rows);
+            int inserted = notificationMapper.insertBatchIdempotent(rows);
             metrics.notifyQueued(inserted);
         }
         log.info("[iot] 规则停用收口活动告警：实例 {} 条，通知入队 {} 条", actives.size(), rows.size());
@@ -272,9 +339,12 @@ public class AlertInstanceServiceImpl implements AlertInstanceService {
         for (IotDevice device : devices) {
             ids.add(device.getId());
         }
-        if (ids.size() == MAX_PRODUCT_DEVICES) {
-            log.warn("[iot] 按产品筛选告警：产品 {} 下设备数超过 {}，本次只覆盖前 {} 台（请改用设备筛选）",
-                productId, MAX_PRODUCT_DEVICES, MAX_PRODUCT_DEVICES);
+        if (ids.size() >= MAX_PRODUCT_DEVICES) {
+            // 与告警**评估**侧的「跨轮滚动」不同：这是**查询筛选**，无法跨轮滚动（一次请求必须给出完整结果），
+            // 因此这里是真截断。它必须在日志里显式暴露（独立复核 2026-10-03 指出原来只在「恰好等于」时告警，
+            // 超过上限反而静默），并在文档里登记为已知限制。
+            log.warn("[iot] 按产品筛选告警：产品 {} 下设备数达到/超过上限 {}，本次只覆盖前 {} 台"
+                + "（请改用设备筛选或时间范围收窄）", productId, MAX_PRODUCT_DEVICES, MAX_PRODUCT_DEVICES);
         }
         return ids;
     }

@@ -92,10 +92,6 @@ class IotAlertConfigurationTest {
         assertThatThrownBy(() -> configuration(badSeverity).afterPropertiesSet())
             .isInstanceOf(IllegalStateException.class).hasMessageContaining("default-severity");
 
-        AlertProperties badOutageSeverity = new AlertProperties();
-        badOutageSeverity.setOutageSeverity("FATAL");
-        assertThatThrownBy(() -> configuration(badOutageSeverity).afterPropertiesSet())
-            .isInstanceOf(IllegalStateException.class).hasMessageContaining("outage-severity");
     }
 
     @Test

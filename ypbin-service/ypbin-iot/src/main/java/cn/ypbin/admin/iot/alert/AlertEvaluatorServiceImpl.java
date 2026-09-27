@@ -114,7 +114,15 @@ public class AlertEvaluatorServiceImpl implements AlertEvaluatorService {
             }
         }
         metrics.recordRoundDuration(Duration.ofMillis(System.currentTimeMillis() - startedAt));
-        metrics.roundSucceeded();
+        // 健康 = 本轮没有任何租户失败、也没有 Redis 读取失败。只要有一项不满足就**不刷新**活性时刻，
+        // 让 iot.alert.evaluate.lag 持续增长（设计 §2.2.4：评估器不健康必须能被人看见）
+        if (failed == 0 && redisFailed == 0) {
+            metrics.roundSucceeded();
+        } else {
+            metrics.roundFailed();
+            log.error("[iot] 告警评估轮次不健康：失败租户 {}、Redis 失败租户 {}（last_success_ts 不刷新，"
+                + "lag 会持续增长）", failed, redisFailed);
+        }
         if (fired > 0 || resolved > 0 || queued > 0) {
             log.info("[iot] 告警评估完成：租户 {}（失败 {}）、候选 {}、触发 {}、恢复 {}、待投递通知 {}",
                 tenants, failed, candidates, fired, resolved, queued);

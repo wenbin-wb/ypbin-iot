@@ -72,9 +72,12 @@ public class AlertTenantEvaluator {
 
     private static final Logger log = LoggerFactory.getLogger(AlertTenantEvaluator.class);
 
+    /** 持续窗口缺口容忍度下限（毫秒）：采集周期未知时用它，避免把正常采样抖动误判成缺口。 */
+    static final long MIN_WINDOW_GAP_TOLERANCE_MS = 15_000L;
+
     private final AlertCandidateResolver candidateResolver;
     private final AlertLatestValueReader latestValueReader;
-    private final AlertNotifyPlanner notifyPlanner;
+    private final AlertNotifyScheduler notifyScheduler;
     private final AlertMetrics metrics;
     private final AlertProperties properties;
     private final IotAlertInstanceMapper instanceMapper;
@@ -85,7 +88,7 @@ public class AlertTenantEvaluator {
 
     public AlertTenantEvaluator(AlertCandidateResolver candidateResolver,
                                 AlertLatestValueReader latestValueReader,
-                                AlertNotifyPlanner notifyPlanner, AlertMetrics metrics,
+                                AlertNotifyScheduler notifyScheduler, AlertMetrics metrics,
                                 AlertProperties properties, IotAlertInstanceMapper instanceMapper,
                                 IotAlertNotificationMapper notificationMapper,
                                 DeviceLivenessMapper livenessMapper,
@@ -93,7 +96,7 @@ public class AlertTenantEvaluator {
                                 TimeSeriesQueryService timeSeriesQueryService) {
         this.candidateResolver = candidateResolver;
         this.latestValueReader = latestValueReader;
-        this.notifyPlanner = notifyPlanner;
+        this.notifyScheduler = notifyScheduler;
         this.metrics = metrics;
         this.properties = properties;
         this.instanceMapper = instanceMapper;
@@ -120,11 +123,6 @@ public class AlertTenantEvaluator {
         public static TenantOutcome skipped(boolean redisFailed) {
             return new TenantOutcome(0, 0, 0, 0, false, redisFailed);
         }
-    }
-
-    /** 待入队的通知任务（{@code now} 必须整轮一致：通知的 next_retry_ts 与实例的 last_notified_ts 要同源）。 */
-    private record NotifyTask(IotAlertInstance instance, IotAlertRule rule, AlertNotifyEvent event,
-                              LocalDateTime now) {
     }
 
     /** 单候选的处理结果（只用于累加计数）。 */
@@ -185,7 +183,7 @@ public class AlertTenantEvaluator {
         List<IotAlertInstance> toInsert = new ArrayList<>();
         List<IotAlertInstance> toUpdate = new ArrayList<>();
         List<Long> toDeletePending = new ArrayList<>();
-        List<NotifyTask> notifyTasks = new ArrayList<>();
+        List<AlertNotifyTask> notifyTasks = new ArrayList<>();
         int fired = 0;
         int resolvedCount = 0;
         int candidates = 0;
@@ -196,13 +194,15 @@ public class AlertTenantEvaluator {
             IotDevice device = resolved.devices().get(deviceId);
             Map<String, AlertLatestValueReader.AlertSample> deviceValues =
                 latest.getOrDefault(deviceId, Map.of());
-            long stalenessTtlMs = stalenessTtlMs(pollIntervals.get(deviceId));
+            Integer pollIntervalMs = pollIntervals.get(deviceId);
+            long stalenessTtlMs = stalenessTtlMs(pollIntervalMs);
             for (AlertCandidateResolver.Candidate candidate : entry.getValue()) {
                 candidates++;
                 IotAlertInstance active = activeByKey.get(AlertRules.dedupKey(candidate.rule().getId(),
                     deviceId, candidate.point().getPropertyId()));
                 Outcome outcome = applyCandidate(candidate, device, deviceValues, active, now, nowMs,
-                    stalenessTtlMs, toInsert, toUpdate, toDeletePending, notifyTasks, activeWindows);
+                    stalenessTtlMs, pollIntervalMs, toInsert, toUpdate, toDeletePending, notifyTasks,
+                    activeWindows);
                 fired += outcome.fired;
                 resolvedCount += outcome.resolved;
             }
@@ -220,9 +220,10 @@ public class AlertTenantEvaluator {
     private Outcome applyCandidate(AlertCandidateResolver.Candidate candidate, IotDevice device,
                                    Map<String, AlertLatestValueReader.AlertSample> deviceValues,
                                    IotAlertInstance active, LocalDateTime now, long nowMs,
-                                   long stalenessTtlMs, List<IotAlertInstance> toInsert,
+                                   long stalenessTtlMs, Integer pollIntervalMs,
+                                   List<IotAlertInstance> toInsert,
                                    List<IotAlertInstance> toUpdate, List<Long> toDeletePending,
-                                   List<NotifyTask> notifyTasks, List<MaintenanceWindow> activeWindows) {
+                                   List<AlertNotifyTask> notifyTasks, List<MaintenanceWindow> activeWindows) {
         IotAlertRule rule = candidate.rule();
         IotAlertRulePoint point = candidate.point();
         AlertTriggerMode mode = AlertTriggerMode.of(rule.getTriggerMode());
@@ -256,7 +257,7 @@ public class AlertTenantEvaluator {
             && active.getStartTs() != null
             && Duration.between(active.getStartTs(), now).getSeconds() >= threshold) {
             windowSatisfied = verifyDurationWindow(device.getId(), point, active.getStartTs(), now, nowMs,
-                stalenessTtlMs);
+                stalenessTtlMs, pollIntervalMs);
         }
         AlertStateMachine.Decision decision = AlertStateMachine.decide(currentState,
             active == null || active.getConsecutiveCount() == null ? 0 : active.getConsecutiveCount(),
@@ -275,8 +276,8 @@ public class AlertTenantEvaluator {
                 toInsert.add(created);
                 if (decision.isFiring()) {
                     metrics.triggered();
-                    scheduleNotify(created, rule, device, AlertNotifyEvent.FIRING, now, activeWindows,
-                        notifyTasks);
+                    notifyScheduler.schedule(created, rule, device.getId(), AlertNotifyEvent.FIRING, now,
+                        activeWindows, notifyTasks);
                     return new Outcome(1, 0);
                 }
             }
@@ -290,23 +291,37 @@ public class AlertTenantEvaluator {
                 toDeletePending.add(active.getId());
             }
             case PROMOTE -> {
+                if (!currentState.canTransitionTo(AlertState.FIRING)) {
+                    // 状态转换表在生产路径生效：非法转换**不执行**，但必须可见（数据被人工改动时会走到这里）
+                    metrics.verdictSkipped(AlertValueVerdict.INVALID_CONDITION);
+                    log.error("[iot] 告警评估：拒绝非法状态转换 {} -> FIRING（instanceId={}）",
+                        currentState, active.getId());
+                    return new Outcome(0, 0);
+                }
                 active.setState(AlertState.FIRING.getCode());
                 active.setFiringTs(decision.firingTs());
                 active.setConsecutiveCount(decision.consecutiveCount());
                 active.setTriggerValue(rawValue);
                 toUpdate.add(active);
                 metrics.triggered();
-                scheduleNotify(active, rule, device, AlertNotifyEvent.FIRING, now, activeWindows,
-                    notifyTasks);
+                notifyScheduler.schedule(active, rule, device.getId(), AlertNotifyEvent.FIRING, now,
+                    activeWindows, notifyTasks);
                 return new Outcome(1, 0);
             }
             case PROGRESS -> {
                 active.setConsecutiveCount(decision.consecutiveCount());
                 active.setTriggerValue(rawValue);
                 toUpdate.add(active);
-                scheduleRepeat(active, rule, device, now, activeWindows, notifyTasks);
+                notifyScheduler.scheduleRepeat(active, rule, device.getId(), now, activeWindows,
+                    notifyTasks);
             }
             case RESOLVE -> {
+                if (!currentState.canTransitionTo(AlertState.RESOLVED)) {
+                    metrics.verdictSkipped(AlertValueVerdict.INVALID_CONDITION);
+                    log.error("[iot] 告警评估：拒绝非法状态转换 {} -> RESOLVED（instanceId={}）",
+                        currentState, active.getId());
+                    return new Outcome(0, 0);
+                }
                 active.setState(AlertState.RESOLVED.getCode());
                 active.setResolvedTs(now);
                 active.setReason(decision.reason() == null ? null : decision.reason().getCode());
@@ -315,8 +330,8 @@ public class AlertTenantEvaluator {
                 active.setTriggerValue(rawValue);
                 toUpdate.add(active);
                 metrics.resolved();
-                scheduleNotify(active, rule, device, AlertNotifyEvent.RESOLVED, now, activeWindows,
-                    notifyTasks);
+                notifyScheduler.schedule(active, rule, device.getId(), AlertNotifyEvent.RESOLVED, now,
+                    activeWindows, notifyTasks);
                 return new Outcome(0, 1);
             }
             default -> throw new IllegalStateException("未处理的状态机动作：" + decision.kind());
@@ -338,11 +353,24 @@ public class AlertTenantEvaluator {
     /**
      * 持续 T 秒的窗口校验（**只在这一刻查时序库**，设计 §2.2.2）。
      *
-     * @return {@code TRUE} = 窗口内每个可判定点都越界；{@code FALSE} = 存在未越界点；
-     *         {@code null} = **不可求值**（库读不到 / 窗口内无点 / 存在不可判定点）
+     * <p><b>除了「点是否越界」，还必须确认窗口**被数据覆盖**</b>（独立复核 2026-10-03 指出原实现只检查
+     * 「窗口内**存在的**点都越界」，因此「中途停发数据」也会被判成「持续越界」并误触发）：</p>
+     * <ul>
+     *   <li>查询结果达到 {@code limit} ⇒ 可能被截断 ⇒ **不可求值**（计数 {@code window_uncovered}）；</li>
+     *   <li>首点距窗口起点、末点距 now、以及相邻点之间的间隔超过容忍度（{@code max(2 × 采集周期, 15s)}）
+     *       ⇒ 窗口存在缺口 ⇒ **不可求值**；</li>
+     *   <li>窗口内的点必须**全部可判定且全部越界**才算满足（任一不可判定点即不可求值）。</li>
+     * </ul>
+     *
+     * <p>窗口内的点**天然是历史点**，故这里不做「相对 now 的陈旧判定」（传 0 = 关闭）：那个判据回答的是
+     * 「我当作当前值的点是否新鲜」，而本方法的时间范围已由窗口本身（startTs ~ now）界定。</p>
+     *
+     * @return {@code TRUE} = 窗口被完整覆盖且每个点都越界；{@code FALSE} = 存在未越界的点；
+     *         {@code null} = **不可求值**（库读不到 / 无点 / 有不可判定点 / 窗口未被覆盖）
      */
     private Boolean verifyDurationWindow(Long deviceId, IotAlertRulePoint point, LocalDateTime startTs,
-                                         LocalDateTime now, long nowMs, long stalenessTtlMs) {
+                                         LocalDateTime now, long nowMs, long stalenessTtlMs,
+                                         Integer pollIntervalMs) {
         TimeSeriesQueryReq req = new TimeSeriesQueryReq();
         req.setPropertyId(point.getPropertyId());
         req.setFrom(toEpochMillis(startTs));
@@ -364,12 +392,22 @@ public class AlertTenantEvaluator {
             metrics.timeseriesFailed();
             return null;
         }
+        if (points.size() >= TimeSeriesQueryReq.MAX_LIMIT) {
+            // 达到返回上限 ⇒ 无法确认窗口被覆盖（可能截断掉了后半段），宁可不触发
+            metrics.windowUncovered();
+            log.warn("[iot] 告警评估：持续窗口点数达到查询上限 {}，无法确认覆盖，本轮不改状态：deviceId={}",
+                TimeSeriesQueryReq.MAX_LIMIT, deviceId);
+            return null;
+        }
+        if (!isWindowCovered(points, toEpochMillis(startTs), nowMs, pollIntervalMs)) {
+            metrics.windowUncovered();
+            log.warn("[iot] 告警评估：持续窗口未被数据覆盖（首尾或中间有缺口），本轮不改状态：deviceId={} "
+                + "property={}", deviceId, LogSanitizer.sanitize(point.getPropertyId()));
+            return null;
+        }
         for (TimeSeriesPointResp item : points) {
-            // 窗口内的点**天然是历史点**（最早的点在 startTs，可能已超过陈旧 TTL）⇒ 这里**不做时效判定**
-            // （传 0 = 关闭陈旧检查），只判「可判定 / 越界」。否则「持续 T 秒」在 T > 陈旧 TTL 时
-            // 会因为窗口早期点被判陈旧而永远不可求值（D7 会变成永远不触发）。
-            // 时效判定的语义边界不变：它回答的是「我当作当前值的那个点是否新鲜」，而这里的时间范围由
-            // 窗口本身（startTs ~ now）界定。
+            // 窗口内的点是**历史点**（最早的在 startTs，可能已超过陈旧 TTL）⇒ 传 0 关闭陈旧判定，
+            // 只判「可判定 / 越界」；覆盖完整性由 isWindowCovered 单独负责
             AlertValueVerdict verdict = AlertRules.verdict(point, item.value(), item.quality(), item.ts(),
                 nowMs, 0L);
             if (!verdict.isDecidable()) {
@@ -382,6 +420,35 @@ public class AlertTenantEvaluator {
             }
         }
         return Boolean.TRUE;
+    }
+
+    /**
+     * 窗口是否被数据完整覆盖：首点贴近起点、末点贴近 now、相邻点间隔不超过容忍度。
+     *
+     * <p>容忍度取 {@code max(2 × 采集周期, }{@value #MIN_WINDOW_GAP_TOLERANCE_MS}{@code ms)}：
+     * 采集周期未知（或异常小）时也不会把「正常的采样抖动」误判成缺口。</p>
+     */
+    private static boolean isWindowCovered(List<TimeSeriesPointResp> points, long startMs, long nowMs,
+                                           Integer pollIntervalMs) {
+        long toleranceMs = Math.max(2L * (pollIntervalMs == null || pollIntervalMs <= 0
+            ? 0L : pollIntervalMs), MIN_WINDOW_GAP_TOLERANCE_MS);
+        Long first = points.get(0).ts();
+        Long last = points.get(points.size() - 1).ts();
+        if (first == null || last == null) {
+            return false;
+        }
+        if (first - startMs > toleranceMs || nowMs - last > toleranceMs) {
+            return false;
+        }
+        long previous = first;
+        for (TimeSeriesPointResp item : points) {
+            Long current = item.ts();
+            if (current == null || current - previous > toleranceMs) {
+                return false;
+            }
+            previous = current;
+        }
+        return true;
     }
 
     /** 建实例（PENDING 或 FIRING；id 预生成，便于同事务内写通知行）。 */
@@ -413,49 +480,9 @@ public class AlertTenantEvaluator {
         return instance;
     }
 
-    /**
-     * 触发/恢复通知的入队（含静默判定：**静默只影响通知，不影响判定与状态**，设计 §3.4-S1）。
-     */
-    private void scheduleNotify(IotAlertInstance instance, IotAlertRule rule, IotDevice device,
-                                AlertNotifyEvent event, LocalDateTime now,
-                                List<MaintenanceWindow> activeWindows, List<NotifyTask> notifyTasks) {
-        if (silencePolicy.isSilenced(instance, rule, device.getId(), now, activeWindows)) {
-            metrics.notifySilenced();
-            return;
-        }
-        instance.setLastNotifiedTs(now);
-        instance.setNotifyCount(intOrDefault(instance.getNotifyCount(), 0) + 1);
-        notifyTasks.add(new NotifyTask(instance, rule, event, now));
-    }
-
-    /**
-     * 重复提醒的入队（仅 {@code FIRING}；{@code ACKED} 之后不再按 repeat_interval 打扰，设计 §2.3/§3.4-S5）。
-     */
-    private void scheduleRepeat(IotAlertInstance instance, IotAlertRule rule, IotDevice device,
-                                LocalDateTime now, List<MaintenanceWindow> activeWindows,
-                                List<NotifyTask> notifyTasks) {
-        if (!AlertState.FIRING.getCode().equals(instance.getState())) {
-            return;
-        }
-        int repeatIntervalSec = intOrDefault(rule.getRepeatIntervalSec(),
-            properties.getDefaultRepeatIntervalSec());
-        LocalDateTime lastNotified = instance.getLastNotifiedTs();
-        if (lastNotified != null
-            && Duration.between(lastNotified, now).getSeconds() < repeatIntervalSec) {
-            return;
-        }
-        if (silencePolicy.isSilenced(instance, rule, device.getId(), now, activeWindows)) {
-            metrics.notifySilenced();
-            return;
-        }
-        instance.setLastNotifiedTs(now);
-        instance.setNotifyCount(intOrDefault(instance.getNotifyCount(), 0) + 1);
-        notifyTasks.add(new NotifyTask(instance, rule, AlertNotifyEvent.REPEAT, now));
-    }
-
     /** 批量落库 + 排队通知（写入只在有变化时发生；稳态下几乎为零）。 */
     private int flush(List<IotAlertInstance> toInsert, List<IotAlertInstance> toUpdate,
-                      List<Long> toDeletePending, List<NotifyTask> notifyTasks) {
+                      List<Long> toDeletePending, List<AlertNotifyTask> notifyTasks) {
         if (!toInsert.isEmpty()) {
             insertWithRetry(toInsert);
         }
@@ -468,20 +495,11 @@ public class AlertTenantEvaluator {
         if (notifyTasks.isEmpty()) {
             return 0;
         }
-        List<IotAlertNotification> rows = new ArrayList<>();
-        Set<String> seen = new LinkedHashSet<>();
-        for (NotifyTask task : notifyTasks) {
-            for (IotAlertNotification row : notifyPlanner.plan(task.instance(), task.rule(),
-                channelsOf(task.rule()), task.rule().getNotifyTargets(), task.event(), task.now())) {
-                if (seen.add(row.getIdempotentKey())) {
-                    rows.add(row);
-                }
-            }
-        }
+        List<IotAlertNotification> rows = notifyScheduler.planRows(notifyTasks);
         if (rows.isEmpty()) {
             return 0;
         }
-        int inserted = notificationMapper.insertBatchIgnore(rows);
+        int inserted = notificationMapper.insertBatchIdempotent(rows);
         metrics.notifyQueued(inserted);
         if (inserted < rows.size()) {
             log.info("[iot] 告警通知入队：{} 条中 {} 条被幂等键跳过（同一实例同一事件同一轮已入过队）",
@@ -559,12 +577,6 @@ public class AlertTenantEvaluator {
     private String severityOf(IotAlertRule rule) {
         AlertSeverity severity = AlertSeverity.of(rule.getSeverity());
         return severity == null ? properties.getDefaultSeverity() : severity.getCode();
-    }
-
-    /** 生效通知渠道（规则缺省 → 平台默认）。 */
-    private String channelsOf(IotAlertRule rule) {
-        String channels = rule.getNotifyChannels();
-        return channels == null || channels.isBlank() ? properties.getDefaultNotifyChannels() : channels;
     }
 
     private static int intOrDefault(Integer value, int fallback) {
