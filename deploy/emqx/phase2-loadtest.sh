@@ -283,13 +283,22 @@ wait "$PROBE_PID" 2>/dev/null
 echo "延迟观测器输出：$(cat "$LATENCY_LOG" 2>/dev/null || echo '(无)')" | tee -a "$SUMMARY"
 
 ############################ ③ 观测与判据 ############################
-# ⚠️ 必须在**用它的那一行之前**赋值：下面 ③ 的报告块就要用它（曾把它写在 verdict=0 前面，
-#    结果 `set -u` 在报告块第一行就报 unbound variable，整段 ③ 被吃掉 —— 已修，勿再挪回去）。
+# ⚠️ 变量顺序有坑（踩过两次，勿再改）：
+#   ① `HAVE_SAMPLES` 必须在**下面 ③ 报告块**用到它之前赋值（曾把赋值写在 `verdict=0` 前，
+#      而报告块在它之前 ⇒ `set -u` 报 unbound variable，整段 ③ 被吃掉）；
+#   ② `METRICS_OK` 必须在 `read -r M1_*` **之后**（它要读 M1_DROPQ/M1_DROPE/M1_NOSUB）。
+#      `m_snapshot` 失败会回退成 -1，而 `-1 <= -1` 会让 dropped 类判据**假 PASS**（复核者指出）
+#      ⇒ 这里要求两端读数都 ≥ 0，否则该项判 FAIL（标注"不可求值"）。
 HAVE_SAMPLES=$([ "$i" -ge 1 ] && echo 1 || echo 0)
 read -r M1_RECV M1_DROPQ M1_DROPE M1_MSGDROP M1_NOSUB M1_CONN M1_ALLOW <<<"$(m_snapshot | tr ',' ' ')"
 M1_OOM="$(docker inspect "$CONTAINER" --format '{{.State.OOMKilled}}')"
 M1_RESTART="$(docker inspect "$CONTAINER" --format '{{.RestartCount}}')"
 M1_DISK="$(disk_use_pct)"
+
+METRICS_OK=1
+for v in "$M0_DROPQ" "$M1_DROPQ" "$M0_DROPE" "$M1_DROPE" "$M0_NOSUB" "$M1_NOSUB"; do
+  [ "$v" -ge 0 ] 2>/dev/null || METRICS_OK=0
+done
 
 {
   echo "-------- ③ 观测结果 --------"
@@ -319,6 +328,7 @@ LAT_LINE="$(grep -h '^n=' "$LATENCY_LOG" 2>/dev/null | tail -1)"
 [ -n "$LAT_LINE" ] || LAT_LINE="未能求值（观测器未产出结果，见 $BENCH_OUT/latency-probe.log）"
 echo "消息延迟（发布→订阅端接收，latency-probe.py / paho-mqtt）：$LAT_LINE" | tee -a "$SUMMARY"
 
+# （`METRICS_OK` 已在 ③ 段开头算好 —— 依赖 `read -r M1_*`，别再在这里重复实现）
 verdict=0
 chk() { if [ "$2" = "1" ]; then printf '  ✅ PASS  %-34s %s\n' "$1" "$3" | tee -a "$SUMMARY"
         else printf '  ❌ FAIL  %-34s %s\n' "$1" "$3" | tee -a "$SUMMARY"; verdict=1; fi; }
@@ -327,9 +337,9 @@ chk "RestartCount 窗口内不增长"      "$([ "$M1_RESTART" -eq "$M0_RESTART" 
 chk "MemUsage < 85% mem_limit"       "$([ "$HAVE_SAMPLES" -eq 1 ] && [ "$max_mem_pct" -lt 85 ] && echo 1 || echo 0)" "$([ "$HAVE_SAMPLES" -eq 1 ] && echo "${max_mem_pct}%" || echo "无采样，不可求值")"
 chk "宿主机 available ≥ 400MB"       "$([ "$HAVE_SAMPLES" -eq 1 ] && [ "$min_avail" -ge 400 ] && echo 1 || echo 0)" "$([ "$HAVE_SAMPLES" -eq 1 ] && echo "${min_avail}MB" || echo "无采样，不可求值")"
 chk "压测期 available ≥ 200MB"       "$([ "$HAVE_SAMPLES" -eq 1 ] && [ "$min_avail" -ge 200 ] && echo 1 || echo 0)" "$([ "$HAVE_SAMPLES" -eq 1 ] && echo "${min_avail}MB" || echo "无采样，不可求值")"
-chk "dropped.queue_full 不增长"      "$([ "$M1_DROPQ" -le "$M0_DROPQ" ] && echo 1 || echo 0)" "$M0_DROPQ -> $M1_DROPQ"
-chk "dropped.expired 不增长"         "$([ "$M1_DROPE" -le "$M0_DROPE" ] && echo 1 || echo 0)" "$M0_DROPE -> $M1_DROPE"
-chk "无 no_subscribers 丢弃"         "$([ "$M1_NOSUB" -eq "$M0_NOSUB" ] && echo 1 || echo 0)" "$M0_NOSUB -> $M1_NOSUB"
+chk "dropped.queue_full 不增长"      "$([ "$METRICS_OK" -eq 1 ] && [ "$M1_DROPQ" -le "$M0_DROPQ" ] && echo 1 || echo 0)" "$([ "$METRICS_OK" -eq 1 ] && echo "$M0_DROPQ -> $M1_DROPQ" || echo "指标读不到（-1），不可求值")"
+chk "dropped.expired 不增长"         "$([ "$METRICS_OK" -eq 1 ] && [ "$M1_DROPE" -le "$M0_DROPE" ] && echo 1 || echo 0)" "$([ "$METRICS_OK" -eq 1 ] && echo "$M0_DROPE -> $M1_DROPE" || echo "指标读不到（-1），不可求值")"
+chk "无 no_subscribers 丢弃"         "$([ "$METRICS_OK" -eq 1 ] && [ "$M1_NOSUB" -eq "$M0_NOSUB" ] && echo 1 || echo 0)" "$([ "$METRICS_OK" -eq 1 ] && echo "$M0_NOSUB -> $M1_NOSUB" || echo "指标读不到（-1），不可求值")"
 chk "宿主机 / 使用率 < 95%"          "$([ "$max_disk" -lt 95 ] && echo 1 || echo 0)" "${max_disk}%"
 chk "负载真的发生了（自证三条）"     "$LOAD_OK" "$LOAD_WHY"
 chk "publish.received 增量 ≥ 95%×N×D" "$([ "$(( M1_RECV - M0_RECV ))" -ge "$(( TIER * DURATION * 95 / 100 ))" ] && echo 1 || echo 0)" "$(( M1_RECV - M0_RECV )) / $(( TIER * DURATION ))"

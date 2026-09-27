@@ -30,7 +30,9 @@
 
 - 真实凭据**只存在于目标机** `/opt/emqx/.env`（600）与 `/opt/emqx/api-key/default_api_key.conf`（400，属主 = 容器内 `emqx` 用户 uid 1000）。
 - 两者都在 `.gitignore` 内；仓库只有 `.env.example`（全空值）。
-- 所有脚本**只回显长度与 sha256 指纹**，从不打印值；API Key 用 `curl -K <600 文件>` 传入（**不进 argv**）。
+- 所有脚本**只回显长度与 sha256 指纹**，从不打印值；API Key 用 `curl -K <600 文件>` 传入（curl 的 argv 里只有路径）。
+- ⚠️ **但 emqtt-bench 的 `-P <明文口令>` 会进 `docker run` 的 argv 与容器 `Config.Cmd`**（第三方工具硬限制，
+  两个脚本的 S6–S11 / 压测端都用它；宿主 `/proc` 无 hidepid ⇒ 有可见窗口）——见下方专门一条。
 - ⚠️ **一处必须说准的口径**：`phase2-loadtest.sh` 的**压测端 emqtt-bench 只支持 `-P <明文口令>`** ⇒
   压测**期间**该临时口令会出现在 `docker inspect <pub 容器>` 的 `Config.Cmd`（与 /proc 的 cmdline）里。
   对策：输出目录 700、`cleanup()` 立即删除 `*.inspect.json`、账号在压测结束即删（口令随之失效）。

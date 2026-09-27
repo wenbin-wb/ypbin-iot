@@ -19,13 +19,18 @@
 #   S11 服务账号（username 无点）subscribe 通配 `ypbin/v1/+/+/up/#` 必须放行
 #       —— 同时验证 `client_attrs_init` 的 `nth` 越界不会让服务账号路径失效（设计 U6/U19）
 #
-# 凭据纪律（**措辞要紧贴事实，别再说成"不落盘"**）：
-#   · 口令**不会**出现在任何进程 argv（所有带口令的 HTTP body 走 `--data-binary @<私有文件>`）；
-#   · 但口令**会短暂落在磁盘上**——`$PRIV`（mktemp -d 的 700 目录）里的 600 `data.json`/`login-ok.json`
-#     与 `curlrc`（内含真实 API Key+Secret）；正常路径下 `cleanup()` 在退出时**连同账号一起删除**；
-#   · `--keep-probe-users` 是**排查开关**：它保留临时账号与规则（因此口令仍然有效），此时
-#     `cleanup()` 会**明确告警**并要求人工清理，但 **`$PRIV` 仍然会被删掉**（不留 API Key）。
-#   · ⚠️ 不要写成"只在进程内存/不落盘"——前者是错的（body 会写文件），后者也不准确。
+# 凭据纪律（**三条都要说准，任何一条说绝对了都会被实测证伪**）：
+#   · **HTTP 路径不在 argv 里带口令**：所有含口令的 HTTP body 走 `--data-binary @<私有文件>`
+#     （API Key/Secret 走 600 的 `curlrc` + `-K`），所以 curl 的 argv 里只有文件路径。
+#   · ⚠️ **但 S6–S11 的 MQTT 探测口令必然进 argv**：emqtt-bench 只支持 `-P <明文口令>` ⇒
+#     那 5 次 `docker run … pub/sub -u … -P …` 的**明文口令**会出现在 `docker run` 的 argv
+#     以及容器的 `Config.Cmd` 里（宿主 `/proc` 无 hidepid ⇒ 约 12–15s 窗口内本机非 root 用户可读）。
+#     与 `phase2-loadtest.sh` 头部「凭据口径」和 docs §10 U-K 是**同一件事**，别只在这一个文件里说反。
+#     账号在退出时被删 ⇒ 口令随之失效；`--keep-probe-users` 时**账号保留、口令仍然有效**，脚本会告警。
+#   · 口令**会短暂落在磁盘上**：`$PRIV`（mktemp -d 的 700 目录）里的 600 `data.json`/`login-*.json`/
+#     `curlrc`（含真实 API Key+Secret）；`cleanup()` 在退出时**无条件删除 `$PRIV`**（即使 KEEP），
+#     正常路径下同时删掉临时账号与规则。
+#   · ⚠️ 不要写成"只在进程内存 / 不落盘 / 不进任何 argv"——三条都是可实测证伪的过度断言。
 #
 # 退出码：0 = 全部 PASS；1 = 有 FAIL
 # 用法：bash emqx-selfcheck.sh [--env-file /opt/emqx/.env] [--base-url http://127.0.0.1:18093]
@@ -216,7 +221,12 @@ fi
 # ── 建临时账号（口令只在内存里）──────────────────────────────────────────────
 PW_A="$(openssl rand -hex 12)"; PW_B="$(openssl rand -hex 12)"; PW_S="$(openssl rand -hex 12)"
 for u in "$DEV_A:$PW_A" "$DEV_B:$PW_B" "$SVC_PROBE:$PW_S"; do
-  api DELETE "/api/v5/authentication/$AUTH_ID/users/${u%%:*}" >/dev/null
+  # 预清理（幂等）：**失败不静默** —— 非 204/404 时告警（否则可能带着上一次的旧账号跑）
+  api DELETE "/api/v5/authentication/$AUTH_ID/users/${u%%:*}"
+  case "$API_CODE" in
+    204|404) : ;;
+    *) echo "  ⚠️ 预清理 ${u%%:*} 返回 HTTP $API_CODE（非 204/404，可能残留同名旧账号）" >&2 ;;
+  esac
   api POST "/api/v5/authentication/$AUTH_ID/users" \
       "{\"user_id\":\"${u%%:*}\",\"password\":\"${u#*:}\",\"is_superuser\":false}"
   [ "$API_CODE" = 201 ] && pass "临时账号 ${u%%:*} 已创建（口令不经 argv、不回显）" \
@@ -227,7 +237,8 @@ api POST /api/v5/authorization/sources/built_in_database/rules/users \
   "[{\"username\":\"$SVC_PROBE\",\"rules\":[{\"action\":\"subscribe\",\"permission\":\"allow\",\"topic\":\"$PROBE_TOPIC_SVC\"}]}]"
 [ "$API_CODE" = 204 ] && pass "临时服务账号规则已建（$SVC_PROBE → $PROBE_TOPIC_SVC）" \
                       || fail "临时服务账号规则创建失败：HTTP $API_CODE"
-api DELETE /api/v5/authorization/cache >/dev/null
+api DELETE /api/v5/authorization/cache
+[ "$API_CODE" = 204 ] || echo "  ⚠️ 清授权缓存返回 HTTP $API_CODE（非 204）" >&2
 
 bench() { timeout "$1" docker run --rm --pull=never --network "$NETWORK" "$BENCH_IMAGE" "${@:2}" >/dev/null 2>&1 || true; }
 

@@ -253,7 +253,8 @@ HTTP=200
 | 加固 | `NoNewPrivileges`、`PrivateTmp`、`ProtectSystem=full`、`ProtectHome=read-only`、`RestrictAddressFamilies`、`MemoryMax=128M`、`CPUQuota=20%` | 最小权限 |
 
 **凭据最小化**：仅有的一把私钥 `/etc/ypbin/emqx-tunnel.key`（600，root）在中间件机侧被限制为
-`restrict,port-forwarding,permitopen="127.0.0.1:18093"` ⇒ **即使拿到也开不了别的转发**；单元/脚本里**不落任何口令**。
+`restrict,port-forwarding,permitopen="127.0.0.1:18093"` ⇒ **即使拿到也开不了到别处的本地转发（-L）**；
+单元/脚本里**不落任何口令**（唯一凭据是那把私钥，见下方「实际能力」）。
 
 > **R8 残留风险（如实登记；本节曾被独立复核判为"表述与实测相反"，已改正）**：
 > `restrict,port-forwarding,permitopen="127.0.0.1:18093"` 里
@@ -522,7 +523,7 @@ bash /opt/ypbin/ypbin-iot/deploy/emqx/emqx-tunnel-install.sh --dir /opt/ypbin/yp
 | **U-F** | 集群/多节点 | 未涉及 | 单节点 standalone；设计 U11 |
 | **U-G** | EMQX 云安全组规则 | **只读了主机防火墙** | 未读云控制台入站规则（设计 U16）；本机 ufw 已是第二层 |
 | **U-H** | 隧道密钥的「禁执行命令」**与「禁反向转发」** | **都做不到**（OpenSSH 无对应 authorized_keys 选项；`port-forwarding` 是两向开关，且未设 `permitlisten`） | 见 §6.1 的 R8 残留风险；已由独立复核实测证伪过一版错误表述 |
-| **U-K** | 压测期临时口令的落点 | **会进压测容器的 argv**（emqtt-bench 只支持 `-P <明文>`） | 已在脚本 `cleanup()` 里删除 `*.inspect.json`（含 `Config.Cmd`）并把 `$OUT` 设为 700；账号在压测结束时删除 ⇒ 口令随之失效。**不得声称"口令绝不落盘"** |
+| **U-K** | 临时口令的 argv 落点（**两个脚本都有，不只是压测**） | **会进容器 argv**：`emqtt-bench` **只支持 `-P <明文口令>`** ⇒ ① `phase2-loadtest.sh` 的压测端 `pub`（5 个及以上客户端连接共用同一账号）；② `emqx-selfcheck.sh` 的 **S6–S11 探测**（5 次 `docker run … pub/sub -u … -P …`）。口令会出现在 `docker run` 的 argv、容器 `Config.Cmd`（`docker inspect`）与 `/proc/<pid>/cmdline`（宿主 **无 hidepid**，本机有非 root 用户 `www` ⇒ 有约 12–15s 可见窗口）。**HTTP 路径不受影响**：curl 侧一律 `-K <600 文件>` / `--data-binary @<600 文件>`，argv 里只有路径 | 对策：① 这些账号都是**临时**的，`cleanup()` 在退出时删除 ⇒ 口令随之失效；② `$OUT`/`$OUT/bench` 700 且 `cleanup()` 删除 `*.inspect.json`/`*.cid`；③ `--keep-probe-users` / `--keep-users` 会**明确告警**"口令仍然有效，务必手工清理"；④ `$PRIV`（含 API Key 的 curlrc）**无条件删除**。**任何"口令不进 argv / 绝不落盘"的说法都是可被实测证伪的过度断言**——本表就是它的纠正口径 |
 | **U-M** | Erlang 分发 cookie 会出现在容器内 `beam.smp` 的 **argv**（`-setcookie`） | **Erlang 机制，非脚本引入**。验证口径（**第一次写错过，已按确定性命中改正**）：① `/proc` 轮询扫描只命中 `comm=beam.smp`；② 用 **PATH 包装 curl + 确定性记录 argv** 的方式复扫，整改前的 `emqx-selfcheck.sh` 里 **Dashboard 口令命中 1 次**（`-d '{"username":"admin","password":…}'`）、临时账号口令亦命中——**轮询法会漏采毫秒级进程**。整改后这些 body 全部改走 `--data-binary @<私有 600 文件>`，argv 不应再出现任何口令；扫描时**必须用包装法**或至少承认轮询法的漏采风险 | 暴露面 = 宿主可见（`/proc` 无 hidepid，本机有非 root 用户 `www`）；整改后脚本侧不再以 argv 传递口令。另有 `emqtt-bench -P`（第三方工具硬限制）仍会进 argv，见 U-K |
 | **U-N** | `packets.subscribe.auth_error` 对 **MQTT 3.1.1** 客户端的越权订阅**不增长** | 独立复核实测：3.1.1 越权 SUBSCRIBE → SUBACK `Unspecified error`，只有 `authorization.nomatch` 增长；MQTT 5 → SUBACK `Not authorized` 且该计数器增长。同理 `deny_action=ignore` 下 3.1.1 的越权 publish 客户端**看不到任何错误** | **验收判据必须用 EMQX 侧指标**，不能看客户端返回码；用 3.1.1 设备验收时改看 `authorization.nomatch` |
 | **U-L** | 跨 bridge 可达性的机制 | **未定论**：独立复核从默认 bridge 实测 `172.28.0.2` 的 1883/18093/18083/8883 **全不可达**，但 iptables 里存在按端口的跨 bridge ACCEPT 规则 ⇒ 规则层与实测层不一致，未从 `middleware_default`/`app_default` 源网络实测（刻意不接入别人的网络） | 本阶段暴露面结论**不依赖**跨 bridge 可达性（宿主侧只绑回环 + ufw 无放行 + 公网实测不可达）；后续如需"其他容器也不可达"的强结论，用一次性源网络补测 |
