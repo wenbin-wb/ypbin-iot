@@ -1,0 +1,35 @@
+[Unit]
+Description=ypbin MQTT 1883 对外放行（开发测试期；**只**放行 tcp/1883 入站）
+Documentation=file:///opt/emqx/README.md
+# 与 emqx-ingress-firewall.service 同一模式：规则由我们自己的单元幂等维护，回滚随 ExecStop 删除。
+# 为什么需要它：宿主 INPUT 策略实测 **DROP**（只显式放行了别人的 18080/8080 等）；
+#   docker-proxy 即使把 1883 绑到 0.0.0.0，外部 SYN 仍会被 INPUT 丢掉，
+#   表现为「端口没开」——排障时极易误判成 EMQX 没起或云安全组没放行。
+# 规则范围刻意收到最窄：
+#   · 只放行 **tcp/1883** 一个端口（不动 18093 管理面，不动 8883/8083/8084）；
+#   · 来源默认 0.0.0.0/0（**开发测试期用户决策**），可用 EnvironmentFile 收敛到设备来源；
+#   · 不改 INPUT 默认策略、不做任何 -F、不动别人的链（IN_BT / ufw-* 一律不碰）。
+# 幂等：先 `-C` 检查再 `-I`；重复执行不堆叠规则（重复插规则会让回滚删不干净）。
+# 插在 INPUT 队首（与既有 18084 规则同位置）：宝塔的 IN_BT 与 ufw-* 都在其后，
+#   ⇒ 即使将来别人的链新增 DROP，本规则仍先命中，行为可预测。
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+
+# 允许来源：默认全网（开发测试期）。收敛来源**只需改这一行再 restart**：
+#   install -d /etc/ypbin && echo 'EMQX_MQTT_EXPOSE_SOURCE=203.0.113.7/32' > /etc/ypbin/emqx-mqtt-expose.env
+#   systemctl restart emqx-mqtt-expose-firewall.service
+# EnvironmentFile 的值**覆盖**下面的 Environment= 默认值（systemd 语义）。
+EnvironmentFile=-/etc/ypbin/emqx-mqtt-expose.env
+Environment=EMQX_MQTT_EXPOSE_SOURCE=0.0.0.0/0
+Environment=EMQX_MQTT_EXPOSE_PORT=1883
+
+ExecStart=/bin/bash -c 'iptables -C INPUT -s "$EMQX_MQTT_EXPOSE_SOURCE" -p tcp --dport "$EMQX_MQTT_EXPOSE_PORT" -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -s "$EMQX_MQTT_EXPOSE_SOURCE" -p tcp --dport "$EMQX_MQTT_EXPOSE_PORT" -j ACCEPT'
+# while 循环：历史上重复插过多次时也能一次删干净
+ExecStop=/bin/bash -c 'while iptables -C INPUT -s "$EMQX_MQTT_EXPOSE_SOURCE" -p tcp --dport "$EMQX_MQTT_EXPOSE_PORT" -j ACCEPT 2>/dev/null; do iptables -D INPUT -s "$EMQX_MQTT_EXPOSE_SOURCE" -p tcp --dport "$EMQX_MQTT_EXPOSE_PORT" -j ACCEPT; done'
+
+[Install]
+WantedBy=multi-user.target

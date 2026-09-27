@@ -1,0 +1,38 @@
+[Unit]
+Description=ypbin MQTT 1883 暴露面判据（**只告警，不自愈**）
+Documentation=file:///opt/emqx/README.md
+After=network-online.target docker.service
+Wants=network-online.target
+# 需要宿主 iptables/ss 看到真实状态 ⇒ 不等 docker 起完也能判（会如实报"监听不在"）
+
+[Service]
+Type=oneshot
+ExecStart=/opt/emqx/emqx-mqtt-expose-watch.sh
+
+# 退出码语义（见脚本头部）：0 = OK；2 = ALERT；3 = 无 ALERT 但判据无法求值。
+# 刻意**不把 2/3 当成成功**：一旦漂移，单元进入 failed ⇒ `systemctl --failed` 一眼可见，
+# `journalctl -u emqx-mqtt-expose-watch.service` 里有 `判定: ALERT`；
+# 下一次运行若恢复 OK，单元回到 inactive(dead)（oneshot 成功态）⇒ **告警自愈**。
+#
+# ⚠️ **本单元不做任何自愈动作**（不改绑地址、不改防火墙、不重启容器）：
+#    自愈与告警分离，避免看门狗与运维动作互相打架（与 emqx-tunnel-watch / feeder-watch 同一取舍）。
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=emqx-mqtt-expose-watch
+
+# 只读作业，最小权限（保留 root：脚本要调 `iptables -S` / `ss` 读宿主状态，
+# 降权会产生**假 ALERT** —— 与 emqx-tunnel-watch.service 同一取舍）
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryMax=128M
+CPUQuota=20%
+
+# 判据是毫秒级（2 次 curl 各限时 8s + 本地 iptables/ss）
+TimeoutStartSec=60
