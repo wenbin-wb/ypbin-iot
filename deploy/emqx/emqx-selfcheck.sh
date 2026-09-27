@@ -73,7 +73,8 @@ set -a; . "$ENV_FILE"; set +a
 : "${EMQX_API_KEY:?}"; : "${EMQX_API_SECRET:?}"
 : "${EMQX_DASHBOARD_PASSWORD:?}"
 
-# ── 凭据不进 argv、中间文件不落世界可读目录 ──────────────────────────────────
+# ── curl/HTTP 路径不在 argv 带口令；中间文件不落世界可读目录 ─────────────────
+#    （注意限定语：**MQTT 探测口令仍会经 emqtt-bench -P 进 docker argv**，见文件头第 2 条）
 # · `curl -u` 会把密钥写进 /proc/<pid>/cmdline ⇒ 改用 700 目录里的 600 `-K` 配置文件；
 # · Dashboard 登录响应含 JWT，**不能**放 /tmp（默认 umask 644）⇒ 一律落在 $PRIV（700）。
 # 远程调用必须显式超时（仓内铁律）：REST 调用全部带这两个上限，避免 cleanup 里挂死
@@ -87,7 +88,6 @@ PASS_N=0; FAIL_N=0
 
 pass() { PASS_N=$((PASS_N+1)); printf '  ✅ %s\n' "$1"; }
 fail() { FAIL_N=$((FAIL_N+1)); printf '  ❌ %s\n' "$1"; }
-note() { printf '     · %s\n' "$1"; }
 
 api() { # api <method> <path> [json] → API_CODE / API_BODY
   local method="$1" path="$2" data="${3:-}"

@@ -197,13 +197,18 @@ M0_RESTART="$(docker inspect "$CONTAINER" --format '{{.RestartCount}}')"
 ############################ 测试账号 ############################
 PW_D="$(openssl rand -hex 12)"; PW_S="$(openssl rand -hex 12)"
 for pair in "$LOAD_DEV:$PW_D" "$LOAD_SVC:$PW_S"; do
-  api DELETE "/api/v5/authentication/$AUTH_ID/users/${pair%%:*}" >/dev/null
-  api POST "/api/v5/authentication/$AUTH_ID/users" \
-      "{\"user_id\":\"${pair%%:*}\",\"password\":\"${pair#*:}\",\"is_superuser\":false}" >/dev/null
+  # 预清理 + 建号：返回码**必须检查**（否则压测端可能因为账号没建上而白跑，甚至"零负载 PASS"）
+  rc=$(api DELETE "/api/v5/authentication/$AUTH_ID/users/${pair%%:*}")
+  case "$rc" in 204|404) : ;; *) echo "  ⚠️ 预清理 ${pair%%:*} 返回 HTTP $rc（非 204/404）" >&2 ;; esac
+  rc=$(api POST "/api/v5/authentication/$AUTH_ID/users" \
+      "{\"user_id\":\"${pair%%:*}\",\"password\":\"${pair#*:}\",\"is_superuser\":false}")
+  case "$rc" in 201) : ;; *) echo "  ⚠️ 建号 ${pair%%:*} 返回 HTTP $rc（期望 201）—— 压测端多半连不上" >&2 ;; esac
 done
-api POST /api/v5/authorization/sources/built_in_database/rules/users \
-    "[{\"username\":\"$LOAD_SVC\",\"rules\":[{\"action\":\"subscribe\",\"permission\":\"allow\",\"topic\":\"$SUB_TOPIC\"}]}]" >/dev/null
-api DELETE /api/v5/authorization/cache >/dev/null
+rc=$(api POST /api/v5/authorization/sources/built_in_database/rules/users \
+    "[{\"username\":\"$LOAD_SVC\",\"rules\":[{\"action\":\"subscribe\",\"permission\":\"allow\",\"topic\":\"$SUB_TOPIC\"}]}]")
+case "$rc" in 204) : ;; *) echo "  ⚠️ 建订阅规则 $LOAD_SVC 返回 HTTP $rc（期望 204）" >&2 ;; esac
+rc=$(api DELETE /api/v5/authorization/cache)
+[ "$rc" = 204 ] || echo "  ⚠️ 清授权缓存返回 HTTP $rc（非 204）" >&2
 echo "测试账号：$LOAD_DEV（publish 自己的 up/）、$LOAD_SVC（subscribe $SUB_TOPIC）；口令不回显；但对压测端 emqtt-bench 只能经 -P 传入 ⇒ 压测期间会出现在容器 argv/inspect 里；结束即删账号（口令随之失效）并删除 inspect 产物（见文件头「凭据口径」）" | tee -a "$SUMMARY"
 
 ############################ ② 施压 ############################

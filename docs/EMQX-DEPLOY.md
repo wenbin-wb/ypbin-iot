@@ -139,6 +139,13 @@ LISTEN 127.0.0.1:1883   users:(("docker-proxy",...))
 >    `failed_to_open_the_bootstrap_file, reason: Permission denied`（**不致死不报错，只静默失效**）
 >    ⇒ `gen-env.sh` 已把属主设为**容器 uid**、权限 400。
 >
+> 🔴 **实测踩坑（轮换凭据时一定会遇到）**：`docker compose` 的变量优先级是
+> **shell 环境 > `.env` 文件**。若在同一个 shell 里先 `set -a; . .env`（拿到旧值做对比），
+> 再 `docker compose up -d`，compose 会把**旧**口令传给容器 ⇒ 出现「新 API Key 能用、
+> 但新 Dashboard 口令登录 401」这种自相矛盾的现象（本阶段轮换凭据时实际踩到）。
+> **做法**：重建容器的命令必须在**没有 source 过 `.env` 的干净 shell** 里执行；
+> 校验方式是比对「容器 `Config.Env` 里该值的 sha256 前 12 位」与「`.env` 里该值的 sha256 前 12 位」是否相等。
+>
 > ⚠️ **`dashboard.default_password` 只在 data 卷首次初始化时生效**：实测在已有 data 卷上仅重建容器（换新口令）
 > **不会**改变 admin 口令（登录仍 401）。轮换口令有两条路：`docker compose down && docker volume rm emqx-data`
 > （本项目自己的卷）或官方 `emqx ctl admins passwd admin '<new>'`。**部署文档按「先生成 .env 再首次 up」的顺序**，此坑只影响轮换场景。
@@ -526,6 +533,7 @@ bash /opt/ypbin/ypbin-iot/deploy/emqx/emqx-tunnel-install.sh --dir /opt/ypbin/yp
 | **U-K** | 临时口令的 argv 落点（**两个脚本都有，不只是压测**） | **会进容器 argv**：`emqtt-bench` **只支持 `-P <明文口令>`** ⇒ ① `phase2-loadtest.sh` 的压测端 `pub`（5 个及以上客户端连接共用同一账号）；② `emqx-selfcheck.sh` 的 **S6–S11 探测**（5 次 `docker run … pub/sub -u … -P …`）。口令会出现在 `docker run` 的 argv、容器 `Config.Cmd`（`docker inspect`）与 `/proc/<pid>/cmdline`（宿主 **无 hidepid**，本机有非 root 用户 `www` ⇒ 有约 12–15s 可见窗口）。**HTTP 路径不受影响**：curl 侧一律 `-K <600 文件>` / `--data-binary @<600 文件>`，argv 里只有路径 | 对策：① 这些账号都是**临时**的，`cleanup()` 在退出时删除 ⇒ 口令随之失效；② `$OUT`/`$OUT/bench` 700 且 `cleanup()` 删除 `*.inspect.json`/`*.cid`；③ `--keep-probe-users` / `--keep-users` 会**明确告警**"口令仍然有效，务必手工清理"；④ `$PRIV`（含 API Key 的 curlrc）**无条件删除**。**任何"口令不进 argv / 绝不落盘"的说法都是可被实测证伪的过度断言**——本表就是它的纠正口径 |
 | **U-M** | Erlang 分发 cookie 会出现在容器内 `beam.smp` 的 **argv**（`-setcookie`） | **Erlang 机制，非脚本引入**。验证口径（**第一次写错过，已按确定性命中改正**）：① `/proc` 轮询扫描只命中 `comm=beam.smp`；② 用 **PATH 包装 curl + 确定性记录 argv** 的方式复扫，整改前的 `emqx-selfcheck.sh` 里 **Dashboard 口令命中 1 次**（`-d '{"username":"admin","password":…}'`）、临时账号口令亦命中——**轮询法会漏采毫秒级进程**。整改后这些 body 全部改走 `--data-binary @<私有 600 文件>`，argv 不应再出现任何口令；扫描时**必须用包装法**或至少承认轮询法的漏采风险 | 暴露面 = 宿主可见（`/proc` 无 hidepid，本机有非 root 用户 `www`）；整改后脚本侧不再以 argv 传递口令。另有 `emqtt-bench -P`（第三方工具硬限制）仍会进 argv，见 U-K |
 | **U-N** | `packets.subscribe.auth_error` 对 **MQTT 3.1.1** 客户端的越权订阅**不增长** | 独立复核实测：3.1.1 越权 SUBSCRIBE → SUBACK `Unspecified error`，只有 `authorization.nomatch` 增长；MQTT 5 → SUBACK `Not authorized` 且该计数器增长。同理 `deny_action=ignore` 下 3.1.1 的越权 publish 客户端**看不到任何错误** | **验收判据必须用 EMQX 侧指标**，不能看客户端返回码；用 3.1.1 设备验收时改看 `authorization.nomatch` |
+| **U-N** | 凭据轮换的**完整口径** | 已按纪律执行一次轮换（2026-09-27，原因见 §11）。做法：`gen-env.sh --force` → **清空本项目 data/log 卷** → 干净 shell 里 `docker compose up -d` → `emqx-init.sh`。**为什么必须清卷**：`api_key.bootstrap_file` 只**新增/更新**同名 key，不会删除其它 key ⇒ 不清卷时被泄露的旧 API Key 可能仍留在内置库继续可用 | 已实测：旧 Key/Secret 打受保护端点 = **401**、新 Key = **200**；`admin/public` = 401；新 Dashboard 口令 = 200；轮换后 `emqx-init.sh` = PASS=19/FAIL=0 |
 | **U-L** | 跨 bridge 可达性的机制 | **未定论**：独立复核从默认 bridge 实测 `172.28.0.2` 的 1883/18093/18083/8883 **全不可达**，但 iptables 里存在按端口的跨 bridge ACCEPT 规则 ⇒ 规则层与实测层不一致，未从 `middleware_default`/`app_default` 源网络实测（刻意不接入别人的网络） | 本阶段暴露面结论**不依赖**跨 bridge 可达性（宿主侧只绑回环 + ufw 无放行 + 公网实测不可达）；后续如需"其他容器也不可达"的强结论，用一次性源网络补测 |
 | **U-I** | `sub2api` 容器自身 `unhealthy` | **属其自身既有状态** | 部署前即 `Up 6 weeks (unhealthy)`、`StartedAt=2026-08-14`；**未触碰** |
 | **U-J** | 阶段② 只测到 500 连接 | 未测更高档 | 设计目标规模即 500；更高规模需重新压测并复核 `mem_limit` |
@@ -584,3 +592,17 @@ journalctl -u emqx-tunnel.service -n 20 --no-pager
 bash /opt/emqx/phase2-loadtest.sh --tier 100 --duration 600 --out /var/tmp/emqx-loadtest/tier100
 bash /opt/emqx/phase2-loadtest.sh --tier 500 --duration 600 --out /var/tmp/emqx-loadtest/tier500
 ```
+
+---
+
+## 11. 凭据轮换记录（2026-09-27）
+
+| 项 | 内容 |
+|---|---|
+| **触发** | 第 5 轮独立复核者在其会话里误用 `set -x`，把 `/opt/emqx/.env` 的 **EMQX_API_KEY / EMQX_API_SECRET 明文**打印进了会话记录（Dashboard 口令未泄露）。按凭据纪律「可生效即真凭据、泄露即轮换」执行轮换。 |
+| **范围** | **全部**凭据一起换（`gen-env.sh --force`）：Erlang cookie、Dashboard 口令、API Key/Secret。 |
+| **步骤** | ① `gen-env.sh --force`（就地重新生成，仅回显长度/指纹）→ ② `docker compose down` + `docker volume rm emqx-data emqx-log`（**只删本项目卷**）→ ③ **干净 shell** 里 `docker compose up -d` → ④ `emqx-init.sh` 重建 ACL 规则并全量自检 |
+| **为什么清卷** | `api_key.bootstrap_file` 只新增/更新同名 key，**不会删除**其它 key ⇒ 不清卷时被泄露的旧 Key 可能仍在内置库里可用，轮换就是假的 |
+| **验证（实测）** | 旧 Key/Secret → `GET /api/v5/authorization/settings` = **401**；新 Key = **200**；`admin/public` = **401**；新 Dashboard 口令 = **200**；轮换后自检 **PASS=19 / FAIL=0**；`users=0`、`rules/users` 恰 2 条；容器 healthy / `OOMKilled=false` / `Restarts=0` |
+| **未受影响** | 隧道与告警单元（配置未变，重启期间自动重连）；平台侧（本阶段未接入）；别人的项目（未触碰） |
+| **残留** | 会话记录里那串已失效的旧 Key/Secret **无法撤回**（已轮换，不再可用）；本次未把任何凭据写入仓库/日志/文档 |
