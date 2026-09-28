@@ -12,6 +12,7 @@ package cn.ypbin.admin.iot.mapper;
 import cn.ypbin.admin.iot.entity.OutageEvent;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.Map;
 import org.apache.ibatis.annotations.Delete;
 import org.apache.ibatis.annotations.Param;
@@ -116,4 +117,23 @@ public interface OutageEventMapper extends BaseMapper<OutageEvent> {
                                           @Param("from") LocalDateTime from,
                                           @Param("to") LocalDateTime to,
                                           @Param("now") LocalDateTime now);
+
+    /**
+     * 取**进行中**的断档事件（{@code end_ts IS NULL}），限定在给定设备集合内。
+     *
+     * <p>断档类告警映射用：只对「被启用离线规则覆盖」的设备做映射，因此这里必须按设备集合过滤——
+     * 否则一次全表扫描会把无关设备的断档也拉进来（代价与误伤面都放大）。</p>
+     *
+     * <p>租户条件由插件追加；{@code is_deleted = 0} 必须显式写（原生 SQL 不会被逻辑删除注入器改写）。</p>
+     *
+     * @param deviceIds 设备 ID（调用方先判空短路）
+     * @param limit     单批上限（超出跨轮滚动）
+     * @return 进行中的断档事件（按开始时刻升序）
+     */
+    @Select("<script>SELECT id, tenant_id, device_id, start_ts, end_ts, duration_sec, reason "
+        + "FROM outage_event WHERE is_deleted = 0 AND end_ts IS NULL AND device_id IN "
+        + "<foreach collection='deviceIds' item='deviceId' open='(' separator=',' close=')'>#{deviceId}</foreach> "
+        + "ORDER BY start_ts ASC LIMIT #{limit}</script>")
+    List<OutageEvent> selectOpenOutages(@Param("deviceIds") List<Long> deviceIds,
+                                        @Param("limit") int limit);
 }

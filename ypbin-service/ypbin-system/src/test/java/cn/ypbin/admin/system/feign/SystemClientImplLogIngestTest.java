@@ -19,6 +19,7 @@ import static org.mockito.Mockito.when;
 import cn.ypbin.admin.system.entity.SysLog;
 import cn.ypbin.admin.system.mapper.SysConfigMapper;
 import cn.ypbin.admin.system.mapper.SysLogMapper;
+import cn.ypbin.admin.system.mapper.SysMessageMapper;
 import cn.ypbin.admin.system.provider.DbLogProviders;
 import cn.ypbin.admin.system.service.SocialBindService;
 import cn.ypbin.admin.system.service.SysMenuService;
@@ -27,6 +28,7 @@ import cn.ypbin.admin.system.service.SysUserService;
 import cn.ypbin.admin.system.social.SocialConfigReader;
 import cn.ypbin.starter.core.model.R;
 import cn.ypbin.starter.core.exception.BusinessException;
+import cn.ypbin.starter.messaging.mail.MailService;
 import cn.ypbin.starter.log.model.LogRecord;
 import cn.ypbin.starter.tracking.core.TrackEvent;
 import cn.ypbin.starter.tracking.core.TrackRecorder;
@@ -69,6 +71,8 @@ class SystemClientImplLogIngestTest {
             mock(SocialBindService.class),
             mock(SysMenuService.class),
             new DbLogProviders.DbLogDao(logMapper),
+            mock(SysMessageMapper.class),
+            mock(MailService.class),
             recorderProvider);
     }
 

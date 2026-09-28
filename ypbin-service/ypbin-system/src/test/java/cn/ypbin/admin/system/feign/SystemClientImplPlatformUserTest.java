@@ -23,8 +23,11 @@ import cn.ypbin.admin.system.service.SysPermissionService;
 import cn.ypbin.admin.system.service.SysUserService;
 import cn.ypbin.admin.system.social.SocialConfigReader;
 import cn.ypbin.admin.system.mapper.SysLogMapper;
+import cn.ypbin.admin.system.mapper.SysMessageMapper;
 import cn.ypbin.starter.tracking.core.TrackRecorder;
+import cn.ypbin.starter.messaging.mail.MailService;
 import org.junit.jupiter.api.DisplayName;
+import cn.ypbin.starter.messaging.mail.MailService;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.ObjectProvider;
 
@@ -50,6 +53,8 @@ class SystemClientImplPlatformUserTest {
         mock(SocialBindService.class),
         mock(SysMenuService.class),
         new DbLogProviders.DbLogDao(mock(SysLogMapper.class)),
+        mock(SysMessageMapper.class),
+        mock(MailService.class),
         providerOfTrackRecorder());
 
     @SuppressWarnings("unchecked")

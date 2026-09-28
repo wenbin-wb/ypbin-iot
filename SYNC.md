@@ -26,7 +26,7 @@ mvn -B -ntp -fae clean verify               # 同步后必须重跑门禁
 IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，改动要尽量是「加法一行」。
 **本清单与 `.github/workflows/sync-whitelist.yml` 里的白名单必须保持一致**（改了这里就改那里）。
 
-> **白名单膨胀要记账**：目前 **10** 个文件。每增加一个都是「以后同步时的潜在冲突点」；
+> **白名单膨胀要记账**：目前 **17** 个文件。每增加一个都是「以后同步时的潜在冲突点」；
 > 加之前先问：能不能用新文件/新模块实现？只能改既有文件时才加，并在提交信息里写明理由。
 
 | 文件 | 改动 | 说明 |
@@ -40,6 +40,11 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 | `deploy/.env.example` | 端口段注释加 18084 | 环境变量示例（纯注释） |
 | `ypbin-architecture-tests/src/test/java/cn/ypbin/admin/arch/SourceConventionTest.java` | `LOOP_DB_EXEMPTIONS` **加一条误报豁免**（类名#接收者.方法 + 理由） | **唯一的上游测试类例外**，理由见下方专条 |
 | `ypbin-service/ypbin-ai/src/main/java/cn/ypbin/admin/ai/service/impl/AiModelConfigServiceImpl.java` | `testConnection` 的 HTTP 客户端改为**复用单个实例 + 显式 `HTTP/1.1` + 具名超时常量** | **2026-09-27 加**：修 admin 既有代码里的**缺陷**——该方法**每次调用新建 `HttpClient`**（丢掉连接池、超时策略散落）且**未指定协议版本**（JDK 默认 HTTP/2）。而它的调用形态恰是「新连接 + 带体 POST」，`baseUrl` 又允许明文 `http://` ⇒ 会踩已在 `ypbin-iot` 实测到的 h2c 坑（带体 POST 作为新连接首个请求 ⇒ `EOF reached while reading`）。**为什么不能用新文件**：问题就在这一行上，改的必须是这个既有方法。⚠️ **更好的长期做法是改上游 admin 仓**（本仓下次同步自然继承、分歧面回到 9）——本轮受「改动落在 ypbin-iot」的范围约束才走白名单。 |
+| `ypbin-service-api/ypbin-system-api/src/main/java/cn/ypbin/admin/system/api/feign/ISystemClient.java` | 新增两个**内部端点**契约：`POST /inbox-message-send`（普通站内信）、`POST /mail-send`（纯文本邮件） | **2026-09-28 加**（告警段 C2 通知投递，见 `ALERTING-DESIGN.md` §7.5-M2/M4）：告警投递必须复用 admin 的 `sys_message` 表与 system 侧既有 JavaMail 能力，新增端点只能声明在**既有 Feign 契约**上——Feign 接口是契约文件，无法用「新文件」表达「给既有契约加方法」 |
+| `ypbin-service-api/ypbin-system-api/src/main/java/cn/ypbin/admin/system/api/feign/ISystemClientFallback.java` | 为上面两个新端点补熔断兜底 | 既有 fallback 必须覆盖契约的全部方法（否则熔断时降级空洞），只能改既有文件 |
+| `ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/feign/SystemClientImpl.java` | 实现两个内部端点：站内信落库（校验收件人存在且属于声明的租户，§7.5-M4）、邮件发送（复用 `MailService`）；失败如实返回 `R` | 端点实现必须落在既有 `SystemClientImpl` 上（构造器同步注入 `SysMessageMapper`/`MailService`）；「给既有 Feign 实现加方法」同样无法用新文件表达 |
+| `ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/mapper/SysMessageMapper.java` | 增「按收件人查站内信」与落库辅助查询 | 站内信必须复用既有 `sys_message` 表与 Mapper（不新造站内信链路），查询方法只能加在既有 Mapper 上 |
+| `ypbin-service/ypbin-system/src/test/java/cn/ypbin/admin/system/feign/SystemClientImplUserByIdTest.java`、`SystemClientImplPlatformUserTest.java`、`SystemClientImplLogIngestTest.java` | 构造参数随 `SystemClientImpl` 注入新增，同步补 `mock(SysMessageMapper.class)`/`mock(MailService.class)` | 既有 3 个单测的构造器签名随被测类变化，属**连带更新**（3 个文件共 17 行） |
 | `docs/microservice-deployment.md` | 「初始口令」一句话更正 | **2026-09-26 加**：该句原写「Nacos 控制台默认 `nacos/nacos`」，而本仓已改为随机口令 + 开 auth（`NACOS-AUTH.md`）。留着一句**已不成立**的口令说明会误导运维，故只能改既有文件（无法用新文件表达「原句作废」） |
 | `deploy/sql/006-iot-schema.sql`、`007-iot-data.sql` | **新文件** | 全新安装用 |
 | `deploy/sql/migration/*-iot-*.sql` | **新文件**（命名必须含 `-iot-`） | 已上线库用；按文件名排序拼接后与 `006+007` **语句等价**（有 CI 校验）。顺序即结构演进顺序：`device-schema` → `lease-schema` → `menu-data` |
@@ -62,8 +67,11 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 （IoT 业务文件 + SYNC.md + 门禁脚本等），而本纪律关心的只有「**改动的既有文件**」——
 用 `git diff --name-only --diff-filter=MDR upstream/main` 看，应当只有上表那几个。
 
-**明确不动**的（改了就会长期冲突）：`ypbin-common`、`ypbin-auth`、`ypbin-system`、
-admin 的既有 SQL（`001`–`005`）、admin 的既有工作流。
+**明确不动**的（改了就会长期冲突）：`ypbin-common`、`ypbin-auth`、admin
+的既有 SQL（`001`–`005`）、admin 的既有工作流。
+`ypbin-system` 平时同样不动；**2026-09-28 起唯一例外**是上表的
+`ISystemClient`/`ISystemClientFallback`/`SystemClientImpl`/`SysMessageMapper` 及其 3 个既有单测——
+告警通知必须复用 sys_message 与既有 Feign 契约（条条已在白名单内登记理由），除此之外不许再动。
 
 **部署时的目录名**：`deploy/install.sh` 里有 52 处按 `ypbin-admin/` 目录名拼路径（它原本服务 admin 仓）。
 本仓**不改这些行**（改 52 行 = 每次同步都冲突）；部署时把本仓检出到名为 `ypbin-admin` 的目录即可
