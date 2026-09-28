@@ -47,7 +47,20 @@ jobs:
           ALLOWED+='ypbin-architecture-tests/src/test/java/cn/ypbin/admin/arch/SourceConventionTest\.java|'
           # 第 10 项（2026-09-27 加）：修 admin 既有代码里的**缺陷**，无法用新文件实现
           # （问题就在该方法"每次调用新建 HttpClient 且未指定协议版本"那一行上）。理由与代价见 SYNC.md 第二节。
-          ALLOWED+='ypbin-service/ypbin-ai/src/main/java/cn/ypbin/admin/ai/service/impl/AiModelConfigServiceImpl\.java'
+          ALLOWED+='ypbin-service/ypbin-ai/src/main/java/cn/ypbin/admin/ai/service/impl/AiModelConfigServiceImpl\.java|'
+          # 第 11–17 项（2026-09-28 加）：告警通知投递必须复用 admin 的 sys_message 表与
+          # system 侧既有 Feign 契约/JavaMail，新增端点只能落在既有契约/实现/兜底上（见 SYNC.md 第二节）。
+          # 11/12：Feign 契约与熔断兜底是既有接口文件，无法用新文件表达「给既有契约加两个内部端点」。
+          ALLOWED+='ypbin-service-api/ypbin-system-api/src/main/java/cn/ypbin/admin/system/api/feign/ISystemClient\.java|'
+          ALLOWED+='ypbin-service-api/ypbin-system-api/src/main/java/cn/ypbin/admin/system/api/feign/ISystemClientFallback\.java|'
+          # 13：端点实现在既有 SystemClientImpl 上（复用 SysMessageMapper/MailService，见 §7.5-M2/M4）。
+          ALLOWED+='ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/feign/SystemClientImpl\.java|'
+          # 14：sys_message 落库与「按收件人查询」复用在既有 Mapper 上（站内信不新造链路）。
+          ALLOWED+='ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/mapper/SysMessageMapper\.java|'
+          # 15–17：构造器注入随 13 增加 SysMessageMapper/MailService ⇒ 既有 3 个单测的构造参数同步更新。
+          ALLOWED+='ypbin-service/ypbin-system/src/test/java/cn/ypbin/admin/system/feign/SystemClientImplUserByIdTest\.java|'
+          ALLOWED+='ypbin-service/ypbin-system/src/test/java/cn/ypbin/admin/system/feign/SystemClientImplPlatformUserTest\.java|'
+          ALLOWED+='ypbin-service/ypbin-system/src/test/java/cn/ypbin/admin/system/feign/SystemClientImplLogIngestTest\.java'
           ALLOWED+=')$'
           echo "当前白名单正则：$ALLOWED"
           changed="$(git diff --name-only --diff-filter=MDR upstream/main...HEAD)"
