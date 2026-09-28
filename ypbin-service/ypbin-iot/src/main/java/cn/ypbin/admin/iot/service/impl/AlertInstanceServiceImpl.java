@@ -201,7 +201,7 @@ public class AlertInstanceServiceImpl implements AlertInstanceService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public int ack(List<Long> ids) {
-        gate.requireEnabled();
+        gate.requireWritable();
         if (ids == null || ids.isEmpty()) {
             return 0;
         }
@@ -272,7 +272,7 @@ public class AlertInstanceServiceImpl implements AlertInstanceService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public int silence(List<Long> ids, int minutes) {
-        gate.requireEnabled();
+        gate.requireWritable();
         if (ids == null || ids.isEmpty()) {
             return 0;
         }
@@ -287,6 +287,7 @@ public class AlertInstanceServiceImpl implements AlertInstanceService {
     @Transactional(rollbackFor = Exception.class)
     public int resolveByRuleIds(List<Long> ruleIds) {
         if (ruleIds == null || ruleIds.isEmpty()) {
+            // 空入参直接返回（不校验租户：没有要写的东西）
             return 0;
         }
         List<IotAlertInstance> actives = instanceMapper.selectActiveByRuleIds(ruleIds);

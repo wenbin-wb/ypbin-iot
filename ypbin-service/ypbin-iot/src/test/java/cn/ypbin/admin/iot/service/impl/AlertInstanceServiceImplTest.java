@@ -64,6 +64,21 @@ import org.junit.jupiter.api.Test;
  */
 class AlertInstanceServiceImplTest {
 
+    /**
+     * 建立**有租户**的调用上下文：写路径会校租户（缺租户时给的是人话业务错误，不是裸 500），
+     * 因此用例必须像真实请求一样带上租户上下文（`TenantContext` 没有公开 setter，用 snapshot 还原）。
+     */
+    @org.junit.jupiter.api.BeforeEach
+    void enterTenant() {
+        cn.ypbin.starter.tenant.core.TenantContext.restore(
+            new cn.ypbin.starter.tenant.core.TenantContext.ContextSnapshot(0, 1L));
+    }
+
+    @org.junit.jupiter.api.AfterEach
+    void exitTenant() {
+        cn.ypbin.starter.tenant.core.TenantContext.clear();
+    }
+
     static {
         cn.ypbin.admin.iot.alert.AlertMybatisTestSupport.initMetadata(IotDevice.class,
             MaintenanceWindow.class, IotAlertInstance.class);

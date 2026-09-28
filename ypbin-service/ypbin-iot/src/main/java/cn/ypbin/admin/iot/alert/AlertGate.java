@@ -10,6 +10,7 @@
 package cn.ypbin.admin.iot.alert;
 
 import cn.ypbin.starter.core.exception.BusinessException;
+import cn.ypbin.starter.tenant.core.TenantContext;
 import org.springframework.stereotype.Component;
 
 /**
@@ -31,6 +32,26 @@ public class AlertGate {
 
     public AlertGate(AlertProperties properties) {
         this.properties = properties;
+    }
+
+    /**
+     * 校验**写操作**可用：能力已启用 **且** 当前身份有租户上下文。
+     *
+     * <p>为什么写操作要单独校租户：MyBatis-Plus 的租户插件在租户上下文缺失时会给 INSERT **跳过**
+     * {@code tenant_id} 列（对 SELECT 则是跳过租户条件），而四张告警表的 {@code tenant_id} 是
+     * {@code NOT NULL} ⇒ 数据库以 {@code Column 'tenant_id' cannot be null} 拒绝，最终对用户表现为
+     * **裸 500「系统内部错误」**（生产实测过这一形态）。这里提前拦下并给出**人话**，符合本仓
+     * 「HTTP 200 + {@code R.code} 信封」的惯例。</p>
+     *
+     * <p>读操作**不**做此校验：平台身份在无租户上下文时按设计可跨租户只读（插件跳过条件），
+     * 若一并拒绝会改变既有读行为。</p>
+     */
+    public void requireWritable() {
+        requireEnabled();
+        if (TenantContext.getTenantId().isEmpty()) {
+            throw new BusinessException("当前登录身份没有租户上下文，无法保存："
+                + "请先在右上角选择/切换到你管理的租户（平台管理员需要指定租户后才能配置该租户的告警）");
+        }
     }
 
     /**

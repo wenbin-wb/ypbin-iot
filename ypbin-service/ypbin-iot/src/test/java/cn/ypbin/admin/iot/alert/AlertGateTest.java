@@ -13,7 +13,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import cn.ypbin.starter.core.exception.BusinessException;
+import cn.ypbin.starter.tenant.core.TenantContext;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -38,6 +40,34 @@ class AlertGateTest {
             .isInstanceOf(BusinessException.class)
             .hasMessageContaining("告警能力未启用")
             .hasMessageContaining("空结果会被误读成「没有告警」");
+    }
+
+    @AfterEach
+    void tearDown() {
+        TenantContext.clear();
+    }
+
+    @Test
+    @DisplayName("★ 写操作缺租户上下文 ⇒ 抛**人话**业务异常（不是裸 500）："
+        + "MP 在缺租户时给 INSERT 跳过 tenant_id 列，DB 以 NOT NULL 拒绝 ⇒ 原本表现为 500")
+    void writableRequiresTenantContext() {
+        AlertProperties properties = new AlertProperties();
+        properties.setEnabled(true);
+        AlertGate gate = new AlertGate(properties);
+        // 读操作放行（平台身份按设计可跨租户只读）
+        gate.requireEnabled();
+        assertThatThrownBy(gate::requireWritable)
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("没有租户上下文")
+            .hasMessageContaining("选择/切换");
+    }
+
+    @Test
+    @DisplayName("有租户上下文时写操作放行")
+    void writablePassesWithTenant() {
+        AlertProperties properties = new AlertProperties();
+        AlertGate gate = new AlertGate(properties);
+        TenantContext.runWithTenant(1L, gate::requireWritable);
     }
 
     @Test

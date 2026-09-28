@@ -138,7 +138,7 @@ public class AlertRuleServiceImpl implements AlertRuleService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public AlertRuleResp create(AlertRuleSaveReq req) {
-        gate.requireEnabled();
+        gate.requireWritable();
         Validated validated = validate(req);
         IotAlertRule rule = new IotAlertRule();
         apply(rule, req, validated);
@@ -156,7 +156,7 @@ public class AlertRuleServiceImpl implements AlertRuleService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public AlertRuleResp update(Long id, AlertRuleSaveReq req) {
-        gate.requireEnabled();
+        gate.requireWritable();
         IotAlertRule rule = requireRule(id);
         Validated validated = validate(req);
         apply(rule, req, validated);
@@ -173,7 +173,7 @@ public class AlertRuleServiceImpl implements AlertRuleService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public int setEnabled(List<Long> ids, boolean enabled) {
-        gate.requireEnabled();
+        gate.requireWritable();
         if (ids == null || ids.isEmpty()) {
             // 空集合直接返回（禁止 `IN ()`，也不做「无参数即全量」的危险默认）
             return 0;
