@@ -31,6 +31,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DuplicateKeyException;
@@ -60,6 +61,16 @@ import org.springframework.transaction.annotation.Transactional;
 public class AlertTenantOutageService {
 
     private static final Logger log = LoggerFactory.getLogger(AlertTenantOutageService.class);
+
+    /**
+     * 孤立实例的**连续**轮次计数（instanceId → 轮数）。
+     *
+     * <p>只在「事件行确实不存在」时递增；一旦事件重新出现即清零。宽限期满后以
+     * {@code OUTAGE_EVENT_MISSING} 收口并通知——否则会留下**永久幽灵告警**（保留清理只删 RESOLVED、
+     * 决策 5 又取消了人工关闭）。计数是进程内的有界提示，**不落库**：重启后重新计宽限期，代价是多等
+     * 一个宽限期，收益是不引入新表列。见独立复核 2026-10-03 M3。</p>
+     */
+    private final Map<Long, Integer> orphanRounds = new ConcurrentHashMap<>();
 
     private final AlertCandidateResolver candidateResolver;
     private final AlertNotifyScheduler notifyScheduler;
@@ -184,27 +195,37 @@ public class AlertTenantOutageService {
                 }
                 OutageEvent event = events.get(entry.getValue());
                 if (event == null) {
-                    // 事件行已不存在（人工清理/数据异常）：**不伪造恢复**，但必须可见并需要人处理
-                    orphan++;
-                    log.error("[iot] 断档告警找不到对应事件，保持活动等待人工处置：instanceId={} dedupKey={}",
-                        active.getId(), active.getDedupKey());
+                    // 事件行已不存在（人工清理/数据异常）：**不伪造恢复**。
+                    // 宽限期内保持活动（给人处理窗口），超过宽限轮次后以可区分的原因码收口——
+                    // 既不留永久幽灵告警，也不谎称「设备已恢复」（独立复核 2026-10-03 M3）。
+                    int rounds = orphanRounds.merge(active.getId(), 1, Integer::sum);
+                    if (rounds < properties.getOutageOrphanGraceRounds()) {
+                        orphan++;
+                        if (rounds == 1 || rounds % 10 == 0) {
+                            log.error("[iot] 断档告警找不到对应事件（第 {} 轮，宽限 {} 轮后收口）："
+                                    + "instanceId={} dedupKey={}", rounds,
+                                properties.getOutageOrphanGraceRounds(), active.getId(),
+                                active.getDedupKey());
+                        }
+                        continue;
+                    }
+                    orphanRounds.remove(active.getId());
+                    markOutageResolved(active, now, AlertReason.OUTAGE_EVENT_MISSING, insertedIds,
+                        toUpdate, notifyTasks, windows, scope);
+                    resolvedCount++;
+                    metrics.outageResolved(1);
+                    log.warn("[iot] 断档告警对应事件持续缺失（{} 轮），已按 {} 收口：instanceId={}",
+                        rounds, AlertReason.OUTAGE_EVENT_MISSING.getCode(), active.getId());
                     continue;
                 }
+                orphanRounds.remove(active.getId());
                 if (event.getEndTs() == null) {
                     continue;
                 }
-                active.setState(AlertState.RESOLVED.getCode());
-                active.setResolvedTs(event.getEndTs());
-                active.setReason(AlertReason.OUTAGE_RECOVERED.getCode());
-                // 释放去重键：同一设备下一次断档是**新事件**，会新建实例（「清除 ≠ 删除」）
-                active.setActiveDedupKey(null);
-                if (!insertedIds.contains(active.getId())) {
-                    toUpdate.add(active);
-                }
+                markOutageResolved(active, event.getEndTs(), AlertReason.OUTAGE_RECOVERED, insertedIds,
+                    toUpdate, notifyTasks, windows, scope);
                 resolvedCount++;
                 metrics.outageResolved(1);
-                notifyScheduler.schedule(active, scope.ruleByDevice().get(active.getDeviceId()),
-                    active.getDeviceId(), AlertNotifyEvent.RESOLVED, now, windows, notifyTasks);
             }
         }
         int queued = flush(toInsert, toUpdate, notifyTasks);
@@ -214,6 +235,23 @@ public class AlertTenantOutageService {
         }
         return new TenantOutageOutcome(scope.ruleByDevice().size(), openOutages.size(), created,
             resolvedCount, queued, orphan);
+    }
+
+    /** 收口一条断档类告警（置 RESOLVED、释放去重键、排恢复通知；新插入的行不必再更新）。 */
+    private void markOutageResolved(IotAlertInstance active, LocalDateTime resolvedTs, AlertReason reason,
+                                    Set<Long> insertedIds, List<IotAlertInstance> toUpdate,
+                                    List<AlertNotifyTask> notifyTasks, List<MaintenanceWindow> windows,
+                                    AlertCandidateResolver.DeviceScope scope) {
+        active.setState(AlertState.RESOLVED.getCode());
+        active.setResolvedTs(resolvedTs == null ? LocalDateTime.now() : resolvedTs);
+        active.setReason(reason.getCode());
+        // 释放去重键：同一设备下一次断档是**新事件**，会新建实例（「清除 ≠ 删除」）
+        active.setActiveDedupKey(null);
+        if (!insertedIds.contains(active.getId())) {
+            toUpdate.add(active);
+        }
+        notifyScheduler.schedule(active, scope.ruleByDevice().get(active.getDeviceId()),
+            active.getDeviceId(), AlertNotifyEvent.RESOLVED, active.getResolvedTs(), windows, notifyTasks);
     }
 
     /** 从去重键反解断档事件 ID（{@code OUTAGE:deviceId:eventId}）。 */

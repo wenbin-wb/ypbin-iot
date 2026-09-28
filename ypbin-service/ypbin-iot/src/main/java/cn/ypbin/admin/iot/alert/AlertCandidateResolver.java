@@ -258,7 +258,10 @@ public class AlertCandidateResolver {
                 wrapper.clone().orderByAsc(IotDevice::getId));
         }
         cursor.advance(key, page.getRecords().size(), maxDevices);
-        return new LoadedPage(page.getRecords(), page.getTotal() > page.getRecords().size());
+        // 「本轮未覆盖全部设备」= 本页之后还有数据（用页码×页容量与总数比，而不是
+        // 「总数 > 本页条数」——后者在最后一页也成立，会让滚动成为常态时每轮都记 truncated 并打 WARN）
+        boolean hasMore = page.getCurrent() * page.getSize() < page.getTotal();
+        return new LoadedPage(page.getRecords(), hasMore);
     }
 
     /** 作用域指纹：把 ID 集合折叠成稳定短串（同一规则集合每轮得到同一个键）。 */

@@ -63,14 +63,30 @@ public class AlertProperties {
     /** 陈旧 TTL 上限（毫秒）：防「采集周期配成 1 小时」把陈旧判定变成永不生效。 */
     private long stalenessMaxTtlMs = 3_600_000L;
 
+    /**
+     * 持续窗口**缺口容忍度下限**（毫秒，默认 15s）。
+     *
+     * <p>实际容忍度 = {@code max(2 × 生效采集周期, 本值)}；「生效采集周期」优先取设备上报的
+     * {@code poll_interval_ms}，取不到时用**窗口内实测点间距的中位数**（自适应）。
+     * 为什么需要自适应：独立复核 2026-10-03 指出，若固定用 15s，一个采集周期未知但实际每 60s 上报的设备
+     * 会让窗口**每轮都判「未覆盖」** ⇒ 持续模式规则静默永不触发。</p>
+     */
+    private long windowGapFloorMs = 15_000L;
+
     /** 默认连续次数 N（预设模板与缺省值用）。 */
     private int defaultTriggerThreshold = 3;
 
     /** 默认 pending 最大挂起时长（秒）。 */
     private int defaultPendingTtlSec = 300;
 
-    /** 默认重复通知间隔（秒；默认 10 分钟）。 */
-    private int defaultRepeatIntervalSec = 1800;
+    /**
+     * 默认重复通知间隔（秒）。
+     *
+     * <p>取 **600（10 分钟）**：用户批准的 UX 默认口径是「静默 10 分钟」；设计 §2.4 的建议值写的是
+     * 1800（30 分钟）——两处口径不一致，按**用户口径**取 600 并登记在本文件与方法处
+     * （见 `docs/ALERTING-DESIGN.md` §7.5）。</p>
+     */
+    private int defaultRepeatIntervalSec = 600;
 
     /** 默认级别码。 */
     private String defaultSeverity = "WARNING";
@@ -102,6 +118,14 @@ public class AlertProperties {
 
     /** 断档映射单轮最多处理的断档事件数（超出跨轮滚动）。 */
     private int outageBatchSize = 200;
+
+    /**
+     * 断档类告警找不到对应事件时的**宽限轮次**（默认 20 轮 ≈ 15s × 20 = 5 分钟）。
+     *
+     * <p>宽限期内保持活动并计数（给人处理窗口），超过后以 {@code OUTAGE_EVENT_MISSING} 收口，
+     * 避免留下永久幽灵告警（独立复核 2026-10-03 M3）。</p>
+     */
+    private int outageOrphanGraceRounds = 20;
 
     /** 已恢复告警的保留天数（**活动告警永久保留**；默认 180 天）。 */
     private int retentionResolvedDays = 180;

@@ -273,7 +273,8 @@ class AlertRuleServiceImplTest {
         assertThat(stored.get().getNotifyChannels()).isEqualTo("INBOX,EMAIL");
         assertThat(stored.get().getTriggerMode()).isEqualTo("CONSECUTIVE_COUNT");
         assertThat(stored.get().getTriggerThreshold()).isEqualTo(3);
-        assertThat(stored.get().getRepeatIntervalSec()).isEqualTo(1800);
+        // 用户口径「静默 10 分钟」⇒ 默认重复通知 600s（设计 §2.4 的 1800s 被用户口径覆盖，见文档 §7.5）
+        assertThat(stored.get().getRepeatIntervalSec()).isEqualTo(600);
         assertThat(stored.get().getPendingTtlSec()).isEqualTo(300);
         assertThat(stored.get().getEnabled()).isTrue();
         // 条件行**一次批量插入**（不在循环里逐条写）

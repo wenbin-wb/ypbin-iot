@@ -72,9 +72,6 @@ public class AlertTenantEvaluator {
 
     private static final Logger log = LoggerFactory.getLogger(AlertTenantEvaluator.class);
 
-    /** 持续窗口缺口容忍度下限（毫秒）：采集周期未知时用它，避免把正常采样抖动误判成缺口。 */
-    static final long MIN_WINDOW_GAP_TOLERANCE_MS = 15_000L;
-
     private final AlertCandidateResolver candidateResolver;
     private final AlertLatestValueReader latestValueReader;
     private final AlertNotifyScheduler notifyScheduler;
@@ -425,13 +422,18 @@ public class AlertTenantEvaluator {
     /**
      * 窗口是否被数据完整覆盖：首点贴近起点、末点贴近 now、相邻点间隔不超过容忍度。
      *
-     * <p>容忍度取 {@code max(2 × 采集周期, }{@value #MIN_WINDOW_GAP_TOLERANCE_MS}{@code ms)}：
-     * 采集周期未知（或异常小）时也不会把「正常的采样抖动」误判成缺口。</p>
+     * <p>容忍度 = {@code max(2 × 生效采集周期, ypbin.alert.window-gap-floor-ms)}；
+     * 生效采集周期优先取设备上报值，取不到时用窗口内实测间距的中位数（见 {@link #medianGapMs}）。</p>
      */
-    private static boolean isWindowCovered(List<TimeSeriesPointResp> points, long startMs, long nowMs,
-                                           Integer pollIntervalMs) {
-        long toleranceMs = Math.max(2L * (pollIntervalMs == null || pollIntervalMs <= 0
-            ? 0L : pollIntervalMs), MIN_WINDOW_GAP_TOLERANCE_MS);
+    private boolean isWindowCovered(List<TimeSeriesPointResp> points, long startMs, long nowMs,
+                                    Integer pollIntervalMs) {
+        // 生效采集周期：优先设备上报值；取不到则用**窗口内实测间距的中位数**（自适应）。
+        // 固定小容忍度会让「周期未知但实际每 60s 上报」的设备每轮都判「未覆盖」⇒ 持续模式永不触发
+        // （独立复核 2026-10-03 M1）。自适应之后，60s 周期的设备容忍度自然放宽到 120s，
+        // 而「中途停发数据」仍会被首尾/中间缺口检测抓住（缺口远大于中位间距）。
+        long effectiveIntervalMs = pollIntervalMs == null || pollIntervalMs <= 0
+            ? medianGapMs(points) : pollIntervalMs;
+        long toleranceMs = Math.max(2L * effectiveIntervalMs, properties.getWindowGapFloorMs());
         Long first = points.get(0).ts();
         Long last = points.get(points.size() - 1).ts();
         if (first == null || last == null) {
@@ -449,6 +451,32 @@ public class AlertTenantEvaluator {
             previous = current;
         }
         return true;
+    }
+
+    /**
+     * 窗口内相邻点间距的**中位数**（毫秒）。
+     *
+     * <p>用中位数而不是平均值/最大值：中途停发数据会让「最大值」被缺口本身抬高（自证清白），
+     * 而中位数对单个大缺口不敏感，能代表该设备**正常的采集节奏**。</p>
+     */
+    private static long medianGapMs(List<TimeSeriesPointResp> points) {
+        List<Long> gaps = new ArrayList<>(points.size());
+        Long previous = null;
+        for (TimeSeriesPointResp item : points) {
+            Long current = item.ts();
+            if (current == null) {
+                continue;
+            }
+            if (previous != null && current - previous > 0) {
+                gaps.add(current - previous);
+            }
+            previous = current;
+        }
+        if (gaps.isEmpty()) {
+            return 0L;
+        }
+        gaps.sort(Long::compareTo);
+        return gaps.get(gaps.size() / 2);
     }
 
     /** 建实例（PENDING 或 FIRING；id 预生成，便于同事务内写通知行）。 */

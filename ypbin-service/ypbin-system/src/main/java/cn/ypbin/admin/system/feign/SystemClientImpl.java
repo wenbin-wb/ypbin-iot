@@ -465,6 +465,16 @@ public class SystemClientImpl implements ISystemClient {
     @Override
     @PostMapping("/inbox-message-send")
     public R<Void> sendInboxMessage(@Valid @RequestBody InboxMessageSendReq req) {
+        // 收件人必须是**该租户下真实存在的用户**：否则站内信会写进库而收件人永远看不到
+        // （投递记录却标成 SENT）——那是「静默失效」。这里显式校验并返回失败 R，由调用方记为 GIVEN_UP。
+        // 独立复核 2026-10-03 M4。
+        SysUser receiver = TenantContext.executeWithTenant(req.getTenantId(),
+            () -> userService.getById(req.getReceiverUserId()));
+        if (receiver == null) {
+            log.warn("站内信收件人不存在（或被逻辑删除）：tenantId={} receiverUserId={}", req.getTenantId(),
+                req.getReceiverUserId());
+            return R.fail("收件人不存在或不属于该租户：userId=" + req.getReceiverUserId());
+        }
         SysMessage message = new SysMessage();
         message.setId(IdWorker.getId());
         message.setTenantId(req.getTenantId());

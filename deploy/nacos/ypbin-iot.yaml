@@ -89,10 +89,10 @@ ypbin:
     staleness-interval-multiplier: 3
     staleness-fallback-ttl-ms: 90000
     staleness-max-ttl-ms: 3600000
-    # 默认抖动抑制：连续 3 次；缺省级别「警告」、渠道「站内信 + 邮件」
+    # 默认抖动抑制：连续 3 次；缺省级别「警告」、渠道「站内信 + 邮件」；重复通知 10 分钟（用户口径）
     default-trigger-threshold: 3
     default-pending-ttl-sec: 300
-    default-repeat-interval-sec: 1800
+    default-repeat-interval-sec: 600
     default-severity: WARNING
     default-notify-channels: INBOX,EMAIL
     max-points-per-rule: 50
@@ -223,3 +223,13 @@ management:
       show-components: never
     metrics:
       enabled: true
+
+# 调度线程池：本服务有 9 个 @Scheduled（既有断档/命令超时/保留清理/租约失效 + 告警的评估/投递/
+# 断档映射/清理）。默认 1 个线程时，一次慢评估会推迟既有 OutageScanner（可用率链路）——
+# 独立复核 2026-10-03 M8 指出。这里给 4 个线程（仍远小于连接池容量）。
+spring:
+  task:
+    scheduling:
+      pool:
+        size: 4
+      thread-name-prefix: ypbin-iot-sched-

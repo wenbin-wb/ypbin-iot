@@ -32,7 +32,17 @@ public enum AlertReason {
     RULE_DISABLED("RULE_DISABLED", "规则已停用"),
 
     /** 断档事件已闭合（复用既有 {@code outage_event}，不新造判定）。 */
-    OUTAGE_RECOVERED("OUTAGE_RECOVERED", "设备已恢复上报");
+    OUTAGE_RECOVERED("OUTAGE_RECOVERED", "设备已恢复上报"),
+
+    /**
+     * 断档类告警对应的**事件行已不存在**（人工清理/数据异常），宽限期满后收口。
+     *
+     * <p>为什么需要它：事件行消失时既不能伪造「已恢复」（那是无依据的结论），也不能让实例永久活动
+     * ——后者会留下一条永远消不掉的幽灵告警（保留清理只删 RESOLVED，决策 5 又取消了人工关闭）。
+     * 因此宽限 {@code ypbin.alert.outage-orphan-grace-rounds} 轮（默认 20 轮 ≈ 5 分钟）后**显式收口**
+     * 并留下这个**可区分的原因码**，值班一眼能看出「不是设备恢复了，是事件数据丢了」。</p>
+     */
+    OUTAGE_EVENT_MISSING("OUTAGE_EVENT_MISSING", "断档事件已不存在（数据被清理，宽限后收口）");
 
     private final String code;
 

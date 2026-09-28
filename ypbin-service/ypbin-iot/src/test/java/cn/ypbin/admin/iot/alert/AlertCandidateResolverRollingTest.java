@@ -137,15 +137,19 @@ class AlertCandidateResolverRollingTest {
     }
 
     @Test
-    @DisplayName("截断标记：本轮取不满（还有下一页）时标记为「未覆盖全部」，用于指标与日志")
+    @DisplayName("截断标记语义：**本页之后还有数据**才算未覆盖（最后一页不得再报 truncated）")
     void truncatedFlagReflectsRolling() {
         IotAlertRule rule = tenantRule(7L);
+        // 第 1 页（2/3）⇒ 后面还有 1 台 ⇒ truncated=true
         AlertCandidateResolver.Resolved first = resolver.resolve(List.of(rule),
             Map.of(7L, List.of(point())), PAGE_SIZE);
         assertThat(first.truncated()).isTrue();
+        // 第 2 页（最后 1 台）⇒ 本页之后没有数据 ⇒ truncated=false。
+        // 早期实现写成「总数 > 本页条数」，在最后一页也返回 true ⇒ 滚动成为常态时每轮都记指标 + 打 WARN
+        // （独立复核 2026-10-03 M7）
         AlertCandidateResolver.Resolved second = resolver.resolve(List.of(rule),
             Map.of(7L, List.of(point())), PAGE_SIZE);
-        assertThat(second.truncated()).isTrue();
+        assertThat(second.truncated()).isFalse();
     }
 
     @Test
