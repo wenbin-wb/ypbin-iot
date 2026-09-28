@@ -741,3 +741,32 @@ MySQL 的唯一索引对**含 NULL 的行不做约束**——只要索引涉及�
 | **【低】规则表用动态拼键与内联条件文本（与 data.ts 的死导出重复）** | 改为调用 `scopeLabelKey` / `scopeTargetText` / `conditionText`（未知作用域不再渲染出原始 i18n 键） |
 | **【低】`list-states.test.ts` 未覆盖 `alerts/index.vue`（覆盖缺口）** | **如实登记为未覆盖**：该桩式用例在本机因既有 `es-toolkit/compat` 依赖问题跑不起来，新增页面未纳入其 `PAGES`（改动它无法本地验证，可能反而弄红 CI）⇒ 告警列表页的「失败不画成空态」目前**只有实现、没有用例守门**，待依赖问题解决后补 |
 | **默认重复通知间隔 1800 → 600** | 用户批准的默认口径是「静默 10 分钟」，而设计 §2.4 建议 1800（30 分钟）：按**用户口径**取 600，并同步 `deploy/nacos/ypbin-iot.yaml` 与前端表单默认值。（`AlertProperties` 的旧注释写「10 分钟」而值是 1800，属本仓自身矛盾，一并修正） |
+
+### 7.7 生产演示（2026-09-28，真实数据 + 端到端证据）
+
+**结论**：`FIRING`（连续 3 次越界）→ 一键 **ACK** → 条件恢复 **RESOLVED** 全链路在**生产**跑通；
+站内信真实落库到目标用户；邮件渠道因**本环境未配置 SMTP** 而如实失败（投递记录里可见原因，不是静默）。
+
+| 环节 | 证据 |
+|---|---|
+| 部署 | `ypbin-iot` jar md5 `692b78daee11dc84fd67ed21a2f82169`、`ypbin-system` jar md5 `684b25a7e0da3fab574e82a48bb90d74`（容器内 `/app/app.jar` 与构建机一致）；迁移已在生产 MySQL 应用：4 张表 + 菜单 `3207/320701~320703` + `sys_role_menu`/`sys_template_menu` 授权（逐条 SQL 核对） |
+| **去重索引** | 生产 MySQL 实测：`uk_alert_active` 的列序 = `tenant_id, active_dedup_key`（此前只在 CI/单测层验证，现已在**真库**确认） |
+| 规则 | 经 API 创建（POINT 作用域、`temperature GT 20`、连续 3 次、CRITICAL、INBOX+EMAIL）⇒ `code=200`，规则 id `2104373415356145665`、条件行 tenant_id=1 正确落库 |
+| 触发 | 实例 id `2104373421643407361`：`start_ts=08:51:35` → `firing_ts=08:52:05`（**正好 30s = 2 个评估周期后计数到 3**）、`trigger_value=23.5`、`threshold_snapshot="> 20"`、`state=FIRING` |
+| 通知 | 站内信 → 用户 2 `SENT`（`sys_message` 里确有「【已恢复】…」与「【已确认】…」两行，未读状态）；邮件 → `FAILED`，原因 `邮件未配置或配置不完整（缺少 host/username）`（环境未配 SMTP，**如实可见并可重试**）；首次 FIRING 因当时 system 服务仍是旧 jar 而 `接口不存在`，重试链路如实记录（`attempt=3`，退避生效） |
+| 一键 ACK | `POST /iot/alerts/ack` ⇒ `code=200, data=1`；实例 `state=ACKED`、`acked_ts=08:56:32`、`acked_by=1`；随后产生 `ACKED` 通知（站内信 `SENT`） |
+| 恢复 | 把阈值改为 `GT 100`（23.5 不再越界）⇒ 下一轮 `state=RESOLVED`、`resolved_ts=08:57:37`、`reason=RECOVERED`、`active_dedup_key=NULL`（去重键释放 = 「清除 ≠ 删除」），并产生 `RESOLVED` 通知（站内信 `SENT`） |
+| 指标 | `iot.alert.evaluate.rounds=29`、`triggered=1`、`resolved=1`、`notify.queued=6`、`notify.sent=2`、`notify.failed=7`、`lag=7.1s`（评估器活性正常） |
+| 前端 | 同批产物已部署到生产（`iot-ui-dist` 已备份为 `iot-ui-dist.bak-20260928-005906`），19000 端口 `index=200`；产物的 JS 分片内含告警页与文案 |
+
+**生产实测发现并已修复的真实缺陷（1 项，阻断级）**：
+`AlertRuleServiceImpl.create` 用 MyBatis-Plus 的 `insert` 落规则后，直接拿**实体**的 `tenantId` 去写点位条件行——
+而租户插件在 INSERT 时**只改 SQL、不回填实体字段** ⇒ 条件行插入得到 `tenant_id = NULL`，
+生产表现为 `Column 'tenant_id' cannot be null`（HTTP 500）。**修复**：插入后按主键回读一次取租户；
+拿不到租户则**明确失败**而不是带 NULL 落库（宁可保存失败并报错，也不留脏行）。
+该缺陷在单测层不可见（测试用 mock 的 Mapper，没有租户插件），**只有真库探针/生产演示能暴露**——
+这正是「本机门禁全绿 ≠ 生产可用」的又一实例。
+
+**未在本次演示中验证的**：邮件实际送达（环境未配 SMTP）、前端页面的浏览器渲染（只验证了产物部署与接口 200；
+浏览器复看步骤见任务回执）、断档类告警的真实触发（本次只演示了阈值类；断档映射由单测覆盖 + 生产 15s 扫描器在跑，
+`iot.alert.outage.mapped` 当前为 0，说明当前没有设备处于断档）。

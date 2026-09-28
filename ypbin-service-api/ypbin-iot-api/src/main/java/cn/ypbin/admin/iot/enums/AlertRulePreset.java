@@ -39,17 +39,17 @@ public enum AlertRulePreset {
     /** 点位超上限：{@code 温度 连续 3 次 > 80 ℃ 就告警}。 */
     POINT_ABOVE_UPPER("POINT_ABOVE_UPPER", "点位超上限",
         "page.iot.alert.preset.aboveUpper", AlertScopeType.POINT, AlertOperator.GT, true,
-        AlertSeverity.WARNING, 1800),
+        AlertSeverity.WARNING, 0),
 
     /** 点位低于下限：{@code 液位 连续 3 次 < 10 % 就告警}。 */
     POINT_BELOW_LOWER("POINT_BELOW_LOWER", "点位低于下限",
         "page.iot.alert.preset.belowLower", AlertScopeType.POINT, AlertOperator.LT, true,
-        AlertSeverity.WARNING, 1800),
+        AlertSeverity.WARNING, 0),
 
     /** 设备离线（单台）：断档类，默认范围 = 指定设备。 */
     DEVICE_OFFLINE("DEVICE_OFFLINE", "设备离线",
         "page.iot.alert.preset.deviceOffline", AlertScopeType.DEVICE, null, false,
-        AlertSeverity.CRITICAL, 1800),
+        AlertSeverity.CRITICAL, 0),
 
     /** 数据中断（大范围）：断档类，默认范围 = 整租户（可改成产品/设备），通知节奏更安静。 */
     DATA_INTERRUPT("DATA_INTERRUPT", "数据中断",
@@ -75,7 +75,13 @@ public enum AlertRulePreset {
     /** 默认级别。 */
     private final AlertSeverity defaultSeverity;
 
-    /** 默认重复通知间隔（秒）。 */
+    /**
+     * 预设自带的重复通知间隔（秒）；{@code 0} = **用平台默认值**
+     * （{@code ypbin.alert.default-repeat-interval-sec}，用户口径 10 分钟）。
+     *
+     * <p>为什么用 0 而不是再写一个数字：口径只能有一处来源。三个常规模板都用平台默认；
+     * 「数据中断」刻意更安静（大范围故障时不该 10 分钟喊一次），因此显式给 3600 并在此说明。</p>
+     */
     private final int defaultRepeatIntervalSec;
 
     AlertRulePreset(String code, String desc, String i18nKey, AlertScopeType defaultScopeType,
@@ -126,7 +132,11 @@ public enum AlertRulePreset {
         return defaultSeverity;
     }
 
-    /** 默认重复通知间隔（秒）。 */
+    /**
+     * 预设自带的重复通知间隔（秒）；{@code 0} = 交给平台默认值。
+     *
+     * @return 秒数；0 表示未指定
+     */
     public int getDefaultRepeatIntervalSec() {
         return defaultRepeatIntervalSec;
     }

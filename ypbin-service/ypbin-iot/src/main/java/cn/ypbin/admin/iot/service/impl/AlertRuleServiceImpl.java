@@ -144,7 +144,10 @@ public class AlertRuleServiceImpl implements AlertRuleService {
         apply(rule, req, validated);
         rule.setCreateUser(UserContext.getUserId());
         ruleMapper.insert(rule);
-        insertPoints(rule, validated);
+        // ⚠️ 租户插件在 INSERT 上**只往 SQL 里加 tenant_id，不会回填实体字段** ⇒
+        // 直接拿 rule.getTenantId() 去写条件行会得到 NULL（生产实测：Column 'tenant_id' cannot be null）。
+        // 因此这里显式回读一次（主键查询，代价一次点查），拿不准就明确失败、绝不带 NULL 落库。
+        insertPoints(rule, validated, requireTenantId(rule));
         log.info("[iot] 告警规则已创建：id={} name={} scope={} 点位条件 {} 条", rule.getId(),
             rule.getRuleName(), rule.getScopeType(), validated.points().size());
         return detail(rule.getId());
@@ -161,7 +164,7 @@ public class AlertRuleServiceImpl implements AlertRuleService {
         ruleMapper.updateById(rule);
         // 「先删后插」只作用于本规则：条件行没有外部引用，重建比逐行 diff 更不容易留下半更新状态
         pointMapper.deleteByRuleId(id);
-        insertPoints(rule, validated);
+        insertPoints(rule, validated, requireTenantId(rule));
         log.info("[iot] 告警规则已修改：id={} name={} 点位条件 {} 条（已产生的实例不受影响）", id,
             rule.getRuleName(), validated.points().size());
         return detail(id);
@@ -224,7 +227,9 @@ public class AlertRuleServiceImpl implements AlertRuleService {
             resp.setDefaultTriggerThreshold(preset.isNeedsPointCondition()
                 ? properties.getDefaultTriggerThreshold() : 0);
             resp.setDefaultPendingTtlSec(properties.getDefaultPendingTtlSec());
-            resp.setDefaultRepeatIntervalSec(preset.getDefaultRepeatIntervalSec());
+            // 预设未指定（0）时回落到**平台默认值**（口径只能有一处来源：AlertProperties + nacos）
+            resp.setDefaultRepeatIntervalSec(preset.getDefaultRepeatIntervalSec() > 0
+                ? preset.getDefaultRepeatIntervalSec() : properties.getDefaultRepeatIntervalSec());
             resp.setDefaultNotifyChannels(properties.getDefaultNotifyChannels());
             presets.add(resp);
         }
@@ -400,15 +405,36 @@ public class AlertRuleServiceImpl implements AlertRuleService {
         rule.setDescription(req.getDescription());
     }
 
+    /**
+     * 取规则所属租户（实体字段为空时回读一次）。
+     *
+     * <p>为什么必须回读：MyBatis-Plus 的租户插件在 INSERT 时只改 SQL、不回填实体 ⇒ 直接读实体的
+     * {@code tenantId} 会拿到 {@code null}，而条件行是**带 tenant_id 的显式批量插入**，落库会被拒
+     * （生产演示实测：`Column 'tenant_id' cannot be null`）。</p>
+     */
+    private Long requireTenantId(IotAlertRule rule) {
+        Long tenantId = rule.getTenantId();
+        if (tenantId != null) {
+            return tenantId;
+        }
+        IotAlertRule saved = ruleMapper.selectById(rule.getId());
+        tenantId = saved == null ? null : saved.getTenantId();
+        if (tenantId == null) {
+            // 拿不到租户就不写：宁可让这次保存失败并明确报错，也不要留下 tenant_id 为空的行
+            throw new BusinessException("无法确定规则所属租户，保存已中止（请联系平台管理员检查租户上下文）");
+        }
+        return tenantId;
+    }
+
     /** 批量插入条件行（单条语句，不在循环里做 DB 调用）。 */
-    private void insertPoints(IotAlertRule rule, Validated validated) {
+    private void insertPoints(IotAlertRule rule, Validated validated, Long tenantId) {
         if (validated.points().isEmpty()) {
             return;
         }
         LocalDateTime now = LocalDateTime.now();
         Long userId = UserContext.getUserId();
         for (IotAlertRulePoint point : validated.points()) {
-            point.setTenantId(rule.getTenantId());
+            point.setTenantId(tenantId);
             point.setRuleId(rule.getId());
             point.setCreateUser(userId);
             point.setCreateTime(now);

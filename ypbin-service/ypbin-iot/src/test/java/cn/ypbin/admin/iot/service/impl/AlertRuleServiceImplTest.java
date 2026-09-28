@@ -54,6 +54,13 @@ import org.junit.jupiter.api.Test;
  */
 class AlertRuleServiceImplTest {
 
+    static {
+        // 不依赖其它测试类的静态初始化顺序（toRespList 会用 LambdaQueryWrapper 查设备/产品）
+        cn.ypbin.admin.iot.alert.AlertMybatisTestSupport.initMetadata(
+            cn.ypbin.admin.iot.entity.IotDevice.class, cn.ypbin.admin.iot.entity.IotProduct.class,
+            cn.ypbin.admin.iot.entity.IotAlertRule.class, cn.ypbin.admin.iot.entity.IotAlertRulePoint.class);
+    }
+
     private IotAlertRuleMapper ruleMapper;
 
     private IotAlertRulePointMapper pointMapper;
@@ -340,6 +347,12 @@ class AlertRuleServiceImplTest {
         assertThat(offline.getDefaultOperator()).isNull();
         assertThat(offline.getDefaultScopeType()).isEqualTo("DEVICE");
         assertThat(offline.getDefaultSeverity()).isEqualTo("CRITICAL");
+        // 预设的重复间隔必须来自平台默认值（否则会出现「前端 600 / 后端 1800」的双口径）
+        assertThat(above.getDefaultRepeatIntervalSec()).isEqualTo(600);
+        assertThat(offline.getDefaultRepeatIntervalSec()).isEqualTo(600);
+        // 「数据中断」刻意更安静：显式 3600（不是平台默认）
+        AlertPresetResp interrupt = presets.get(3);
+        assertThat(interrupt.getDefaultRepeatIntervalSec()).isEqualTo(3600);
     }
 
     @Test

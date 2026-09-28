@@ -945,3 +945,14 @@ core 也无宿主可插的解码 SPI ⇒ **框架侧能力缺口**（不是本�
 **已知限制（如实登记）**：真库行为（`CASE` 批量更新、`ON DUPLICATE KEY UPDATE`、并发去重、
 NULL 唯一索引）只在 CI 的 `-Pit` 与生产演示验证；`/actuator/metrics` 未在真实进程逐条读值；
 多实例部署未加分布式锁；一轮评估的量级未用真实租户数据校准；DURATION 模式的时序查询随候选数线性增长。
+
+#### 四点二十二·补充：生产演示（2026-09-28）与一项生产缺陷
+
+- **演示**：真实设备 `demo-dev-curve`（temperature=23.5）上建 `GT 20` 连续 3 次规则 ⇒ `FIRING`（30s 后计数到 3）
+  ⇒ API 一键 `ACK` ⇒ 阈值改 `GT 100` 后**自动** `RESOLVED`（`reason=RECOVERED`，去重键释放）；
+  站内信真实落库到目标用户（`SENT`），邮件因环境未配 SMTP 而如实 `FAILED`（原因可查、可重试）。
+  4 张表 + 菜单 + 授权已在生产应用；`uk_alert_active(tenant_id, active_dedup_key)` 在**真库**确认。
+- **生产缺陷（已修）**：规则落库后直接用实体的 `tenantId` 写条件行，而租户插件不回填实体 ⇒
+  `Column 'tenant_id' cannot be null`（HTTP 500）。改为插入后回读取租户、取不到则明确失败。
+  单测看不见（Mapper 被 mock、无租户插件），**只有真库/生产能暴露**。
+- 详见 `docs/ALERTING-DESIGN.md` §7.7。
