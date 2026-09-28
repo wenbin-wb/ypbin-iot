@@ -117,8 +117,11 @@ PROBE_IDEMPOTENT_CLOSE_KEYS >>> [...#close:73, ...#close:73]                # Lo
 
 ## SF-4（高｜可用性）identity 模式下 auth 登录结构性失败：token 生成 12 次重试后抛异常
 
-> **状态：⬜ 未关闭（2026-09-25 提出；starter 侧修复目标版本 3.5.1）** —— starter 仓 issue：
-> **https://github.com/wenbin-wb/ypbin-starter/issues/52**（标题与本节同）。
+> **状态：✅ 已修复（starter 3.5.1，PR #59，2026-09-28 合入 master）** ——
+> `IdentityStpLogic#getLoginIdNotHandle` 在无身份时改返回 `null`（原返回空串使 sa-token
+> `distUsableToken` 的「候选可用」判据 `== null` 恒不成立 ⇒ 12 次重试全败）；
+> 含针对 `createLoginSession` 的回归测试（修复前必红）。
+> starter 仓 issue：**https://github.com/wenbin-wb/ypbin-starter/issues/52**（已关闭）。
 > 前置条目：issue #50 / PR #51（SF-1~SF-3，随 starter 3.5.0 交付；**本缺陷正是 3.5.0 引入的**）。
 
 **现象**：`ypbin.security.identity.enabled=true` 的服务**登录功能结构性不可用**。
@@ -355,8 +358,14 @@ starter 侧前序：issue #50 / PR #51（SF-1~SF-3，3.5.0）。
 
 ## SF-5（高｜安全）微服务下游的 `IdentityHeaderFilter` 不校验网关身份头签名：直连下游端口即可伪造身份（越过网关鉴权）
 
-> **状态：⬜ 未关闭（2026-09-25 提出；starter 侧修复目标版本 3.5.1）** —— starter 仓 issue：
-> **https://github.com/wenbin-wb/ypbin-starter/issues/53**（标题与本节同）。
+> **状态：✅ 已修复（starter 3.5.1，PR #59，2026-09-28 合入 master；⚠️ 升级动作见下）** ——
+> identity 模式改为 fail-closed：`ypbin.security.identity.enabled=true` **必须**配置
+> `ypbin.security.identity.trusted-source-token`（与网关 `ypbin.gateway.auth.trusted-source-token`
+> 一致），未配置**启动失败**；`IdentityHeaderFilter` 对携带身份头的请求校验来源标记
+> （`X-Gateway-Signed`），缺失或不匹配一律拒绝（业务码 403）。
+> **⚠️ 本仓升级动作**：若启用 identity 模式，需在网关与 auth/system/ai 等下游配置同一随机串
+> （`deploy/nacos/*.yaml` 与网关 `ypbin-gateway` 配置同步补 `trusted-source-token`）。
+> starter 仓 issue：**https://github.com/wenbin-wb/ypbin-starter/issues/53**（已关闭）。
 
 **现象**：微服务 Servlet 下游服务（`ypbin-system` / `ypbin-iot` / `ypbin-ai` 等；**`ypbin-access` 不在其列**，
 见环 5 的口径说明）在 `ypbin.security.identity.enabled=true` 下装配
