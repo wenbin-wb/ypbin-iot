@@ -22,13 +22,13 @@
 | A | **UP-3** TCP 整帧 `byte[]` 当值 + 缺解码 SPI | `ypbin-iot-starter` | 数据正确性（静默语义丢失） | **已核实**（源码一手） |
 | A | **UP-4**（新）TCP 只投递订阅地址列表**第 0 个**点位 | `ypbin-iot-starter` | 功能性缺口（数据不完整） | **已核实**（源码一手 + 本仓生产观测记录） |
 | A | **UP-2** 建链超时硬编码 10s + `bind` 阻塞调用方线程 | `ypbin-iot-starter` | 可用性 | **已核实**（源码一手；生产超时形态为 2026-09-26 记录，当前已打补丁不可再现） |
-| A | **SF-4**（#52）/ **SF-5**（#53）是否已修 | `ypbin-starter` | 可用性 / 安全 | **已核实：两件均仍未修**（源码一手） |
-| A | **UP-5**（新）管理端点 `/actuator/metrics` 无权限码 | `ypbin-starter` | 安全（能力缺口） | **已核实**（鉴权层一手；「非管理员实测可读」**未核实**） |
-| B | **UP-6**（新）`install.sh` 占位符替换是全局 `sed` | `ypbin-admin` | 凭据卫生 | **已核实**；**上游 admin 当前为「潜在」**（见条目内说明） |
-| B | **UP-7**（新）`install.sh` 的 `NACOS_DIR` 写死 `ypbin-admin` | `ypbin-admin` | 部署可靠性（静默不生效） | **已核实**（本机 + 生产路径判定） |
-| B | **UP-8**（新）compose 健康检查把口令放进 `exec` 参数 | `ypbin-admin` | 凭据卫生 | **已核实**（源码一手） |
-| B | **UP-9**（新）`005-xxl-job.sql` 内置默认口令哈希 | `ypbin-admin` | 凭据卫生 | **已核实**（源码一手 + 哈希复算） |
-| B | **UP-10**（新）「业务 404 包在 HTTP 200」易被误判 | **`ypbin-starter`** | DX / 文档陷阱（非 admin） | **已核实**（生产实测 + 源码一手） |
+| A | **SF-4**（#52）/ **SF-5**（#53）是否已修 | `ypbin-starter` | 可用性 / 安全 | **✅ 已修复**（starter 3.5.1，PR #59，2026-09-28 合入；SF-4 登录恢复 + SF-5 身份头来源强制校验） |
+| A | **UP-5**（新）管理端点 `/actuator/metrics` 无权限码 | `ypbin-starter` | 安全（能力缺口） | **✅ 已修复**（starter 3.5.1：`ManagementEndpointGuard`，PR #59） |
+| B | **UP-6**（新）`install.sh` 占位符替换是全局 `sed` | `ypbin-admin` | 凭据卫生 | **✅ 已修复**（admin PR #77，2026-09-28 合入；注释行不再替换） |
+| B | **UP-7**（新）`install.sh` 的 `NACOS_DIR` 写死 `ypbin-admin` | `ypbin-admin` | 部署可靠性（静默不生效） | **✅ 已修复**（admin PR #77：`SCRIPT_DIR/nacos` 解析 + 缺失 warn） |
+| B | **UP-8**（新）compose 健康检查把口令放进 `exec` 参数 | `ypbin-admin` | 凭据卫生 | **✅ 已修复**（admin PR #77：Redis `nc -z` / MySQL `mysqladmin ping -h 127.0.0.1`） |
+| B | **UP-9**（新）`005-xxl-job.sql` 内置默认口令哈希 | `ypbin-admin` | 凭据卫生 | **✅ 已修复**（admin PR #77：口令随机化 + 部署期哈希占位符） |
+| B | **UP-10**（新）「业务 404 包在 HTTP 200」易被误判 | **`ypbin-starter`** | DX / 文档陷阱（非 admin） | **✅ 已修复**（starter 3.5.1，PR #59：README/MODULES 陷阱警示 + curl 判据 + 表述订正） |
 
 **最该先修的（建议优先级）**：`UP-10`（最容易反复踩、成本最低）＞ `SF-4`（登录结构性不可用）＞
 `UP-6`（凭据落到配置存储）＞ `SF-5`（身份头可伪造）＞ `UP-3`/`UP-4`（数据语义/完整性）＞
@@ -45,8 +45,8 @@
 | `ypbin-iot-starter` | [#14](https://github.com/wenbin-wb/ypbin-iot-starter/issues/14) | 建链超时硬编码 + `connect-timeout` 死键 + `bind` 阻塞调用方线程 | UP-2 |
 | `ypbin-iot-starter` | [#15](https://github.com/wenbin-wb/ypbin-iot-starter/issues/15) | TCP 只投递订阅地址列表第 0 个点位 | UP-4 |
 | `ypbin-iot-starter` | [#13 评论](https://github.com/wenbin-wb/ypbin-iot-starter/issues/13#issuecomment-5852289739) | 「仍未修」复核回执 + 交叉引用 #15 | UP-3 |
-| `ypbin-starter` | [#52 评论](https://github.com/wenbin-wb/ypbin-starter/issues/52#issuecomment-5852289501) | 「仍未修」复核回执（identity 登录结构性失败） | SF-4 |
-| `ypbin-starter` | [#53 评论](https://github.com/wenbin-wb/ypbin-starter/issues/53#issuecomment-5852289643) | 「仍未修」复核回执 + 默认 fail-open 实证 | SF-5 |
+| `ypbin-starter` | [#52](https://github.com/wenbin-wb/ypbin-starter/issues/52)（已关闭） | identity 登录结构性失败（SF-4） | SF-4 |
+| `ypbin-starter` | [#53](https://github.com/wenbin-wb/ypbin-starter/issues/53)（已关闭） | 身份头来源校验（SF-5，fail-closed） | SF-5 |
 
 > 合并口径（避免刷屏）：`install.sh` 的两个缺陷合成 admin#74；两条部署凭据卫生合成 admin#75；
 > TCP 的「值语义」（#13）与「点位覆盖」（#15）是**两个不同缺陷**故分开，但在两边互相交叉引用并建议共享扩展点。
@@ -297,12 +297,11 @@ ERROR 7 --- [ypbin-access] [   scheduling-1] c.y.i.spring.autoconfigure.IotLifec
 
 ---
 
-## SF-4 / SF-5 回执：`ypbin-starter` **两件均仍未修**（2026-09-27 复核）
+## SF-4 / SF-5 回执：`ypbin-starter` **两件均已修复**（2026-09-28 复核）
 
-> 上游 issue：**#52**（SF-4，2026-09-25 开，**0 评论、open**）、**#53**（SF-5，2026-09-25 开，open，含我们 1 条生产实证评论）。
-> **按纪律不重复开 issue**，改在两条下面补「仍未修」的复核评论（2026-09-27 已补：
-> [#52 评论](https://github.com/wenbin-wb/ypbin-starter/issues/52#issuecomment-5852289501)、
-> [#53 评论](https://github.com/wenbin-wb/ypbin-starter/issues/53#issuecomment-5852289643)）。
+> 上游 issue：**#52**（SF-4）、**#53**（SF-5）均于 2026-09-28 随 starter PR **#59** 修复并关闭
+> （`mvn clean test` 全仓 964 测试全绿；本回执章节保留「未修」时的原始复核证据作为历史记录，
+> 修复详情与验收见下方两节末尾的「修复回执」）。
 
 ### SF-4（高｜可用性）identity 模式下 auth 登录结构性失败
 
@@ -329,8 +328,13 @@ sed -n '57,63p;89,96p;104,111p' \
 ⇒ 与 `docs/STARTER-FEEDBACK.md` §SF-4 环 1-4 的机制链**逐字一致**：
 sa-token 的「候选 token 可用」判据要求 `getLoginIdNotHandle(...) == null`，
 而本实现**任何输入都不可能返回 `null`**（只可能是空串或身份值）⇒ 12 次重试必然全败 ⇒ 建 token 恒抛异常。
-**结论：仍未修。** 影响：`ypbin.security.identity.enabled=true` 的服务登录（含短信/社交）**结构性不可用**。
+**结论（历史记录）：仍未修。** 影响：`ypbin.security.identity.enabled=true` 的服务登录（含短信/社交）**结构性不可用**。
 **我方临时处置**：本仓 `ypbin-auth` 保持 `identity.enabled=false`（见 `docs/NACOS-AUTH.md`），等待 starter 修复。
+
+**✅ 修复回执（2026-09-28）**：starter PR **#59** 已修复——`IdentityStpLogic#getLoginIdNotHandle`
+无身份时改返回 `null`（`distUsableToken` 判据成立），含 `createLoginSession` 回归测试；
+issue #52 已关闭。启动 `identity.enabled=true` 的升级动作见 `docs/STARTER-FEEDBACK.md` §SF-5 的升级注意事项
+（需与网关配置同一 `trusted-source-token`）。
 
 ### SF-5（高｜安全）下游 `IdentityHeaderFilter` 不校验网关签名
 
@@ -362,15 +366,21 @@ grep -n "isIdentitySourceTrusted" -A 6 \
 - 且 Feign 侧校验**默认 fail-open**（`trustedSourceToken` 空 ⇒ `isIdentitySourceTrusted` 恒 `true`）——
   与 #53 里我们提出的「不允许『配了 token 才校验』的 fail-open」一致。
 
-**结论：仍未修。** 生产实证已在 #53 的评论里（2026-09-25，只读 GET，直连 `127.0.0.1:18084` 构造身份头成功）。
+**结论（历史记录）：仍未修。** 生产实证已在 #53 的评论里（2026-09-25，只读 GET，直连 `127.0.0.1:18084` 构造身份头成功）。
 **我方临时处置/边界**：`18084` 已收窄为**仅回环**（`deploy/docker-compose.yml:409-415` 用独立的
 `IOT_BIND_ADDR`），把现网可利用面限制为「同宿主进程 / 同 compose 网络 / 能打 `127.0.0.1` 的 SSRF」。
+
+**✅ 修复回执（2026-09-28）**：starter PR **#59** 已修复（fail-closed）——`identity.enabled=true`
+必须配置 `ypbin.security.identity.trusted-source-token`（与网关一致），未配置**启动失败**；
+`IdentityHeaderFilter` 对携带身份头的请求校验 `X-Gateway-Signed`，缺失/不匹配一律拒绝（业务 403）；
+issue #53 已关闭。**本仓升级动作**：启用 identity 的服务需在网关与各下游同步配置同一随机串，
+否则下游启动失败（预期 fail-closed 行为）。
 
 ---
 
 ## UP-5（中｜安全）网关与下游对 `/actuator/**` **只做登录校验、无权限码**，任何已登录用户可读平台级指标
 
-> 状态：⬜ **未修**。上游 issue：**#54**（2026-09-27 开，
+> 状态：✅ **已修复**（starter 3.5.1，PR #59，2026-09-28 合入）。上游 issue：**#54**（已关闭，
 > [链接](https://github.com/wenbin-wb/ypbin-starter/issues/54)）。归属：**`ypbin-starter`**（能力缺口）；
 > 现象在本仓（`ypbin-iot`）部署形态下实测。本仓的配置已把「直接暴露」这一面收窄，但「已登录即可读」这一面**没有能力去收**。
 
@@ -451,7 +461,7 @@ starter 提供**管理端点权限收口**能力，建议形态：
 
 ## UP-6（中｜凭据卫生）`deploy/install.sh` 的占位符替换是**全局 `sed`**，会把**注释里**的占位符替换成真实凭据
 
-> 状态：上游 **未修**。上游 issue：**#74**（2026-09-27 开，[链接](https://github.com/wenbin-wb/ypbin-admin/issues/74)）。
+> 状态：✅ **已修复**（admin PR #77，2026-09-28 合入）。上游 issue：**#74**（已关闭，[链接](https://github.com/wenbin-wb/ypbin-admin/issues/74)）。
 > **重要订正（R4）**：在**上游 `ypbin-admin` 当前 `main`** 里，`deploy/nacos/*.yaml`
 > **目前没有任何注释行含 `${...}` 占位符**（已 grep 复核）⇒ 这是**潜在**缺陷，不是已发生的事实；
 > 它在我们 fork 的 `ypbin-iot.yaml` 上**已经真实发生过**（注释里写了 `${GATEWAY_SIGN_TOKEN}`，
@@ -521,7 +531,7 @@ sed -e "/^[[:space:]]*#/! s/\${MYSQL_ROOT_PASSWORD}/${MYSQL_ROOT_PASSWORD}/g" \
 
 ## UP-7（中｜部署可靠性）`install.sh` 的 `NACOS_DIR` 写死 `$ROOT/ypbin-admin/deploy/nacos`：fork 下**静默不导入自己的配置**
 
-> 状态：上游 **未修**。与 UP-6 同属 `deploy/install.sh`，**合并提在同一个 issue**：
+> 状态：✅ **已修复**（admin PR #77）。与 UP-6 同属 `deploy/install.sh`，**合并提在同一个 issue**：
 > **#74**（[链接](https://github.com/wenbin-wb/ypbin-admin/issues/74)）；本文件仍分两条写清证据与验收。
 
 ### 现象
@@ -590,7 +600,8 @@ ROOT=/opt/ypbin/ypbin-iot          ROOT=/opt/ypbin/main
 
 ## UP-8（中｜凭据卫生）compose 健康检查把口令放进 `exec` 参数（`docker events` / 进程 args 可见）
 
-> 状态：上游 **未修**。与 UP-9 同属「部署凭据卫生」，**合并提在同一个 issue**：
+> 状态：✅ **已修复**（admin PR #77：Redis `nc -z` / MySQL `mysqladmin ping -h 127.0.0.1`，不再带口令）。
+> 与 UP-9 同属「部署凭据卫生」，**合并提在同一个 issue**：
 > **#75**（[链接](https://github.com/wenbin-wb/ypbin-admin/issues/75)）。
 
 ### 现象
@@ -640,7 +651,8 @@ Docker 的 healthcheck 以 `exec` 形式执行 ⇒ 该命令的 **argv 会出现
 
 ## UP-9（中｜凭据卫生）`deploy/sql/005-xxl-job.sql` 内置默认口令 `123456` 的 SHA-256 哈希
 
-> 状态：上游 **未修**。与 UP-8 合并为一个 issue：**#75**（[链接](https://github.com/wenbin-wb/ypbin-admin/issues/75)）。
+> 状态：✅ **已修复**（admin PR #77：`005-xxl-job.sql` 改部署期哈希占位符，`install.sh` 随机生成口令写入
+> `.env` 的 `XXL_JOB_ADMIN_PASSWORD`）。与 UP-8 合并为一个 issue：**#75**（[链接](https://github.com/wenbin-wb/ypbin-admin/issues/75)）。
 
 ### 现象
 XXL-JOB 调度中心的用户表初始化脚本写死了内置账号 `admin` 的**默认口令哈希**，
@@ -708,7 +720,9 @@ curl -sS --http1.1 https://raw.githubusercontent.com/xuxueli/xxl-job/3.4.2/doc/d
 
 ## UP-10（中｜DX / 文档陷阱）「未知路径/未暴露端点返回**业务 404 包在 HTTP 200**」极易被误判为「健康」
 
-> 状态：上游 **未修**（文档未显式警示该陷阱，且有一处**文档与代码不一致**）。
+> 状态：✅ **已修复**（starter 3.5.1，PR #59：README/MODULES 显式警示陷阱 + 可复制 curl 判据；
+> 同时订正 `throw-exception-if-no-handler-found`「已默认开启」的错误表述——实际由 Framework 默认抛
+> `NoResourceFoundException` + 模块注入 `spring.web.resources.add-mappings=false` 兜底）。
 > 上游 issue：**#55**（2026-09-27 开，[链接](https://github.com/wenbin-wb/ypbin-starter/issues/55)）。
 > **归属订正（R4）**：本条**不属于 `ypbin-admin`**——`R` 与全局异常处理器都在 **`ypbin-starter`**
 > （`ypbin-starter-core` 的 `R`、`ypbin-starter-web` 的 `GlobalExceptionHandler`、
@@ -821,8 +835,8 @@ grep -rn "throw-exception-if-no-handler" . | grep -v '/target/' | grep -v tools/
 | A3 | UP-2 `bind` 阻塞调用方线程 | iot-starter | `IotLifecycle.java:73`（`BIND_TIMEOUT=10s`）、`:214-224`（`.join()`） | `sed -n '210,224p' …IotLifecycle.java` | **已核实** |
 | A3 | UP-2 生产线程/节奏旁证 | 生产实例 | `docker logs ypbin-access`（线程 `scheduling-1`；每 2 分钟 9 台一轮） | `grep "failed to bind device"` + `grep -oE` 计数 | **已核实**（今日） |
 | A3 | UP-2 `ConnectTimeoutException after 10000 ms` 原始形态 | iot | `docs/STARTER-FEEDBACK.md` §UP-2 证据段（2026-09-26 记录） | —（**当前生产已打补丁，无法再现**） | **已核实（历史记录，不可再现）** |
-| A4 | SF-4 未修（**仅限 starter 侧这半条**） | starter | `IdentityStpLogic.java:63/90-96/109-111` | `sed -n '57,63p;89,96p;104,111p' …` | **已核实**（starter 侧代码；sa-token「`distUsableToken` 要求 `== null`」半条系引自 `docs/STARTER-FEEDBACK.md` 的既有字节码实证，本轮**未**重做） |
-| A4 | SF-5 未修 | starter | `IdentityHeaderFilter.java:57-94`（无签名校验）；`FeignHeaderInterceptor.java:128-134`（仅 Feign 透传侧、默认 fail-open）；`GatewayProperties.java:223/226` | `grep -n "Signed\|trustedSource" …IdentityHeaderFilter.java` ⇒ 0 | **已核实** |
+| A4 | SF-4 已修复（starter PR #59） | starter | `IdentityStpLogic.java`（`getLoginIdNotHandle` 无身份返回 `null`） | 修复含 `createLoginSession` 回归测试；「未修」时的复核证据见上 | **✅ 2026-09-28 复核** |
+| A4 | SF-5 已修复（starter PR #59） | starter | `IdentityHeaderFilter`（校验 `X-Gateway-Signed`，缺失/不匹配拒绝）；未配置 `trusted-source-token` 启动失败 | 「未修」时的复核证据见上 | **✅ 2026-09-28 复核** |
 | A5 | UP-5 网关只认证不授权 | starter | `GatewayAuthGlobalFilter.java:76-84`（仅 `authenticate`） | `sed -n '76,84p' …` | **已核实** |
 | A5 | UP-5 路由与白名单 | iot | `deploy/nacos/ypbin-gateway.yaml:49-54`（`/iot/**`+StripPrefix）、`:57-82`（白名单无 `actuator`）；`deploy/nacos/ypbin-system.yaml:90-94`（服务侧 `excludes: /actuator/**`） | `grep -n "Path=/iot/\*\*" -A 4 …` | **已核实** |
 | A5 | UP-5 未登录被拒（登录是唯一门槛） | 生产实例 | `curl http://127.0.0.1:18080/iot/actuator/metrics` ⇒ `code=401`，HTTP 200 | 同上 | **已核实** |
