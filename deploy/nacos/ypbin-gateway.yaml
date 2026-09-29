@@ -56,6 +56,34 @@ spring:
 # 统一鉴权：校验 token 后清洗外部头、签发内部身份头
 ypbin:
   gateway:
+    # -------------------------------------------------------------------------
+    # 入口身份头清洗（SF-5 纵深防御，2026-09-29 补）
+    #
+    # starter 默认清洗表是 X-User-Id/X-User-Name/X-Tenant-Id/X-Dept-Id/X-Roles，
+    # **不含 X-Gateway-Signed**（jar 内 GatewayProperties$HeaderSanitize:180-181）。
+    # 后果：客户端可自带一个 X-Gateway-Signed 头穿透到下游。下游 IdentityHeaderFilter
+    # 仍要求它等于密钥（不知密钥就伪造不出来），但
+    #   ① 密钥一旦因任何途径泄露，唯一兜底也没了；
+    #   ② "外部头能否直达下游"不该依赖"密钥没泄露"才成立。
+    # 故显式把来源标记头并入清洗表：网关先删客户端同名头，再由 GatewayAuthGlobalFilter
+    # 用真值重新签发（清洗 order = HIGHEST_PRECEDENCE+1，签发 = +2 ⇒ 顺序正确）。
+    #
+    # ⚠️ 必须列全：本键一旦设置就**整体覆盖** starter 默认表（不是追加），
+    #    漏写任何一个身份头都等于取消对该头的清洗。
+    #    tools/check-identity-config.sh 断言本表含默认 5 头 + X-Gateway-Signed。
+    # ⚠️ 本键是**启动期**绑定（GatewayProperties），改完需重启网关容器才生效。
+    # -------------------------------------------------------------------------
+    header-sanitize:
+      enabled: true
+      headers:
+        # 以下 5 个 = starter 默认表，原样保留（覆盖语义，不是追加）
+        - X-User-Id
+        - X-User-Name
+        - X-Tenant-Id
+        - X-Dept-Id
+        - X-Roles
+        # IoT 补：来源标记头，防客户端预置/探测（SF-5 纵深防御）
+        - X-Gateway-Signed
     auth:
       enabled: true
       # 身份头签名：网关在写入 X-User-Id 等身份头的同时签发该标记，

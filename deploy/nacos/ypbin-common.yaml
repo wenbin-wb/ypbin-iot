@@ -63,10 +63,23 @@ sa-token:
 # starter 的 ypbin.security.identity（IdentityHeaderFilter，解析网关签发的身份头写入
 # IdentityContext）随后续 starter 版本将改为默认关闭（matchIfMissing=false），此处显式开启，
 # 保持 auth/system/ai 各 Servlet 服务既有行为不变；网关为 WebFlux，不装配该过滤器，本键对其无效。
+#
+# ⚠️ trusted-source-token 是**必填**项，不是可选项（starter 3.6.0 起，SF-5 修复引入）：
+#   IdentityAutoConfiguration#identityHeaderFilterRegistration 在 enabled=true 且该键为空时抛
+#   IllegalStateException ⇒ **应用启动即失败**（jar 内类：cn.ypbin.starter.security.identity.
+#   IdentityProperties / IdentityAutoConfiguration）。同时 IdentityHeaderFilter 会逐请求校验网关
+#   写出的 X-Gateway-Signed 标记，缺失或不匹配一律拒绝（fail-closed）——堵住"直连下游端口 +
+#   伪造 X-User-Id 头 ⇒ 冒充任意用户"的越权路径（见 docs/STARTER-FEEDBACK.md SF-5）。
+#   值与网关侧 ypbin.gateway.auth.trusted-source-token（deploy/nacos/ypbin-gateway.yaml）**必须同串**，
+#   否则所有经网关的正常请求都会被下游判为非法来源而被拒（表现为全站 403）。
+#   真值不入库：install.sh 导入 Nacos 时替换为 deploy/.env 的 GATEWAY_SIGN_TOKEN（600 权限）。
+#   键名以 jar 内一手核实为准（勿写成旧命名空间的 ypbin.cloud.feign.*：那是 Feign 出站透传开关，
+#   与"入口侧是否可信"是两件事，配错位置会得到"启动失败"或"静默不校验"两种都很难查的后果）。
 ypbin:
   security:
     identity:
       enabled: true
+      trusted-source-token: ${GATEWAY_SIGN_TOKEN}
   # ---------- 内部 Feign 调用凭证（/internal/** 服务间调用守卫）----------
   # 网关鉴权不覆盖 Feign 直连的 /internal/** 端点：system 服务守卫校验 X-Internal-Token 与
   # 本凭证一致，未配置（缺失/为空）即 fail-closed 拒绝。auth/system/ai 三服务同处本共享配置

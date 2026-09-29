@@ -2,8 +2,9 @@ name: Sync Whitelist
 
 # 把「与 admin 基座的同步纪律」变成机器检查：
 #   1) 改动的**既有 admin 文件**必须落在白名单内（新增文件不受限——IoT 业务一律加新文件/新模块）；
-#      白名单当前 **18 个文件**（见 SYNC.md 第二节，两边必须一致）；
-#   2) IoT 的 SQL 迁移脚本必须与全新安装脚本语句等价。
+#      白名单当前 **19 个文件**（见 SYNC.md 第二节，两边必须一致）；
+#   2) IoT 的 SQL 迁移脚本必须与全新安装脚本语句等价；
+#   3) Nacos 身份模式配置键齐备（enabled=true ⇒ 必须配 trusted-source-token，否则 3.6.0 起启动失败）。
 # 注意：`git diff upstream/main --stat` 的字面数字包含**新增文件**，比白名单口径大得多；
 #      本工作流检查的是「改动的既有文件」（--diff-filter=MDR），别把两者混为一谈。
 # 为什么需要：纪律只写在 SYNC.md 里没有强制力——本仓刚建立时，依赖机器人（Dependabot）的 PR
@@ -67,7 +68,17 @@ jobs:
           # 能力清单属**对外陈述**，与实际不符不能用「另写一份」补救。
           # 代价如实登记：上游常改 README ⇒ 下次同步必然冲突，且必须整体取本仓版本。
           # 理由与代价全文见 SYNC.md 第二节对应行。
-          ALLOWED+='README\.md'
+          ALLOWED+='README\.md|'
+          # 第 19 项（2026-09-29 加）：补 identity 入口侧密钥（#6b 部署阻塞面）。
+          # 无法用新文件实现：问题就**在这一行**——starter 3.6.0 起
+          # `ypbin.security.identity.enabled=true`（本文件既有行）必须同时给出
+          # `ypbin.security.identity.trusted-source-token`，否则启动失败；
+          # 新增文件无法表达「给既有键补一个兄弟键」，改成新文件（如另立
+          # ypbin-common-iot.yaml）只会让既有 Key 的约束仍然缺配。
+          # ⚠️ **更好的长期做法是改上游 admin 仓**：本仓下次同步自然继承、分歧面回到 18。
+          # 代价如实登记：多一个 merge 冲突点（本文件上游改动频率低，代价可接受）。
+          # 理由与代价全文见 SYNC.md 第二节对应行。
+          ALLOWED+='deploy/nacos/ypbin-common\.yaml'
           ALLOWED+=')$'
           echo "当前白名单正则：$ALLOWED"
           changed="$(git diff --name-only --diff-filter=MDR upstream/main...HEAD)"
@@ -86,3 +97,9 @@ jobs:
 
       - name: IoT SQL 迁移脚本与全新安装脚本的语句等价
         run: bash tools/check-iot-sql-equivalence.sh
+
+      - name: Nacos 身份模式配置键齐备（#6b：防「3.6.0 制品起不来」回归）
+        run: |
+          # 只依赖 PyYAML（出题范围小、易审计）；runner 自带 python3。
+          python3 -m pip install --quiet 'pyyaml>=6,<7'
+          bash tools/check-identity-config.sh
