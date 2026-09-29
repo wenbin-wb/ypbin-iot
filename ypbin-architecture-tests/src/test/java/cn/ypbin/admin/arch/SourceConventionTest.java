@@ -164,7 +164,21 @@ class SourceConventionTest {
         "误报：ReadingValueMapper 是**纯词法映射**（读数文本 → 目标列，无任何 IO；见其类注释），"
             + "与 MyBatis Mapper 无关；规则按「接收者名以 Mapper 结尾」判定，识别不了语义。"
             + "写入器在按 `batch-size` 分块的循环里逐点判类型（数值行/文本行走两条 INSERT），"
-            + "循环体内只有纯函数调用与内存 add，不存在 N+1");
+            + "循环体内只有纯函数调用与内存 add，不存在 N+1",
+        "DeviceImportServiceImpl#deviceMapper.insertBatch",
+        "分块批量插入：CSV 批量导入的行数由上传文件决定（不可控，上限 1 万），"
+            + "按 ROW_INSERT_BATCH_SIZE 切块后每块一次 insertBatch（见 persistDevices），非逐行往返",
+        "DeviceImportServiceImpl#deviceMapper.insert",
+        "块失败后的**逐行重试回退**（persistDevicesRowByRow）：批量插入按块回退到逐行重试，"
+            + "是因为本能力的语义要求「单行失败只让该行失败」——整块回滚会把同块里的好行一起废掉。"
+            + "该路径只在块级写入失败时进入，不是常态往返",
+        "DeviceImportServiceImpl#groupMemberMapper.insertBatch",
+        "分块批量插入：一台设备可归多个分组、一次导入最多 1 万台 ⇒ 归属行数不可控，"
+            + "按 ROW_INSERT_BATCH_SIZE 切块后每块一次 insertBatch（见 persistGroupMembers），非逐行往返",
+        "DeviceImportServiceImpl#rowMapper.insertBatch",
+        "分块批量插入：明细行数 = 导入行数（不可控，上限 1 万），"
+            + "按 ROW_INSERT_BATCH_SIZE 切块后每块一次 insertBatch（见 persistRows），非逐行往返。"
+            + "与 IotEventLogMapper#insertBatch 同一形态");
 
     /**
      * 构建实体继承例外清单。

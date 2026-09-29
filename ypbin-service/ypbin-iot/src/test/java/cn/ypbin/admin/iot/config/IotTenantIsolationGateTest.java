@@ -60,7 +60,11 @@ class IotTenantIsolationGateTest {
         "iot_event_log",
         // 告警与阈值（2026-10-03 追加）：四张表都是租户表；漏登记会让「跨租户读别人告警」
         // 这条最危险的路径**不受本门禁覆盖**（设计 §3.5-N4 明确要求补进本清单）
-        "iot_alert_rule", "iot_alert_rule_point", "iot_alert_instance", "iot_alert_notification");
+        "iot_alert_rule", "iot_alert_rule_point", "iot_alert_instance", "iot_alert_notification",
+        // 设备批量导入（2026-09-30 追加，看板 #7）：批次与明细都是租户表。
+        // 漏登记的后果尤其严重——明细里存的是**原始行内容**（可能含业务备注），
+        // 跨租户读到就等于把别人上传的设备清单整份拿走
+        "iot_device_import_batch", "iot_device_import_row");
 
     /** 平台表（不继承租户基类，必须被忽略——作为「ignoreTable 能返回 true」的自检锚点）。 */
     /**

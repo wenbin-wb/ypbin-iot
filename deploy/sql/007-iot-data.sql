@@ -385,6 +385,70 @@ CREATE TABLE iot_device_credential
 -- ⚠️ 唯一键含 device_id：requestId 由**设备**生成，跨设备不保证唯一（平台下发的 requestId 才是
 --    平台生成的全局唯一值，见 iot_command_instance 的 (tenant_id, request_id)）。
 -- =============================================================
+-- 设备批量导入（CSV）+ 批次管理（2026-09-30 追加，任务看板 #7）
+-- 覆盖：iot_device_import_batch（一次上传 = 一个批次）
+--       iot_device_import_row  （批次下逐行的结果与错误，失败行可下载后改完重传）
+-- 租户表：含 tenant_id 且**不**进 deploy/nacos/ypbin-iot.yaml 的 ignore-tables
+--        （与 iot_device 一致，由租户插件统一追加 tenant_id 条件）。
+-- 门禁口径（如实）：兜住「漏登记」的是 NacosTenantIgnoreConfigTest 的泛化反向门禁
+--        （继承 TenantBaseEntity 的表一律不得进 ignore-tables）与「新增租户表须补进
+--        IotTenantIsolationGateTest 的表清单」这条人工约定；后者是清单式门禁，不补就不覆盖。
+-- 计数自洽：total_rows = success_rows + failed_rows 由应用层在同一事务内落库并断言
+--        （DeviceImportServiceImpl#assertCountsConsistent），不做库级 CHECK——
+--        MySQL 8.0.16 之前忽略 CHECK，而本仓要兼容既有 8.0.x 安装。
+-- 等价性：本文件追加部分与 migration/2026-09-30-iot-device-import-schema.sql 语句等价。
+-- ⚠️ 迁移文件名日期用 09-30（schema 批次）：等价性脚本按文件名排序拼接，
+--    本段 DDL 必须排在 2026-09-30-iot-credential-schema.sql 之后
+--    （凭据段在前，且同为 09-30 ⇒ 取 `device-import-schema` 使其排在 `credential-*` 之后）。
+-- =============================================================
+
+CREATE TABLE iot_device_import_batch
+(
+    id               BIGINT       NOT NULL COMMENT '主键',
+    tenant_id        BIGINT       NOT NULL COMMENT '租户 ID',
+    file_name        VARCHAR(200) NULL COMMENT '上传的原始文件名（原样留痕，便于用户认出是哪一批）',
+    total_rows       INT          NOT NULL DEFAULT 0 COMMENT 'CSV 数据行总数（不含表头与说明行）',
+    success_rows     INT          NOT NULL DEFAULT 0 COMMENT '成功创建的行数',
+    failed_rows      INT          NOT NULL DEFAULT 0 COMMENT '失败的行数',
+    batch_status     VARCHAR(16)  NOT NULL COMMENT '状态码（枚举 code，非 ordinal）：running/success/partial-failed/failed（列名避让基类 status）',
+    error_summary    VARCHAR(1024) NULL COMMENT '错误摘要（面向用户的一句话；全部成功时为 NULL）',
+    start_time       DATETIME     NULL COMMENT '导入开始时刻',
+    end_time         DATETIME     NULL COMMENT '导入结束时刻（NULL=进行中）',
+    operator_user_id BIGINT       NULL COMMENT '操作人用户 ID（审计：谁传的这批）',
+    create_user      BIGINT       NULL COMMENT '创建人',
+    create_time      DATETIME     NULL COMMENT '创建时间',
+    update_user      BIGINT       NULL COMMENT '更新人',
+    update_time      DATETIME     NULL COMMENT '更新时间',
+    status           TINYINT      NOT NULL DEFAULT 1 COMMENT '状态：1 启用 0 停用',
+    is_deleted       TINYINT      NOT NULL DEFAULT 0 COMMENT '逻辑删除',
+    PRIMARY KEY (id),
+    KEY idx_iot_import_batch_tenant_time (tenant_id, create_time)
+) COMMENT 'IoT 设备批量导入批次（一次 CSV 上传对应一行；批次管理页签的数据源）';
+
+CREATE TABLE iot_device_import_row
+(
+    id            BIGINT       NOT NULL COMMENT '主键',
+    tenant_id     BIGINT       NOT NULL COMMENT '租户 ID',
+    batch_id      BIGINT       NOT NULL COMMENT '批次 ID（iot_device_import_batch.id）',
+    row_no        INT          NOT NULL COMMENT '行号（数据行从 1 开始，不含表头与说明行）',
+    raw_line      TEXT         NULL COMMENT '原始行内容（原样留痕；用 TEXT 而非 VARCHAR：单行是「列数×列宽」之和，用 VARCHAR(500) 会把「某一列太长」变成整批导入失败）',
+    row_result    VARCHAR(16)  NOT NULL COMMENT '结果码（枚举 code）：success/failed',
+    error_code    VARCHAR(48)  NULL COMMENT '错误码（DeviceImportErrorCode 的 code；成功行为 NULL）',
+    error_message VARCHAR(512) NULL COMMENT '面向用户的错误信息（含具体是哪一列、哪个取值）',
+    device_id     BIGINT       NULL COMMENT '成功创建出的设备 ID（不加外键：明细是审计留痕，设备后续被删仍要能解释当时发生了什么）',
+    device_code   VARCHAR(64)  NULL COMMENT '该行的设备编码（成功/失败都存：失败行要靠它让用户认出是哪台设备）',
+    create_user   BIGINT       NULL COMMENT '创建人',
+    create_time   DATETIME     NULL COMMENT '创建时间',
+    update_user   BIGINT       NULL COMMENT '更新人',
+    update_time   DATETIME     NULL COMMENT '更新时间',
+    status        TINYINT      NOT NULL DEFAULT 1 COMMENT '状态：1 启用 0 停用',
+    is_deleted    TINYINT      NOT NULL DEFAULT 0 COMMENT '逻辑删除',
+    PRIMARY KEY (id),
+    KEY idx_iot_import_row_batch (tenant_id, batch_id, row_no),
+    KEY idx_iot_import_row_result (tenant_id, batch_id, row_result)
+) COMMENT 'IoT 设备批量导入逐行明细（失败行可导出为 CSV 改后原样重传）';
+
+-- =============================================================
 
 CREATE TABLE iot_mqtt_ingest_receipt
 (
@@ -599,3 +663,26 @@ CREATE TABLE iot_alert_notification
     KEY idx_iot_alert_notification_instance (tenant_id, instance_id),
     KEY idx_iot_alert_notification_due (notify_status, next_retry_ts)
 ) COMMENT 'IoT 告警通知投递记录（设计 §2.1 表 D；与告警状态分开存，通知全挂时告警仍可见）';
+
+-- =============================================================
+-- 设备批量导入（CSV）+ 批次管理：权限码与菜单（2026-09-30 追加，任务看板 #7）
+-- 权限码**一个**：iot:device:import（上传）。读路径（模板/批次/明细/失败行）沿用 iot:device:list。
+-- id 段：320024 是 id 段内的下一个空位（3200 下已用到 320023，见上一段的 debug 两项）。
+--   2026-09-30 查仓内 SQL 与既有菜单段确认 3200~3207 与 320001~320024/320101~/320201~/320301~/
+--   320701~ 的占用情况：3200 段最大为 320023 ⇒ 新按钮取 320024。
+-- platform_only=0 ⇒ 按 IotMaintenanceAdminGateTest 口径必须**同时**进 sys_role_menu 与
+--   sys_template_menu（后者是租户可授菜单与「防孤儿」父目录补授的依据）。
+-- 挂在 3200「设备台账」下作为按钮码（与影子/标签/可用率/凭据/调试同一做法：
+--   批量导入是设备页内的能力，不另立页面菜单——用户是在设备台账上点「批量导入」）。
+-- ⚠️ 排序约束：本文件名必须排在 2026-10-03-iot-alert-menu.sql 之后（等价性脚本按文件名排序拼接）。
+-- =============================================================
+
+INSERT INTO sys_menu (id, pid, name, type, platform_only, auth_code, title, sort, create_time, status, is_deleted)
+VALUES (320024, 3200, 'IotDeviceImport', 'button', 0, 'iot:device:import', 'page.iot.device.import.title', 24, NOW(), 1, 0);
+
+-- 显式授权给平台管理员角色（role 1）与租户可授菜单（sys_template_menu）
+INSERT INTO sys_role_menu (role_id, menu_id)
+SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (320024);
+
+INSERT INTO sys_template_menu (template_id, menu_id)
+SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (320024);
