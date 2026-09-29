@@ -2,3 +2,8 @@
 .env
 api-key/default_api_key.conf
 *.tmp
+
+# TLS 证书与**私钥**（/opt/emqx/certs）：私钥绝不入库。
+# 生产换正式 CA 证书时同理——证书文件由运维在目标机落盘，仓库只保留生成/校验脚本。
+certs/
+backup/

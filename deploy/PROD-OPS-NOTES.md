@@ -562,3 +562,82 @@ bash /usr/local/sbin/reconcile-prod-vs-main.sh      # 退出码 0=全一致 / 1=
 | 7 | **保留策略的"过期候选"是否继续清理** | 需业务判断 | 2026-09-26 已按批准删掉 13 个过期 rollback tag + 2 个 jar（`/` 85% → **75%**）；**仍未动**的最大可回收项是 `ypbin/ypbin-ai:local`（340.6MB unique，该服务当前未运行，且不属任何保留类别）—— 需你决定是否保留。 |
 | 8 | **新内核（6.8.0-139）上 `zram-swap.service` 的首次运行** | 未验证 | 139 的模块树里 `zram.ko.zst` 与 `modules.dep` **都存在**（已核实），但**没人实跑过**。⇒ 与用户那次内核重启合并，由 `post-reboot-check.sh` 第 7 组判据自动核对；若 FAIL 先看 `journalctl -u zram-swap.service`。 |
 | 9 | **喂数源在"整机重启"后的自启** | 未验证 | 只证明到"单元 `enabled` + `Restart=always` + `kill -9` 自动拉起"。⇒ 同上，合并到那次重启，由 `post-reboot-check.sh` 第 8 组判据自动核对。 |
+
+---
+
+## 10. 邮件（SMTP）配置：存放位置、生效机制与风险登记
+
+> 登记于 2026-09-30（第二批）。**本节不含任何口令/授权码明文**，只登记键名、机制与风险。
+
+### 10.1 配置存在哪（**不是** `.env`，也不是 Nacos）
+
+邮件参数**不在** `deploy/.env`、**不在** Nacos 活配置，而是存在**业务库表**里：
+
+| 库 | 表 | 组 |
+|---|---|---|
+| `ypbin_admin` | `sys_config` | `config_group = 'mail'` |
+
+**7 个键**（表内 `config_key` 字面量，全大写下划线）：
+
+`MAIL_HOST`、`MAIL_PORT`、`MAIL_SSL_ENABLED`、`MAIL_USERNAME`、`MAIL_PASSWORD`、`MAIL_FROM`、`MAIL_FROM_NAME`
+
+- 读取方：`ypbin-system` 的 `DbMailConfigProvider`（实现 starter 的 `MailConfigProvider`），逐键读
+  `SysConfigService.getString/getInt/getBoolean`，键名带默认值兜底（`MAIL_PORT` 默认 `465`、
+  `MAIL_SSL_ENABLED` 默认 `true`）。
+- 消费方：`MailService`（`MailController` 的测试发送 → `system:mail:test`；以及 `SystemClientImpl`
+  的 `/mail-send` 内部端点 —— **iot 告警邮件正是经这条 Feign 链路**）。
+- ⚠️ `MAIL_PASSWORD` 属敏感键，`SysConfigServiceImpl.toResp()` 会把它的值回显成**空串**
+  （列表/详情接口看不到真值，这是有意的）。
+
+### 10.2 怎么改、怎么生效（**两种路径，机制完全不同**）
+
+| 路径 | 操作 | 生效机制 | 是否需要重启 |
+|---|---|---|---|
+| **A. 平台 UI**（推荐） | `系统管理 → 系统参数` → 页签 `mail` → 改值 → 保存 | `SysConfigServiceImpl.update()` → `SysCache.evictConfig(key)`（逐键失效 Redis 缓存）→ `publishConfigChanged(group)` → `ConfigChangedEvent` → `ConfigChangedEventListener.onConfigChanged`（`@TransactionalEventListener(AFTER_COMMIT)`）→ `configService.refreshCache()` 重建本地快照 | **不需要**，保存即生效 |
+| **B. 直连 SQL** | 直接 `UPDATE sys_config …` | **绕过了**上面的接口与事件 ⇒ 本地快照 `cache` 不会刷新 | **必须重启 `ypbin-system`** 才生效 |
+
+> ⚠️ **踩坑点**：路径 B 改完不重启，`DbMailConfigProvider` 读到的仍是**旧快照**，
+> 表现为「库里明明改了但发信仍用旧值」——很容易误判成"配置没写进去"。**改邮件参数优先用 UI。**
+
+重启口径（只动一个服务，不要全量 `up -d`）：
+
+```bash
+cd /opt/ypbin/ypbin-iot/deploy
+docker compose -p deploy -f docker-compose.yml -f docker-compose.override.yml up -d --no-deps ypbin-system
+```
+
+### 10.3 ⚠️ 风险登记：**当前无声明式来源、无自动备份**（R8 主动提示）
+
+**现状（事实）**：
+
+1. 这 7 个键**只存在于运行库**`ypbin_admin.sys_config` 里 —— 仓库、`.env`、Nacos、`install.sh`
+   全都**没有**它们的声明式定义 ⇒ **生产库是该配置的唯一真值来源**。
+2. **没有自动备份**：`sys_config` 不在任何定时 dump / 快照流程里（§7 的回滚资产是手工产物）。
+   一旦库损坏或误 `DELETE`，配置**不可从仓库重建**（只能重新申请授权码）。
+3. **不做对账**：`reconcile-prod-vs-main.sh` 只覆盖 13 个文件（脚本/单元/配置），**不含库表**。
+4. **两个库表项与其它配置不同构**：`MAIL_PASSWORD` 是**真实可用凭据**（QQ 授权码），
+   按全局 R 的"真实凭据零入库"精神，它现在**确实入库了**（落在业务库里）。
+   这是平台既有设计（starter 的 `MailConfigProvider` 就是这样读的），**不是本轮引入的**，
+   但必须登记：**库备份 = 凭据备份**，库导出物的保管级别应与凭据一致。
+
+**建议（按性价比排序，均未实施）**：
+
+| 优先级 | 建议 | 说明 |
+|---|---|---|
+| 高 | 改邮件参数**一律走 UI**，改完在页面点一次测试发送 | 即时生效 + 当场验证，避免路径 B 的"改了不生效"陷阱 |
+| 中 | 把 `mail` 组纳入**变更前备份**例行流程（导出 600 文件到 `/root/sysconfig-backup/`） | 与 §7 回滚资产同口径；本轮已按此做法留下样本 |
+| 中 | 为 `sys_config` 的 `mail` 组加**周期性快照**（cron dump，600 权限，落 `/root`） | 消除「唯一真值无备份」这个单点 |
+| 低 | 长期考虑把邮件凭据移出业务库（如 `.env` + 环境变量注入，与 EMQX/Nacos 凭据同口径） | 属架构变更，需立项；**当前不改** |
+
+### 10.4 排障速查（怎么判断"邮件到底是配置问题还是凭据问题"）
+
+看 `iot_alert_notification` 的 `last_error` 文本即可分层定位：
+
+| `last_error` 形态 | 定位 |
+|---|---|
+| `邮件未配置或配置不完整（缺少 host/username）` | **配置面**：`sys_config` 缺键/空值（或改了 SQL 没重启） |
+| `系统服务返回失败：邮件发送失败：Authentication failed` | **凭据面**：已读到配置、已连到 SMTP，**卡在 AUTH** ⇒ 授权码/账号状态问题 |
+| 投递行 `SENT` | 平台侧已交出 SMTP（**对方收件箱是否真收到，平台无法证明** ⇒ 需人自查） |
+
+> ⚠️ QQ 邮箱返回 `535` 时**不要反复重试**（会触发风控、甚至锁账号）。平台自带退避
+> （30s → 2min → 10min，`attempt` 上限后转 `GIVEN_UP`），**不要去手工催**。
