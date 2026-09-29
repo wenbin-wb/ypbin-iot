@@ -11,6 +11,10 @@ package cn.ypbin.admin.iot.alert;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import cn.ypbin.admin.iot.entity.IotAlertInstance;
 import cn.ypbin.admin.iot.entity.IotAlertNotification;
 import cn.ypbin.admin.iot.entity.IotAlertRule;
@@ -19,11 +23,18 @@ import cn.ypbin.admin.iot.enums.AlertNotifyEvent;
 import cn.ypbin.admin.iot.enums.AlertNotifyStatus;
 import java.time.LocalDateTime;
 import java.util.List;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 /**
  * 通知投递意图生成的用例（设计 §2.4 投递模型第 1/4 条 + §3.4 的 S6/S7 相关面）。
+ *
+ * <p><b>WARN 必须被断言</b>（2026-09-30 「无收件人只落 GIVEN_UP、运维无人知晓」事故整改）：
+ * 此前这条路径**只写 DB**，没人主动查表。本类用 logback {@link ListAppender} 捕获 WARN 并逐条断言
+ * ——**删掉 {@code AlertNotifyPlanner#logUnsendable} 里的 WARN，对应用例必然转红**。</p>
  *
  * @author wenbin
  * @since 2026-10-03
@@ -35,6 +46,31 @@ class AlertNotifyPlannerTest {
     private final AlertProperties properties = new AlertProperties();
 
     private final AlertNotifyPlanner planner = new AlertNotifyPlanner(properties);
+
+    private ListAppender<ILoggingEvent> logAppender;
+
+    private Logger plannerLogger;
+
+    @BeforeEach
+    void attachLogCapture() {
+        plannerLogger = (Logger) LoggerFactory.getLogger(AlertNotifyPlanner.class);
+        logAppender = new ListAppender<>();
+        logAppender.start();
+        plannerLogger.addAppender(logAppender);
+    }
+
+    @AfterEach
+    void detachLogCapture() {
+        plannerLogger.detachAppender(logAppender);
+    }
+
+    /** 捕获到的 WARN 文本（只要 WARN）。 */
+    private List<String> warnMessages() {
+        return logAppender.list.stream()
+            .filter(event -> event.getLevel() == Level.WARN)
+            .map(ILoggingEvent::getFormattedMessage)
+            .toList();
+    }
 
     private static IotAlertInstance instance() {
         IotAlertInstance instance = new IotAlertInstance();
@@ -89,6 +125,50 @@ class AlertNotifyPlannerTest {
             assertThat(row.getLastError()).contains("没有可用的收件人");
             assertThat(row.getNextRetryTs()).isNull();
         });
+    }
+
+    @Test
+    @DisplayName("★ 无收件人 ⇒ 必须打 WARN 且含租户/规则/设备/渠道/原因码与可执行指引（删掉该 WARN 本用例必转红）")
+    void unresolvableTargetLogsVisibleWarn() {
+        IotAlertInstance instance = instance();
+        instance.setDeviceId(9300001L);
+        IotAlertRule rule = rule(null, null);
+        rule.setRuleName("遗留测试规则x");
+
+        planner.plan(instance, rule, "INBOX,EMAIL", null, AlertNotifyEvent.FIRING, NOW);
+
+        // 两个渠道各一条 WARN（INBOX + EMAIL），缺口一个渠道就是漏报
+        assertThat(warnMessages()).as("无收件人必须每渠道一条 WARN：删掉 logUnsendable 的 WARN 必转红")
+            .hasSize(2);
+        assertThat(warnMessages()).allSatisfy(message -> {
+            assertThat(message).contains("NO_RECIPIENT");
+            assertThat(message).contains("tenantId=1");
+            assertThat(message).contains("ruleId=7");
+            assertThat(message).contains("ruleName=遗留测试规则x");
+            assertThat(message).contains("deviceId=9300001");
+            assertThat(message).contains("instanceId=555");
+            // 可执行指引：告诉运维去哪儿填/配，而不是只说「失败了」
+            assertThat(message).contains("通知对象");
+            assertThat(message).contains("ypbin.alert.notify-fallback-emails");
+            assertThat(message).contains("ypbin.alert.notify-fallback-inbox-user-ids");
+        });
+        assertThat(warnMessages()).anySatisfy(message -> assertThat(message).contains("channel=INBOX"));
+        assertThat(warnMessages()).anySatisfy(message -> assertThat(message).contains("channel=EMAIL"));
+    }
+
+    @Test
+    @DisplayName("★ 无收件人不改变既有行为：仍落 GIVEN_UP、不重试、不产生 PENDING（WARN 只是可观测性补充）")
+    void unresolvableTargetKeepsBehaviorUnchangedDespiteWarn() {
+        List<IotAlertNotification> rows = planner.plan(instance(), rule(null, null), "INBOX,EMAIL", null,
+            AlertNotifyEvent.FIRING, NOW);
+        assertThat(rows).hasSize(2);
+        assertThat(rows).allSatisfy(row -> {
+            assertThat(row.getNotifyStatus()).isEqualTo(AlertNotifyStatus.GIVEN_UP.getCode());
+            assertThat(row.getNextRetryTs()).isNull();
+            assertThat(row.getTarget()).isEmpty();
+            assertThat(row.getAttempt()).isEqualTo(properties.getNotifyMaxAttempt());
+        });
+        assertThat(warnMessages()).hasSize(2);
     }
 
     @Test
