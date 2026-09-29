@@ -17,6 +17,13 @@
 #   etc/base.hocon < cluster.hocon < etc/emqx.conf < **环境变量**
 #   ⇒ 本文件挂载的 emqx.conf 是 ACL/认证/监听/限量的唯一真源；
 #     仅「口令类」值走环境变量（.env，600，不入库），避免密钥进配置模板。
+#
+# commands:
+#   compose-up:    cd /opt/emqx && docker compose up -d emqx
+#   gen-certs:     bash /opt/emqx/gen-certs.sh                 # 自签 CA + 服务端证书（幂等；仅开发测试期）
+#   tls-selfcheck: bash /opt/emqx/emqx-tls-selfcheck.sh        # TLS 8883 验收（握手 + 鉴权 + 凭据连接）
+#   tls-rollback:  bash /opt/emqx/emqx-tls-rollback.sh         # 一行回滚（撤回 8883 发布并重建容器）
+#   watch:         bash /opt/emqx/emqx-mqtt-expose-watch.sh    # 只读巡检（含 8883 判据；只告警不自愈）
 # =============================================================================
 
 name: emqx-edge
@@ -73,7 +80,26 @@ services:
       #   纵深防御的 INPUT 规则，**不足以**收回端口）；生产前必须收回或改 TLS 8883 + 限来源 + 限流。
       # ─────────────────────────────────────────────────────────────────────────
       - "${EMQX_MQTT_BIND_ADDR:-127.0.0.1}:1883:1883"
-      # 8883(TLS) / 8083 / 8084（WS/WSS）/ 4370 / 5370（Erlang distribution）**一律不发布**。
+      # ─────────────────────────────────────────────────────────────────────────
+      # 8883：**MQTT over TLS**（2026-09-30 启用；看板 #9 的第一步）。
+      #
+      # · 与 1883 **并存**（两个 listener 各自独立，容器内分别监听 1883/8883）——
+      #   本批**不**收回 1883（收回需用户在云安全组操作，属下一步）。
+      # · 与 1883 **同口径**：默认 `127.0.0.1`（fail-closed），.env 丢失时绝不静默对外；
+      #   开发测试期对外由 `/opt/emqx/.env` 的 `EMQX_MQTT_TLS_BIND_ADDR=0.0.0.0` **显式**打开。
+      # · 容器内的开关是 `emqx.conf` 的 `listeners.ssl.default.enable`（**那一层才是真开关**；
+      #   只改这里不发布 = 端口不进 DNAT，外部连不上）。
+      # · 🔴 真闸门仍是「绑定地址 + 云安全组」（Docker 发布端口不经 INPUT/ufw，见 §3.1）。
+      #   ⚠️ **云安全组当前未放行 8883**（从生产机实测 CLOSED）⇒ 外部设备要经公网连 8883，
+      #   **必须先在云控制台放行 tcp/8883**，否则连不上。详见 docs/EMQX-DEPLOY.md §3.2。
+      # · 证书：/opt/emqx/certs（自签 CA + 服务端证书，SAN 含 43.242.200.8/ypbin-emqx.local/localhost）。
+      #   ⚠️ **自签证书仅开发测试期可用**，生产必须换正式 CA 证书（替换步骤见 §3.2）。
+      #   证书目录以**只读**方式挂载，私钥 600、目录 700，容器内 uid 1000(emqx) 所属。
+      # · 回滚一行：`EMQX_MQTT_TLS_BIND_ADDR=127.0.0.1` + `listeners.ssl.default.enable=false`
+      #   再 `docker compose up -d emqx`（等价物：`bash /opt/emqx/emqx-tls-rollback.sh`）。
+      # ─────────────────────────────────────────────────────────────────────────
+      - "${EMQX_MQTT_TLS_BIND_ADDR:-127.0.0.1}:8883:8883"
+      # 8083 / 8084（WS/WSS）/ 4370 / 5370（Erlang distribution）**一律不发布**。
 
     volumes:
       # 持久化（官方要求持久化 data 与 log）
@@ -83,6 +109,9 @@ services:
       - ./emqx.conf:/opt/emqx/etc/emqx.conf:ro
       # API Key 预置文件（**启动前由 .env 生成，600，gitignore，不得入库**）
       - ./api-key/default_api_key.conf:/opt/emqx/etc/default_api_key.conf:ro
+      # TLS 证书目录（自签 CA + 服务端证书 + 私钥）。**只读挂载**，宿主侧 700/600。
+      # ⚠️ 私钥**不得入库**（见 deploy/emqx/.gitignore）；生产换正式 CA 证书时只替换宿主侧文件。
+      - ./certs:/opt/emqx/etc/certs-ypbin:ro
 
     # 🔴 必须设上限，避免将来与别人抢内存。该机 15991MB/available ~14GB（2026-09-27 实测），
     #    给 2g 的理由：① 单节点 + 目标规模 ≤500 连接（阶段②实测）；② 设计 §8.3 的 512m 是

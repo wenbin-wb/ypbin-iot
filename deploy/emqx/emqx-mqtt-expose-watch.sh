@@ -17,7 +17,9 @@
 #   A1 匿名被拒（**安全红线**）：EMQX `client.auth.anonymous` 必须恒为 0。
 #      > 0 说明有客户端**以匿名身份通过了认证** ⇒ 鉴权配置被改坏，必须立刻查。
 #   A2 管理面未对外：`EMQX_DASHBOARD_BIND_ADDR` 必须是回环，且宿主不得有 `0.0.0.0:18093` 监听。
-#   A3 未开的端口确实没开：宿主不得有 8883/8083/8084 监听（容器内应为 enable=false）。
+#   A3 未开的端口确实没开：宿主不得有 8083/8084 监听（容器内应为 enable=false）。
+#      ⚠️ **8883 已于 2026-09-30 启用**（看板 #9 第一步）⇒ 它不再属于本判据，
+#         改由 **A6** 判（声明一致 + 握手真完成 + 证书未过期）。别把 8883 再加回这里。
 #   A4 声明与现实一致（**有效闸门层**）：`.env` 声明 0.0.0.0 ⇒ 宿主必须有 `0.0.0.0:1883` 监听，
 #      **且** Docker 的 `nat/DOCKER` 里要有"面向非回环目的"的 DNAT（= 真会把外部流量转给容器）；
 #      声明 127.0.0.1 ⇒ 宿主不应有非回环监听、也不应有面向外部的 DNAT。**不一致就是 ALERT**
@@ -45,7 +47,10 @@ set -uo pipefail
 
 PORT=1883
 DASH_PORT=18093
-CLOSED_PORTS="8883 8083 8084"
+# 仍应保持关闭的端口（WS/WSS 未开）。⚠️ **8883 已于 2026-09-30 移出本列表**
+#   —— 它现在由 A6 按"与 .env 声明一致 + 握手真能完成"来判，而不再是"必须没监听"。
+CLOSED_PORTS="8083 8084"
+TLS_PORT=8883
 # 允许覆盖（便于**变异验证**：用一个假 .env / 假 BASE_URL 证明判据真的会咬人，而不必改线上配置）
 MW_ENV="${MW_ENV:-/opt/emqx/.env}"
 BASE_URL="${BASE_URL:-http://127.0.0.1:18093}"
@@ -89,7 +94,9 @@ rule_sources() {       # 打印 tcp/$PORT 放行规则的来源集合（"无 -s"
 
 DECLARED_MQTT="$(env_val EMQX_MQTT_BIND_ADDR)"
 DECLARED_DASH="$(env_val EMQX_DASHBOARD_BIND_ADDR)"
-notes+=("声明 EMQX_MQTT_BIND_ADDR=${DECLARED_MQTT:-NA}、EMQX_DASHBOARD_BIND_ADDR=${DECLARED_DASH:-NA}")
+# 8883：**未声明即为 compose 默认值 127.0.0.1（fail-closed）**，与 compose 的 `:-127.0.0.1` 同口径
+DECLARED_TLS="$(env_val EMQX_MQTT_TLS_BIND_ADDR)"; DECLARED_TLS="${DECLARED_TLS:-127.0.0.1}"
+notes+=("声明 EMQX_MQTT_BIND_ADDR=${DECLARED_MQTT:-NA}、EMQX_DASHBOARD_BIND_ADDR=${DECLARED_DASH:-NA}、EMQX_MQTT_TLS_BIND_ADDR=${DECLARED_TLS:-NA}")
 
 # ── A1：匿名连接必须恒为 0（安全红线）────────────────────────────────────────
 if [ "$USE_API" -eq 1 ]; then
@@ -150,8 +157,9 @@ done
 
 # ── A4：声明与现实一致（有效闸门层）──────────────────────────────────────────
 # Docker 是否会把**外部**流量转给容器：看 nat/DOCKER 里有没有"目的不是 127.0.0.1/32"的 1883 DNAT。
-dnat_external() {
-  iptables -t nat -S DOCKER 2>/dev/null | grep -- "--dport $PORT -j DNAT" \
+dnat_external() { # $1=port（默认 $PORT，供 A6 复用；与 A4 同一判据，避免两处各写一套漂移）
+  local p="${1:-$PORT}"
+  iptables -t nat -S DOCKER 2>/dev/null | grep -- "--dport $p -j DNAT" \
     | grep -qv -- '-d 127\.0\.0\.1/32'
 }
 sources="$(rule_sources | tr '\n' ' ')"
@@ -189,6 +197,87 @@ else
   ok_note "A5 宿主 INPUT 无 tcp/$PORT 放行（纵深防御缺失；对 Docker 发布端口不影响可达性）"
 fi
 
+# ── A6：8883（MQTT over TLS）—— 声明一致性 + 握手真完成（2026-09-30 新增）─────
+# 本判据**只告警不自愈**（与全脚本同一口径）。它回答三个问题：
+#   ① 声明与监听是否一致（和 A4 同构，只是换成 8883）；
+#   ② **TLS 是否真的能握手**（"端口在监听"不等于"证书能协商"——证书过期/私钥读不到/
+#      版本不匹配都表现为"端口开着但连不上"）；
+#   ③ 证书离到期还有多久（自签**不会**自动续期，这是最容易静默爆掉的一项）。
+# ⚠️ 判据口径：这里只验**TLS 层**（握手 + 证书），不做 MQTT/CONNACK 层断言——
+#    后者由 emqx-tls-selfcheck.sh 负责。两者分工写清楚，避免"巡检绿 = MQTT 也能连"的误读。
+tls_probe() { # tls_probe <host> → 成功(0)并把摘要放 TLS_SUMMARY
+  TLS_SUMMARY=""
+  command -v openssl >/dev/null 2>&1 || return 1
+  local out rc
+  out="$(printf 'Q' | timeout 10 openssl s_client -connect "${1}:${TLS_PORT}" \
+          -servername "$1" 2>&1)"; rc=$?
+  [ "$rc" -ne 0 ] && return 1
+  local proto verify
+  proto="$(printf '%s' "$out" | sed -n 's/^ *Protocol *: *//p' | head -1)"
+  verify="$(printf '%s' "$out" | sed -n 's/^ *Verify return code: *//p' | head -1)"
+  [ -z "$proto" ] && return 1
+  TLS_SUMMARY="protocol=${proto}；Verify return code=${verify:-（无）}"
+  return 0
+}
+
+tls_addrs="$(host_listen_addr "$TLS_PORT" | tr '\n' ' ')"
+case "$DECLARED_TLS" in
+  0.0.0.0)
+    if has_listen_on "0.0.0.0:$TLS_PORT"; then
+      ok_note "A6 宿主监听 0.0.0.0:$TLS_PORT 在（与声明一致）"
+    else
+      alert "A6 🔴 声明 TLS 对外（0.0.0.0）但宿主没有 0.0.0.0:$TLS_PORT 监听 ⇒ 外部连不上（绑定层没生效）"
+    fi
+    if dnat_external "$TLS_PORT"; then
+      ok_note "A6 nat/DOCKER 存在面向非回环的 $TLS_PORT DNAT（外部流量会被转给容器）"
+    else
+      alert "A6 🔴 声明 TLS 对外但 nat/DOCKER 没有面向外部的 $TLS_PORT DNAT ⇒ Docker 不会转发外部流量"
+    fi
+    ;;
+  127.0.0.1)
+    if any_listen_any_addr "$TLS_PORT"; then
+      alert "A6 🔴 声明 TLS 只绑回环，但宿主存在非回环 $TLS_PORT 监听：$tls_addrs ⇒ 静默漂移成对外暴露"
+    else
+      ok_note "A6 声明 TLS 只绑回环且无非回环 $TLS_PORT 监听"
+    fi
+    if dnat_external "$TLS_PORT"; then
+      alert "A6 🔴 声明 TLS 只绑回环，但 nat/DOCKER 仍有面向外部的 $TLS_PORT DNAT ⇒ 回滚没落到 Docker 层"
+    else
+      ok_note "A6 nat/DOCKER 无面向外部的 $TLS_PORT DNAT（与只绑回环一致）"
+    fi
+    ;;
+  *) alert "A6 🔴 EMQX_MQTT_TLS_BIND_ADDR='$DECLARED_TLS' 不受支持（期望 0.0.0.0/127.0.0.1）" ;;
+esac
+
+# 握手：只要端口有监听就必须能握（否则是"开着但不可用"的最坏形态）
+if [ -n "$tls_addrs" ]; then
+  if tls_probe 127.0.0.1; then
+    ok_note "A6 TLS 握手成功（127.0.0.1:$TLS_PORT；$TLS_SUMMARY）"
+  else
+    alert "A6 🔴 宿主 $TLS_PORT 有监听但 **TLS 握手失败** ⇒ 证书/私钥/版本有问题，设备连不上（查 docker logs ypbin-emqx | grep -i ssl）"
+  fi
+  # 证书到期：自签不自动续期，<30 天告警
+  if command -v openssl >/dev/null 2>&1 && [ -r /opt/emqx/certs/server.crt ]; then
+    end="$(openssl x509 -in /opt/emqx/certs/server.crt -noout -enddate 2>/dev/null | cut -d= -f2)"
+    if [ -n "$end" ]; then
+      left=$(( ( $(date -d "$end" +%s 2>/dev/null || echo 0) - $(date +%s) ) / 86400 ))
+      if [ "$left" -lt 0 ]; then
+        alert "A6 🔴 TLS 服务端证书**已过期**（$end）⇒ 客户端握手会失败"
+      elif [ "$left" -lt 30 ]; then
+        alert "A6 ⚠️ TLS 服务端证书 $left 天后到期（$end）—— 自签不自动续期，请排期重签（gen-certs.sh --force）"
+      else
+        ok_note "A6 TLS 服务端证书有效期剩余 $left 天（至 $end）"
+      fi
+    else
+      uneval "A6 读不到 /opt/emqx/certs/server.crt 的有效期"
+    fi
+  else
+    uneval "A6 读不到 /opt/emqx/certs/server.crt（无法判到期）"
+  fi
+else
+  ok_note "A6 宿主 $TLS_PORT 无监听（8883 未对外发布）—— 跳过握手判据"
+fi
+
 # ── 输出 ─────────────────────────────────────────────────────────────────────
 echo "emqx-mqtt-expose-watch @ $now"
 for n in "${notes[@]}"; do echo "  · $n"; done
@@ -206,5 +295,5 @@ if [ "${#unevaluable[@]}" -gt 0 ]; then
   for u in "${unevaluable[@]}"; do echo "  ? $u"; done
   exit 3
 fi
-echo "判定: OK（1883 暴露面与声明一致，且匿名仍被拒、管理面未对外）"
+echo "判定: OK（1883/8883 暴露面与声明一致、TLS 握手可完成、匿名仍被拒、管理面未对外）"
 exit 0
