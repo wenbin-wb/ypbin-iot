@@ -23,6 +23,7 @@ import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.core.exception.GlobalErrorCode;
 import cn.ypbin.starter.crud.model.PageResult;
 import cn.ypbin.starter.crud.service.BaseServiceImpl;
+import cn.ypbin.starter.data.core.EntityStatus;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import java.util.List;
 import org.springframework.stereotype.Service;
@@ -100,6 +101,28 @@ public class IotDeviceServiceImpl extends BaseServiceImpl<IotDeviceMapper, IotDe
         tenantLedgerService.bumpConfigEpochOfCurrentTenant();
     }
 
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void updateStatus(Long id, Integer status) {
+        IotDevice device = getById(id);
+        if (device == null) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "设备不存在：" + id);
+        }
+        // 只接受 EntityStatus 的两个取值：非法值落到 DB 会变成「既非启用也非停用」的第三态，
+        // 而规格下发只认 status=1 ⇒ 等于把设备静默停采。写入侧挡住，不靠下游兜。
+        if (!EntityStatus.ENABLED.getCode().equals(status) && !EntityStatus.DISABLED.getCode().equals(status)) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "状态取值非法（仅支持 0 停用 / 1 启用）：" + status);
+        }
+        IotDevice update = new IotDevice();
+        update.setId(id);
+        update.setStatus(status);
+        updateById(update);
+        // 停用/启用都改变「采什么」⇒ 必须推进台账版本号，否则接入侧要等安全网周期才发现
+        // （见 IotDeviceServiceImpl 类注释与 ROADMAP 的 G8/R8-9）。
+        notifyConfigChanged();
+    }
+
     /**
      * 校验绑定产品存在且物模型已发布（§4.1：设备绑定的是已发布版本）。
      *
@@ -119,6 +142,9 @@ public class IotDeviceServiceImpl extends BaseServiceImpl<IotDeviceMapper, IotDe
     /**
      * 请求字段应用到实体（新增/编辑共用）。
      *
+     * <p>{@code status} 为 {@code null} 时**不动**启停位：新增交给 DB 默认值 {@code 1}，
+     * 编辑时保留原值——否则一个不含该字段的旧版表单调用（如只改备注）会把设备静默改成停用。</p>
+     *
      * @param device 实体
      * @param req    请求
      */
@@ -130,6 +156,9 @@ public class IotDeviceServiceImpl extends BaseServiceImpl<IotDeviceMapper, IotDe
         device.setProductId(req.getProductId());
         device.setProductVersion(req.getProductVersion());
         device.setRemark(req.getRemark());
+        if (req.getStatus() != null) {
+            device.setStatus(req.getStatus());
+        }
     }
 
     /**
@@ -168,6 +197,7 @@ public class IotDeviceServiceImpl extends BaseServiceImpl<IotDeviceMapper, IotDe
         resp.setProductId(entity.getProductId());
         resp.setProductVersion(entity.getProductVersion());
         resp.setOnlineStatus(entity.getOnlineStatus());
+        resp.setStatus(entity.getStatus());
         resp.setLastSeenAt(entity.getLastSeenAt());
         resp.setRemark(entity.getRemark());
         resp.setCreateTime(entity.getCreateTime());

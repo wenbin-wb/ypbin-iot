@@ -52,4 +52,21 @@ public interface IotDeviceService {
      * @param req 设备信息
      */
     void updateDevice(Long id, IotDeviceReq req);
+
+    /**
+     * 启用/停用设备（设备台账里的启停开关）。
+     *
+     * <p>与 {@link #updateDevice} 分开的理由：编辑走的是「整表单提交」，而启停是**单点动作**——
+     * 列表页的开关只改启停位，不该要求调用方回填设备编码/名称/协议/端点（那些字段带
+     * {@code @NotBlank} 校验，回填等于「读到什么就写回什么」，一旦读到的是旧值就静默覆盖别人的修改）。
+     * 独立端点同时让权限与日志语义准确（{@code iot:device:update} + 「切换设备状态」）。</p>
+     *
+     * <p><b>停用即停止采集</b>：本方法推进台账 {@code config_epoch}，接入侧据此重新对账，
+     * 而 {@code DeviceSpecServiceImpl} 只下发 {@code status=1} 的设备 ⇒ 停用设备被解绑、
+     * 其点位订阅随之撤销。</p>
+     *
+     * @param id     设备主键
+     * @param status 启停位：1 启用 / 0 停用（{@code EntityStatus} 的 code）
+     */
+    void updateStatus(Long id, Integer status);
 }

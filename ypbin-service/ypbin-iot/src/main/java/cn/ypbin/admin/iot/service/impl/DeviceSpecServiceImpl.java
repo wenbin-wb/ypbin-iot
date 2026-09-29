@@ -18,6 +18,7 @@ import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.IotPointMappingMapper;
 import cn.ypbin.admin.iot.mapper.IotPropertyMapper;
 import cn.ypbin.admin.iot.service.DeviceSpecService;
+import cn.ypbin.starter.data.core.EntityStatus;
 import cn.ypbin.starter.tenant.core.TenantContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import java.util.ArrayList;
@@ -79,9 +80,14 @@ public class DeviceSpecServiceImpl implements DeviceSpecService {
     }
 
     private List<AccessDeviceSpecResp> assemble(Long tenantId) {
+        // 启停位过滤 = **「全部停用」这条产品能力的落地点**（ROADMAP 四点十一 G7′）：
+        // 台账把设备置为停用（EntityStatus.DISABLED）后，本查询就不再返回它 ⇒ 接入侧本轮对账
+        // 得到「设备消失」⇒ 解绑并撤销其点位订阅。**过滤本身不能删**：删掉它，停用只是台账上的
+        // 一个标记，设备照常被采集（这是变异验证的靶点，见 DeviceSpecServiceImplTest）。
+        // 取值用 EntityStatus 而不是字面量 1：状态码语义集中在枚举里，禁止裸数字（通用代码红线）。
         List<IotDevice> devices = iotDeviceMapper.selectList(
             new LambdaQueryWrapper<IotDevice>()
-                .eq(IotDevice::getStatus, 1)
+                .eq(IotDevice::getStatus, EntityStatus.ENABLED.getCode())
                 .orderByAsc(IotDevice::getId));
         if (devices.isEmpty()) {
             return List.of();

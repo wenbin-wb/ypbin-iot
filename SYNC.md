@@ -26,7 +26,8 @@ mvn -B -ntp -fae clean verify               # 同步后必须重跑门禁
 IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，改动要尽量是「加法一行」。
 **本清单与 `.github/workflows/sync-whitelist.yml` 里的白名单必须保持一致**（改了这里就改那里）。
 
-> **白名单膨胀要记账**：目前 **17** 个文件。每增加一个都是「以后同步时的潜在冲突点」；
+> **白名单膨胀要记账**：目前 **18** 个文件（2026-09-29 由 17 增至 18：新增 `README.md`，理由见下表）。
+> 每增加一个都是「以后同步时的潜在冲突点」；
 > 加之前先问：能不能用新文件/新模块实现？只能改既有文件时才加，并在提交信息里写明理由。
 
 | 文件 | 改动 | 说明 |
@@ -46,6 +47,7 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 | `ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/mapper/SysMessageMapper.java` | 增「按收件人查站内信」与落库辅助查询 | 站内信必须复用既有 `sys_message` 表与 Mapper（不新造站内信链路），查询方法只能加在既有 Mapper 上 |
 | `ypbin-service/ypbin-system/src/test/java/cn/ypbin/admin/system/feign/SystemClientImplUserByIdTest.java`、`SystemClientImplPlatformUserTest.java`、`SystemClientImplLogIngestTest.java` | 构造参数随 `SystemClientImpl` 注入新增，同步补 `mock(SysMessageMapper.class)`/`mock(MailService.class)` | 既有 3 个单测的构造器签名随被测类变化，属**连带更新**（3 个文件共 17 行） |
 | `docs/microservice-deployment.md` | 「初始口令」一句话更正 | **2026-09-26 加**：该句原写「Nacos 控制台默认 `nacos/nacos`」，而本仓已改为随机口令 + 开 auth（`NACOS-AUTH.md`）。留着一句**已不成立**的口令说明会误导运维，故只能改既有文件（无法用新文件表达「原句作废」） |
+| `README.md` | **整体重写为 IoT 版** | **2026-09-29 加**（M-6）：原 README 是 admin 原版（标题、徽章、截图、功能清单全是基座的），**读起来像另一个项目**。这是「仓库门面」性质的内容，**只能用既有文件表达**——新增 `README-IOT.md` 之类只会让访客仍然先看到错误的那个（GitHub 默认渲染 `README.md`）。同时它是**仓库首屏可信度**问题：README 里承诺的能力与实际不符属对外陈述。**代价如实登记**：README 是上游高频改动文件（徽章/截图/功能表），下一次 `git merge upstream/main` 必然冲突，且**必须整体取本仓版本**（不是逐行合并）——这份代价由「门面必须说真话」换取 |
 | `deploy/sql/006-iot-schema.sql`、`007-iot-data.sql` | **新文件** | 全新安装用 |
 | `deploy/sql/migration/*-iot-*.sql` | **新文件**（命名必须含 `-iot-`） | 已上线库用；按文件名排序拼接后与 `006+007` **语句等价**（有 CI 校验）。顺序即结构演进顺序：`device-schema` → `lease-schema` → `menu-data` |
 | `admin-ui`（后续） | 路由/菜单注册 | 前端增量时再补清单 |

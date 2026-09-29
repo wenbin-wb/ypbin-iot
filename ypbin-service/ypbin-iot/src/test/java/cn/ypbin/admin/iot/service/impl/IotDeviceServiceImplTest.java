@@ -10,7 +10,10 @@
 package cn.ypbin.admin.iot.service.impl;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -22,6 +25,8 @@ import cn.ypbin.admin.iot.mapper.IotProductMapper;
 import cn.ypbin.admin.iot.model.req.IotDeviceReq;
 import cn.ypbin.admin.iot.model.query.IotDeviceQuery;
 import cn.ypbin.admin.iot.model.resp.IotDeviceResp;
+import cn.ypbin.starter.core.exception.BusinessException;
+import cn.ypbin.starter.data.core.EntityStatus;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
@@ -30,6 +35,7 @@ import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.test.util.ReflectionTestUtils;
 
 /**
@@ -127,6 +133,103 @@ class IotDeviceServiceImplTest {
         service.removeDevice(1L);
 
         verify(ledgerService, times(3)).bumpConfigEpochOfCurrentTenant();
+    }
+
+    @Test
+    @DisplayName("★ 停用设备必须落库 status=0 并推进版本号（G7′：停用要真的停止采集，不是只写个标记）")
+    void disableMustPersistStatusAndBumpEpoch() {
+        IotDeviceMapper mapper = mock(IotDeviceMapper.class);
+        ReflectionTestUtils.setField(service, "baseMapper", mapper);
+        when(mapper.selectById(1L)).thenReturn(existingDevice());
+
+        service.updateStatus(1L, EntityStatus.DISABLED.getCode());
+
+        ArgumentCaptor<IotDevice> captured = ArgumentCaptor.forClass(IotDevice.class);
+        verify(mapper).updateById(captured.capture());
+        assertThat(captured.getValue().getId()).isEqualTo(1L);
+        assertThat(captured.getValue().getStatus())
+            .as("停用位必须是 EntityStatus.DISABLED 的码值").isEqualTo(EntityStatus.DISABLED.getCode());
+        verify(ledgerService).bumpConfigEpochOfCurrentTenant();
+    }
+
+    @Test
+    @DisplayName("★ 启用设备恢复 status=1（停用→启用必须能回到采集，不许单向）")
+    void enableMustPersistEnabledStatus() {
+        IotDeviceMapper mapper = mock(IotDeviceMapper.class);
+        ReflectionTestUtils.setField(service, "baseMapper", mapper);
+        IotDevice disabled = existingDevice();
+        disabled.setStatus(EntityStatus.DISABLED.getCode());
+        when(mapper.selectById(1L)).thenReturn(disabled);
+
+        service.updateStatus(1L, EntityStatus.ENABLED.getCode());
+
+        ArgumentCaptor<IotDevice> captured = ArgumentCaptor.forClass(IotDevice.class);
+        verify(mapper).updateById(captured.capture());
+        assertThat(captured.getValue().getStatus()).isEqualTo(EntityStatus.ENABLED.getCode());
+        verify(ledgerService).bumpConfigEpochOfCurrentTenant();
+    }
+
+    @Test
+    @DisplayName("非法 status（第三态）必须被拒且不写库：规格下发只认 1，第三态等于静默停采")
+    void illegalStatusMustBeRejectedWithoutWrite() {
+        IotDeviceMapper mapper = mock(IotDeviceMapper.class);
+        ReflectionTestUtils.setField(service, "baseMapper", mapper);
+        when(mapper.selectById(1L)).thenReturn(existingDevice());
+
+        for (Integer bad : new Integer[] {2, -1, null}) {
+            assertThatThrownBy(() -> service.updateStatus(1L, bad))
+                .as("status=%s 必须抛业务异常", bad)
+                .isInstanceOf(BusinessException.class);
+        }
+        verify(mapper, never()).updateById(any(IotDevice.class));
+        verify(ledgerService, never()).bumpConfigEpochOfCurrentTenant();
+    }
+
+    @Test
+    @DisplayName("设备不存在时启停必须报错（不得静默成功）")
+    void statusUpdateOnMissingDeviceMustFail() {
+        IotDeviceMapper mapper = mock(IotDeviceMapper.class);
+        ReflectionTestUtils.setField(service, "baseMapper", mapper);
+        when(mapper.selectById(404L)).thenReturn(null);
+
+        assertThatThrownBy(() -> service.updateStatus(404L, EntityStatus.DISABLED.getCode()))
+            .isInstanceOf(BusinessException.class);
+        verify(mapper, never()).updateById(any(IotDevice.class));
+    }
+
+    @Test
+    @DisplayName("★ status 为 null 的编辑请求不得改动启停位（旧版表单只改备注时不能把设备静默停用）")
+    void updateWithoutStatusMustKeepExistingStatus() {
+        IotDeviceMapper mapper = mock(IotDeviceMapper.class);
+        ReflectionTestUtils.setField(service, "baseMapper", mapper);
+        IotDevice enabled = existingDevice();
+        enabled.setStatus(EntityStatus.ENABLED.getCode());
+        when(mapper.selectById(1L)).thenReturn(enabled);
+
+        IotDeviceReq req = deviceReq();
+        req.setStatus(null);
+        service.updateDevice(1L, req);
+
+        ArgumentCaptor<IotDevice> captured = ArgumentCaptor.forClass(IotDevice.class);
+        verify(mapper).updateById(captured.capture());
+        assertThat(captured.getValue().getStatus())
+            .as("请求未带 status ⇒ 必须保留读到的原值").isEqualTo(EntityStatus.ENABLED.getCode());
+    }
+
+    @Test
+    @DisplayName("带 status 的编辑请求生效（编辑表单里也能直接改启停位）")
+    void updateWithStatusMustApplyIt() {
+        IotDeviceMapper mapper = mock(IotDeviceMapper.class);
+        ReflectionTestUtils.setField(service, "baseMapper", mapper);
+        when(mapper.selectById(1L)).thenReturn(existingDevice());
+
+        IotDeviceReq req = deviceReq();
+        req.setStatus(EntityStatus.DISABLED.getCode());
+        service.updateDevice(1L, req);
+
+        ArgumentCaptor<IotDevice> captured = ArgumentCaptor.forClass(IotDevice.class);
+        verify(mapper).updateById(captured.capture());
+        assertThat(captured.getValue().getStatus()).isEqualTo(EntityStatus.DISABLED.getCode());
     }
 
     private static IotDevice existingDevice() {

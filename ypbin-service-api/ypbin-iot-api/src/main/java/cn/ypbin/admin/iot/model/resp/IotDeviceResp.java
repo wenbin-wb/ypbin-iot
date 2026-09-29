@@ -50,6 +50,14 @@ public class IotDeviceResp {
     /** 最后心跳/上报时刻。 */
     private LocalDateTime lastSeenAt;
 
+    /**
+     * 启停位：{@code EntityStatus} 的 code（1 启用 / 0 停用）。
+     *
+     * <p>与 {@link #onlineStatus} **不是一回事**：那是「设备现在连没连上」的观测值，本字段是运维意图，
+     * 停用后设备不再进入采集规格下发（见 {@code DeviceSpecServiceImpl}）。</p>
+     */
+    private Integer status;
+
     /** 备注。 */
     private String remark;
 

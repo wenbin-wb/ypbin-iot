@@ -9,6 +9,8 @@
  */
 package cn.ypbin.admin.iot.model.req;
 
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
@@ -59,6 +61,20 @@ public class IotDeviceReq {
     /** 绑定物模型版本（如 v1.0，§3.8；可选）。 */
     @Size(max = 32, message = "物模型版本长度不能超过 32")
     private String productVersion;
+
+    /**
+     * 启停位：{@code EntityStatus} 的 code（1 启用 / 0 停用），与实体基类 {@code status} 字段同名同类型。
+     *
+     * <p><b>与 {@code onlineStatus} 不是一回事</b>：{@code onlineStatus} 是设备「现在连没连上」的观测值，
+     * 本字段是运维意图的**写入口**——停用后该设备不再进入采集规格下发（见 {@code DeviceSpecServiceImpl}），
+     * 于是接入侧会把它解绑、停止采集/订阅。</p>
+     *
+     * <p>可选：{@code null} 表示「本次不改启停位」（新增时由 DB 默认值 {@code 1} 兜底），
+     * 这样既有的编辑表单不传该字段时行为不变。</p>
+     */
+    @Min(value = 0, message = "状态取值非法（仅支持 0 停用 / 1 启用）")
+    @Max(value = 1, message = "状态取值非法（仅支持 0 停用 / 1 启用）")
+    private Integer status;
 
     /** 备注。 */
     @Size(max = 500, message = "备注长度不能超过 500")

@@ -2,7 +2,7 @@ name: Sync Whitelist
 
 # 把「与 admin 基座的同步纪律」变成机器检查：
 #   1) 改动的**既有 admin 文件**必须落在白名单内（新增文件不受限——IoT 业务一律加新文件/新模块）；
-#      白名单当前 **10 个文件**（见 SYNC.md 第二节，两边必须一致）；
+#      白名单当前 **18 个文件**（见 SYNC.md 第二节，两边必须一致）；
 #   2) IoT 的 SQL 迁移脚本必须与全新安装脚本语句等价。
 # 注意：`git diff upstream/main --stat` 的字面数字包含**新增文件**，比白名单口径大得多；
 #      本工作流检查的是「改动的既有文件」（--diff-filter=MDR），别把两者混为一谈。
@@ -60,7 +60,14 @@ jobs:
           # 15–17：构造器注入随 13 增加 SysMessageMapper/MailService ⇒ 既有 3 个单测的构造参数同步更新。
           ALLOWED+='ypbin-service/ypbin-system/src/test/java/cn/ypbin/admin/system/feign/SystemClientImplUserByIdTest\.java|'
           ALLOWED+='ypbin-service/ypbin-system/src/test/java/cn/ypbin/admin/system/feign/SystemClientImplPlatformUserTest\.java|'
-          ALLOWED+='ypbin-service/ypbin-system/src/test/java/cn/ypbin/admin/system/feign/SystemClientImplLogIngestTest\.java'
+          ALLOWED+='ypbin-service/ypbin-system/src/test/java/cn/ypbin/admin/system/feign/SystemClientImplLogIngestTest\.java|'
+          # 第 18 项（2026-09-29 加）：README 整体重写为 IoT 版（M-6）。
+          # 无法用新文件实现：GitHub 默认渲染 README.md，新增 README-IOT.md 只会让访客
+          # 仍然先看到 admin 原版（标题/徽章/截图/功能清单全是基座的）；而 README 的
+          # 能力清单属**对外陈述**，与实际不符不能用「另写一份」补救。
+          # 代价如实登记：上游常改 README ⇒ 下次同步必然冲突，且必须整体取本仓版本。
+          # 理由与代价全文见 SYNC.md 第二节对应行。
+          ALLOWED+='README\.md'
           ALLOWED+=')$'
           echo "当前白名单正则：$ALLOWED"
           changed="$(git diff --name-only --diff-filter=MDR upstream/main...HEAD)"
