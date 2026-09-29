@@ -135,6 +135,22 @@ class NacosIdentityConfigTest {
     }
 
     @Test
+    @DisplayName("★ 清洗不得被整块关掉（enabled=false ⇒ 过滤器根本不装配，清洗静默消失）")
+    void gatewaySanitizeMustNotBeDisabled() throws IOException {
+        // 独立复核（2026-09-29）发现的缺口：header-sanitize.enabled 是**条件装配开关**
+        // （jar 内 GatewayAutoConfiguration:64 @ConditionalOnProperty(havingValue="true",
+        // matchIfMissing=true)）⇒ 写成 false 时 HeaderSanitizeGlobalFilter 整个 bean 不装配。
+        // 只看 headers 列表的断言会放过这种写法，故单独钉一条。
+        Map<String, Object> sanitize = dig(loadYaml(GATEWAY_YAML),
+            "ypbin", "gateway", "header-sanitize");
+
+        assertThat(sanitize.get("enabled"))
+            .as("显式写 enabled=false 会让清洗过滤器**完全不被装配**（不是「停用规则」），"
+                + "外部即可自带 X-User-Id / X-Gateway-Signed 直达下游")
+            .isNotEqualTo(false);
+    }
+
+    @Test
     @DisplayName("★ 自检：本门禁读的键名必须真的在 starter 契约里（防键名笔误造成假绿）")
     void keyNamesMustMatchStarterContract() throws IOException {
         // 键名以 jar 内一手核实为准；这里锚定"两个文件都用了同一个键名"这一事实，
