@@ -11,6 +11,7 @@ package cn.ypbin.admin.iot.model.req;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import cn.ypbin.starter.data.core.EntityStatus;
 import jakarta.validation.ConstraintViolation;
 import jakarta.validation.Validation;
 import jakarta.validation.Validator;
@@ -66,6 +67,37 @@ class IotDeviceReqValidationTest {
         req.setProtocol("TCP");
 
         assertThat(violatedFields(req)).contains("protocol");
+    }
+
+    @Test
+    @DisplayName("status 缺省合法：不传表示「本次不改启停位」（旧版表单不带该字段时行为不变）")
+    void statusMayBeAbsent() {
+        IotDeviceReq req = validReq();
+        req.setStatus(null);
+
+        assertThat(violatedFields(req)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("status 只接受 EntityStatus 的两个码值（1 启用 / 0 停用）")
+    void statusAcceptsOnlyEntityStatusCodes() {
+        IotDeviceReq enabled = validReq();
+        enabled.setStatus(EntityStatus.ENABLED.getCode());
+        IotDeviceReq disabled = validReq();
+        disabled.setStatus(EntityStatus.DISABLED.getCode());
+
+        assertThat(violatedFields(enabled)).isEmpty();
+        assertThat(violatedFields(disabled)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("★ status 越界必须被拒：落到 DB 会成第三态，而规格下发只认 1 ⇒ 静默停采")
+    void outOfRangeStatusMustBeRejected() {
+        for (Integer bad : new Integer[] {2, -1, 9}) {
+            IotDeviceReq req = validReq();
+            req.setStatus(bad);
+            assertThat(violatedFields(req)).as("status=%s 必须被拒", bad).contains("status");
+        }
     }
 
     private static Set<String> violatedFields(IotDeviceReq req) {

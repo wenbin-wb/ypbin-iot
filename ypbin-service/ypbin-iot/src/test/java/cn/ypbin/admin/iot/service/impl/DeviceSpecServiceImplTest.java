@@ -23,8 +23,10 @@ import cn.ypbin.admin.iot.entity.IotProperty;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.IotPointMappingMapper;
 import cn.ypbin.admin.iot.mapper.IotPropertyMapper;
+import cn.ypbin.starter.data.core.EntityStatus;
 import cn.ypbin.starter.tenant.core.TenantContext;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import java.math.BigDecimal;
 import java.util.List;
@@ -153,6 +155,67 @@ class DeviceSpecServiceImplTest {
 
         assertThat(seenTenant.get()).as("查设备时租户上下文必须是入参 tenantId")
             .contains(TENANT);
+    }
+
+    @Test
+    @DisplayName("★ 停用设备不进规格下发：查询条件必须带 status=1（去掉该条件 ⇒ 本用例转红）")
+    void disabledDeviceMustBeFilteredOutOfSpecDelivery() {
+        // 为什么必须断言「查询条件」而不是「返回值」：本测试的 mapper 是 mock，返回什么由 stub 决定——
+        // 若只 stub 一个空列表再断言结果为空，那条用例**永远绿**，删掉 status 过滤也照样通过（假绿）。
+        // 唯一咬得住变异的判据是**发给 DB 的 WHERE 子句本身**：它必须含 status = 1。
+        AtomicReference<String> sqlSegment = new AtomicReference<>();
+        when(deviceMapper.selectList(any())).thenAnswer(invocation -> {
+            sqlSegment.set(invocation.<LambdaQueryWrapper<IotDevice>>getArgument(0).getTargetSql());
+            return List.of();
+        });
+
+        assertThat(service.listByTenant(TENANT)).isEmpty();
+
+        assertThat(sqlSegment.get())
+            .as("设备取数必须只取启停位为「启用」的设备（G7′ 停用即停采的落地点）")
+            .contains("status")
+            .contains("=");
+        assertThat(service.listByTenant(TENANT)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("★ 启停位过滤用的是 EntityStatus.ENABLED 的码值 1（裸数字/取值写错 ⇒ 本用例转红）")
+    void specQueryMustFilterByEnabledStatusCode() {
+        AtomicReference<LambdaQueryWrapper<IotDevice>> captured = new AtomicReference<>();
+        when(deviceMapper.selectList(any())).thenAnswer(invocation -> {
+            captured.set(invocation.getArgument(0));
+            return List.of();
+        });
+
+        service.listByTenant(TENANT);
+
+        // ⚠️ 必须先取一次 `getSqlSegment()`：MyBatis-Plus 是**在渲染 SQL 段时才把参数登记进**
+        // `paramNameValuePairs` 的（`eq(...)` 只排好「列 + #{} 占位符」）。不先渲染，
+        // 这里读到的永远是空 Map ⇒ 断言以「空 map 不含 1」的形式**误红**；
+        // 而删掉 status 过滤它反而变绿——那就成了一个方向反了的哨兵。
+        String segment = captured.get().getSqlSegment();
+        assertThat(segment).as("设备取数条件必须引用 status 列").contains("status");
+
+        // 用参数对（列 → 值）而不是整串 SQL 断言：不依赖 MyBatis-Plus 的 SQL 拼写细节，
+        // 但**取值**必须逐字等于枚举码 —— 改成 0（把「只取启用」写成「只取停用」）立刻转红。
+        assertThat(captured.get().getParamNameValuePairs())
+            .as("过滤值必须是 EntityStatus.ENABLED.getCode() = 1")
+            .containsValue(EntityStatus.ENABLED.getCode());
+        assertThat(captured.get().getParamNameValuePairs())
+            .as("绝不能出现停用码 0（那等于整体反转语义）")
+            .doesNotContainValue(EntityStatus.DISABLED.getCode());
+    }
+
+    @Test
+    @DisplayName("停用设备的点位映射不会被顺带查出：设备为空即短路，不发点位查询")
+    void disabledDeviceMustNotTriggerMappingQuery() {
+        // 与上面两条互补：即便过滤条件在，若设备列表为空却仍去查点位，就说明短路被破坏
+        // （而且「全部停用」的租户会每轮发一次空 IN）。
+        when(deviceMapper.selectList(any())).thenReturn(List.of());
+
+        assertThat(service.listByTenant(TENANT)).isEmpty();
+        verify(mappingMapper, never()).selectList(any());
+        verify(propertyMapper, never()).selectBatchIds(any());
     }
 
     private static IotDevice device(Long id) {

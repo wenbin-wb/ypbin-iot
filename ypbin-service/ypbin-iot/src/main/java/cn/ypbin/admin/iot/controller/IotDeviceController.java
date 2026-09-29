@@ -102,4 +102,24 @@ public class IotDeviceController {
         iotDeviceService.updateDevice(id, req);
         return R.ok();
     }
+
+    /**
+     * 启用/停用设备（设备台账的启停开关，G7′）。
+     *
+     * <p>形态与 admin 既有的 {@code PUT /{id}/status/{status}} 一致（如 AI 模型配置、Prompt 模板）：
+     * 单点动作不改整表单，避免把「读到什么就写回什么」变成静默覆盖。停用后该设备不再进入
+     * 采集规格下发（{@code DeviceSpecServiceImpl} 只取 {@code status=1}）⇒ 接入侧解绑并停止采集。</p>
+     *
+     * @param id     设备主键
+     * @param status 启停位：1 启用 / 0 停用
+     * @return 空响应
+     */
+    @PutMapping("/{id}/status/{status}")
+    @SaCheckPermission("iot:device:update")
+    @Idempotent
+    @Log("切换 IoT 设备状态")
+    public R<Void> updateStatus(@PathVariable Long id, @PathVariable Integer status) {
+        iotDeviceService.updateStatus(id, status);
+        return R.ok();
+    }
 }

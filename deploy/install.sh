@@ -1341,7 +1341,37 @@ fi
 # 发布 Nacos 配置（共 6 个：ypbin-common + 5 服务；幂等：已存在则覆盖；使用 Nacos 3 Console 新 API）
 if [ -n "$NACOS_TOKEN" ]; then
   info "导入 Nacos 配置中心（ypbin-common + 5 服务）"
-  NACOS_DIR="$ROOT/ypbin-admin/deploy/nacos"
+  # =============================================================
+  # Nacos 配置模板目录：**带回退 + 失败即报错**（不再静默跳过）
+  #
+  # 为什么需要回退：本仓是 `ypbin-admin` 的 fork，**检出目录名可能不是 `ypbin-admin`**
+  # （fork 惯例叫 `ypbin-iot`）。脚本 [2/7] 会 clone 出 `$ROOT/ypbin-admin`，所以正常路径下
+  # 首选目录一定存在；但**在 fork 检出目录里直接跑**（例如 `bash ypbin-iot/deploy/install.sh`）
+  # 且 ROOT 恰好指向该检出时，`$ROOT/ypbin-admin/deploy/nacos` 不存在。
+  #
+  # 旧行为是**静默跳过**：内层 `if [ -f "$NACOS_DIR/$cfg.yaml" ]` 全为假 ⇒ 循环空转 ⇒
+  # 一个字都不打印，用户以为配置已导入，实际 Nacos 里什么都没有（下次启动业务服务才炸）。
+  # 这就是「静默降级」，按仓库红线必须消除。
+  #
+  # 处置（二选一里选了「回退 + 明确报错」，而不是只报错）：只报错会让 fork 检出**完全无法部署**，
+  # 而回退是无害的——两个候选目录都指向同一份 nacos 模板，取先命中者即可，没有语义歧义。
+  # 回退也不掩盖真问题：两个候选都不存在时**直接 die**（不是 warn 后继续），
+  # 因为「配置没导入」不是可以继续的状态。
+  # =============================================================
+  NACOS_DIR=""
+  for candidate in "$ROOT/ypbin-admin/deploy/nacos" "$ROOT/ypbin-iot/deploy/nacos"; do
+    if [ -d "$candidate" ]; then
+      NACOS_DIR="$candidate"
+      break
+    fi
+  done
+  if [ -z "$NACOS_DIR" ]; then
+    die "找不到 Nacos 配置模板目录（试过 $ROOT/ypbin-admin/deploy/nacos 与 $ROOT/ypbin-iot/deploy/nacos）。
+     配置未导入则业务服务启动时拿不到配置，因此这里直接中止而不是继续。
+     自查：① 检出目录名是否为 ypbin-admin / ypbin-iot 之外的其它名字？此时请用
+     YPBIN_ROOT（或 --root）指向包含 deploy/nacos 的仓库根；② 该仓库是否确实包含 deploy/nacos/。"
+  fi
+  info "Nacos 配置模板目录：$NACOS_DIR"
   # 渲染后的配置含真实凭据：脚本无论正常/异常退出都清掉**本次**产生的临时文件
   # （只删自己 mktemp 出来的那些，不用通配符，避免误删并发进程的文件）
   NACOS_TMP_FILES=""
@@ -1349,6 +1379,13 @@ if [ -n "$NACOS_TOKEN" ]; then
   # 并让上面那个 ERR trap 打出「脚本执行失败于第 N 行」的误导信息（独立复核实测 T7/T8）。
   trap 'for f in $NACOS_TMP_FILES; do rm -f "$f" 2>/dev/null || true; done' EXIT
   for cfg in ypbin-common ypbin-gateway ypbin-auth ypbin-system ypbin-ai ypbin-iot ypbin-access; do
+    # 模板缺失必须出声：这个循环的清单是**硬编码的服务清单**，某个模板不在目录里意味着
+    # 「这个服务的配置永远不会被导入」，而它要到该服务启动时才以「拿不到配置」的形式暴露。
+    # 静默跳过会让 `install.sh` 打印一排「已导入 x.yaml」却少一个，没人会发现。
+    if [ ! -f "$NACOS_DIR/$cfg.yaml" ]; then
+      warn "$cfg.yaml 在 $NACOS_DIR 下不存在 ⇒ **该服务的配置不会被导入**（服务启动时可能拿不到配置）"
+      continue
+    fi
     if [ -f "$NACOS_DIR/$cfg.yaml" ]; then
       # 占位符替换：仓库 nacos yaml 不提交真实密码/凭证，导入前用 .env 实际值填充
       # （仅 ypbin-common.yaml 使用 ${MYSQL_ROOT_PASSWORD}/${REDIS_PASSWORD}/${INTERNAL_TOKEN}；
