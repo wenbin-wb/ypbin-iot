@@ -64,7 +64,13 @@ class IotTenantIsolationGateTest {
         // 设备批量导入（2026-09-30 追加，看板 #7）：批次与明细都是租户表。
         // 漏登记的后果尤其严重——明细里存的是**原始行内容**（可能含业务备注），
         // 跨租户读到就等于把别人上传的设备清单整份拿走
-        "iot_device_import_batch", "iot_device_import_row");
+        "iot_device_import_batch", "iot_device_import_row",
+        // 命令实例与 MQTT 入站回执（2026-09-30 追加，看板 #8 设计复核时发现的**既有门禁缺口**）。
+        // 两者实体均 extends TenantBaseEntity，却一直未登记进本清单 ⇒ 本清单式门禁**不覆盖**它们。
+        // 漏登记的后果：iot_command_instance.payload/reply_payload 是**命令与回执报文体**
+        // （用户自由输入、服务端不过滤内容），跨租户读到等于拿到别人设备的命令内容与回执。
+        // 注：007-iot-data.sql 的 DDL 注释早已点名要求登记，此处补上。
+        "iot_command_instance", "iot_mqtt_ingest_receipt");
 
     /** 平台表（不继承租户基类，必须被忽略——作为「ignoreTable 能返回 true」的自检锚点）。 */
     /**
