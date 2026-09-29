@@ -46,13 +46,50 @@
 
 ⇒ **一期新增独立的平台告警表**（§3.1），与设备告警**物理分离**，避免污染既有语义。
 
-### 1.4 ⚠️ 未核实项（实施前须实测放行）
+### 1.4 ✅ 实测放行结果（**2026-09-30 生产实测，原"未核实"三项已收敛**）
 
-- **`/actuator/metrics` 在生产的真实可用性**：仓内注释称"默认不暴露"已通过配置解决，
-  但**未实测**在容器内 `curl 127.0.0.1:18084/actuator/metrics` 能否读到**真实进程值**
-  （`ALERTING-DESIGN.md:699-711` 登记过"`/actuator/metrics` 未真实进程读值"）⇒ 必须实测。
-- **各指标的实际量级与波动**：健康阈值（如"投递失败率 > X%"）**不能凭感觉定** ⇒ 需先观测一段时间。
-- **告警通知的系统账号**："平台自告警"该发给谁（租户管理员？平台运维？）**属产品决策** ⇒ §5 列出选项待定。
+#### 1.4.1 ✅ `/actuator/metrics` **在生产可读且返回真实进程值**（原设计最大阻塞点已排除）
+
+在生产机（`ypbin-iot` 容器所在宿主机，18084 **只绑 `127.0.0.1`**）实测：
+
+| 探测 | 结果 |
+|---|---|
+| `GET /actuator/health` | `{"groups":["liveness","readiness"],"status":"UP"}` |
+| `GET /actuator/metrics` | 返回指标索引，**含全部 `iot.alert.*` / `iot.ingest.*` / `iot.timeseries.*`** |
+| `iot.alert.evaluate.rounds` | `2007`（**真实累计值**，非 0、非占位） |
+| `iot.alert.evaluate.last_success_ts` | `1.790725224569E12`（**真实 epoch 毫秒**） |
+| `iot.alert.evaluate.lag` | 见 §1.4.2（**动态变化** ⇒ 确为实时 gauge） |
+| `iot.alert.notify.sent` / `.failed` | `3` / `0` |
+
+⇒ **`ALERTING-DESIGN.md:699-711` 曾登记的"未真实进程读值"在现状下不成立**（配置补齐后已可读）。
+**本能力因此可以落地**：判定器直接读 `MeterRegistry`，无需新增任何埋点或外部栈。
+
+#### 1.4.2 ✅ 指标量级已实测 —— **阈值有据可依（不是拍脑袋）**
+
+对 `lag` 做 **24 次 × 10s 采样（约 4 分钟）**，实测：
+
+| 指标 | 实测区间 | 说明 |
+|---|---|---|
+| `iot.alert.evaluate.lag` | **168 – 15,040 ms**（mean 8,406） | **锯齿振荡**：评估器每 15s 跑一轮，lag 自然在 `[0, 15000]` 间来回爬 |
+| `iot.alert.evaluate.rounds` | 每 ~15s **+1** | 评估器健康 |
+| `iot.alert.evaluate.round.failed` | **恒 0**（全程） | 任何增长都有意义 |
+| `iot.alert.notify.failed` | **恒 0**（全程） | 任何增长都有意义 |
+
+> 🔴 **这条实测直接否掉了一个"看起来合理"的阈值**：若按直觉取 `lag > 10s`，
+> 由于锯齿**峰值本身就达 15,040ms**，该规则会**周期性假告警**（每个周期都报一次）⇒
+> 正是设计 §6 R1 警告的"刷屏到无人再看"。
+>
+> **据实测得出的阈值**：评估周期 `evaluate-interval-ms=15000`（`deploy/nacos/ypbin-iot.yaml:84`）
+> ⇒ 取 **`lag > 3 × 周期 = 45s`** 才算"停摆"。实测最大值 15,040ms **远低于** 45s，
+> 留有 **3 倍余量**；且"连续 3 个周期都没成功"本身就是一个**可解释**的判据。
+
+#### 1.4.3 ⏳ 仍未决（**属产品决策，不擅自决定**）
+
+- **平台告警的收件人**：见 §5（一期按 **(c) 只落库不通知** 起步，与他人裁定不冲突）。
+- **外部大盘（Prometheus/Grafana）**：本设计**不涉及**（§2.2 非目标）。
+- **其它指标（notify 失败率、入站丢弃率）的阈值**：当前实测均为恒 0 ⇒
+  **一期采用"增长即告警"**（0 基础上任何增长都值得看），并**在观察期积累数据后再校准** ✗（不预设百分比）。
+
 
 ---
 
@@ -61,13 +98,15 @@
 ### 2.1 目标
 
 1. **平台健康规则**（一期 4 条，全部基于**已存在**的指标，不新增埋点）：
-   | 规则 id | 判据（既有指标） | 阈值初值 | 严重度 |
+   | 规则 id | 判据（既有指标） | **阈值（据 §1.4.2 实测）** | 严重度 |
    |---|---|---|---|
-   | `PLATFORM_EVALUATOR_STALLED` | `iot.alert.evaluate.last_success_ts` 距今超过 N 个周期 | 3× 评估周期 | CRITICAL |
-   | `PLATFORM_EVALUATOR_LAG` | `iot.alert.evaluate.lag` 超阈值 | 待实测 | WARNING |
-   | `PLATFORM_NOTIFY_FAILING` | `iot.alert.notify.failed` 增速 / 失败率 | 待实测 | CRITICAL |
-   | `PLATFORM_INGEST_DROPPING` | `iot.ingest.propertyid.unmapped`+`orphan` 增速 | 待实测 | WARNING |
-   > ⚠️ **阈值必须实测后定**（§1.4）：表中"待实测"**不得**在实施时用拍脑袋数字填。
+   | `PLATFORM_EVALUATOR_STALLED` | `iot.alert.evaluate.lag` 超过阈值（`lag` 为实时 gauge；**`-1` = 从未成功过**，须单独判） | **45 s = 3 × 评估周期(15 s)**；实测最大 15.04 s ⇒ 3 倍余量 | CRITICAL |
+   | `PLATFORM_EVALUATOR_ROUND_FAILED` | `iot.alert.evaluate.round.failed` 增长 | **增长即告警**（实测恒 0） | WARNING |
+   | `PLATFORM_NOTIFY_FAILING` | `iot.alert.notify.failed` 增长 | **增长即告警**（实测恒 0）；失败率待观察期后校准 | CRITICAL |
+   | `PLATFORM_INGEST_DROPPING` | `iot.ingest.propertyid.unmapped` + `orphan` 增长 | **增长即告警**（实测恒 0） | WARNING |
+   > ✅ **阈值已由实测支撑**（§1.4.2），不是拍脑袋：`lag` 的锯齿峰值实测达 **15,040 ms**，
+   > 若按直觉取 10 s 会**周期性假告警**；取 3×周期 = 45 s 则余量 3 倍且判据可解释。
+   > ⚠️ 其余三条当前实测**恒 0** ⇒ 用"增长即告警"；**百分比阈值须待观察期数据再校准**，本设计不预设。
 2. **判定为纯函数**：`(指标快照, 规则) → 判定结果`，零 IO ⇒ 可穷举单测（与 #8 的 `TraceAdviceResolver`、#7 的做法一致）。
 3. **落痕 + 复用通知**：判定结果写入平台告警表（含 `PENDING→FIRING→RESOLVED` 三态，**ACKED 一期不做**——平台告警的"确认"主要是值班动作，二期再谈），通知走**既有**投递链路。
 4. **大盘复用既有端点**：不新建前端大盘组件；文档给出 `/actuator/metrics/*` 的**取数清单**与安全边界说明。
