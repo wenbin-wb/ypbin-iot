@@ -15,6 +15,7 @@ import cn.ypbin.admin.iot.entity.IotAlertRule;
 import cn.ypbin.admin.iot.enums.AlertChannel;
 import cn.ypbin.admin.iot.enums.AlertNotifyEvent;
 import cn.ypbin.admin.iot.enums.AlertNotifyStatus;
+import cn.ypbin.starter.core.util.LogSanitizer;
 import cn.ypbin.starter.data.core.EntityStatus;
 import com.baomidou.mybatisplus.core.toolkit.IdWorker;
 import java.nio.charset.StandardCharsets;
@@ -27,6 +28,8 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 /**
@@ -43,11 +46,26 @@ import org.springframework.stereotype.Component;
  * <p><b>没有收件人时不许静默</b>：规则没配收件人、又取不到创建者与兜底收件人时，仍然落一条
  * {@code GIVEN_UP} 行并写明原因——页面上能回答「为什么我一条都没收到」，而不是什么都没有。</p>
  *
+ * <p><b>而且必须在服务端日志里看得见</b>（2026-09-30 事故整改）：此前这条路径**只写 DB**
+ * （{@code last_error} + {@code GIVEN_UP}），平台侧没人主动看 ⇒ 遗留规则 {@code x}
+ * （{@code notify_targets=NULL}）配平台兜底 {@code notify-fallback-emails=[]} 时，**每 10 分钟
+ * 静默产生一条放弃行**，运维无从知晓。现在同一路径上补一条 WARN（含租户/规则/设备/渠道/原因码与
+ * 可执行指引），使「没人收到告警」这件事在 {@code docker logs ypbin-iot} 里直接可见。</p>
+ *
  * @author wenbin
  * @since 2026-10-03
  */
 @Component
 public class AlertNotifyPlanner {
+
+    private static final Logger log = LoggerFactory.getLogger(AlertNotifyPlanner.class);
+
+    /**
+     * 不可投递原因码：规则未配收件人、回落链（规则创建者 → 平台兜底收件人）也全不可用。
+     *
+     * <p>抽成常量而非内联字面量，是为了让日志与 {@code last_error} 共用同一份文案、避免两处漂移。</p>
+     */
+    static final String REASON_NO_RECIPIENT = "NO_RECIPIENT";
 
     private final AlertProperties properties;
 
@@ -85,10 +103,11 @@ public class AlertNotifyPlanner {
         for (AlertChannel channel : channelSet) {
             Set<String> resolved = resolveTargets(channel, rawTargets, rule);
             if (resolved.isEmpty()) {
-                rows.add(unsendable(instance, channel,
-                    "没有可用的收件人：规则未配收件人、且规则创建者与平台兜底收件人都不可用"
-                        + "（请在规则里填「通知对象」，或联系平台管理员配置 "
-                        + AlertProperties.PREFIX + ".notify-fallback-*-ids）", event, now));
+                String reason = "没有可用的收件人：规则未配收件人、且规则创建者与平台兜底收件人都不可用"
+                    + "（请在规则里填「通知对象」，或联系平台管理员配置 "
+                    + AlertProperties.PREFIX + ".notify-fallback-*-ids）";
+                logUnsendable(instance, rule, channel, REASON_NO_RECIPIENT);
+                rows.add(unsendable(instance, channel, reason, event, now));
                 continue;
             }
             for (String target : resolved) {
@@ -96,6 +115,35 @@ public class AlertNotifyPlanner {
             }
         }
         return rows;
+    }
+
+    /**
+     * 把「不可投递」这件事打到服务端日志（WARN）——**只写 DB 不够**。
+     *
+     * <p>为什么必须有：{@code GIVEN_UP} 行只落在 {@code iot_alert_notification} 表里，运维不会主动查表；
+     * 真实事故中遗留规则未配收件人 + 平台兜底为空 ⇒ 每 10 分钟静默产生一条放弃行，**无人知晓**。
+     * 本方法让它在 {@code docker logs ypbin-iot} 中直接可见，并给出可执行的处理指引。</p>
+     *
+     * <p><b>不打印敏感信息</b>：只记 id/名称/渠道/原因码，**不记收件人明文**（此路径本就没有收件人）；
+     * 规则名与设备 id 经 {@code LogSanitizer} 脱敏，防止脏数据里的换行/控制字符伪造日志行。</p>
+     *
+     * @param instance  实例
+     * @param rule      规则（可为 {@code null}）
+     * @param channel   渠道
+     * @param reasonCode 原因码（便于日志检索与告警规则匹配）
+     */
+    private void logUnsendable(IotAlertInstance instance, IotAlertRule rule, AlertChannel channel,
+                               String reasonCode) {
+        // TODO(board #14): 规则未配通知对象时应在前端给出可见提示（或按需配置兜底收件人），
+        //  避免只落 GIVEN_UP 无人知晓。用户 2026-09-30 决定：本批只加日志 + 此 TODO，
+        //  不实现兜底收件人配置、也不做前端提示。
+        log.warn("[iot] 告警通知不可投递，已放弃（GIVEN_UP）：{} tenantId={} ruleId={} ruleName={} "
+                + "deviceId={} channel={} instanceId={} 指引=请在规则的「通知对象」里填写收件人；"
+                + "或联系平台管理员配置 {}.notify-fallback-emails / {}.notify-fallback-inbox-user-ids",
+            reasonCode, instance.getTenantId(), rule == null ? null : rule.getId(),
+            LogSanitizer.sanitize(rule == null ? null : rule.getRuleName()),
+            LogSanitizer.sanitize(instance.getDeviceId()), channel.getCode(), instance.getId(),
+            AlertProperties.PREFIX, AlertProperties.PREFIX);
     }
 
     /** 幂等键列宽（{@code idempotent_key VARCHAR(191)}）。 */
