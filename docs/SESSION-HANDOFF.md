@@ -44,9 +44,9 @@
 
 | # | 任务 | 备注 |
 |---|---|---|
-| 小修 A | `docs/EMQX-DEPLOY.md:88` 仍写「`8883/8083/8084` 已显式 `enable=false`」✗ **与实机不符**（8883 已启用）⇒ 极小文档 PR 改一行 |
+| 小修 A | ⏳ **仍未做**：`docs/EMQX-DEPLOY.md:88` 仍写「`8883/8083/8084` 已显式 `enable=false`」✗ **与实机不符**（8883 已启用）⇒ 需极小文档 PR 改一行。**注**：`deploy/emqx/emqx.conf` 已于 2026-09-30 修正为 `enable=true`（PR #115，实测 8883 `running=true`），**但该文档尚未同步** ✗ |
 | 小修 B | **云安全组 8883 登记自相矛盾**：仓内写"未放行（生产机实测 CLOSED）"，实测"应用机→`43.242.200.8:8883` TCP 可连通" ⇒ **只读复核**后回写（**不据此宣称公网可达/不可达** ✗） |
-| 清理 C | **远端旧分支**清理（`docs/6b-board`、`chore/board-closeout-6b`、`docs/emqx-decisions`、`docs/fork-ops-notes`、`docs/receipt-corrections`、`docs/deploy-backend-56-fixes`、`chore/iotdb-password-hardening`、`docs/alerting-design` 等）：**逐个先核对"无独有内容"再删** ✓（`docs/emqx-tls-design` 已删 ✓） |
+| 清理 C | **远端旧分支**清理（`docs/6b-board`、`chore/board-closeout-6b`、`docs/emqx-decisions`、`docs/fork-ops-notes`、`docs/receipt-corrections`、`docs/deploy-backend-56-fixes`、`chore/iotdb-password-hardening`、`docs/alerting-design` 等）：**逐个先核对"无独有内容"再删** ✅ **已完成（2026-09-30）**：远端 **114 → 2** 个分支（删 97 个，0 失败）。<br>**⚠️ 过程中发现并修正一个重要前提**：`git config remote.origin.fetch` 原先**只跟踪 `main`** ⇒ 本地分支列表长期是**陈旧缓存**（据此曾误判"远端只剩 4 个分支"，实际 114 个）。已改为全量 refspec 同步（`git fetch origin '+refs/heads/*:refs/remotes/origin/*' --prune`）后再判定 ✓。<br>**判据（可复现，不看 commit 祖先——本仓走 squash 合并）**：对每个分支取 `git diff --name-only origin/main...origin/<b>`，逐个文件判断**是否存在于 main**；"main 里没有的文件"数为 0 ⇒ 无独有内容。111/114 属此类。剩 3 个有独有文件者逐个判定：`chore/emqx-tls-config-and-docs`（**保留**，PR #115）、`feat/iot-maintenance-admin`（**已删**：SF-1 关闭后注解鉴权已生效，main 的 `IotMaintenanceAdminGateTest` **明文禁止**再引入 `IotPermissionGuard`）、`feat/iot-minimal-domain`（**已删**：其迁移文件已被 `2026-09-19-iot-device-schema.sql` 取代，保留会与 SQL 等价门禁冲突）。<br>**未动** `upstream/*`（**别人仓库**，红线）与 `main` ✓；删前已用 API 确认**当时仅 1 个 open PR** 且其分支不在删除列表内 ✓。 |
 | **#8（下一项）** | 消息跟踪 + 「定位建议」：**设计已完成**（`docs/MESSAGE-TRACE-DESIGN.md`，含两轮独立复核）⇒ **下一步按设计 §8 实施一批**：读侧聚合端点（`GET /devices/{deviceId}/messages`，权限 **`iot:debug:get`**）+ 定位建议**纯函数**规则（每条至少一正一反用例）+ 前端「消息跟踪」页签（复用 `detail-debug.vue` 约定）。**不建新表、不改写入路径**（一期）；二批（上行结构化补齐 / 实时跟踪）触及采集链路 ⇒ 按生产发布纪律 + 外委独立复核 |
 | #9 余项 | 正式 CA 证书 / **收回明文 1883**（须先确认云安全组放行 8883）/ 限来源 / **轮换明文窗口用过的设备凭据** |
 | #10 | 平台自告警 + 指标大盘（复用已有 `iot.alert.*` 指标） |
