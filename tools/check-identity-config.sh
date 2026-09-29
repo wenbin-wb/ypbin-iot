@@ -228,5 +228,22 @@ else:
     else:
         print(f"[ok] 网关清洗表覆盖 {len(IDENTITY_HEADERS)} 个身份/标记头（含 X-Gateway-Signed）")
 
+# ---- 断言 6：清洗不得被整块关掉（enabled=false ⇒ 过滤器根本不装配）----
+# 独立复核（2026-09-29）发现的缺口：`ypbin.gateway.header-sanitize.enabled` 是
+# **条件装配开关**（GatewayAutoConfiguration:64 的 @ConditionalOnProperty(havingValue="true",
+# matchIfMissing=true)）⇒ 一旦显式写成 false，HeaderSanitizeGlobalFilter **整个 bean 都不装配**，
+# 清洗静默消失、身份头全部裸奔。断言 5 只看 headers 列表，会放过这种写法。
+san_enabled, has_san_enabled = dig(gateway, "ypbin", "gateway", "header-sanitize", "enabled")
+if has_san_enabled and san_enabled is not True:
+    print(
+        "::error file=deploy/nacos/ypbin-gateway.yaml::"
+        f"ypbin.gateway.header-sanitize.enabled={san_enabled!r} ⇒ HeaderSanitizeGlobalFilter "
+        "根本不会被装配（@ConditionalOnProperty havingValue=true），外部可自带 "
+        "X-User-Id/X-Gateway-Signed 等头直达下游。清洗不可关闭。"
+    )
+    fail = 1
+else:
+    print("[ok] 网关清洗已启用（enabled 未显式关闭）")
+
 sys.exit(1 if fail else 0)
 PY
