@@ -562,6 +562,7 @@ bash /usr/local/sbin/reconcile-prod-vs-main.sh      # 退出码 0=全一致 / 1=
 | 7 | **保留策略的"过期候选"是否继续清理** | 需业务判断 | 2026-09-26 已按批准删掉 13 个过期 rollback tag + 2 个 jar（`/` 85% → **75%**）；**仍未动**的最大可回收项是 `ypbin/ypbin-ai:local`（340.6MB unique，该服务当前未运行，且不属任何保留类别）—— 需你决定是否保留。 |
 | 8 | **新内核（6.8.0-139）上 `zram-swap.service` 的首次运行** | 未验证 | 139 的模块树里 `zram.ko.zst` 与 `modules.dep` **都存在**（已核实），但**没人实跑过**。⇒ 与用户那次内核重启合并，由 `post-reboot-check.sh` 第 7 组判据自动核对；若 FAIL 先看 `journalctl -u zram-swap.service`。 |
 | 9 | **喂数源在"整机重启"后的自启** | 未验证 | 只证明到"单元 `enabled` + `Restart=always` + `kill -9` 自动拉起"。⇒ 同上，合并到那次重启，由 `post-reboot-check.sh` 第 8 组判据自动核对。 |
+| 10 | **平台自告警（看板 #10）的启用顺序**：**开开关前必须先建表** | 部署顺序约束（**已在代码中核实**） | 调度壳由 `ypbin.platform-alert.enabled` 控制且**默认 false** ⇒ **当前部署不影响启动**（`PlatformAlertService` 无 `@PostConstruct`，唯一调用方是调度壳）。但若把该键改 `true` 而 `iot_platform_alert` 表**尚未建**（应执行 `deploy/sql/migration/2026-10-05-iot-platform-alert-schema.sql`），调度壳会每 30s 失败一次——**不会拖垮服务**（`@Scheduled` 异常由调度器记堆栈、下一轮重试，与仓内其它 10 个扫描器同范式），但会无意义地刷错误日志。⇒ 顺序固定为 **先建表 → 再改开关**；详见 `docs/PLATFORM-ALERTING-DESIGN.md` §7.1。**注**：一期为"观察期只落库不通知"，本就**不急**着开。 |
 
 ---
 
