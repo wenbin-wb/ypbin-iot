@@ -158,7 +158,7 @@
 > 🔴 **「待反哺 starter」（按工作规范：本仓只做纯业务，通用机制反哺底层）**：「虚拟主体 → scopes」的
 > **通用机制**（保留虚拟 ID 段、scopes 白名单过滤、与 `IdentityHeaderFilter`/`StpPermissionAdapter` 的衔接）
 > 本质是 **`ypbin-starter` 的通用能力**（任何下游服务做开放 API 都需要）。本批为**过渡实现**（合入以打通 F-1 前置）；
-> 反哺责任：**在 `wenbin-wb/ypbin-starter` 提 PR**（以本实现为蓝本抽成通用组件），本仓随后切换为
+> 反哺责任：**已在 `wenbin-wb/ypbin-starter` 提 PR #60**（`VirtualPrincipalScopes`，以本实现为蓝本抽成通用组件），本仓随后切换为
 > 「依赖 starter 通用实现 + 仅保留业务白名单」。tracker：看板 #11「待反哺 starter」标注。
 
 ### 2.4 限流与配额（具名常量，按 Key 维度）
