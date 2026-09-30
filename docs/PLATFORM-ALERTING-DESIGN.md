@@ -197,6 +197,21 @@ PlatformHealthVerdict evaluate(PlatformHealthSnapshot snapshot, PlatformHealthRu
 | **二批** | 开通通知（收件人裁定后）+ 前端平台告警列表 | 一批观察期数据（用于定阈值） |
 | 三批（可选） | ACK/指派/评论；外部大盘接入评估 | 用户决策 |
 
+### 7.1 ⚠️ 部署顺序（**开开关前必须先建表**，已实施的硬约束）
+
+一批实现里调度壳由 `ypbin.platform-alert.enabled` 控制且**默认 false** ⇒
+默认配置下**没有任何代码路径会碰新表**（已核实：服务无 `@PostConstruct`，
+唯一调用方是调度壳），因此**部署本批不会影响启动** ✓。
+
+但反过来有一条**必须遵守的顺序**：
+
+> **若要开启 `enabled=true`，必须先把 `iot_platform_alert` 建好**（执行
+> `deploy/sql/migration/2026-10-05-iot-platform-alert-schema.sql`，或全新安装时跑 `007-iot-data.sql`）。
+> 否则调度壳每 30s 会因表不存在而失败一次（**不会拖垮服务**——`@Scheduled` 异常由调度器捕获并记堆栈、
+> 下一轮重试，但没有意义地刷错误日志）。
+
+⇒ 顺序：**建表 → 再改开关**。这也是 §9 未决项 1-3 裁定后才能做的事（一期观察期本就**不该**急着开）。
+
 ---
 
 ## 8. 验收判据（可测）
