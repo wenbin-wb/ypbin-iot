@@ -719,3 +719,11 @@ CREATE TABLE iot_platform_alert
     KEY idx_platform_alert_state (tenant_id, state, start_ts),
     KEY idx_platform_alert_rule (tenant_id, rule_code, start_ts)
 ) COMMENT 'IoT 平台自告警实例（看板 #10；与设备告警物理分离，uk_platform_alert_active 是去重的库级保证）';
+
+-- 平台告警菜单（看板 #10 二批；与 migration/2026-10-05-iot-platform-alert-menu.sql 等价）
+INSERT INTO sys_menu (id, pid, name, type, platform_only, path, component, auth_code, title, icon, sort, create_time, status, is_deleted)
+VALUES (3208, 3204, 'IotPlatformAlert', 'menu', 0, '/iot/platform-alerts', '/iot/platformAlert/index', 'iot:alert:list', 'page.iot.platformAlert.title', 'carbon:alarm', 15, NOW(), 1, 0);
+INSERT INTO sys_role_menu (role_id, menu_id)
+SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (3208);
+INSERT INTO sys_template_menu (template_id, menu_id)
+SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (3208);
