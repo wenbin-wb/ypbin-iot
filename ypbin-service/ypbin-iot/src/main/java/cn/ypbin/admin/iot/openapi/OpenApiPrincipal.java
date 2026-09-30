@@ -55,6 +55,29 @@ public final class OpenApiPrincipal {
     /** Sa-Token 官方全权限通配符（starter `StpPermissionAdapter.ANY` 同值）。 */
     public static final String ANY_WILDCARD = "*";
 
+    /**
+     * 虚拟主体**允许**持有的 scopes（= 设计 §2.3 的既定开放作用域，全部是既有 iot: 权限码）。
+     *
+     * <p>🔴 <b>为什么是"白名单"而不是"只过滤通配符"</b>（本类最重要的一处决定）：
+     * Sa-Token 把账号的权限码当 <b>pattern</b> 走 `SaFoxUtil.vagueMatch` 做模糊匹配
+     * （starter `StpPermissionAdapter` 类注释明确写了这一点）⇒ 形如 `iot:*`、`iot:device:*`
+     * 的**段内星号同样能命中**真实权限码。只过滤 `*`/`*:*:*` 会**漏掉这一类**，
+     * 于是一把 Key 只要带上 `iot:*` 就能调用**包括命令下发在内**的全部 iot 能力 ——
+     * 正是设计 §2.3 要防的"作用域隔离形同虚设"。</p>
+     *
+     * <p>白名单把可授予范围**收敛到既定清单**：清单外的任何值（含各种 pattern 形态）一律丢弃并记日志。
+     * 代价是"新增开放作用域必须改这里"—— 这正是安全白名单应有的性质：让扩权成为一次**显式、可评审**的改动。</p>
+     */
+    public static final Set<String> ALLOWED_SCOPES = Set.of(
+        "iot:device:list",
+        "iot:device:latest",
+        "iot:series:get",
+        "iot:alert:list",
+        "iot:product:list",
+        "iot:availability:get",
+        // 命令下发：设计 §2.3 列为**高危、默认不授予**；白名单允许"显式勾选"时生效
+        "iot:debug:send");
+
     private OpenApiPrincipal() {
     }
 
@@ -89,7 +112,43 @@ public final class OpenApiPrincipal {
     }
 
     /**
-     * 把 Key 的 scopes 转成权限码集合（**去空白、去重、剔除通配符**）。
+     * 判定是不是**允许授予**的开放作用域（白名单精确匹配，无 pattern 语义）。
+     *
+     * @param code 待判的码
+     * @return 在白名单内返回 \`true\`
+     */
+    public static boolean isAllowedScope(String code) {
+        return code != null && ALLOWED_SCOPES.contains(code.trim());
+    }
+
+    /**
+     * 挑出**会被丢弃**的 scopes（白名单外的全部，含通配符与各类 pattern）。
+     *
+     * <p>用途：调用方据此**记日志**。静默丢弃是危险的——"Key 配了 scope 却不生效"
+     * 若不留痕，排查时只能靠猜（这正是 F-1 实测里"403 但不知道为什么"的处境）。</p>
+     *
+     * @param scopes 原始 scopes
+     * @return 被丢弃的项（保持首次出现顺序）
+     */
+    public static List<String> droppedScopes(Set<String> scopes) {
+        if (scopes == null || scopes.isEmpty()) {
+            return List.of();
+        }
+        Set<String> out = new LinkedHashSet<>();
+        for (String scope : scopes) {
+            if (scope == null) {
+                continue;
+            }
+            String token = scope.trim();
+            if (!token.isEmpty() && !isAllowedScope(token)) {
+                out.add(token);
+            }
+        }
+        return List.copyOf(out);
+    }
+
+    /**
+     * 把 Key 的 scopes 转成权限码集合（**去空白、去重、白名单过滤**）。
      *
      * @param scopes 原始 scopes（可空）
      * @return 权限码列表（**绝不返回 `null`**；无有效项时返回空列表 ⇒ 调用方据此拒绝）
@@ -104,7 +163,8 @@ public final class OpenApiPrincipal {
                 continue;
             }
             String token = scope.trim();
-            if (token.isEmpty() || isWildcard(token)) {
+            // 白名单：清单外一律丢弃（含 * / *:*:* / iot:* 等一切 pattern 形态）
+            if (!isAllowedScope(token)) {
                 continue;
             }
             out.add(token);

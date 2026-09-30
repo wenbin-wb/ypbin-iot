@@ -124,6 +124,56 @@ class OpenApiPrincipalTest {
     }
 
     @Test
+    @DisplayName("🔴 段内星号 pattern（iot:* / iot:device:*）必须被丢弃——只挡 * 与 *:*:* 会漏掉它们")
+    void patternScopesMustBeDropped() {
+        // Sa-Token 把权限码当 pattern 走 vagueMatch ⇒ iot:* 能命中 iot:device:list、iot:debug:send 等。
+        // 若只过滤 * 与 *:*:*，一把 Key 带 iot:* 就能调到命令下发 ⇒ 作用域隔离形同虚设。
+        for (String pattern : List.of("iot:*", "iot:device:*", "iot:*:list", "*:device:list")) {
+            assertThat(OpenApiPrincipal.scopesToPermissions(new LinkedHashSet<>(List.of(pattern))))
+                .as("pattern %s 被放行 ⇒ 可越权命中未授予的权限码", pattern)
+                .isEmpty();
+        }
+    }
+
+    @Test
+    @DisplayName("白名单内的既定作用域全部放行（一个都不许漏）")
+    void allowlistedScopesMustPass() {
+        assertThat(OpenApiPrincipal.scopesToPermissions(OpenApiPrincipal.ALLOWED_SCOPES))
+            .containsExactlyInAnyOrderElementsOf(OpenApiPrincipal.ALLOWED_SCOPES);
+    }
+
+    @Test
+    @DisplayName("白名单外的普通权限码同样丢弃（不能凭它是合法权限码就放行）")
+    void nonAllowlistedScopeMustBeDropped() {
+        // system:user:list 是合法的平台权限码，但不属开放 API 的既定作用域
+        assertThat(OpenApiPrincipal.scopesToPermissions(
+            new LinkedHashSet<>(List.of("system:user:list")))).isEmpty();
+        assertThat(OpenApiPrincipal.isAllowedScope("system:user:list")).isFalse();
+        assertThat(OpenApiPrincipal.isAllowedScope("iot:device:list")).isTrue();
+    }
+
+    @Test
+    @DisplayName("混合输入：只留白名单内的，其余丢弃且能被 droppedScopes 报出")
+    void mixedScopesKeepOnlyAllowlisted() {
+        Set<String> scopes = new LinkedHashSet<>(List.of(
+            "iot:device:list", "iot:*", "*:*:*", "system:user:list", "iot:series:get"));
+
+        assertThat(OpenApiPrincipal.scopesToPermissions(scopes))
+            .containsExactly("iot:device:list", "iot:series:get");
+        assertThat(OpenApiPrincipal.droppedScopes(scopes))
+            .containsExactly("iot:*", "*:*:*", "system:user:list");
+    }
+
+    @Test
+    @DisplayName("droppedScopes 边界：空 / 全合法 / null / 纯空白")
+    void droppedScopesBoundaries() {
+        assertThat(OpenApiPrincipal.droppedScopes(null)).isEmpty();
+        assertThat(OpenApiPrincipal.droppedScopes(Set.of())).isEmpty();
+        assertThat(OpenApiPrincipal.droppedScopes(Set.of("iot:device:list"))).isEmpty();
+        assertThat(OpenApiPrincipal.droppedScopes(new LinkedHashSet<>(List.of("  ")))).isEmpty();
+    }
+
+    @Test
     @DisplayName("wildcardsIn 能把被剔除的通配符报出来（供记日志，避免静默）")
     void wildcardsInMustReport() {
         Set<String> scopes = new LinkedHashSet<>(List.of("iot:device:list", "*", "*:*:*"));

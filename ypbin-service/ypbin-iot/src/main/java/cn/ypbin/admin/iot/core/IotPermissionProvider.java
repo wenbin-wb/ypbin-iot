@@ -111,6 +111,16 @@ public class IotPermissionProvider implements PermissionProvider {
             log.warn("[iot] 虚拟主体 scopes 含通配符，已剔除（防止越权为超管）：userId={}, wildcards={}",
                 userId, wildcards);
         }
+        List<String> dropped = OpenApiPrincipal.droppedScopes(scopes);
+        if (!dropped.isEmpty()) {
+            // 白名单外的值同样不静默：否则"Key 配了 scope 却不生效"无从排查。
+            // 注意 droppedScopes 已含通配符项，故这里用去掉通配符后的差集描述"非通配符的未知 scope"。
+            List<String> unknown = dropped.stream().filter(item -> !wildcards.contains(item)).toList();
+            if (!unknown.isEmpty()) {
+                log.warn("[iot] 虚拟主体 scopes 含白名单外的值，已丢弃（不允许授予）：userId={}, dropped={}",
+                    userId, unknown);
+            }
+        }
         return OpenApiPrincipal.scopesToPermissions(scopes);
     }
 

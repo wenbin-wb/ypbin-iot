@@ -107,6 +107,26 @@ class IotPermissionProviderVirtualPrincipalTest {
     }
 
     @Test
+    @DisplayName("🔴 虚拟主体只带 pattern scope（iot:*）⇒ 拒绝（白名单外一律丢弃）")
+    void virtualPrincipalPatternScopeMustBeDenied() {
+        givenVirtualIdentity(-1_000_000_000L, Set.of("iot:*"));
+
+        assertThat(provider.getPermissions("-1000000000", "identity"))
+            .as("iot:* 会被 Sa-Token 的 vagueMatch 命中大量权限码 ⇒ 必须丢弃")
+            .isEmpty();
+    }
+
+    @Test
+    @DisplayName("虚拟主体混合 scopes：只保留白名单内的")
+    void virtualPrincipalMixedScopesKeepAllowlistedOnly() {
+        givenVirtualIdentity(-1_000_000_000L,
+            Set.of("iot:series:get", "iot:*", "system:user:list"));
+
+        assertThat(provider.getPermissions("-1000000000", "identity"))
+            .containsExactly("iot:series:get");
+    }
+
+    @Test
     @DisplayName("🔴 虚拟主体没有角色（scopes 不得同时满足 @SaCheckRole）")
     void virtualPrincipalMustHaveNoRoles() {
         givenVirtualIdentity(-1_000_000_000L, Set.of("iot:device:list"));
