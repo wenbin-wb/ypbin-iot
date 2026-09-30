@@ -9,9 +9,13 @@
  */
 package cn.ypbin.admin.iot.core;
 
+import cn.ypbin.admin.iot.openapi.OpenApiPrincipal;
 import cn.ypbin.admin.system.api.cache.SysCache;
+import cn.ypbin.starter.security.core.LoginUser;
 import cn.ypbin.starter.security.core.PermissionProvider;
+import cn.ypbin.starter.security.identity.IdentityContext;
 import java.util.List;
+import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -25,6 +29,17 @@ import org.springframework.stereotype.Component;
  *
  * <p>为什么走 {@code SysCache} 而不是每次 Feign：{@code @SaCheckPermission} 在请求线程上同步执行，
  * 直连 system 会让每个请求都多一次远程调用；SysCache 是带本地缓存的既有通道。</p>
+ *
+ * <p><b>开放 API 的虚拟主体（看板 #11，方案 B2，2026-09-30 新增）</b>：按**用户 ID 段**分流 ——
+ * 落在 {@link OpenApiPrincipal#isVirtualPrincipal} 的保留段时，权限取**该请求 scopes**
+ * （网关放进既有 {@code X-Roles} 头，已由 starter 解析进 {@link LoginUser#getRoles()}），
+ * **不查库**；真实用户**走原路径、行为不变**。</p>
+ *
+ * <p>⚠️ <b>为什么这条分流是安全的</b>：① 虚拟段是负数高位段，与真实雪花 ID（正数）**永不重叠**；
+ * ② 客户端**无法**自带 {@code X-Roles} 穿透 —— 该头在网关 {@code header-sanitize} 表内会被清洗，
+ * 而直连 iot 又过不了 {@code X-Gateway-Signed} 校验（SF-5 fail-closed，已实测）；
+ * ③ scopes 里的**通配符会被剔除**（见 {@link OpenApiPrincipal#scopesToPermissions}），
+ * 否则 starter 会把它升级成全权限（越权为超管）。</p>
  *
  * @author wenbin
  * @since 2026-09-19
@@ -40,6 +55,9 @@ public class IotPermissionProvider implements PermissionProvider {
         if (userId == null) {
             return List.of();
         }
+        if (OpenApiPrincipal.isVirtualPrincipal(userId)) {
+            return resolveVirtualPrincipalPermissions(userId);
+        }
         List<String> permissions = SysCache.getUserPermissions(userId);
         if (permissions == null) {
             log.error("[iot] 权限码查询结果缺失，按拒绝处理（未放行）：userId={}", userId);
@@ -54,12 +72,46 @@ public class IotPermissionProvider implements PermissionProvider {
         if (userId == null) {
             return List.of();
         }
+        if (OpenApiPrincipal.isVirtualPrincipal(userId)) {
+            // 虚拟主体**没有角色**：scopes 只在"权限码"这一维表达。
+            // 刻意**不**把 scopes 同时当角色返回——否则 @SaCheckRole 会被 scopes 意外满足，
+            // 把两种语义混在一起（fail-closed：虚拟主体一律无角色）。
+            return List.of();
+        }
         List<String> roleCodes = SysCache.getUserRoleCodes(userId);
         if (roleCodes == null) {
             log.error("[iot] 角色码查询结果缺失，按无角色处理（未放行）：userId={}", userId);
             return List.of();
         }
         return roleCodes;
+    }
+
+    /**
+     * 解析**虚拟主体**的权限（= 该请求的 scopes，来自网关注入的 {@code X-Roles}）。
+     *
+     * <p>语义与真实用户路径一致：**取不到就拒绝**（返回空列表 ⇒ 端点 403），
+     * 且失败必须**留日志**（否则"Key 明明配了 scope 却 403"无从排查）。</p>
+     *
+     * @param userId 虚拟用户 ID（仅用于日志）
+     * @return 权限码列表（**绝不返回 `null`**）
+     */
+    private List<String> resolveVirtualPrincipalPermissions(Long userId) {
+        Set<String> scopes = IdentityContext.getLoginUser()
+            .map(LoginUser::getRoles)
+            .orElse(null);
+        if (scopes == null || scopes.isEmpty()) {
+            // fail-closed + 可见：无身份上下文或无 scopes ⇒ 不授予任何权限
+            log.warn("[iot] 虚拟主体缺少 scopes（身份上下文缺失或 X-Roles 为空），按拒绝处理：userId={}",
+                userId);
+            return List.of();
+        }
+        List<String> wildcards = OpenApiPrincipal.wildcardsIn(scopes);
+        if (!wildcards.isEmpty()) {
+            // 不静默：通配符被剔除是"Key 配错了/想越权"的信号，必须能查出来
+            log.warn("[iot] 虚拟主体 scopes 含通配符，已剔除（防止越权为超管）：userId={}, wildcards={}",
+                userId, wildcards);
+        }
+        return OpenApiPrincipal.scopesToPermissions(scopes);
     }
 
     /**
