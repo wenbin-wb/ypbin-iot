@@ -152,6 +152,15 @@
 > **(b)** 为每个 Key 在 `sys_user` 侧建影子用户（**不推荐**：污染用户表与在线用户视图）。
 > 本稿建议 **(a)**，但**这是对既有鉴权链的一处真实改动**，须在实施时单独立项评审并补测试（属 L2 非平凡改动）。
 
+> ✅ **2026-09-30 落地（方案 B2，L2 已评审）**：采纳 **B2**（网关复用**既有 `X-Roles`** 注入 scopes + iot **虚拟 ID 段回落**）。
+> 实现与独立复核见 `feat/openapi-virtual-principal-b2`（iot 全量 796/0/0/0；端到端咬合测试 + 变异验证）。
+
+> 🔴 **「待反哺 starter」（按工作规范：本仓只做纯业务，通用机制反哺底层）**：「虚拟主体 → scopes」的
+> **通用机制**（保留虚拟 ID 段、scopes 白名单过滤、与 `IdentityHeaderFilter`/`StpPermissionAdapter` 的衔接）
+> 本质是 **`ypbin-starter` 的通用能力**（任何下游服务做开放 API 都需要）。本批为**过渡实现**（合入以打通 F-1 前置）；
+> 反哺责任：**在 `wenbin-wb/ypbin-starter` 提 PR**（以本实现为蓝本抽成通用组件），本仓随后切换为
+> 「依赖 starter 通用实现 + 仅保留业务白名单」。tracker：看板 #11「待反哺 starter」标注。
+
 ### 2.4 限流与配额（具名常量，按 Key 维度）
 
 **现状：仓内当前没有限流组件**（`deploy/nacos/ypbin-iot.yaml` 无 sentinel/rate-limit 配置；`ypbin-gateway.yaml` 无 `RequestRateLimiter`）。故限流是**新增能力**，不是接线。
