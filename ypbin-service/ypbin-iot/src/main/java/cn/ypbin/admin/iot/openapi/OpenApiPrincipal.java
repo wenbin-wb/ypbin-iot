@@ -9,6 +9,7 @@
  */
 package cn.ypbin.admin.iot.openapi;
 
+import cn.ypbin.starter.security.satoken.StpPermissionAdapter;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -49,11 +50,16 @@ public final class OpenApiPrincipal {
      */
     public static final long VIRTUAL_USER_ID_MAX = -1_000_000_000L;
 
-    /** 平台超管权限码（starter `StpPermissionAdapter.SUPER_ADMIN` 同值）。 */
-    public static final String SUPER_ADMIN_WILDCARD = "*:*:*";
+    /**
+     * 平台超管权限码 —— **直接引用** starter 常量（StpPermissionAdapter.SUPER_ADMIN）。
+     *
+     * <p>刻意**不复制字面量**：复制会与 starter 漂移，而漂移的后果是**通配符过滤漏掉新形态**
+     * （本类存在的全部理由就是防这类"静默放行"）。</p>
+     */
+    public static final String SUPER_ADMIN_WILDCARD = StpPermissionAdapter.SUPER_ADMIN;
 
-    /** Sa-Token 官方全权限通配符（starter `StpPermissionAdapter.ANY` 同值）。 */
-    public static final String ANY_WILDCARD = "*";
+    /** Sa-Token 官方全权限通配符 —— 同样**直接引用** starter 常量（StpPermissionAdapter.ANY）。 */
+    public static final String ANY_WILDCARD = StpPermissionAdapter.ANY;
 
     /**
      * 虚拟主体**允许**持有的 scopes（= 设计 §2.3 的既定开放作用域，全部是既有 iot: 权限码）。

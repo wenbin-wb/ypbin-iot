@@ -100,8 +100,24 @@ class OpenApiPrincipalTest {
         assertThat(OpenApiPrincipal.isWildcard("*:*:*")).isTrue();
         assertThat(OpenApiPrincipal.isWildcard(" *:*:* ")).isTrue();
         assertThat(OpenApiPrincipal.isWildcard("iot:device:list")).isFalse();
-        assertThat(OpenApiPrincipal.isWildcard("iot:*:list")).as("段内星号不是通配符语义").isFalse();
+        assertThat(OpenApiPrincipal.isWildcard("iot:*:list")).isFalse();
         assertThat(OpenApiPrincipal.isWildcard(null)).isFalse();
+    }
+
+    @Test
+    @DisplayName("⚠️ isWildcard 只用于日志分类，不是安全判据——真正的守卫是白名单")
+    void isWildcardIsOnlyForLoggingNotSecurity() {
+        // 独立复核（2026-09-30）指出的关键点：Sa-Token 把账号权限码**当 pattern** 走
+        // SaFoxUtil.vagueMatch（仅 pattern 含 * 时才启用模糊匹配）⇒ iot:*:list 这类**段内星号**
+        // 同样能命中真实权限码。故：
+        //   ① isWildcard 只回答"是不是两种精确通配符"（用于日志归因）；
+        //   ② **判"能不能授予"必须用 isAllowedScope（白名单精确匹配）**，绝不能用 !isWildcard()。
+        // 这条边界必须钉死：一旦有人把 isWildcard 当安全判据（回到"只挡两类"），
+        // patternScopesMustBeDropped 与下面的断言会一起转红。
+        assertThat(OpenApiPrincipal.isWildcard("iot:*:list")).isFalse();
+        assertThat(OpenApiPrincipal.isAllowedScope("iot:*:list")).isFalse();
+        assertThat(OpenApiPrincipal.scopesToPermissions(new LinkedHashSet<>(List.of("iot:*:list"))))
+            .isEmpty();
     }
 
     @Test
@@ -162,6 +178,52 @@ class OpenApiPrincipalTest {
             .containsExactly("iot:device:list", "iot:series:get");
         assertThat(OpenApiPrincipal.droppedScopes(scopes))
             .containsExactly("iot:*", "*:*:*", "system:user:list");
+    }
+
+    @Test
+    @DisplayName("更多 pattern 形态：*:* 与 iot:*:* 也必须被丢弃（独立复核点名漏测）")
+    void morePatternFormsMustBeDropped() {
+        for (String pattern : List.of("*:*", "iot:*:*", "*:*:*:*")) {
+            assertThat(OpenApiPrincipal.scopesToPermissions(new LinkedHashSet<>(List.of(pattern))))
+                .as("pattern %s 未被丢弃", pattern)
+                .isEmpty();
+        }
+    }
+
+    @Test
+    @DisplayName("宽容首尾空白、严格大小写：IOT:DEVICE:LIST 必须被丢弃")
+    void caseSensitiveButWhitespaceTolerant() {
+        // 🔴 语义边界（2026-09-30 一试修正）：
+        //   ① **宽容首尾空白**（trim 后精确匹配）：带空白的合法码应放行——trim 不放大权限，
+        //      仍是白名单内那一码；若连空白都拒，反而会因网关/配置里的多余空格产生"配了却不生效"。
+        //   ② **严格大小写**：Sa-Token 权限匹配区分大小写；归一化大小写会造成
+        //      "白名单放行 IOT:DEVICE:LIST 但 Sa-Token 不认"的口径分裂 ⇒ 大小写变体必须丢弃。
+        // 先证 ①：trim 后精确命中 ⇒ 放行
+        for (String padded : List.of("iot:device:list ", " iot:device:list", "iot:device:list\t")) {
+            assertThat(OpenApiPrincipal.scopesToPermissions(
+                new LinkedHashSet<>(List.of(padded))))
+                .as("带首尾空白的合法码 %s 应被 trim 后放行（宽容空白不放大权限）", padded)
+                .containsExactly("iot:device:list");
+        }
+        // 再证 ②：大小写变体 ⇒ 丢弃
+        for (String cased : List.of("IOT:DEVICE:LIST", "iot:Device:List")) {
+            assertThat(OpenApiPrincipal.scopesToPermissions(
+                new LinkedHashSet<>(List.of(cased))))
+                .as("大小写变体 %s 被放行 => 与 Sa-Token 的大小写语义分裂", cased)
+                .isEmpty();
+        }
+    }
+
+    @Test
+    @DisplayName("虚拟段边界：0 / -1 / -999999999 走库；Long.MIN_VALUE 属虚拟段（不与真实 ID 冲突）")
+    void virtualSegmentBoundaries() {
+        // 真实用户是正数雪花 ID ⇒ 这些"不走虚拟分支"的边界必须明确
+        assertThat(OpenApiPrincipal.isVirtualPrincipal(0L)).isFalse();
+        assertThat(OpenApiPrincipal.isVirtualPrincipal(-1L)).isFalse();
+        assertThat(OpenApiPrincipal.isVirtualPrincipal(-999_999_999L)).isFalse();
+        // Long.MIN_VALUE 落在保留段内 ⇒ 判为虚拟。真实用户 ID 永不为其（雪花为正数），
+        // 故这不构成"占用真实用户权限"的风险；且即便构造出来，也仍需过白名单与网关签名。
+        assertThat(OpenApiPrincipal.isVirtualPrincipal(Long.MIN_VALUE)).isTrue();
     }
 
     @Test

@@ -96,13 +96,25 @@ public class IotPermissionProvider implements PermissionProvider {
      * @return 权限码列表（**绝不返回 `null`**）
      */
     private List<String> resolveVirtualPrincipalPermissions(Long userId) {
-        Set<String> scopes = IdentityContext.getLoginUser()
-            .map(LoginUser::getRoles)
-            .orElse(null);
+        LoginUser loginUser = IdentityContext.getLoginUser().orElse(null);
+        if (loginUser == null) {
+            // fail-closed + 可见：无身份上下文 ⇒ 不授予任何权限
+            log.warn("[iot] 虚拟主体缺少身份上下文，按拒绝处理：userId={}", userId);
+            return List.of();
+        }
+        // 🔴 一致性校验（独立复核 2026-09-30 指出的"行为未定义"路径）：
+        // 权限只认**这个身份自己的** scopes。若 loginId 与身份上下文里的 userId 不一致，
+        // 说明线程态异常（或被错误复用），此时**绝不能**拿上下文的 roles 当权限——
+        // 因为真实用户的 roles 也可能恰好长得像权限码。fail-closed + 留痕。
+        if (!userId.equals(loginUser.getId())) {
+            log.warn("[iot] 虚拟主体 loginId 与身份上下文不一致，按拒绝处理：loginId={}, contextUserId={}",
+                userId, loginUser.getId());
+            return List.of();
+        }
+        Set<String> scopes = loginUser.getRoles();
         if (scopes == null || scopes.isEmpty()) {
-            // fail-closed + 可见：无身份上下文或无 scopes ⇒ 不授予任何权限
-            log.warn("[iot] 虚拟主体缺少 scopes（身份上下文缺失或 X-Roles 为空），按拒绝处理：userId={}",
-                userId);
+            // fail-closed + 可见：有身份但 X-Roles 为空 ⇒ 不授予任何权限
+            log.warn("[iot] 虚拟主体缺少 scopes（X-Roles 为空），按拒绝处理：userId={}", userId);
             return List.of();
         }
         List<String> wildcards = OpenApiPrincipal.wildcardsIn(scopes);
@@ -121,7 +133,15 @@ public class IotPermissionProvider implements PermissionProvider {
                     userId, unknown);
             }
         }
-        return OpenApiPrincipal.scopesToPermissions(scopes);
+        List<String> permissions = OpenApiPrincipal.scopesToPermissions(scopes);
+        if (permissions.isEmpty()) {
+            // 覆盖"scopes 非空但一项都不可用"（例如只填了空白、或全是白名单外的值）——
+            // 上面两条日志按"通配符/白名单外"分类，这里兜住"看起来有 scopes 却全部无效"的情形，
+            // 否则该情形会**静默 403**（独立复核 2026-09-30 指出的漏日志路径）。
+            log.warn("[iot] 虚拟主体的 scopes 全部不可用（白名单外或为空），按拒绝处理：userId={}, scopes={}",
+                userId, scopes);
+        }
+        return permissions;
     }
 
     /**
