@@ -70,7 +70,11 @@ class IotTenantIsolationGateTest {
         // 漏登记的后果：iot_command_instance.payload/reply_payload 是**命令与回执报文体**
         // （用户自由输入、服务端不过滤内容），跨租户读到等于拿到别人设备的命令内容与回执。
         // 注：007-iot-data.sql 的 DDL 注释早已点名要求登记，此处补上。
-        "iot_command_instance", "iot_mqtt_ingest_receipt");
+        "iot_command_instance", "iot_mqtt_ingest_receipt",
+        // 平台自告警（2026-09-30 追加，看板 #10）：建表**同批**登记，不重犯 #8 复核发现的
+        // "实体是租户表却没登记"缺口。平台告警含 metric_snapshot（指标快照）与 summary，
+        // 跨租户读到会暴露别的租户的平台运行状态。
+        "iot_platform_alert");
 
     /** 平台表（不继承租户基类，必须被忽略——作为「ignoreTable 能返回 true」的自检锚点）。 */
     /**
