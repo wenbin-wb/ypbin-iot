@@ -451,8 +451,8 @@ environment.getPropertySources().addLast(...);                 // ← 最低优�
 
 | # | 必须实跑的事项 | 为什么静态不可判 | 建议验证方式 | 阻断谁 |
 |---|---|---|---|---|
-| **F-1** | **虚拟主体 → scopes 真的生效**（方案 B 的落地验证） | 涉及 Spring 装配顺序、`SysCache` 行为、Sa-Token 内部匹配 | 起最小原型：注入虚拟 `X-User-Id` + `X-Roles=iot:series:get`，**断言**该 Key 调 `/series` **通过**、调 `/devices`（无该 scope）**403**、调 `/commands` **403** | **O-1…O-7 全部**（作用域隔离的前提） |
-| **F-2** | **`@SaCheckPermission` 在开放 API 链路真的执行**（含 `loginType` 取值） | iot 关了 `interceptor`，只靠 `annotation-check` 默认 true | 用一个**无任何权限**的虚拟主体调任一带注解端点，**必须 403** | **O-1…O-7 全部** |
+| **F-1** | **虚拟主体 → scopes 真的生效**（方案 B 的落地验证） | **已实测通过（2026-10-01，F-1 复跑 + dev 端到端，见 TASK-BOARD）** -- 本行为实现后的复验记录 | 涉及 Spring 装配顺序、`SysCache` 行为、Sa-Token 内部匹配 | 起最小原型：注入虚拟 `X-User-Id` + `X-Roles=iot:series:get`，**断言**该 Key 调 `/series` **通过**、调 `/devices`（无该 scope）**403**、调 `/commands` **403** | **O-1…O-7 全部**（作用域隔离的前提） |
+| **F-2** | **`@SaCheckPermission` 在开放 API 链路真的执行**（含 `loginType` 取值） | **已实测通过**（同 F-1 批次；无权限虚拟主体 403） | iot 关了 `interceptor`，只靠 `annotation-check` 默认 true | 用一个**无任何权限**的虚拟主体调任一带注解端点，**必须 403** | **O-1…O-7 全部** |
 | **F-3** | **`ypbin-starter-api-doc` 加依赖后 iot 真能起、`/v3/api-docs` 真能出** | 未加依赖（本任务禁改 pom）；依赖冲突/装配条件需运行时才暴露 | 加依赖后实跑 `/iot/v3/api-docs` 与 `/iot/swagger-ui/index.html`；并核对 **4001 菜单**指向是否正确（§3.3 D） | **U-6** |
 | **F-4** | **生产 profile 是否含 `prod`**（决定 `disable-in-prod` 是否生效） | 静态只看得到代码逻辑，看不到生产启动参数 | 核对生产启动命令/Nacos 的 `spring.profiles.active` | **U-6 R-2** |
 | **F-5** | **O-3 的 IoTDB 是否真连得通**（决定 `/series` 是否可用 vs 报「未启用」） | `timeseries.enabled: true`（`ypbin-iot.yaml:160`）只说明配了，不说明存储可达 | 实跑一次 `GET /devices/{id}/series` | **O-3 可用性**（非安全性） |

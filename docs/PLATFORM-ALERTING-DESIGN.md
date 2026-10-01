@@ -207,7 +207,7 @@ PlatformHealthVerdict evaluate(PlatformHealthSnapshot snapshot, PlatformHealthRu
 | 批次 | 内容 | 依赖 |
 |---|---|---|
 | **一批** | 新表 + 纯函数判定器（含用例）+ 调度壳 + **观察期**（只落库不通知） | 实测 `/actuator/metrics` 可用性（§1.4） |
-| **二批** | 开通通知（收件人裁定后）+ 前端平台告警列表 | 一批观察期数据（用于定阈值） |
+| **二批** | 开通通知（收件人裁定后）+ 前端平台告警列表 | **实施状态（2026-10-01）**：通知投递代码已实现（#132，PlatformAlertNotifier，默认 notify-enabled=false）+ 前端列表已实现（#129/#43）；阈值校准与 notify flip 待观察期数据 |
 | 三批（可选） | ACK/指派/评论；外部大盘接入评估 | 用户决策 |
 
 ### 7.1 ⚠️ 部署顺序（**开开关前必须先建表**，已实施的硬约束）
