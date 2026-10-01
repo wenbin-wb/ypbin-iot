@@ -11,6 +11,7 @@ package cn.ypbin.admin.iot.platform;
 
 import cn.ypbin.admin.iot.entity.IotPlatformAlert;
 import cn.ypbin.admin.iot.mapper.IotPlatformAlertMapper;
+import cn.ypbin.starter.tenant.core.TenantContext;
 import cn.ypbin.starter.core.util.LogSanitizer;
 import com.baomidou.mybatisplus.core.toolkit.IdWorker;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
@@ -96,7 +97,9 @@ public class PlatformAlertService {
         for (PlatformHealthRule rule : PlatformHealthRule.values()) {
             PlatformHealthVerdict verdict = PlatformHealthEvaluator.evaluate(rule, snapshot, baseline);
             verdicts.put(rule, verdict);
-            applyVerdict(rule, verdict);
+            // 观察期(2026-10-01)暴露：调度线程无租户上下文 => 平台告警表读写被租户守卫拒绝。
+            // 平台告警是企业级全局语义 => 显式忽略租户隔离。
+            TenantContext.runIgnore(() -> applyVerdict(rule, verdict));
         }
         // 基线在**一轮全部判完之后**统一推进：若逐条推进，同轮不同规则看到不同基线
         baseline = PlatformHealthBaseline.from(snapshot);
