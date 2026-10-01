@@ -16,9 +16,9 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.cloud.gateway.filter.GatewayFilterChain;
+import org.springframework.cloud.gateway.filter.GlobalFilter;
 import org.springframework.web.server.ServerWebExchange;
-import org.springframework.web.server.WebFilter;
-import org.springframework.web.server.WebFilterChain;
 import reactor.core.publisher.Mono;
 
 /**
@@ -31,7 +31,7 @@ import reactor.core.publisher.Mono;
  * 失败统一 401（信息与签名错误不可区分，防枚举）。</p>
  */
 @Component
-public class OpenApiKeyAuthFilter implements WebFilter, Ordered {
+public class OpenApiKeyAuthFilter implements GlobalFilter, Ordered {
 
     private static final Logger log = LoggerFactory.getLogger(OpenApiKeyAuthFilter.class);
     private static final String OPEN_API_PREFIX = "/iot/open-api/v1/";
@@ -59,7 +59,7 @@ public class OpenApiKeyAuthFilter implements WebFilter, Ordered {
     }
 
     @Override
-    public Mono<Void> filter(ServerWebExchange exchange, WebFilterChain chain) {
+    public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
         String path = exchange.getRequest().getPath().value();
         if (!path.startsWith(OPEN_API_PREFIX)) {
             return chain.filter(exchange);
@@ -68,6 +68,8 @@ public class OpenApiKeyAuthFilter implements WebFilter, Ordered {
         if (parsed == null) {
             return reject(exchange, "api key missing or invalid: send X-Api-Key: accessKeyId:secret");
         }
+        log.info("[gateway] openapi auth: path={} ak={} verifyTokens=[{}/{}]", path, parsed.accessKeyId(),
+            internalToken().length(), gatewaySignToken().length());
         return verify(parsed.accessKeyId(), parsed.secret())
             .flatMap(data -> data.valid()
                 ? chain.filter(forge(exchange, data))
@@ -122,6 +124,8 @@ public class OpenApiKeyAuthFilter implements WebFilter, Ordered {
 
     private ServerWebExchange forge(ServerWebExchange exchange, VerifyData data) {
         String roles = String.join(",", data.scopes());
+        log.info("[gateway] openapi forge: userId={} tenantId={} roles={} signLen={}", data.virtualUserId(),
+            data.tenantId(), roles, gatewaySignToken().length());
         return exchange.mutate()
             .request(builder -> builder
                 .header("X-User-Id", String.valueOf(data.virtualUserId()))
