@@ -57,8 +57,8 @@ public class OpenApiRateLimitGlobalFilter implements GlobalFilter, Ordered {
             return chain.filter(exchange);
         }
         String accessKey = exchange.getAttribute(OpenApiKeyAuthFilter.ATTR_ACCESS_KEY);
+        log.info("[gateway] rate-limit check: path={} ak={}", path, accessKey);
         if (accessKey == null || accessKey.isEmpty()) {
-            // 非 openapi 鉴权路径（未落 attr）不限流（不会被放行为 openapi）
             return chain.filter(exchange);
         }
         int qpsLimit = attrInt(exchange, OpenApiKeyAuthFilter.ATTR_RATE_QPS, 10);
@@ -69,10 +69,12 @@ public class OpenApiRateLimitGlobalFilter implements GlobalFilter, Ordered {
         long quotaTtlSec = ChronoUnit.SECONDS.between(LocalDateTime.now(),
             LocalDate.now().plusDays(1).atStartOfDay()) + 1;
 
-        return incr(qpsKey, nowSec + windowSeconds() + 2L).flatMap(qpsCount ->
+        return incr(qpsKey, windowSeconds() + 1L).flatMap(qpsCount ->
             incr(quotaKey, quotaTtlSec).flatMap(quotaCount -> {
                 RateLimitDecision qpsDecision = RateLimitDecision.forCount(qpsCount, qpsLimit);
                 RateLimitDecision quotaDecision = RateLimitDecision.forCount(quotaCount, quotaLimit);
+                log.info("[gateway] rate-limit counts: ak={} qps={}/{} quota={}/{}", accessKey,
+                    qpsCount, qpsLimit, quotaCount, quotaLimit);
                 if (!qpsDecision.allowed() || !quotaDecision.allowed()) {
                     log.warn("[gateway] openapi rate limited: ak={} qps={}/{} quota={}/{}", accessKey,
                         qpsCount, qpsLimit, quotaCount, quotaLimit);
