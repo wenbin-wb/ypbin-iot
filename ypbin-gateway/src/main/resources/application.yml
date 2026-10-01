@@ -7,7 +7,91 @@ spring:
   cloud:
     nacos:
       server-addr: ${NACOS_ADDR:localhost:8848}
+    compatibility-verifier:
+      enabled: false
+    gateway:
+      server:
+        webflux:
+          discovery:
+            locator:
+              enabled: true
+              lower-case-service-id: true
+          routes:
+            - id: auth
+              uri: lb://ypbin-auth
+              predicates:
+                - Path=/auth/**,/auth/social/**
+              filters:
+                - StripPrefix=1
+            - id: system
+              uri: lb://ypbin-system
+              predicates:
+                - Path=/system/**
+              filters:
+                - StripPrefix=1
+            - id: ai
+              uri: lb://ypbin-ai
+              predicates:
+                - Path=/ai/**
+              filters:
+                - StripPrefix=1
+            - id: iot-openapi
+              uri: lb://ypbin-iot
+              # 开放 API（看板 #11 第 1 批）：OpenApiKeyAuthFilter 校验后重写为 iot 既有路径
+              predicates:
+                - Path=/iot/open-api/v1/**
+              filters:
+                - RewritePath=/iot/open-api/v1/(?<seg>.*), /${seg}
+            - id: iot
+              uri: lb://ypbin-iot
+              predicates:
+                - Path=/iot/**
+              filters:
+                - StripPrefix=1
   config:
     import:
       - optional:nacos:ypbin-common.yaml
-      - optional:nacos:ypbin-gateway.yaml
+
+# Sa-Token 与 auth 保持一致（网关读取 Redis 中的登录会话）
+sa-token:
+  token-name: Authorization
+  token-prefix: Bearer
+  timeout: 2592000
+  active-timeout: 1800
+  auto-renew: true
+  is-read-cookie: false
+  is-print: false
+
+# 网关鉴权与身份头清洗（starter GatewayProperties，前缀 ypbin.gateway）
+ypbin:
+  gateway:
+    # 入口身份头清洗（SF-5）：客户端自带 X-Gateway-Signed 等身份头必须先删再签发
+    header-sanitize:
+      enabled: true
+      headers:
+        - X-User-Id
+        - X-User-Name
+        - X-Tenant-Id
+        - X-Dept-Id
+        - X-Roles
+        - X-Gateway-Signed
+    auth:
+      enabled: true
+      # 身份头签名（与 auth/system/ai 的 trusted-source-token 同值）
+      trusted-source-token: ${GATEWAY_SIGN_TOKEN}
+      exclude-paths:
+        - /auth/login
+        - /auth/sms/send
+        - /auth/sms/login
+        - /auth/social/authorize/**
+        - /auth/social/callback/**
+        - /auth/social/platforms
+        - /auth/captcha/**
+        - /system/open-api/**
+        - /system/open/license/**
+        - /ai/share/**
+        - /ai/widget/**
+        - /system/ypbin/sse/subscribe
+        - /system/tracking/ingest
+        # 开放 API（#11）：由 OpenApiKeyAuthFilter 接管，免会话登录
+        - /iot/open-api/**
