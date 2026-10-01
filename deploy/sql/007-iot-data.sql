@@ -727,3 +727,35 @@ INSERT INTO sys_role_menu (role_id, menu_id)
 SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (3208);
 INSERT INTO sys_template_menu (template_id, menu_id)
 SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (3208);
+
+-- 开放 API Key 表（看板 #11 第 1 批；与 migration/2026-10-01-iot-open-api-key.sql 等价）
+CREATE TABLE IF NOT EXISTS iot_open_api_key (
+  id BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键',
+  tenant_id BIGINT NOT NULL COMMENT '租户 ID',
+  app_name VARCHAR(128) NOT NULL COMMENT '应用名',
+  access_key_id VARCHAR(64) NOT NULL COMMENT '公开标识（定位行）',
+  secret_hash CHAR(64) NOT NULL COMMENT '密钥哈希（HMAC-SHA256(pepper, secret) hex）',
+  secret_prefix VARCHAR(16) NOT NULL COMMENT '密钥明文前若干位（仅回显辨识）',
+  scopes VARCHAR(512) NOT NULL COMMENT '作用域集合（逗号分隔，白名单内）',
+  status TINYINT NOT NULL DEFAULT 1 COMMENT '状态：1 启用 / 0 禁用',
+  rate_limit_qps INT NOT NULL DEFAULT 10 COMMENT '按 Key 的 QPS 配额',
+  daily_quota INT NOT NULL DEFAULT 100000 COMMENT '日配额（0=不限）',
+  ip_whitelist VARCHAR(512) NULL COMMENT 'CIDR 白名单（逗号分隔；空=不限）',
+  expire_at DATETIME NULL COMMENT '过期时间（空=永不过期）',
+  last_used_at DATETIME NULL COMMENT '最近调用时刻',
+  create_by VARCHAR(64) NULL, create_time DATETIME NULL, update_by VARCHAR(64) NULL, update_time DATETIME NULL, del_flag TINYINT NOT NULL DEFAULT 0,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_ak (access_key_id),
+  KEY idx_tenant_status (tenant_id, status)
+) COMMENT='IoT 开放 API Key（只存哈希，明文仅创建时返回一次）';
+
+-- 开放 API Key 管理菜单（看板 #11 第 1 批；与 migration 等价）
+INSERT INTO sys_menu (id, pid, name, type, platform_only, path, component, auth_code, title, icon, sort, create_time, status, is_deleted)
+VALUES (3209, 3204, 'IotOpenApiKeys', 'menu', 0, '/iot/open-api-keys', '/iot/openApiKeys/index', 'iot:openapi:key-list', 'page.iot.openApiKey.title', 'carbon:key', 17, NOW(), 1, 0);
+INSERT INTO sys_menu (id, pid, name, type, platform_only, auth_code, title, sort, create_time, status, is_deleted)
+VALUES (320901, 3209, 'IotOpenApiKeyCreate', 'button', 0, 'iot:openapi:key-create', 'common.create', 1, NOW(), 1, 0),
+       (320902, 3209, 'IotOpenApiKeyRevoke', 'button', 0, 'iot:openapi:key-revoke', 'common.delete', 2, NOW(), 1, 0);
+INSERT INTO sys_role_menu (role_id, menu_id)
+SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (3209, 320901, 320902);
+INSERT INTO sys_template_menu (template_id, menu_id)
+SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (3209, 320901, 320902);
