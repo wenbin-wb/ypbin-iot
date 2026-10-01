@@ -54,6 +54,7 @@ public class PlatformAlertService {
 
     private final MeterRegistry meterRegistry;
     private final IotPlatformAlertMapper alertMapper;
+    private final PlatformAlertNotifier notifier;
 
     /** 上一轮基线（进程内）。**刻意不用 DB**：平台自告警不应依赖 DB 才能判断
      * （见设计 §6 R2 "监控者先坏"）；进程重启后基线丢失，判定退化为首次运行分支。 */
@@ -68,9 +69,11 @@ public class PlatformAlertService {
 
     private final Counter unknownCounter;
 
-    public PlatformAlertService(MeterRegistry meterRegistry, IotPlatformAlertMapper alertMapper) {
+    public PlatformAlertService(MeterRegistry meterRegistry, IotPlatformAlertMapper alertMapper,
+                                 PlatformAlertNotifier notifier) {
         this.meterRegistry = meterRegistry;
         this.alertMapper = alertMapper;
+        this.notifier = notifier;
         this.roundsCounter = Counter.builder("iot.platform_alert.rounds")
             .description("平台自告警判定轮次").register(meterRegistry);
         this.firingCounter = Counter.builder("iot.platform_alert.firing")
@@ -149,6 +152,10 @@ public class PlatformAlertService {
         alert.setObservedRounds(rounds);
 
         alertMapper.upsertActive(alert);
+        if (state == PlatformAlertState.FIRING && rounds == FIRING_THRESHOLD_ROUNDS) {
+            // 升到 FIRING 的当轮发一次（续期不再发 ⇒ 防刷屏；恢复再发一次 RESOLVED）
+            notifier.notifyFiring(rule, verdict.summary(), buildSnapshotJson(verdict));
+        }
         log.warn("[iot] 平台健康异常：rule={}, state={}, {}",
             rule.getCode(), state.getCode(), LogSanitizer.sanitize(verdict.summary()));
     }
@@ -167,6 +174,7 @@ public class PlatformAlertService {
         }
         alertMapper.resolve(active.getId(), PlatformAlertState.RESOLVED.getCode(),
             "已恢复：" + verdict.summary(), LocalDateTime.now());
+        notifier.notifyResolved(rule, verdict.summary());
         log.info("[iot] 平台健康恢复正常，告警收口：rule={}, {}",
             rule.getCode(), LogSanitizer.sanitize(verdict.summary()));
     }

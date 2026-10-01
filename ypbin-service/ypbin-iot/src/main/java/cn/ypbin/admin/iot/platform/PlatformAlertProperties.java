@@ -9,6 +9,8 @@
  */
 package cn.ypbin.admin.iot.platform;
 
+import java.util.ArrayList;
+import java.util.List;
 import lombok.Getter;
 import lombok.Setter;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -45,4 +47,14 @@ public class PlatformAlertProperties {
      * 显式配置变更，而不是悄悄发生。</p>
      */
     private boolean notifyEnabled = false;
+
+    /**
+     * 平台告警收件人：系统用户 ID 列表（用户裁定：选当前系统用户；站内信通道）。默认空 = 不投递站内信。
+     */
+    private List<Long> recipientUserIds = new ArrayList<>();
+
+    /**
+     * 平台告警收件人：额外邮箱列表（选填；EMAIL 通道）。默认空 = 不投递邮件。
+     */
+    private List<String> recipientExtraEmails = new ArrayList<>();
 }

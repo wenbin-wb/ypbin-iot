@@ -55,13 +55,16 @@ class PlatformAlertServiceTest {
 
     private IotPlatformAlertMapper alertMapper;
 
+    private PlatformAlertNotifier notifier;
+
     private PlatformAlertService service;
 
     @BeforeEach
     void setUp() {
         registry = new SimpleMeterRegistry();
         alertMapper = mock(IotPlatformAlertMapper.class);
-        service = new PlatformAlertService(registry, alertMapper);
+        notifier = mock(PlatformAlertNotifier.class);
+        service = new PlatformAlertService(registry, alertMapper, notifier);
     }
 
     /** 注册一个"评估器停摆"的 gauge（lag 很大）。 */
@@ -111,10 +114,13 @@ class PlatformAlertServiceTest {
         registerStalledLag(120_000L);
         when(alertMapper.selectOne(any())).thenReturn(null);
 
-        // 第 1 轮：连续 1 次 < 门槛(2) ⇒ PENDING
+        // 第 1 轮：连续 1 次 < 门槛(2) ⇒ PENDING（不发通知）
         service.evaluateOnce();
-        // 第 2 轮：连续 2 次 ⇒ FIRING
+        verify(notifier, never()).notifyFiring(any(), anyString(), anyString());
+        // 第 2 轮：连续 2 次 ⇒ FIRING（升 FIRING 当轮发一次）
         service.evaluateOnce();
+        verify(notifier, times(1)).notifyFiring(
+            eq(PlatformHealthRule.EVALUATOR_STALLED), anyString(), anyString());
 
         ArgumentCaptor<IotPlatformAlert> captor =
             ArgumentCaptor.forClass(IotPlatformAlert.class);
@@ -159,6 +165,9 @@ class PlatformAlertServiceTest {
         verify(alertMapper).resolve(eq(99L),
             eq(PlatformAlertState.RESOLVED.getCode()),
             anyString(), any());
+        // 恢复必发通知（设计点名）
+        verify(notifier).notifyResolved(
+            eq(PlatformHealthRule.EVALUATOR_STALLED), anyString());
     }
 
     @Test
