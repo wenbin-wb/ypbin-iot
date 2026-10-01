@@ -2,6 +2,7 @@ package cn.ypbin.admin.iot.controller;
 
 import cn.ypbin.admin.iot.openapi.OpenApiKeyService;
 import cn.ypbin.admin.iot.openapi.OpenApiKeyVerifyDtos;
+import cn.ypbin.starter.tenant.core.TenantContext;
 import cn.ypbin.starter.core.model.R;
 import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -28,6 +29,7 @@ public class InternalOpenApiKeyController {
     @PostMapping("/verify")
     public R<OpenApiKeyVerifyDtos.VerifyResp> verify(
         @Valid @RequestBody OpenApiKeyVerifyDtos.VerifyReq req) {
-        return R.ok(openApiKeyService.verify(req));
+        // 内部校验按 accessKeyId **跨租户全局定位**（Key 行归属租户由行本身携带）⇒ 显式忽略租户隔离
+        return R.ok(TenantContext.executeIgnore(() -> openApiKeyService.verify(req)));
     }
 }
