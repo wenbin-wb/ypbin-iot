@@ -36,6 +36,11 @@ public class OpenApiKeyAuthFilter implements GlobalFilter, Ordered {
     private static final Logger log = LoggerFactory.getLogger(OpenApiKeyAuthFilter.class);
     private static final String OPEN_API_PREFIX = "/iot/open-api/v1/";
 
+    /** 限流过滤器读取用的 exchange attribute（OpenApiKeyRateLimitGlobalFilter 依赖）。 */
+    public static final String ATTR_ACCESS_KEY = "openapi.accessKeyId";
+    public static final String ATTR_RATE_QPS = "openapi.rateLimitQps";
+    public static final String ATTR_DAILY_QUOTA = "openapi.dailyQuota";
+
     private final WebClient webClient;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Environment environment;
@@ -72,7 +77,7 @@ public class OpenApiKeyAuthFilter implements GlobalFilter, Ordered {
             internalToken().length(), gatewaySignToken().length());
         return verify(parsed.accessKeyId(), parsed.secret())
             .flatMap(data -> data.valid()
-                ? chain.filter(forge(exchange, data))
+                ? chain.filter(forge(exchange, data, parsed.accessKeyId()))
                 : reject(exchange, "api key invalid or revoked"));
     }
 
@@ -116,16 +121,21 @@ public class OpenApiKeyAuthFilter implements GlobalFilter, Ordered {
                     scopes.add(scope.asText());
                 }
                 return new VerifyData(valid, data.path("virtualUserId").asLong(0L),
-                    data.path("tenantId").asLong(0L), scopes);
+                    data.path("tenantId").asLong(0L), scopes,
+                    data.path("rateLimitQps").asInt(10), data.path("dailyQuota").asInt(100000));
             })
             .doOnError(ex -> log.error("[gateway] openapi verify failed: {}", ex.getMessage()))
             .onErrorReturn(VerifyData.invalid());
     }
 
-    private ServerWebExchange forge(ServerWebExchange exchange, VerifyData data) {
+    private ServerWebExchange forge(ServerWebExchange exchange, VerifyData data, String accessKeyId) {
         String roles = String.join(",", data.scopes());
-        log.info("[gateway] openapi forge: userId={} tenantId={} roles={} signLen={}", data.virtualUserId(),
-            data.tenantId(), roles, gatewaySignToken().length());
+        exchange.getAttributes().put(ATTR_ACCESS_KEY, accessKeyId);
+        exchange.getAttributes().put(ATTR_RATE_QPS, data.rateLimitQps());
+        exchange.getAttributes().put(ATTR_DAILY_QUOTA, data.dailyQuota());
+        log.info("[gateway] openapi forge: userId={} tenantId={} roles={} qps={} quota={} signLen={}",
+            data.virtualUserId(), data.tenantId(), roles, data.rateLimitQps(), data.dailyQuota(),
+            gatewaySignToken().length());
         return exchange.mutate()
             .request(builder -> builder
                 .header("X-User-Id", String.valueOf(data.virtualUserId()))
@@ -158,9 +168,10 @@ public class OpenApiKeyAuthFilter implements GlobalFilter, Ordered {
     record ParsedKey(String accessKeyId, String secret) {
     }
 
-    record VerifyData(boolean valid, long virtualUserId, long tenantId, List<String> scopes) {
+    record VerifyData(boolean valid, long virtualUserId, long tenantId, List<String> scopes,
+                       int rateLimitQps, int dailyQuota) {
         static VerifyData invalid() {
-            return new VerifyData(false, 0L, 0L, List.of());
+            return new VerifyData(false, 0L, 0L, List.of(), 0, 0);
         }
     }
 }

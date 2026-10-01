@@ -126,8 +126,10 @@ public class OpenApiKeyService {
         }
         row.setLastUsedAt(LocalDateTime.now());
         keyMapper.updateById(row);
+        int qps = row.getRateLimitQps() == null ? OpenApiKeyConstants.DEFAULT_RATE_LIMIT_QPS : row.getRateLimitQps();
+        int quota = row.getDailyQuota() == null ? OpenApiKeyConstants.DEFAULT_DAILY_QUOTA : row.getDailyQuota();
         return new OpenApiKeyVerifyDtos.VerifyResp(true, row.getTenantId(),
-            OpenApiKeyConstants.virtualUserId(row.getId()), splitScopes(row.getScopes()));
+            OpenApiKeyConstants.virtualUserId(row.getId()), splitScopes(row.getScopes()), qps, quota);
     }
 
     /** 作用域归一化 + 白名单校验（只允许既有开放作用域）。 */
