@@ -52,6 +52,9 @@ public class IotCommandInstance extends TenantBaseEntity {
     /** 请求 ID（幂等键；平台生成，随 payload 下发）。 */
     private String requestId;
 
+    /** 客户端幂等键（看板 #11 O-7 C2；第三方提供，同租户+同设备唯一；null 不参与去重）。 */
+    private String clientRequestId;
+
     /** 下行主题（定向靠主题；官方无按 clientid 定向的端点）。 */
     private String topic;
 

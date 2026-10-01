@@ -51,14 +51,14 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
-import java.time.LocalDateTime;
-import java.util.ArrayList;
+import java.time.LocalDateTime;import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.JsonNode;
@@ -180,12 +180,25 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
     }
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
+    // ⚠️ 刻意无 @Transactional（看板 #11 O-7 C1）：insert（PENDING，即时提交）→ publish（事务外）
+    // → update 各自单语句自动提交；一次慢 EMQX（最坏 5s）不再占住数据库事务。
+    // 崩溃窗口（insert 后 publish 前进程挂掉）由 CommandTimeoutScanner（15s 一轮）收敛为超时。
+    // 代价（用户已接受）：publish 失败会留 FAILED 行（以前是回滚无痕）—— residual 更可审计。
     public CommandInstanceResp send(Long deviceId, CommandSendReq req, CommandSource source,
                                     Long operatorUserId) {
         IotDevice device = requireDevice(deviceId);
         CommandKind kind = requireKind(req.getKind());
         requireWriteDesiredUnsupported(req);
+        String clientKey = normalizeClientKey(req.getClientRequestId());
+        if (clientKey != null) {
+            IotCommandInstance existing = instanceMapper.selectByClientKey(deviceId, clientKey);
+            if (existing != null) {
+                log.info("[iot] 命令幂等命中（不二次下发）：deviceId={} clientKey={} requestId={} status={}",
+                    LogSanitizer.sanitize(deviceId), LogSanitizer.sanitize(clientKey),
+                    LogSanitizer.sanitize(existing.getRequestId()), existing.getStatusCode());
+                return toResp(existing);
+            }
+        }
         // 体积与形态：params 必须在**构造 payload 之前**校验（评审核心要求：校验失败一律不发布）
         // DTO 里是 Object（客户端发的是 JSON 对象）；这里统一序列化成文本再走"必须是对象 + ≤64KB"的校验
         String paramsJson = toJsonText(req.getParams());
@@ -209,6 +222,7 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
         row.setIdentifier(target.identifier());
         row.setKind(kind.getCode());
         row.setRequestId(requestId);
+        row.setClientRequestId(clientKey);
         row.setTopic(topic);
         row.setPayload(payload);
         row.setStatusCode(CommandInstanceStatus.PENDING.getCode());
@@ -216,12 +230,45 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
         row.setRetryCount(0);
         row.setSource(source.getCode());
         row.setOperatorUserId(operatorUserId);
-        instanceMapper.insert(row);
+        try {
+            instanceMapper.insert(row);
+        } catch (DuplicateKeyException ex) {
+            // 并发同键：对方先落库 ⇒ 读回现有的返回（不二次下发）；读不到则原样抛出
+            // （request_id 唯一冲突理论上不可能：服务端每次新生成；只处理 clientKey 分支）。
+            IotCommandInstance raced = clientKey == null ? null
+                : instanceMapper.selectByClientKey(deviceId, clientKey);
+            if (raced != null) {
+                log.info("[iot] 命令并发幂等命中（不二次下发）：deviceId={} clientKey={} requestId={}",
+                    LogSanitizer.sanitize(deviceId), LogSanitizer.sanitize(clientKey),
+                    LogSanitizer.sanitize(raced.getRequestId()));
+                return toResp(raced);
+            }
+            throw ex;
+        }
         publishAndPersist(row, topic, payload, false);
         log.info("[iot] 命令已下发：deviceId={} kind={} identifier={} requestId={} status={}",
             LogSanitizer.sanitize(deviceId), kind.getCode(), LogSanitizer.sanitize(target.identifier()),
             LogSanitizer.sanitize(requestId), row.getStatusCode());
         return toResp(row);
+    }
+
+    /**
+     * 客户端幂等键归一化（看板 #11 O-7 C2）。
+     *
+     * @param raw 原始值（可空）
+     * @return trim 后的键；空输入返回 {@code null}（= 每次调用都是独立命令）
+     */
+    private static String normalizeClientKey(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        String key = raw.trim();
+        if (!RequestIdRules.isValid(key)) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "客户端幂等键形态非法（字母/数字/下划线/点/冒号/连字符，1~64 字符）："
+                    + LogSanitizer.sanitize(key));
+        }
+        return key;
     }
 
     @Override
@@ -709,6 +756,7 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
         resp.setKind(row.getKind());
         resp.setIdentifier(row.getIdentifier());
         resp.setRequestId(row.getRequestId());
+        resp.setClientRequestId(row.getClientRequestId());
         resp.setTopic(row.getTopic());
         resp.setPayload(row.getPayload());
         resp.setReplyPayload(row.getReplyPayload());

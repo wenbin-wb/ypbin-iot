@@ -23,6 +23,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.doThrow;
 
 import cn.ypbin.admin.iot.command.CommandReplyReq;
 import cn.ypbin.admin.iot.command.CommandReplyResult;
@@ -52,6 +53,7 @@ import com.baomidou.mybatisplus.core.conditions.Wrapper;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import org.springframework.dao.DuplicateKeyException;
 import java.util.List;
 import java.util.Map;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
@@ -570,6 +572,81 @@ class CommandInstanceServiceImplTest {
         req.setData(data);
         req.setTs(ts);
         return req;
+    }
+
+    @Test
+    @DisplayName("C2：同键重复提交返回已有实例、不二次下发")
+    void repeatClientKeyMustNotPublishTwice() {
+        stubDeviceAndThingModel();
+        when(emqxAdminClient.publish(any(), any(), anyInt(), anyBoolean()))
+            .thenReturn(new EmqxPublishOutcome(EmqxPublishResult.DELIVERED, "msg-1"));
+        when(instanceMapper.selectByClientKey(eq(DEVICE), eq("idem-1"))).thenReturn(null);
+
+        CommandSendReq firstReq = req("property_set", "temperature", Map.of("value", 25.0));
+        firstReq.setClientRequestId("idem-1");
+        CommandInstanceResp first = service.send(DEVICE, firstReq, CommandSource.API, null);
+
+        assertThat(first.getStatusCode()).isEqualTo(CommandInstanceStatus.SENT.getCode());
+        assertThat(first.getClientRequestId()).isEqualTo("idem-1");
+        ArgumentCaptor<IotCommandInstance> inserted = ArgumentCaptor.forClass(IotCommandInstance.class);
+        verify(instanceMapper).insert(inserted.capture());
+
+        // 第二次：同键已存在 ⇒ 直接返回，不 publish、不 insert
+        when(instanceMapper.selectByClientKey(eq(DEVICE), eq("idem-1")))
+            .thenReturn(inserted.getValue());
+        CommandSendReq secondReq = req("property_set", "temperature", Map.of("value", 25.0));
+        secondReq.setClientRequestId("idem-1");
+        CommandInstanceResp second = service.send(DEVICE, secondReq, CommandSource.API, null);
+
+        assertThat(second.getRequestId()).isEqualTo(first.getRequestId());
+        verify(emqxAdminClient, times(1)).publish(any(), any(), anyInt(), anyBoolean());
+        verify(instanceMapper, times(1)).insert(any(IotCommandInstance.class));
+    }
+
+    @Test
+    @DisplayName("C2：并发同键（insert 唯一冲突）读回现有返回、不二次下发")
+    void racingClientKeyMustReturnExistingWithoutPublish() {
+        stubDeviceAndThingModel();
+        IotCommandInstance raced = instance(CommandInstanceStatus.SENT, 0);
+        raced.setRequestId("cmd-race");
+        raced.setClientRequestId("idem-race");
+        when(instanceMapper.selectByClientKey(eq(DEVICE), eq("idem-race")))
+            .thenReturn(null, raced);
+        doThrow(new DuplicateKeyException("dup"))
+            .when(instanceMapper).insert(any(IotCommandInstance.class));
+
+        CommandSendReq req = req("property_set", "temperature", Map.of("value", 1));
+        req.setClientRequestId("idem-race");
+        CommandInstanceResp resp = service.send(DEVICE, req, CommandSource.API, null);
+
+        assertThat(resp.getRequestId()).isEqualTo("cmd-race");
+        verifyNoInteractions(emqxAdminClient);
+    }
+
+    @Test
+    @DisplayName("C2：非法幂等键直接拒绝、绝不发布（不截断归一）")
+    void illegalClientKeyMustBeRejectedBeforePublish() {
+        stubDeviceAndThingModel();
+        CommandSendReq req = req("property_set", "temperature", Map.of("value", 1));
+        req.setClientRequestId("bad key!!");
+        assertThatThrownBy(() -> service.send(DEVICE, req, CommandSource.API, null))
+            .isInstanceOf(BusinessException.class);
+        verifyNoInteractions(emqxAdminClient);
+    }
+
+    @Test
+    @DisplayName("C1：publish 失败留 FAILED 行（不回滚，前值回退即转红）")
+    void publishFailureMustLeaveFailedRow() {
+        stubDeviceAndThingModel();
+        when(emqxAdminClient.publish(any(), any(), anyInt(), anyBoolean()))
+            .thenThrow(new EmqxClientException(EmqxErrorCode.UNREACHABLE, "down"));
+
+        CommandInstanceResp resp = service.send(DEVICE, req("property_set", "temperature", Map.of("value", 1)),
+            CommandSource.API, null);
+
+        assertThat(resp.getStatusCode()).isEqualTo(CommandInstanceStatus.FAILED.getCode());
+        // C1 核心断言：insert 已提交（若仍在旧事务里，此行会被回滚 ⇒ 该校验无意义，故显式断言 insert 发生）
+        verify(instanceMapper, times(1)).insert(any(IotCommandInstance.class));
     }
 
     /**
