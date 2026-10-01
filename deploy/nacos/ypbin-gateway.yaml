@@ -46,6 +46,12 @@ spring:
                 - Path=/ai/**
               filters:
                 - StripPrefix=1
+            - id: iot-openapi
+              uri: lb://ypbin-iot
+              predicates:
+                - Path=/iot/open-api/v1/**
+              filters:
+                - RewritePath=/iot/open-api/v1/(?<seg>.*), /${seg}
             - id: iot
               uri: lb://ypbin-iot
               predicates:
@@ -108,3 +114,5 @@ ypbin:
         - /system/ypbin/sse/subscribe
         # 埋点采集端点：登录前后都要上报（匿名事件占多数），故放行；防护由限流 + 体积/事件数上限 + 事件码白名单承担
         - /system/tracking/ingest
+        # API Key 路径免会话登录（OpenApiKeyAuthFilter 接管）
+        - /iot/open-api/**
