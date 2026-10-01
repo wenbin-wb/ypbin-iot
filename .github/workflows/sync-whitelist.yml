@@ -78,6 +78,11 @@ jobs:
           # ⚠️ **更好的长期做法是改上游 admin 仓**：本仓下次同步自然继承、分歧面回到 18。
           # 代价如实登记：多一个 merge 冲突点（本文件上游改动频率低，代价可接受）。
           # 理由与代价全文见 SYNC.md 第二节对应行。
+          # 第 20 项（2026-10-01 加）：网关配置随源码发布（routes/exclude 等）。
+          # 无法用新文件实现：路由/清洗/白名单必须落在网关既有 application.yml；nacos 3.x 服务端
+          # 脚本化读写 API 已移除（一手实测 404），配置只能随 jar 发布。
+          # 长期做法：反哺 admin 仓（网关工程属 admin/upstream），见 SYNC.md 第二节。
+          ALLOWED+='ypbin-gateway/src/main/resources/application\.yml|'
           ALLOWED+='deploy/nacos/ypbin-common\.yaml'
           ALLOWED+=')$'
           echo "当前白名单正则：$ALLOWED"
