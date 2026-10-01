@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS iot_open_api_key (
   ip_whitelist VARCHAR(512) NULL COMMENT 'CIDR 白名单（逗号分隔；空=不限）',
   expire_at DATETIME NULL COMMENT '过期时间（空=永不过期）',
   last_used_at DATETIME NULL COMMENT '最近调用时刻',
-  create_user VARCHAR(64) NULL, create_time DATETIME NULL, update_user VARCHAR(64) NULL, update_time DATETIME NULL, is_deleted TINYINT NOT NULL DEFAULT 0,
+  create_user BIGINT NULL, create_time DATETIME NULL, update_user BIGINT NULL, update_time DATETIME NULL, is_deleted TINYINT NOT NULL DEFAULT 0,
   PRIMARY KEY (id),
   UNIQUE KEY uk_ak (access_key_id),
   KEY idx_tenant_status (tenant_id, status)

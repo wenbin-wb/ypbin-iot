@@ -95,8 +95,15 @@ public class OpenApiKeyAuthFilter implements WebFilter, Ordered {
             .header("Content-Type", MediaType.APPLICATION_JSON_VALUE)
             .bodyValue(Map.of("accessKeyId", accessKeyId, "secret", secret))
             .retrieve()
-            .bodyToMono(JsonNode.class)
+            .bodyToMono(String.class)
             .timeout(Duration.ofSeconds(3))
+            .map(body -> {
+                try {
+                    return objectMapper.readTree(body);
+                } catch (Exception ex) {
+                    throw new IllegalStateException("openapi verify response parse failed", ex);
+                }
+            })
             .map(root -> {
                 JsonNode data = root.path("data");
                 boolean valid = Boolean.TRUE.equals(data.path("valid").asBoolean(false))
