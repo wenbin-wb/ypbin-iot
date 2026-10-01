@@ -192,6 +192,24 @@ ypbin:
     # 连接超时（毫秒）。JDBC 只有全局登录超时，启动自检会用本值调用 DriverManager.setLoginTimeout
     connect-timeout-ms: 3000
 
+  # 开放 API 文档（看板 #11 门面/F-3：ypbin-starter-api-doc，注解 + 代码生成）。
+  # 安全必修（前置核验 U-6 的 R-1/R-2/R-3）：
+  #   ① paths-to-match 只圈 /open-api/v1/** —— 默认值 /** 会把全部管理面端点写进对外规范；
+  #   ② security-headers 显式覆盖默认值（默认含 X-Tenant-Id 等管理面头，会误导第三方以为可自选租户）；
+  #      v1 只用 X-Api-Key（ak:sk bearer，无签名头）；
+  #   ③ disable-in-prod 保持 true，但注意它只在激活 prod profile 时生效（starter
+  #      ApiDocDefaultsEnvironmentPostProcessor 按 profile 名判定）；本生产 compose 未激活任何
+  #      profile（F-4 已核实）⇒ 该开关在现网不生效，实际边界靠下面两条：
+  #      网关 exclude-paths 未放行 /iot/v3/api-docs（须登录态）+ 18084 只绑回环。
+  api-doc:
+    title: IoT 开放 API
+    version: v1
+    disable-in-prod: true
+    paths-to-match:
+      - /open-api/v1/**
+    security-headers:
+      - X-Api-Key
+
 # ---------- 可观测（Spring Boot Actuator，2026-09-26 新增）----------
 # 为什么要有这一段：本轮新增/既有的入站指标（iot.ingest.latest.regressed / future_rejected / failed、
 # iot.ingest.propertyid.rejected / unmapped / orphan、iot.pointmapping.orphan、iot.access.egress.* …）

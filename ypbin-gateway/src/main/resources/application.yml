@@ -37,11 +37,12 @@ spring:
                 - StripPrefix=1
             - id: iot-openapi
               uri: lb://ypbin-iot
-              # 开放 API（看板 #11 第 1 批）：OpenApiKeyAuthFilter 校验后重写为 iot 既有路径
+              # 开放 API（看板 #11 门面）：只剥服务短名、保留 /open-api/v1 前缀落到 iot 门面
+              # （第 1 批曾剥掉全前缀复用既有路径；门面落地后改保留前缀，未映射的开放路径按 404 不泄露管理面）
               predicates:
                 - Path=/iot/open-api/v1/**
               filters:
-                - RewritePath=/iot/open-api/v1/(?<seg>.*), /${seg}
+                - RewritePath=/iot/(?<seg>.*), /${seg}
             - id: iot
               uri: lb://ypbin-iot
               predicates:
