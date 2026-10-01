@@ -759,3 +759,8 @@ INSERT INTO sys_role_menu (role_id, menu_id)
 SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (3209, 320901, 320902);
 INSERT INTO sys_template_menu (template_id, menu_id)
 SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (3209, 320901, 320902);
+
+-- 命令实例客户端幂等键（看板 #11 O-7 C2；与 migration/2026-10-06-iot-command-client-key.sql 逐字等价）。
+ALTER TABLE iot_command_instance
+    ADD COLUMN client_request_id VARCHAR(64) NULL COMMENT '客户端幂等键（开放 API/第三方提供；同租户+同设备唯一；null=平台生成 request_id，不参与去重）',
+    ADD UNIQUE KEY uk_command_client_key (tenant_id, device_id, client_request_id);

@@ -19,11 +19,11 @@ import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 
 /**
- * 开放 API 门面门禁（看板 #11 门面）。
+ * 开放 API 门面门禁（看板 #11 门面 + O-7）。
  *
  * <p>锁四条：① 门面路径全部在 {@code /open-api/v1} 之下（网关只把该前缀交给 Key 鉴权）；
  * ② 除 whoami 外每个读方法都有精确的作用域权限码（防"顺手改宽"）；
- * ③ 门面禁止一切写映射（O-7 命令下发需 C1–C4 先落地，在此之前连映射都不许出现）；
+ * ③ 写映射仅允许 O-7 这一处（C1–C4 落地后开放；其它写一律不许出现）；
  * ④ {@code /tsl} 必须用独立码（防复用 list 码把导出权限默认塞给第三方）。</p>
  */
 class OpenApiFacadeGateTest {
@@ -45,13 +45,14 @@ class OpenApiFacadeGateTest {
     }
 
     @Test
-    @DisplayName("门面禁止一切写映射（O-7 未达标前连映射都不许出现）")
-    void facadeMustBeReadOnly() {
+    @DisplayName("写映射仅允许 O-7 这一处（其它写一律不许出现）")
+    void onlySendCommandsMayBeWriteMapping() {
+        List<String> posts = new ArrayList<>();
         for (Class<?> controller : FACADE) {
             for (Method method : controller.getDeclaredMethods()) {
-                assertThat(method.getAnnotation(PostMapping.class))
-                    .as("%s#%s 禁止 POST", controller.getSimpleName(), method.getName())
-                    .isNull();
+                if (method.getAnnotation(PostMapping.class) != null) {
+                    posts.add(controller.getSimpleName() + "#" + method.getName());
+                }
                 assertThat(method.getAnnotation(PutMapping.class))
                     .as("%s#%s 禁止 PUT", controller.getSimpleName(), method.getName())
                     .isNull();
@@ -60,6 +61,14 @@ class OpenApiFacadeGateTest {
                     .isNull();
             }
         }
+        assertThat(posts).containsExactly("OpenApiDeviceController#sendCommands");
+    }
+
+    @Test
+    @DisplayName("O-7 下发必须用 iot:debug:send（高危码，默认不授予）")
+    void sendCommandsMustRequireDebugSend() throws Exception {
+        assertThat(permissionOf(OpenApiDeviceController.class, "sendCommands"))
+            .isEqualTo("iot:debug:send");
     }
 
     @Test

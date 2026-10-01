@@ -68,4 +68,14 @@ public class CommandSendReq {
      * {@code PUT /devices/{id}/shadow}（设计 §7.3 ① 已注明该能力既有）。</p>
      */
     private Boolean writeDesired;
+
+    /**
+     * 客户端幂等键（看板 #11 O-7 C2；可选）。
+     *
+     * <p>同一租户+同一设备下重复提交同键 ⇒ 返回已有实例、<b>不二次下发</b>（形态见
+     * {@code RequestIdRules}：字母/数字/下划线/点/冒号/连字符，1~64 字符；非法直接拒绝，
+     * 不截断——截断会把两个不同的键压成同一个，造成"以为去重、实际串单"）。
+     * 为空 ⇒ 每次调用都是独立命令（平台生成 requestId）。</p>
+     */
+    private String clientRequestId;
 }

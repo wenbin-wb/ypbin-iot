@@ -40,11 +40,28 @@ public interface IotCommandInstanceMapper extends BaseMapper<IotCommandInstance>
      * @param requestId 请求 ID
      * @return 实例；无则 {@code null}
      */
-    @Select("SELECT id, tenant_id, device_id, command_id, identifier, kind, request_id, topic, payload, "
+    @Select("SELECT id, tenant_id, device_id, command_id, identifier, kind, request_id, client_request_id, "
+        + "topic, payload, "
         + "reply_payload, status_code, error_code, error_msg, timeout_ms, retry_count, emqx_message_id, "
         + "source, operator_user_id, sent_at, finished_at, create_time, update_time "
         + "FROM iot_command_instance WHERE is_deleted = 0 AND request_id = #{requestId} LIMIT 1")
     IotCommandInstance selectByRequestId(@Param("requestId") String requestId);
+
+    /**
+     * 按客户端幂等键查实例（看板 #11 O-7 C2；租户条件由插件注入，device 显式限定防跨设备复用）。
+     *
+     * @param deviceId 设备 ID
+     * @param clientRequestId 客户端幂等键（已归一化 trim）
+     * @return 实例；无则 {@code null}
+     */
+    @Select("SELECT id, tenant_id, device_id, command_id, identifier, kind, request_id, client_request_id, "
+        + "topic, payload, "
+        + "reply_payload, status_code, error_code, error_msg, timeout_ms, retry_count, emqx_message_id, "
+        + "source, operator_user_id, sent_at, finished_at, create_time, update_time "
+        + "FROM iot_command_instance WHERE is_deleted = 0 AND device_id = #{deviceId} "
+        + "AND client_request_id = #{clientRequestId} LIMIT 1")
+    IotCommandInstance selectByClientKey(@Param("deviceId") Long deviceId,
+                                         @Param("clientRequestId") String clientRequestId);
 
     /**
      * 取超时候选（**跨租户**；调用方用 {@code runIgnore} 包住）。
