@@ -83,6 +83,10 @@ jobs:
           # 脚本化读写 API 已移除（一手实测 404），配置只能随 jar 发布。
           # 长期做法：反哺 admin 仓（网关工程属 admin/upstream），见 SYNC.md 第二节。
           ALLOWED+='ypbin-gateway/src/main/resources/application\.yml|'
+          # 第 21/22 项（2026-10-01 加）：Key 表与平台告警体系共用 007/迁移文件（IoT 建表/菜单），
+          # 既有文件内追加段落（无法用新 SQL 文件：等价门禁按文件次序比对）。
+          ALLOWED+='deploy/sql/007-iot-data\.sql|'
+          ALLOWED+='deploy/sql/migration/2026-10-05-iot-platform-alert-schema\.sql|'
           ALLOWED+='deploy/nacos/ypbin-common\.yaml'
           ALLOWED+=')$'
           echo "当前白名单正则：$ALLOWED"
