@@ -251,6 +251,9 @@ services:
       # 空口令必然导致「全部服务注册失败」这种最难排查的形态，宁可让 compose 在解析期就报缺失键。
       # （install.sh 会生成该键、.env.example 已列；旧 .env 由 env_key_backfill 补齐。）
       SPRING_CLOUD_NACOS_USERNAME: ${NACOS_ADMIN_USERNAME:-nacos}
+      # openapi 转签所需（看板 #11 第 1 批），真值在 .env(600)
+      YPBIN_OPENAPI_INTERNAL_TOKEN: ${INTERNAL_TOKEN:}
+      YPBIN_OPENAPI_GATEWAY_SIGN_TOKEN: ${GATEWAY_SIGN_TOKEN:}
       SPRING_CLOUD_NACOS_PASSWORD: ${NACOS_ADMIN_PASSWORD:?请在deploy/.env设置NACOS_ADMIN_PASSWORD}
     ports:
       - "18080:18080"
