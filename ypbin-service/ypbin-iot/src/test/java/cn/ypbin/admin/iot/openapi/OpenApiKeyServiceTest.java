@@ -9,6 +9,9 @@ import static org.mockito.Mockito.when;
 import cn.ypbin.admin.iot.entity.IotOpenApiKey;
 import cn.ypbin.admin.iot.mapper.IotOpenApiKeyMapper;
 import cn.ypbin.starter.core.exception.BusinessException;
+import cn.ypbin.starter.security.core.LoginUser;
+import cn.ypbin.starter.security.identity.IdentityContext;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -26,6 +29,11 @@ class OpenApiKeyServiceTest {
     void setUp() {
         mapper = mock(IotOpenApiKeyMapper.class);
         service = new OpenApiKeyService(mapper, TEST_PEPPER);
+    }
+
+    @AfterEach
+    void tearDown() {
+        IdentityContext.clear();
     }
 
     private static OpenApiKeyDtos.CreateReq req(String app, String scopes) {
@@ -114,5 +122,69 @@ class OpenApiKeyServiceTest {
         assertThat(resp.tenantId()).isEqualTo(1L);
         assertThat(resp.scopes()).containsExactly("iot:series:get");
         assertThat(resp.virtualUserId()).isEqualTo(OpenApiKeyConstants.virtualUserId(5L));
+    }
+
+    @Test
+    @DisplayName("自检：虚拟主体返回自身信息（不含明文）")
+    void whoamiReturnsOwnKeyInfo() {
+        long keyRowId = 7L;
+        long virtualUserId = OpenApiKeyConstants.virtualUserId(keyRowId);
+        givenVirtualIdentity(virtualUserId, 1L);
+
+        IotOpenApiKey row = new IotOpenApiKey();
+        row.setId(keyRowId);
+        row.setTenantId(1L);
+        row.setAppName("erp");
+        row.setAccessKeyId("ak_x");
+        row.setSecretPrefix("sk_ab12");
+        row.setScopes("iot:series:get,iot:alert:list");
+        row.setStatus(1);
+        row.setRateLimitQps(10);
+        row.setDailyQuota(100000);
+        when(mapper.selectById(keyRowId)).thenReturn(row);
+
+        OpenApiKeyDtos.WhoamiResp resp = service.whoami();
+
+        assertThat(resp.accessKeyId()).isEqualTo("ak_x");
+        assertThat(resp.scopes()).containsExactly("iot:series:get", "iot:alert:list");
+        assertThat(resp.tenantId()).isEqualTo(1L);
+    }
+
+    @Test
+    @DisplayName("自检：非虚拟主体/租户不一致一律拒绝")
+    void whoamiRejectsNonVirtualOrTenantMismatch() {
+        // 无身份
+        IdentityContext.clear();
+        assertThatThrownBy(() -> service.whoami()).isInstanceOf(BusinessException.class);
+
+        // 真实用户
+        givenVirtualIdentity(99L, 1L);
+        assertThatThrownBy(() -> service.whoami()).isInstanceOf(BusinessException.class);
+
+        // 租户不一致
+        long keyRowId = 7L;
+        givenVirtualIdentity(OpenApiKeyConstants.virtualUserId(keyRowId), 2L);
+        IotOpenApiKey row = new IotOpenApiKey();
+        row.setId(keyRowId);
+        row.setTenantId(1L);
+        row.setScopes("iot:series:get");
+        when(mapper.selectById(keyRowId)).thenReturn(row);
+        assertThatThrownBy(() -> service.whoami()).isInstanceOf(BusinessException.class);
+    }
+
+    @Test
+    @DisplayName("自检：行缺失（硬删除）拒绝，不泄露存在性")
+    void whoamiRejectsMissingRow() {
+        long keyRowId = 9L;
+        givenVirtualIdentity(OpenApiKeyConstants.virtualUserId(keyRowId), 1L);
+        when(mapper.selectById(keyRowId)).thenReturn(null);
+        assertThatThrownBy(() -> service.whoami()).isInstanceOf(BusinessException.class);
+    }
+
+    private static void givenVirtualIdentity(long userId, long tenantId) {
+        LoginUser user = new LoginUser();
+        user.setId(userId);
+        user.setTenantId(tenantId);
+        IdentityContext.setLoginUser(user);
     }
 }

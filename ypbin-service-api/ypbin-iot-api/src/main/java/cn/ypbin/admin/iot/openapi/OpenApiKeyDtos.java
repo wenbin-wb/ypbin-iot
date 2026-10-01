@@ -37,4 +37,15 @@ public final class OpenApiKeyDtos {
                                List<String> scopes, Integer status, LocalDateTime expireAt,
                                LocalDateTime lastUsedAt, LocalDateTime createTime) {
     }
+
+    /**
+     * 自检响应（GET /open-api/v1/whoami：只回当前 Key 自身信息，不含明文 secret）。
+     *
+     * <p>用途：第三方接入第一件事就是自检（我是谁、有几个 scope、配额剩多少），大幅降低
+     * 「为什么查不到/调不通」的沟通成本；同时把已授予 scopes 摆明，天然解释作用域隔离。</p>
+     */
+    public record WhoamiResp(String accessKeyId, String appName, Long tenantId, List<String> scopes,
+                             Integer status, Integer rateLimitQps, Integer dailyQuota,
+                             LocalDateTime expireAt, LocalDateTime lastUsedAt) {
+    }
 }

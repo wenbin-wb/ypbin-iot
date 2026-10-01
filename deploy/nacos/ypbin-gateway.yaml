@@ -48,10 +48,11 @@ spring:
                 - StripPrefix=1
             - id: iot-openapi
               uri: lb://ypbin-iot
+              # 开放 API（看板 #11 门面）：只剥服务短名、保留 /open-api/v1 前缀落到 iot 门面
               predicates:
                 - Path=/iot/open-api/v1/**
               filters:
-                - RewritePath=/iot/open-api/v1/(?<seg>.*), /${seg}
+                - RewritePath=/iot/(?<seg>.*), /${seg}
             - id: iot
               uri: lb://ypbin-iot
               predicates:

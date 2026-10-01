@@ -4,6 +4,8 @@ import cn.ypbin.admin.iot.entity.IotOpenApiKey;
 import cn.ypbin.admin.iot.mapper.IotOpenApiKeyMapper;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.data.core.EntityStatus;
+import cn.ypbin.starter.security.core.LoginUser;
+import cn.ypbin.starter.security.identity.IdentityContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
@@ -100,6 +102,34 @@ public class OpenApiKeyService {
         }
         row.setStatus(EntityStatus.DISABLED.getCode());
         keyMapper.updateById(row);
+    }
+
+    /**
+     * 自检（GET /open-api/v1/whoami：只回当前 Key 自身信息，不含明文 secret）。
+     *
+     * <p>无 {@code @SaCheckPermission}（任何 scope 组合的 Key 都应能自检），改为按身份分流：
+     * 非虚拟主体一律拒绝（fail-closed，管理面用户走管理端点，不走这里）。行定位由虚拟 ID
+     * 反推（单 Key 虚拟 ID = 上界 - 行 id），读库实时反映吊销/配额变更。</p>
+     */
+    public OpenApiKeyDtos.WhoamiResp whoami() {
+        LoginUser loginUser = IdentityContext.getLoginUser().orElse(null);
+        Long userId = loginUser == null ? null : loginUser.getId();
+        if (!OpenApiPrincipal.isVirtualPrincipal(userId)) {
+            throw new BusinessException("非开放 API Key 身份");
+        }
+        long keyRowId = OpenApiKeyConstants.VIRTUAL_USER_ID_BASE - userId;
+        IotOpenApiKey row = keyMapper.selectById(keyRowId);
+        if (row == null) {
+            throw new BusinessException("Key 不存在");
+        }
+        Long tenantId = IdentityContext.getTenantId().orElse(null);
+        if (tenantId == null || !tenantId.equals(row.getTenantId())) {
+            log.warn("[iot] 开放 API 自检租户不一致，按拒绝处理：userId={}", userId);
+            throw new BusinessException("非开放 API Key 身份");
+        }
+        return new OpenApiKeyDtos.WhoamiResp(row.getAccessKeyId(), row.getAppName(), row.getTenantId(),
+            splitScopes(row.getScopes()), row.getStatus(), row.getRateLimitQps(), row.getDailyQuota(),
+            row.getExpireAt(), row.getLastUsedAt());
     }
 
     /** 内部校验（网关调用）。失败统一 invalid()，不区分不存在/secret 错/禁用/过期（防枚举）。 */
