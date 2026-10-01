@@ -215,6 +215,16 @@ ypbin:
     # 故不配该键）。实际边界：网关 exclude-paths 未放行 /iot/v3/api-docs（须登录态）
     # + 18084 只绑回环 ⇒ 第三方（Key）够不着，对外只给分组地址。
 
+  # 平台自告警（看板 #10；`PlatformAlertProperties.PREFIX = ypbin.platform-alert`）。
+  # 新装默认：只落库不通知（观察期）。`enabled` 由 compose env `YPBIN_PLATFORM_ALERT_ENABLED`
+  # 供给（此处不重复，避免双源打架）；`notify-enabled` 默认 false。
+  # dev live 已 flip（2026-10-01，用户指定收件人）：`notify-enabled: true` +
+  # `recipient-extra-emails: [wenbin_hyp@163.com]`，见 Nacos 回读与看板变更记录。
+  platform-alert:
+    notify-enabled: false
+    recipient-user-ids: []
+    recipient-extra-emails: []
+
 # ---------- 可观测（Spring Boot Actuator，2026-09-26 新增）----------
 # 为什么要有这一段：本轮新增/既有的入站指标（iot.ingest.latest.regressed / future_rejected / failed、
 # iot.ingest.propertyid.rejected / unmapped / orphan、iot.pointmapping.orphan、iot.access.egress.* …）
