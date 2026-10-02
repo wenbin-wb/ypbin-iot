@@ -219,10 +219,18 @@ public class OpenApiKeyService {
         Map<String, String> params = req.getSignParams();
 
         if (!OpenApiSignVerifier.intendsSignature(timestamp, nonce, sign, params)) {
-            // 未意图签名：灰度期放行（保持既有"仅 Key"接入方式可用）
+            // 四参数全无：即"未意图签名"。是否放行**只能由服务端强制模式决定**——
+            // 绝不能无条件放行，否则攻击者只要不带这些参数即可绕过验签（降级攻击）。
+            if (req.isRequireSignature()) {
+                log.warn("[iot] 开放 API 强制签名模式下请求未携带签名参数，拒绝：ak={}",
+                    LogSanitizer.sanitize(row.getAccessKeyId()));
+                return false;
+            }
+            // 非强制模式（灰度兼容期）：放行"仅 Key"的既有接入方式
             return true;
         }
         if (!OpenApiSignVerifier.complete(timestamp, nonce, sign, params)) {
+            // 带了参数却不齐备：无论是否强制模式都拒绝（fail-closed，防"部分携带"降级）
             log.warn("[iot] 开放 API 请求携带了不完整的签名参数，拒绝：ak={}",
                 LogSanitizer.sanitize(row.getAccessKeyId()));
             return false;

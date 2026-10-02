@@ -108,22 +108,8 @@ public class OpenApiKeyAuthFilter implements GlobalFilter, Ordered {
         Map<String, Object> payload = new HashMap<>();
         payload.put("accessKeyId", accessKeyId);
         payload.put("secret", secret);
-        String timestamp = queryParam(exchange, PARAM_TIMESTAMP);
-        String nonce = queryParam(exchange, PARAM_NONCE);
-        String sign = queryParam(exchange, PARAM_SIGN);
-        if (timestamp != null) {
-            payload.put(PARAM_TIMESTAMP, timestamp);
-        }
-        if (nonce != null) {
-            payload.put(PARAM_NONCE, nonce);
-        }
-        if (sign != null) {
-            payload.put(PARAM_SIGN, sign);
-        }
-        Map<String, String> signParams = collectSignParams(exchange);
-        if (!signParams.isEmpty()) {
-            payload.put("signParams", signParams);
-        }
+        // 签名参数与强制模式（契约见 buildSignPayload）
+        payload.putAll(buildSignPayload(exchange, requireSignature()));
         return webClient.post()
             .uri(verifyUrl())
             .header("X-Internal-Token", internalToken())
@@ -154,6 +140,54 @@ public class OpenApiKeyAuthFilter implements GlobalFilter, Ordered {
             })
             .doOnError(ex -> log.error("[gateway] openapi verify failed: {}", ex.getMessage()))
             .onErrorReturn(VerifyData.invalid());
+    }
+
+    /**
+     * 构造附加到内部校验请求上的签名相关字段（**可单测**，锁死与 iot 侧的契约）。
+     *
+     * <p><b>契约要点（曾因此处缺陷导致签名校验整体失效）</b>：</p>
+     * <ul>
+     *     <li>{@code signParams} <b>始终存在</b>，即便为空 Map —— 若"空就省略"，
+     *     iot 无法区分"客户端没打算签名"与"网关把参数弄丢了"，前者正是降级攻击要伪造的形态；</li>
+     *     <li>{@code requireSignature} 由<b>服务端配置</b>下发，客户端无法通过少发参数降级。</li>
+     * </ul>
+     *
+     * @param exchange 请求
+     * @param require  是否强制签名
+     * @return 待并入内部校验请求体的字段（**绝不返回 {@code null}**）
+     */
+    static Map<String, Object> buildSignPayload(ServerWebExchange exchange, boolean require) {
+        Map<String, Object> out = new HashMap<>();
+        String timestamp = queryParam(exchange, PARAM_TIMESTAMP);
+        String nonce = queryParam(exchange, PARAM_NONCE);
+        String sign = queryParam(exchange, PARAM_SIGN);
+        if (timestamp != null) {
+            out.put(PARAM_TIMESTAMP, timestamp);
+        }
+        if (nonce != null) {
+            out.put(PARAM_NONCE, nonce);
+        }
+        if (sign != null) {
+            out.put(PARAM_SIGN, sign);
+        }
+        // 始终放入（即使为空 Map）
+        out.put("signParams", collectSignParams(exchange));
+        out.put("requireSignature", require);
+        return out;
+    }
+
+    /**
+     * 是否强制要求签名（部署配置，默认 <b>false</b> 以兼容既有"仅 Key"接入）。
+     *
+     * <p>配置项 {@code ypbin.openapi.require-signature=true} 开启后，缺少签名参数的请求
+     * 会被 iot 内部校验直接拒绝。灰度推进路径：先保持 false 让既有第三方接入不受影响，
+     * 待其完成签名改造后置 true。</p>
+     *
+     * @return 强制签名返回 {@code true}
+     */
+    private boolean requireSignature() {
+        return Boolean.parseBoolean(
+            environment.getProperty("ypbin.openapi.require-signature", "false"));
     }
 
     /**

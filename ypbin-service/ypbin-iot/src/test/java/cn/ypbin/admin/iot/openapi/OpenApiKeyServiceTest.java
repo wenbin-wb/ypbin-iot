@@ -432,4 +432,98 @@ class OpenApiKeyServiceTest {
             .as("存储异常应向上暴露（不静默吞掉）")
             .isInstanceOf(IllegalStateException.class);
     }
+
+    // ==================== 强制签名模式（修复"签名可被少发参数绕过"） ====================
+
+    @Test
+    @DisplayName("🔴 强制签名模式：不带任何签名参数 ⇒ 拒绝（不得降级放行）")
+    void requiredModeMustRejectUnsignedRequest() {
+        when(mapper.insert(any(IotOpenApiKey.class))).thenReturn(1);
+        OpenApiKeyDtos.CreateResp created = service.create(req("a", "iot:series:get"));
+        seedKey(created, 5L);
+
+        OpenApiKeyVerifyDtos.VerifyReq r = new OpenApiKeyVerifyDtos.VerifyReq();
+        r.setAccessKeyId(created.accessKeyId());
+        r.setSecret(created.secret());
+        r.setRequireSignature(true); // 服务端强制
+        // 刻意不带 timestamp/nonce/sign/signParams
+
+        assertThat(service.verify(r).valid())
+            .as("强制模式下缺签名必须拒绝，否则攻击者只要少发参数即可绕过验签")
+            .isFalse();
+    }
+
+    @Test
+    @DisplayName("非强制模式（灰度期）：不带签名参数仍放行，兼容既有「仅 Key」接入")
+    void optionalModeAllowsUnsignedRequest() {
+        when(mapper.insert(any(IotOpenApiKey.class))).thenReturn(1);
+        OpenApiKeyDtos.CreateResp created = service.create(req("a", "iot:series:get"));
+        seedKey(created, 5L);
+
+        OpenApiKeyVerifyDtos.VerifyReq r = new OpenApiKeyVerifyDtos.VerifyReq();
+        r.setAccessKeyId(created.accessKeyId());
+        r.setSecret(created.secret());
+        r.setRequireSignature(false);
+
+        assertThat(service.verify(r).valid()).isTrue();
+    }
+
+    @Test
+    @DisplayName("🔴 强制模式：带了参数但不齐备 ⇒ 同样拒绝（防部分携带降级）")
+    void requiredModeMustRejectPartialSignature() {
+        when(mapper.insert(any(IotOpenApiKey.class))).thenReturn(1);
+        OpenApiKeyDtos.CreateResp created = service.create(req("a", "iot:series:get"));
+        seedKey(created, 5L);
+
+        Map<String, String> p = signParams();
+        OpenApiKeyVerifyDtos.VerifyReq r = new OpenApiKeyVerifyDtos.VerifyReq();
+        r.setAccessKeyId(created.accessKeyId());
+        r.setSecret(created.secret());
+        r.setRequireSignature(true);
+        r.setTimestamp(nowTs());
+        // 缺 nonce / sign / signParams
+
+        assertThat(service.verify(r).valid()).isFalse();
+    }
+
+    @Test
+    @DisplayName("强制模式：签名齐备且正确 ⇒ 正常放行（强制不等于一律拒绝）")
+    void requiredModeAllowsFullyValidSignature() {
+        when(mapper.insert(any(IotOpenApiKey.class))).thenReturn(1);
+        OpenApiKeyDtos.CreateResp created = service.create(req("a", "iot:series:get"));
+        seedKey(created, 5L);
+
+        Map<String, String> p = signParams();
+        OpenApiKeyVerifyDtos.VerifyReq r = new OpenApiKeyVerifyDtos.VerifyReq();
+        r.setAccessKeyId(created.accessKeyId());
+        r.setSecret(created.secret());
+        r.setRequireSignature(true);
+        r.setTimestamp(nowTs());
+        r.setNonce("req-ok-nonce");
+        r.setSign(SignGenerator.generate(p, created.secret(), SignAlgorithm.HMAC_SHA256));
+        r.setSignParams(p);
+
+        assertThat(service.verify(r).valid()).isTrue();
+    }
+
+    @Test
+    @DisplayName("🔴 强制模式：重放同一请求必须被拒（防重放真的生效）")
+    void requiredModeMustRejectReplay() {
+        when(mapper.insert(any(IotOpenApiKey.class))).thenReturn(1);
+        OpenApiKeyDtos.CreateResp created = service.create(req("a", "iot:series:get"));
+        seedKey(created, 5L);
+
+        Map<String, String> p = signParams();
+        OpenApiKeyVerifyDtos.VerifyReq r = new OpenApiKeyVerifyDtos.VerifyReq();
+        r.setAccessKeyId(created.accessKeyId());
+        r.setSecret(created.secret());
+        r.setRequireSignature(true);
+        r.setTimestamp(nowTs());
+        r.setNonce("req-replay-nonce");
+        r.setSign(SignGenerator.generate(p, created.secret(), SignAlgorithm.HMAC_SHA256));
+        r.setSignParams(p);
+
+        assertThat(service.verify(r).valid()).as("首次放行").isTrue();
+        assertThat(service.verify(r).valid()).as("重放必须拒绝").isFalse();
+    }
 }
