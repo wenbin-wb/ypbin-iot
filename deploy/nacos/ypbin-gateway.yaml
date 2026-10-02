@@ -134,3 +134,34 @@ ypbin:
         - /system/tracking/ingest
         # API Key 路径免会话登录（OpenApiKeyAuthFilter 接管）
         - /iot/open-api/**
+    # -------------------------------------------------------------------------
+    # 开放 API 限流/配额（starter 通用实现；iot 自研副本已删除去重）
+    #
+    # starter `AttributeRateLimitGlobalFilter`（ypbin-starter-cloud-gateway 3.7.0 起可用）
+    # 与已删除的 `OpenApiRateLimitGlobalFilter` 逻辑等价：固定窗口 Redis INCR+EXPIRE
+    # （QPS 秒级窗口 + 自然日配额），`limit<=0` 不限，Redis 异常 fail-open。
+    # 装配是**三重条件**：classpath 有 ReactiveStringRedisTemplate +
+    # 容器中有该 Bean + 本节 `enabled=true`，缺一即不装配（不报错）。
+    #
+    # 🔴 以下三项**缺一即静默不限流**（不报错，只放行）——改动本节后必须实测 429：
+    #   ① `enabled`：starter 默认 false，不显式开则过滤器根本不装配；
+    #   ② `path-prefixes`：starter 默认空列表，空列表恒不命中 ⇒ 全部路径都不限流；
+    #   ③ `*-attribute`：starter 默认 `rate-limit.*`，须与 `OpenApiKeyAuthFilter` 的
+    #      `ATTR_*` 常量一致（`openapi.*`），否则取不到维度键 ⇒ 直接放行。
+    # -------------------------------------------------------------------------
+    rate-limit:
+      enabled: true
+      path-prefixes:
+        - /iot/open-api/v1/
+      # 与 OpenApiKeyAuthFilter.ATTR_ACCESS_KEY / ATTR_RATE_QPS / ATTR_DAILY_QUOTA 对齐
+      key-attribute: openapi.accessKeyId
+      qps-attribute: openapi.rateLimitQps
+      quota-attribute: openapi.dailyQuota
+      window-seconds: 1
+      default-qps: 10
+      default-quota: 100000
+      # Redis key 前缀沿用旧自研实现的命名（ypbin:openapi:*），而不用 starter 默认
+      # （ypbin:ratelimit:*）：切换瞬间若换前缀，旧计数会被丢弃 ⇒ 全租户日配额被"重置"
+      # （等于一次性多发配额）。沿用旧前缀则计数连续，无感切换。
+      qps-key-prefix: "ypbin:openapi:qps:"
+      quota-key-prefix: "ypbin:openapi:quota:"
