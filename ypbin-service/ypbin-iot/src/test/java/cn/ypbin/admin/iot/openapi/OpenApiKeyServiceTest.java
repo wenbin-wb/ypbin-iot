@@ -526,4 +526,64 @@ class OpenApiKeyServiceTest {
         assertThat(service.verify(r).valid()).as("首次放行").isTrue();
         assertThat(service.verify(r).valid()).as("重放必须拒绝").isFalse();
     }
+
+    // ==================== 纵深防御：本地强制开关（N-1） ====================
+
+    @Test
+    @DisplayName("🔴 纵深防御：本地配置强制时，即使请求体说 requireSignature=false 也必须拒绝")
+    void localRequireSignatureOverridesRequestBody() {
+        // 场景：X-Internal-Token 泄露或 18084 误配对外可达 ⇒ 攻击者直连并自设
+        // requireSignature=false 试图降级。本地开关取"逻辑或"后该降级失效。
+        OpenApiKeyService svc = new OpenApiKeyService(mapper, TEST_PEPPER,
+            new InMemoryNonceStore(), true);
+
+        when(mapper.insert(any(IotOpenApiKey.class))).thenReturn(1);
+        OpenApiKeyDtos.CreateResp created = svc.create(req("a", "iot:series:get"));
+        seedKey(created, 5L);
+
+        OpenApiKeyVerifyDtos.VerifyReq r = new OpenApiKeyVerifyDtos.VerifyReq();
+        r.setAccessKeyId(created.accessKeyId());
+        r.setSecret(created.secret());
+        r.setRequireSignature(false); // 攻击者自设 false
+        // 不带任何签名参数
+
+        assertThat(svc.verify(r).valid())
+            .as("本地强制开关必须压过请求体自设值（fail-closed）")
+            .isFalse();
+    }
+
+    @Test
+    @DisplayName("本地强制开关为 false 时，请求体的 true 仍然生效（取或语义）")
+    void requestTrueStillEffectiveWhenLocalFalse() {
+        OpenApiKeyService svc = new OpenApiKeyService(mapper, TEST_PEPPER,
+            new InMemoryNonceStore(), false);
+
+        when(mapper.insert(any(IotOpenApiKey.class))).thenReturn(1);
+        OpenApiKeyDtos.CreateResp created = svc.create(req("a", "iot:series:get"));
+        seedKey(created, 5L);
+
+        OpenApiKeyVerifyDtos.VerifyReq r = new OpenApiKeyVerifyDtos.VerifyReq();
+        r.setAccessKeyId(created.accessKeyId());
+        r.setSecret(created.secret());
+        r.setRequireSignature(true);
+
+        assertThat(svc.verify(r).valid()).isFalse();
+    }
+
+    @Test
+    @DisplayName("两者都 false ⇒ 灰度放行（既有接入不受影响）")
+    void bothFalseAllowsUnsigned() {
+        OpenApiKeyService svc = new OpenApiKeyService(mapper, TEST_PEPPER,
+            new InMemoryNonceStore(), false);
+
+        when(mapper.insert(any(IotOpenApiKey.class))).thenReturn(1);
+        OpenApiKeyDtos.CreateResp created = svc.create(req("a", "iot:series:get"));
+        seedKey(created, 5L);
+
+        OpenApiKeyVerifyDtos.VerifyReq r = new OpenApiKeyVerifyDtos.VerifyReq();
+        r.setAccessKeyId(created.accessKeyId());
+        r.setSecret(created.secret());
+
+        assertThat(svc.verify(r).valid()).isTrue();
+    }
 }

@@ -52,11 +52,25 @@ public class OpenApiKeyService {
     /** nonce 防重放存储（签名校验用；多实例须 Redis）。 */
     private final NonceStore nonceStore;
 
+    /**
+     * iot 侧自身的强制签名开关（纵深防御）。
+     *
+     * <p><b>为什么不能只信网关传来的 requireSignature</b>：该字段经内部 HTTP 请求体传递，
+     * 其可信度完全依赖"只有网关能调 /internal/**"这一假设（保护手段是一个**共享静态**
+     * X-Internal-Token）。若 token 泄露或 18084 被误配为对外可达，攻击者即可自设
+     * requireSignature=false 降级，使强制签名失效。</p>
+     *
+     * <p>故本服务另读<b>自身配置</b>，与请求值取<b>逻辑或</b>（任一说要强制就强制）——
+     * 这样即便请求体被篡改也无法关闭强制模式（fail-closed）。</p>
+     */
+    private final boolean localRequireSignature;
+
     public OpenApiKeyService(IotOpenApiKeyMapper keyMapper,
                              @Value("${ypbin.openapi.secret-pepper:}") String pepper,
+                             @Value("${ypbin.openapi.require-signature:false}") boolean localRequireSignature,
                              ObjectProvider<NonceStore> nonceStoreProvider) {
         this(keyMapper, pepper, nonceStoreProvider.getIfAvailable(
-            InMemoryNonceStore::new));
+            InMemoryNonceStore::new), localRequireSignature);
     }
 
     /**
@@ -77,9 +91,23 @@ public class OpenApiKeyService {
      * @param nonceStore nonce 防重放存储（不得为 null）
      */
     public OpenApiKeyService(IotOpenApiKeyMapper keyMapper, String pepper, NonceStore nonceStore) {
+        this(keyMapper, pepper, nonceStore, false);
+    }
+
+    /**
+     * 全参构造（供装配层传入本地强制开关）。
+     *
+     * @param keyMapper            Key 表 Mapper
+     * @param pepper               pepper
+     * @param nonceStore           nonce 存储
+     * @param localRequireSignature iot 自身配置的强制签名开关
+     */
+    public OpenApiKeyService(IotOpenApiKeyMapper keyMapper, String pepper, NonceStore nonceStore,
+                             boolean localRequireSignature) {
         this.keyMapper = keyMapper;
         this.pepper = pepper;
         this.nonceStore = nonceStore;
+        this.localRequireSignature = localRequireSignature;
     }
 
     /** 创建 Key：明文仅此一次。 */
@@ -221,7 +249,8 @@ public class OpenApiKeyService {
         if (!OpenApiSignVerifier.intendsSignature(timestamp, nonce, sign, params)) {
             // 四参数全无：即"未意图签名"。是否放行**只能由服务端强制模式决定**——
             // 绝不能无条件放行，否则攻击者只要不带这些参数即可绕过验签（降级攻击）。
-            if (req.isRequireSignature()) {
+            // 逻辑或：请求方（网关）与 iot 自身配置，任一说强制就强制 ⇒ 改请求体也无法关闭
+            if (req.isRequireSignature() || localRequireSignature) {
                 log.warn("[iot] 开放 API 强制签名模式下请求未携带签名参数，拒绝：ak={}",
                     LogSanitizer.sanitize(row.getAccessKeyId()));
                 return false;
