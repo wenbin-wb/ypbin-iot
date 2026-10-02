@@ -41,6 +41,15 @@ public final class OpenApiKeyConstants {
     /** 单 Key 默认日配额（0 = 不限）。 */
     public static final int DEFAULT_DAILY_QUOTA = 100_000;
 
+    /** 签名有效期（秒）：与 starter 默认一致，供 iot 侧内部验签使用。 */
+    public static final long SIGN_TIMEOUT_SECONDS = 60L;
+
+    /** 允许的未来时钟偏移（秒）：容忍客户端与服务端小幅不同步，但不接受明显来自未来的时间戳。 */
+    public static final long SIGN_CLOCK_SKEW_SECONDS = 5L;
+
+    /** nonce 防重放计数 Redis key 前缀（按 Key + nonce 唯一）。 */
+    public static final String SIGN_NONCE_KEY_PREFIX = "ypbin:openapi:sign:nonce:";
+
     /** 计算单 Key 虚拟主体 ID（保留段内、不重叠真实用户）。 */
     public static long virtualUserId(long keyRowId) {
         return VIRTUAL_USER_ID_BASE - keyRowId;
