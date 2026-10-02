@@ -216,9 +216,43 @@ class OpenApiSignVerifierTest {
     @Test
     @DisplayName("nonce TTL 永不为负（非法/极值时间戳回落为安全默认）")
     void shouldNeverReturnNegativeTtl() {
-        assertThat(OpenApiSignVerifier.nonceTtlSeconds(String.valueOf(NOW - 99999), NOW)).isEqualTo(1L);
-        assertThat(OpenApiSignVerifier.nonceTtlSeconds(String.valueOf(Long.MIN_VALUE), NOW)).isGreaterThan(0L);
+        // 窗口内最小值 NOW-60 ⇒ TTL=1（覆盖到该时间戳失效为止）
+        assertThat(OpenApiSignVerifier.nonceTtlSeconds(String.valueOf(NOW - 60), NOW)).isEqualTo(1L);
+        // 非法/超窗/非数字一律回落安全默认（见 extremeTimestampMustNotWrapAroundTtl）
         assertThat(OpenApiSignVerifier.nonceTtlSeconds("abc", NOW)).isGreaterThan(0L);
         assertThat(OpenApiSignVerifier.nonceTtlSeconds(null, NOW)).isGreaterThan(0L);
+    }
+
+    @Test
+    @DisplayName("🔴 极值时间戳不得下溢回绕出「看似正常」的 TTL（CodeQL 曾报 underflow）")
+    void extremeTimestampMustNotWrapAroundTtl() {
+        // Long.MIN_VALUE - now 会下溢回绕；若回绕结果恰好落在合理区间，
+        // 会得到一个过早过期的 nonce TTL ⇒ 留下重放真空期。
+        // 修复后：非法区间直接回落到覆盖完整有效期的安全默认值。
+        long safeDefault = OpenApiKeyConstants.SIGN_TIMEOUT_SECONDS * 2 + 1;
+
+        assertThat(OpenApiSignVerifier.nonceTtlSeconds(String.valueOf(Long.MIN_VALUE), NOW))
+            .isEqualTo(safeDefault);
+        assertThat(OpenApiSignVerifier.nonceTtlSeconds(String.valueOf(Long.MAX_VALUE), NOW))
+            .isEqualTo(safeDefault);
+        // 恰在窗口外的边界值同样回落（不得因"差一点"就放行一个短 TTL）
+        assertThat(OpenApiSignVerifier.nonceTtlSeconds(String.valueOf(NOW - 61), NOW))
+            .isEqualTo(safeDefault);
+        assertThat(OpenApiSignVerifier.nonceTtlSeconds(String.valueOf(NOW + 6), NOW))
+            .isEqualTo(safeDefault);
+
+        // 窗口内仍按动态公式（覆盖到该时间戳失效之后）
+        assertThat(OpenApiSignVerifier.nonceTtlSeconds(String.valueOf(NOW - 60), NOW)).isEqualTo(1L);
+        assertThat(OpenApiSignVerifier.nonceTtlSeconds(String.valueOf(NOW + 5), NOW)).isEqualTo(66L);
+        assertThat(OpenApiSignVerifier.nonceTtlSeconds(String.valueOf(NOW), NOW)).isEqualTo(61L);
+    }
+
+    @Test
+    @DisplayName("TTL 永不为负且不短于 1 秒（全窗口扫描）")
+    void ttlAlwaysPositiveAcrossWindow() {
+        for (long offset = -120; offset <= 120; offset++) {
+            long ttl = OpenApiSignVerifier.nonceTtlSeconds(String.valueOf(NOW + offset), NOW);
+            assertThat(ttl).as("offset=%d", offset).isGreaterThanOrEqualTo(1L);
+        }
     }
 }

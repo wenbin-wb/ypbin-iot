@@ -138,6 +138,21 @@ public final class OpenApiSignVerifier {
         } catch (RuntimeException ex) {
             return OpenApiKeyConstants.SIGN_TIMEOUT_SECONDS + 1;
         }
+        // 🔴 溢出防护（CodeQL: "User-controlled data in arithmetic expression"）：
+        // requestTime 完全由请求方提供，`requestTime - nowEpochSecond` 在极值（Long.MIN/MAX）
+        // 下会**下溢回绕**，回绕后 Math.max(1L, ...) 可能得到一个"看起来正常"的 TTL，
+        // 使 nonce 过早过期 ⇒ 出现重放真空期。
+        // 故用**差值比较**替代直接相减（与 timestampValid 同口径），只用相减后的安全区间：
+        // 先夹到合法窗口 [-timeout, +skew]，再参与运算，杜绝回绕。
+        long lowerBound = nowEpochSecond - OpenApiKeyConstants.SIGN_TIMEOUT_SECONDS;
+        long upperBound = nowEpochSecond + OpenApiKeyConstants.SIGN_CLOCK_SKEW_SECONDS;
+        if (requestTime < lowerBound || requestTime > upperBound) {
+            // 非法/极值时间戳：调用方 timestampValid 已会拒绝；此处回落到安全默认，
+            // 保证 TTL 仍覆盖一个完整有效期（fail-closed，不放宽重放窗口）。
+            return OpenApiKeyConstants.SIGN_TIMEOUT_SECONDS * 2 + 1;
+        }
+        // 走到这里 requestTime ∈ [now-timeout, now+skew] ⇒ 相减结果必落在
+        // [-timeout, +skew]，不可能回绕。
         long delta = requestTime - nowEpochSecond;
         long ttl = OpenApiKeyConstants.SIGN_TIMEOUT_SECONDS + delta + 1;
         return Math.max(1L, ttl);

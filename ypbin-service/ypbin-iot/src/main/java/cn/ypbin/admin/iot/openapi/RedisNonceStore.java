@@ -1,5 +1,6 @@
 package cn.ypbin.admin.iot.openapi;
 
+import cn.ypbin.starter.core.util.LogSanitizer;
 import cn.ypbin.starter.sign.core.NonceStore;
 import java.time.Duration;
 import org.slf4j.Logger;
@@ -42,8 +43,10 @@ public class RedisNonceStore implements NonceStore {
             // setIfAbsent 返回 null 属异常语义（连接层面的不确定结果）⇒ 按拒绝处理，不静默放行
             return Boolean.TRUE.equals(firstUse);
         } catch (RuntimeException ex) {
+            // key 含第三方提供的 nonce ⇒ 必须 sanitize，防换行/控制字符跨行伪造日志
+            // （CodeQL: "Log Injection"）
             log.error("[iot] nonce 防重放存储不可用，按拒绝处理（fail-closed，不放行）：key={}",
-                key, ex);
+                LogSanitizer.sanitize(key), ex);
             return false;
         }
     }
