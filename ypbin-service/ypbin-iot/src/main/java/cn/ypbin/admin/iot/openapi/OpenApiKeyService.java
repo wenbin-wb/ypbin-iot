@@ -3,6 +3,10 @@ package cn.ypbin.admin.iot.openapi;
 import cn.ypbin.admin.iot.entity.IotOpenApiKey;
 import cn.ypbin.admin.iot.mapper.IotOpenApiKeyMapper;
 import cn.ypbin.starter.core.exception.BusinessException;
+import cn.ypbin.starter.core.util.LogSanitizer;
+import cn.ypbin.starter.sign.core.InMemoryNonceStore;
+import cn.ypbin.starter.sign.core.NonceStore;
+import cn.ypbin.starter.sign.core.SignAlgorithm;
 import cn.ypbin.starter.data.core.EntityStatus;
 import cn.ypbin.starter.security.core.LoginUser;
 import cn.ypbin.starter.security.identity.IdentityContext;
@@ -11,15 +15,18 @@ import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -42,10 +49,37 @@ public class OpenApiKeyService {
     /** pepper（环境变量注入；缺失时创建/校验 fail-closed）。 */
     private final String pepper;
 
+    /** nonce 防重放存储（签名校验用；多实例须 Redis）。 */
+    private final NonceStore nonceStore;
+
     public OpenApiKeyService(IotOpenApiKeyMapper keyMapper,
-                             @Value("${ypbin.openapi.secret-pepper:}") String pepper) {
+                             @Value("${ypbin.openapi.secret-pepper:}") String pepper,
+                             ObjectProvider<NonceStore> nonceStoreProvider) {
+        this(keyMapper, pepper, nonceStoreProvider.getIfAvailable(
+            InMemoryNonceStore::new));
+    }
+
+    /**
+     * 简化构造：使用内存 nonce 存储（**仅单实例正确**，供单测/单机场景）。
+     *
+     * @param keyMapper Key 表 Mapper
+     * @param pepper    pepper
+     */
+    public OpenApiKeyService(IotOpenApiKeyMapper keyMapper, String pepper) {
+        this(keyMapper, pepper, new InMemoryNonceStore());
+    }
+
+    /**
+     * 显式传入 nonce 存储（供单测与自定义装配使用）。
+     *
+     * @param keyMapper  Key 表 Mapper
+     * @param pepper     pepper（可为空，为空时创建/校验 fail-closed）
+     * @param nonceStore nonce 防重放存储（不得为 null）
+     */
+    public OpenApiKeyService(IotOpenApiKeyMapper keyMapper, String pepper, NonceStore nonceStore) {
         this.keyMapper = keyMapper;
         this.pepper = pepper;
+        this.nonceStore = nonceStore;
     }
 
     /** 创建 Key：明文仅此一次。 */
@@ -154,12 +188,65 @@ public class OpenApiKeyService {
         if (!matches) {
             return OpenApiKeyVerifyDtos.VerifyResp.invalid();
         }
+        // 密钥已确认属于该 Key ⇒ 此时才具备"验签"的前提（密钥错就没必要继续）
+        if (!verifySignatureIfPresent(req, row)) {
+            return OpenApiKeyVerifyDtos.VerifyResp.invalid();
+        }
         row.setLastUsedAt(LocalDateTime.now());
         keyMapper.updateById(row);
         int qps = row.getRateLimitQps() == null ? OpenApiKeyConstants.DEFAULT_RATE_LIMIT_QPS : row.getRateLimitQps();
         int quota = row.getDailyQuota() == null ? OpenApiKeyConstants.DEFAULT_DAILY_QUOTA : row.getDailyQuota();
         return new OpenApiKeyVerifyDtos.VerifyResp(true, row.getTenantId(),
             OpenApiKeyConstants.virtualUserId(row.getId()), splitScopes(row.getScopes()), qps, quota);
+    }
+
+    /**
+     * 按灰度口径校验请求签名（未意图签名时直接放行 = 既有行为）。
+     *
+     * <p>三分支（**顺序即安全语义，不可重排**）：</p>
+     * <ol>
+     *     <li>四参数<b>全无</b> ⇒ 未启用签名 ⇒ 放行（灰度 OPTIONAL 兼容期）；</li>
+     *     <li>带了参数但<b>不齐备</b> ⇒ 拒绝（fail-closed，防"部分携带"绕过）；</li>
+     *     <li>齐备 ⇒ 校验时间戳 + 重算签名 + nonce 防重放，任一不过即拒绝。</li>
+     * </ol>
+     *
+     * @return 通过返回 {@code true}
+     */
+    private boolean verifySignatureIfPresent(OpenApiKeyVerifyDtos.VerifyReq req, IotOpenApiKey row) {
+        String timestamp = req.getTimestamp();
+        String nonce = req.getNonce();
+        String sign = req.getSign();
+        Map<String, String> params = req.getSignParams();
+
+        if (!OpenApiSignVerifier.intendsSignature(timestamp, nonce, sign, params)) {
+            // 未意图签名：灰度期放行（保持既有"仅 Key"接入方式可用）
+            return true;
+        }
+        if (!OpenApiSignVerifier.complete(timestamp, nonce, sign, params)) {
+            log.warn("[iot] 开放 API 请求携带了不完整的签名参数，拒绝：ak={}",
+                LogSanitizer.sanitize(row.getAccessKeyId()));
+            return false;
+        }
+        long now = System.currentTimeMillis() / 1000L;
+        if (!OpenApiSignVerifier.timestampValid(timestamp, now)) {
+            log.warn("[iot] 开放 API 签名时间戳无效或已过期：ak={}",
+                LogSanitizer.sanitize(row.getAccessKeyId()));
+            return false;
+        }
+        if (!OpenApiSignVerifier.signatureMatches(params, req.getSecret(), sign, SignAlgorithm.HMAC_SHA256)) {
+            log.warn("[iot] 开放 API 签名校验失败：ak={}", LogSanitizer.sanitize(row.getAccessKeyId()));
+            return false;
+        }
+        // 防重放：nonce 只能用一次。放在最后——只有签名合法才占用 nonce 名额，
+        // 否则攻击者可用无效签名刷满 nonce 空间（等于另一种 DoS 面）。
+        if (!nonceStore.tryUse(OpenApiKeyConstants.SIGN_NONCE_KEY_PREFIX
+            + row.getAccessKeyId() + ":" + nonce.trim(),
+            Duration.ofSeconds(OpenApiSignVerifier.nonceTtlSeconds(timestamp, now)))) {
+            log.warn("[iot] 开放 API 请求重放（nonce 已使用）：ak={}",
+                LogSanitizer.sanitize(row.getAccessKeyId()));
+            return false;
+        }
+        return true;
     }
 
     /** 作用域归一化 + 白名单校验（只允许既有开放作用域）。 */

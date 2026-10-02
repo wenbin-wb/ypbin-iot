@@ -34,6 +34,12 @@
             <groupId>cn.ypbin</groupId>
             <artifactId>ypbin-starter-json</artifactId>
         </dependency>
+        <!-- 开放 API 签名：复用 starter 的签名算法与规范化（OpenApiSignVerifier）。
+             直接复用而非自写，避免两侧规范化差异导致"时对时错"。 -->
+        <dependency>
+            <groupId>cn.ypbin</groupId>
+            <artifactId>ypbin-starter-sign</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-validation</artifactId>

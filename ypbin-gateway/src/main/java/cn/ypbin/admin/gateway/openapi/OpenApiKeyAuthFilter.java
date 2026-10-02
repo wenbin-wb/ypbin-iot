@@ -5,8 +5,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.Ordered;
@@ -35,6 +37,11 @@ public class OpenApiKeyAuthFilter implements GlobalFilter, Ordered {
 
     private static final Logger log = LoggerFactory.getLogger(OpenApiKeyAuthFilter.class);
     private static final String OPEN_API_PREFIX = "/iot/open-api/v1/";
+
+    /** 签名相关参数名（与客户端/starter 口径一致）。 */
+    private static final String PARAM_TIMESTAMP = "timestamp";
+    private static final String PARAM_NONCE = "nonce";
+    private static final String PARAM_SIGN = "sign";
 
     /** 限流过滤器读取用的 exchange attribute（OpenApiKeyRateLimitGlobalFilter 依赖）。 */
     public static final String ATTR_ACCESS_KEY = "openapi.accessKeyId";
@@ -75,7 +82,7 @@ public class OpenApiKeyAuthFilter implements GlobalFilter, Ordered {
         }
         log.info("[gateway] openapi auth: path={} ak={} verifyTokens=[{}/{}]", path, parsed.accessKeyId(),
             internalToken().length(), gatewaySignToken().length());
-        return verify(parsed.accessKeyId(), parsed.secret())
+        return verify(exchange, parsed.accessKeyId(), parsed.secret())
             .flatMap(data -> data.valid()
                 ? chain.filter(forge(exchange, data, parsed.accessKeyId()))
                 : reject(exchange, "api key invalid or revoked"));
@@ -95,12 +102,33 @@ public class OpenApiKeyAuthFilter implements GlobalFilter, Ordered {
         return new ParsedKey(accessKeyId, secret);
     }
 
-    private Mono<VerifyData> verify(String accessKeyId, String secret) {
+    private Mono<VerifyData> verify(ServerWebExchange exchange, String accessKeyId, String secret) {
+        // 签名参数由网关**原样透传**给 iot 内部端点，由 iot 侧用 pepper/hash 完成验签
+        // （方案 c）：密钥不出 iot，且不在网关碰流式 body。
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("accessKeyId", accessKeyId);
+        payload.put("secret", secret);
+        String timestamp = queryParam(exchange, PARAM_TIMESTAMP);
+        String nonce = queryParam(exchange, PARAM_NONCE);
+        String sign = queryParam(exchange, PARAM_SIGN);
+        if (timestamp != null) {
+            payload.put(PARAM_TIMESTAMP, timestamp);
+        }
+        if (nonce != null) {
+            payload.put(PARAM_NONCE, nonce);
+        }
+        if (sign != null) {
+            payload.put(PARAM_SIGN, sign);
+        }
+        Map<String, String> signParams = collectSignParams(exchange);
+        if (!signParams.isEmpty()) {
+            payload.put("signParams", signParams);
+        }
         return webClient.post()
             .uri(verifyUrl())
             .header("X-Internal-Token", internalToken())
             .header("Content-Type", MediaType.APPLICATION_JSON_VALUE)
-            .bodyValue(Map.of("accessKeyId", accessKeyId, "secret", secret))
+            .bodyValue(payload)
             .retrieve()
             .bodyToMono(String.class)
             .timeout(Duration.ofSeconds(3))
@@ -126,6 +154,46 @@ public class OpenApiKeyAuthFilter implements GlobalFilter, Ordered {
             })
             .doOnError(ex -> log.error("[gateway] openapi verify failed: {}", ex.getMessage()))
             .onErrorReturn(VerifyData.invalid());
+    }
+
+    /**
+     * 取 query 参数（签名四件套按约定走 query；不读 body —— 网关 body 流式不可重复读）。
+     *
+     * @return 非空白值；缺失返回 {@code null}
+     */
+    private static String queryParam(ServerWebExchange exchange, String name) {
+        String value = exchange.getRequest().getQueryParams().getFirst(name);
+        return (value == null || value.isBlank()) ? null : value;
+    }
+
+    /**
+     * 收集参与签名的参数（query 全量，排除签名四件套本身）。
+     *
+     * <p><b>刻意只收 query、不收 body</b>：网关是 WebFlux，请求体是
+     * {@code Flux<DataBuffer>}、默认只能消费一次；若在此读取 body 参与验签，
+     * 转发给下游时 body 已耗尽 ⇒ 业务侧收到空请求体。故首期签名覆盖范围为
+     * query 参数，body 完整性由 TLS 与幂等键保障（见方案说明的取舍）。</p>
+     *
+     * <p>排序 + 单一取值口径与 starter 的 {@code SignGenerator} 一致：多值参数取**第一个**
+     * （避免两侧取值规则不同导致时对时错）。</p>
+     *
+     * @return 参与签名的参数（**绝不返回 {@code null}**）
+     */
+    private static Map<String, String> collectSignParams(ServerWebExchange exchange) {
+        Map<String, String> out = new TreeMap<>();
+        exchange.getRequest().getQueryParams().forEach((name, values) -> {
+            if (PARAM_SIGN.equals(name) || PARAM_TIMESTAMP.equals(name) || PARAM_NONCE.equals(name)) {
+                return;
+            }
+            if (values == null || values.isEmpty()) {
+                return;
+            }
+            String first = values.getFirst();
+            if (first != null && !first.isEmpty()) {
+                out.put(name, first);
+            }
+        });
+        return out;
     }
 
     private ServerWebExchange forge(ServerWebExchange exchange, VerifyData data, String accessKeyId) {

@@ -11,10 +11,17 @@ import cn.ypbin.admin.iot.mapper.IotOpenApiKeyMapper;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.security.core.LoginUser;
 import cn.ypbin.starter.security.identity.IdentityContext;
+import cn.ypbin.starter.sign.core.InMemoryNonceStore;
+import cn.ypbin.starter.sign.core.NonceStore;
+import cn.ypbin.starter.sign.core.SignAlgorithm;
+import cn.ypbin.starter.sign.core.SignGenerator;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /** 开放 API Key 服务用例（看板 #11 第 1 批）。 */
 class OpenApiKeyServiceTest {
@@ -186,5 +193,243 @@ class OpenApiKeyServiceTest {
         user.setId(userId);
         user.setTenantId(tenantId);
         IdentityContext.setLoginUser(user);
+    }
+
+    // ==================== 签名校验（看板「开放 API 签名合并」） ====================
+
+    /** 造一条可校验的 Key 行（复用 create 得到真实哈希）。 */
+    private IotOpenApiKey seedKey(OpenApiKeyDtos.CreateResp created, long id) {
+        org.mockito.ArgumentCaptor<IotOpenApiKey> cap =
+            org.mockito.ArgumentCaptor.forClass(IotOpenApiKey.class);
+        org.mockito.Mockito.verify(mapper).insert(cap.capture());
+        IotOpenApiKey row = new IotOpenApiKey();
+        row.setId(id);
+        row.setTenantId(1L);
+        row.setAccessKeyId(created.accessKeyId());
+        row.setSecretHash(cap.getValue().getSecretHash());
+        row.setScopes("iot:series:get");
+        row.setStatus(1);
+        when(mapper.selectOne(any())).thenReturn(row);
+        return row;
+    }
+
+    private static Map<String, String> signParams() {
+        Map<String, String> p = new HashMap<>();
+        p.put("orderNo", "A100");
+        return p;
+    }
+
+    private static String nowTs() {
+        return String.valueOf(System.currentTimeMillis() / 1000L);
+    }
+
+    @Test
+    @DisplayName("签名：未带签名参数 ⇒ 放行（灰度兼容既有「仅 Key」接入）")
+    void verifyWithoutSignatureStillPasses() {
+        when(mapper.insert(any(IotOpenApiKey.class))).thenReturn(1);
+        OpenApiKeyDtos.CreateResp created = service.create(req("a", "iot:series:get"));
+        seedKey(created, 5L);
+
+        OpenApiKeyVerifyDtos.VerifyReq r = new OpenApiKeyVerifyDtos.VerifyReq();
+        r.setAccessKeyId(created.accessKeyId());
+        r.setSecret(created.secret());
+
+        assertThat(service.verify(r).valid()).isTrue();
+    }
+
+    @Test
+    @DisplayName("签名：参数齐备且签名正确 ⇒ 放行")
+    void verifyWithValidSignaturePasses() {
+        when(mapper.insert(any(IotOpenApiKey.class))).thenReturn(1);
+        OpenApiKeyDtos.CreateResp created = service.create(req("a", "iot:series:get"));
+        seedKey(created, 5L);
+
+        Map<String, String> p = signParams();
+        OpenApiKeyVerifyDtos.VerifyReq r = new OpenApiKeyVerifyDtos.VerifyReq();
+        r.setAccessKeyId(created.accessKeyId());
+        r.setSecret(created.secret());
+        r.setTimestamp(nowTs());
+        r.setNonce("nonce-1");
+        r.setSign(SignGenerator.generate(p, created.secret(), SignAlgorithm.HMAC_SHA256));
+        r.setSignParams(p);
+
+        assertThat(service.verify(r).valid()).isTrue();
+    }
+
+    @Test
+    @DisplayName("🔴 签名：只带部分参数 ⇒ 拒绝（防降级绕过）")
+    void verifyWithPartialSignatureMustFail() {
+        when(mapper.insert(any(IotOpenApiKey.class))).thenReturn(1);
+        OpenApiKeyDtos.CreateResp created = service.create(req("a", "iot:series:get"));
+        seedKey(created, 5L);
+
+        Map<String, String> p = signParams();
+        String ts = nowTs();
+
+        // 各种"部分携带"组合都必须拒绝
+        Object[][] partials = {
+            {ts, null, null, null},
+            {null, "nonce-1", null, null},
+            {null, null, "ABCDEF", null},
+            {ts, "nonce-1", null, null},
+            {ts, "nonce-1", "ABCDEF", null},
+            {ts, null, "ABCDEF", p},
+            {null, "nonce-1", "ABCDEF", p},
+        };
+        for (Object[] combo : partials) {
+            OpenApiKeyVerifyDtos.VerifyReq r = new OpenApiKeyVerifyDtos.VerifyReq();
+            r.setAccessKeyId(created.accessKeyId());
+            r.setSecret(created.secret());
+            r.setTimestamp((String) combo[0]);
+            r.setNonce((String) combo[1]);
+            r.setSign((String) combo[2]);
+            @SuppressWarnings("unchecked")
+            Map<String, String> sp = (Map<String, String>) combo[3];
+            r.setSignParams(sp);
+            assertThat(service.verify(r).valid())
+                .as("部分携带签名参数必须拒绝：ts=%s nonce=%s sign=%s params=%s",
+                    combo[0], combo[1], combo[2], combo[3])
+                .isFalse();
+        }
+    }
+
+    @Test
+    @DisplayName("签名：错签名 / 篡改参数 ⇒ 拒绝")
+    void verifyWithWrongSignatureMustFail() {
+        when(mapper.insert(any(IotOpenApiKey.class))).thenReturn(1);
+        OpenApiKeyDtos.CreateResp created = service.create(req("a", "iot:series:get"));
+        seedKey(created, 5L);
+
+        Map<String, String> p = signParams();
+        Map<String, String> tampered = new HashMap<>(p);
+        tampered.put("orderNo", "A999");
+
+        OpenApiKeyVerifyDtos.VerifyReq r = new OpenApiKeyVerifyDtos.VerifyReq();
+        r.setAccessKeyId(created.accessKeyId());
+        r.setSecret(created.secret());
+        r.setTimestamp(nowTs());
+        r.setNonce("nonce-x");
+        r.setSign(SignGenerator.generate(p, created.secret(), SignAlgorithm.HMAC_SHA256));
+        r.setSignParams(tampered);
+
+        assertThat(service.verify(r).valid()).isFalse();
+    }
+
+    @Test
+    @DisplayName("签名：时间戳过期 ⇒ 拒绝")
+    void verifyWithExpiredTimestampMustFail() {
+        when(mapper.insert(any(IotOpenApiKey.class))).thenReturn(1);
+        OpenApiKeyDtos.CreateResp created = service.create(req("a", "iot:series:get"));
+        seedKey(created, 5L);
+
+        Map<String, String> p = signParams();
+        OpenApiKeyVerifyDtos.VerifyReq r = new OpenApiKeyVerifyDtos.VerifyReq();
+        r.setAccessKeyId(created.accessKeyId());
+        r.setSecret(created.secret());
+        r.setTimestamp(String.valueOf(System.currentTimeMillis() / 1000L - 9999));
+        r.setNonce("nonce-old");
+        r.setSign(SignGenerator.generate(p, created.secret(), SignAlgorithm.HMAC_SHA256));
+        r.setSignParams(p);
+
+        assertThat(service.verify(r).valid()).isFalse();
+    }
+
+    @Test
+    @DisplayName("🔴 防重放：同一 nonce 第二次必须拒绝")
+    void verifyReplayMustFail() {
+        when(mapper.insert(any(IotOpenApiKey.class))).thenReturn(1);
+        OpenApiKeyDtos.CreateResp created = service.create(req("a", "iot:series:get"));
+        seedKey(created, 5L);
+
+        Map<String, String> p = signParams();
+        OpenApiKeyVerifyDtos.VerifyReq r = new OpenApiKeyVerifyDtos.VerifyReq();
+        r.setAccessKeyId(created.accessKeyId());
+        r.setSecret(created.secret());
+        r.setTimestamp(nowTs());
+        r.setNonce("replay-nonce");
+        r.setSign(SignGenerator.generate(p, created.secret(), SignAlgorithm.HMAC_SHA256));
+        r.setSignParams(p);
+
+        assertThat(service.verify(r).valid()).as("首次应放行").isTrue();
+        assertThat(service.verify(r).valid()).as("重放必须拒绝").isFalse();
+    }
+
+    @Test
+    @DisplayName("🔴 防重放：签名非法时不得占用 nonce 名额（否则可被刷满）")
+    void invalidSignatureMustNotConsumeNonce() {
+        AtomicInteger calls = new AtomicInteger();
+        NonceStore counting = (key, ttl) -> {
+            calls.incrementAndGet();
+            return true;
+        };
+        OpenApiKeyService svc = new OpenApiKeyService(mapper, TEST_PEPPER, counting);
+
+        when(mapper.insert(any(IotOpenApiKey.class))).thenReturn(1);
+        OpenApiKeyDtos.CreateResp created = svc.create(req("a", "iot:series:get"));
+        seedKey(created, 5L);
+
+        Map<String, String> p = signParams();
+        OpenApiKeyVerifyDtos.VerifyReq r = new OpenApiKeyVerifyDtos.VerifyReq();
+        r.setAccessKeyId(created.accessKeyId());
+        r.setSecret(created.secret());
+        r.setTimestamp(nowTs());
+        r.setNonce("bad-sig-nonce");
+        r.setSign("DEADBEEF"); // 错签名
+        r.setSignParams(p);
+
+        assertThat(svc.verify(r).valid()).isFalse();
+        assertThat(calls.get()).as("签名非法时不得调用 nonce 存储").isZero();
+    }
+
+    @Test
+    @DisplayName("防重放：不同 nonce 互不影响")
+    void distinctNoncesBothPass() {
+        when(mapper.insert(any(IotOpenApiKey.class))).thenReturn(1);
+        OpenApiKeyDtos.CreateResp created = service.create(req("a", "iot:series:get"));
+        seedKey(created, 5L);
+
+        Map<String, String> p = signParams();
+        for (String nonce : new String[]{"n-1", "n-2", "n-3"}) {
+            OpenApiKeyVerifyDtos.VerifyReq r = new OpenApiKeyVerifyDtos.VerifyReq();
+            r.setAccessKeyId(created.accessKeyId());
+            r.setSecret(created.secret());
+            r.setTimestamp(nowTs());
+            r.setNonce(nonce);
+            r.setSign(SignGenerator.generate(p, created.secret(), SignAlgorithm.HMAC_SHA256));
+            r.setSignParams(p);
+            assertThat(service.verify(r).valid()).as("nonce=%s 应放行", nonce).isTrue();
+        }
+    }
+
+    @Test
+    @DisplayName("nonce 存储异常 ⇒ 按拒绝处理（fail-closed，不放行重放）")
+    void nonceStoreFailureMustFailClosed() {
+        NonceStore broken = (key, ttl) -> {
+            throw new IllegalStateException("redis down");
+        };
+        OpenApiKeyService svc = new OpenApiKeyService(mapper, TEST_PEPPER, new NonceStore() {
+            @Override
+            public boolean tryUse(String key, java.time.Duration expire) {
+                return broken.tryUse(key, expire);
+            }
+        });
+
+        when(mapper.insert(any(IotOpenApiKey.class))).thenReturn(1);
+        OpenApiKeyDtos.CreateResp created = svc.create(req("a", "iot:series:get"));
+        seedKey(created, 5L);
+
+        Map<String, String> p = signParams();
+        OpenApiKeyVerifyDtos.VerifyReq r = new OpenApiKeyVerifyDtos.VerifyReq();
+        r.setAccessKeyId(created.accessKeyId());
+        r.setSecret(created.secret());
+        r.setTimestamp(nowTs());
+        r.setNonce("boom");
+        r.setSign(SignGenerator.generate(p, created.secret(), SignAlgorithm.HMAC_SHA256));
+        r.setSignParams(p);
+
+        // 实现在 Redis 异常时返回 false；这里用抛异常的包装验证"异常不会变成放行"
+        assertThat(org.assertj.core.api.Assertions.catchThrowable(() -> svc.verify(r)))
+            .as("存储异常应向上暴露（不静默吞掉）")
+            .isInstanceOf(IllegalStateException.class);
     }
 }
