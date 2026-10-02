@@ -255,6 +255,8 @@ services:
       YPBIN_OPENAPI_INTERNAL_TOKEN: ${INTERNAL_TOKEN:-}
       YPBIN_OPENAPI_GATEWAY_SIGN_TOKEN: ${GATEWAY_SIGN_TOKEN:-}
       SPRING_CLOUD_NACOS_PASSWORD: ${NACOS_ADMIN_PASSWORD:?请在deploy/.env设置NACOS_ADMIN_PASSWORD}
+      # 身份头签名密钥（看板#11/轮换事件：Nacos 里是 ${} 占位，由本 env 解析；缺了它服务用空串校验 ⇒ 全链 403）
+      GATEWAY_SIGN_TOKEN: ${GATEWAY_SIGN_TOKEN:-}
     ports:
       - "18080:18080"
     depends_on:
@@ -283,6 +285,8 @@ services:
       # （install.sh 会生成该键、.env.example 已列；旧 .env 由 env_key_backfill 补齐。）
       SPRING_CLOUD_NACOS_USERNAME: ${NACOS_ADMIN_USERNAME:-nacos}
       SPRING_CLOUD_NACOS_PASSWORD: ${NACOS_ADMIN_PASSWORD:?请在deploy/.env设置NACOS_ADMIN_PASSWORD}
+      # 身份头签名密钥（看板#11/轮换事件：Nacos 里是 ${} 占位，由本 env 解析；缺了它服务用空串校验 ⇒ 全链 403）
+      GATEWAY_SIGN_TOKEN: ${GATEWAY_SIGN_TOKEN:-}
     ports:
       - "${INTERNAL_BIND_ADDR:-0.0.0.0}:18081:18081"
     depends_on:
@@ -313,6 +317,8 @@ services:
       # （install.sh 会生成该键、.env.example 已列；旧 .env 由 env_key_backfill 补齐。）
       SPRING_CLOUD_NACOS_USERNAME: ${NACOS_ADMIN_USERNAME:-nacos}
       SPRING_CLOUD_NACOS_PASSWORD: ${NACOS_ADMIN_PASSWORD:?请在deploy/.env设置NACOS_ADMIN_PASSWORD}
+      # 身份头签名密钥（看板#11/轮换事件：Nacos 里是 ${} 占位，由本 env 解析；缺了它服务用空串校验 ⇒ 全链 403）
+      GATEWAY_SIGN_TOKEN: ${GATEWAY_SIGN_TOKEN:-}
     ports:
       - "${INTERNAL_BIND_ADDR:-0.0.0.0}:18082:18082"
     depends_on:
@@ -376,6 +382,8 @@ services:
       # （install.sh 会生成该键、.env.example 已列；旧 .env 由 env_key_backfill 补齐。）
       SPRING_CLOUD_NACOS_USERNAME: ${NACOS_ADMIN_USERNAME:-nacos}
       SPRING_CLOUD_NACOS_PASSWORD: ${NACOS_ADMIN_PASSWORD:?请在deploy/.env设置NACOS_ADMIN_PASSWORD}
+      # 身份头签名密钥（看板#11/轮换事件：Nacos 里是 ${} 占位，由本 env 解析；缺了它服务用空串校验 ⇒ 全链 403）
+      GATEWAY_SIGN_TOKEN: ${GATEWAY_SIGN_TOKEN:-}
       INTERNAL_TOKEN: ${INTERNAL_TOKEN}
       # 每个副本必须唯一（租约归属的键）；扩容时逐副本注入不同的 ACCESS_NODE_ID
       ACCESS_NODE_ID: ${ACCESS_NODE_ID:-access-1}
