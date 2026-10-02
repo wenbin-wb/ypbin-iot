@@ -11,9 +11,12 @@ public final class OpenApiKeyConstants {
     }
 
     /**
-     * 虚拟主体 ID 上界（复用保留段：X-User-Id <= 本值走 scopes；与 B2 的
-     * VirtualPrincipalScopes.DEFAULT_VIRTUAL_USER_ID_MAX 同值，避免两处 drift）。
+     * 虚拟主体 ID 上界（复用保留段：X-User-Id <= 本值走 scopes；与
+     * starter `VirtualPrincipalScopes.DEFAULT_VIRTUAL_USER_ID_MAX` 同值）。
      * 单 Key 虚拟 ID = 上界 - 行 id（iot_open_api_key.id 递增为正数，永不重叠真实用户）。
+     *
+     * <p>本模块不依赖 starter-security，故保留字面量而非直接引用；
+     * 一致性由 `OpenApiPrincipalVirtualIdConsistencyTest` 钉住（三处同值，漂移即转红）。</p>
      */
     public static final long VIRTUAL_USER_ID_BASE = -1_000_000_000L;
 

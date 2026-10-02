@@ -43,7 +43,10 @@ public class OpenApiKeyAuthFilter implements GlobalFilter, Ordered {
     private static final String PARAM_NONCE = "nonce";
     private static final String PARAM_SIGN = "sign";
 
-    /** 限流过滤器读取用的 exchange attribute（OpenApiKeyRateLimitGlobalFilter 依赖）。 */
+    /** 限流过滤器读取用的 exchange attribute（starter `AttributeRateLimitGlobalFilter` 依赖）。
+     *
+     * <p>键名须与 `deploy/nacos/ypbin-gateway.yaml` 的 `ypbin.gateway.rate-limit.*-attribute`
+     * 保持一致，否则 starter 侧取不到维度键会**静默放行**（不限流也不报错）。</p> */
     public static final String ATTR_ACCESS_KEY = "openapi.accessKeyId";
     public static final String ATTR_RATE_QPS = "openapi.rateLimitQps";
     public static final String ATTR_DAILY_QUOTA = "openapi.dailyQuota";

@@ -31,7 +31,9 @@
 ## 3. 开放 API 第 1/2 批速览
 
 - 链路：X-Api-Key ak:sk → 网关 OpenApiKeyAuthFilter（+3，调 iot /internal/open-api-key/verify，转签虚拟主体）
-  → OpenApiRateLimitGlobalFilter（+4，Key 维度 QPS+日配额 429）→ RewritePath **保留 /open-api/v1 前缀落到 iot 门面**
+  → starter `AttributeRateLimitGlobalFilter`（+4，Key 维度 QPS+日配额 429；自研
+  `OpenApiRateLimitGlobalFilter` 已删去重，接线见 `deploy/nacos/ypbin-gateway.yaml`
+  的 `ypbin.gateway.rate-limit`）→ RewritePath **保留 /open-api/v1 前缀落到 iot 门面**
   （#148 前为剥全前缀复用既有端点；未映射路径 404，不穿透管理面）；
 - iot：iot_open_api_key 表（migration 2026-10-05 尾部+007 等价）、管理端点 /open-api-keys（权限码 key-*，菜单 3209）、
   门面 /open-api/v1/**（O-1~O-6 只读薄委托 + whoami；O-7/写/active-counts 刻意不映射）、api-doc 分组文档（仅 /open-api/v1/**）；

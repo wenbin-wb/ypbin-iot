@@ -9,6 +9,7 @@
  */
 package cn.ypbin.admin.iot.openapi;
 
+import cn.ypbin.starter.security.identity.VirtualPrincipalScopes;
 import cn.ypbin.starter.security.satoken.StpPermissionAdapter;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -47,8 +48,14 @@ public final class OpenApiPrincipal {
      * <p><b>为什么不取 -3/-4/-5</b>：那是 Sa-Token 的哨兵值（`IdentityStpLogic` 类注释
      * "账号标识"条已提示冲突）⇒ 本段**必须避开**它们。取 `-1_000_000_000` 使
      * `-1/-3/-4/-5` 等小负数**仍按"非虚拟"处理**，保持既有语义不变。</p>
+     *
+     * <p><b>直接引用 starter 常量，不复制字面量</b>：本值曾与
+     * {@link VirtualPrincipalScopes#DEFAULT_VIRTUAL_USER_ID_MAX}、
+     * {@code OpenApiKeyConstants.VIRTUAL_USER_ID_BASE} 三处各写一遍字面量，
+     * 漂移即"网关认为是虚拟主体、服务端认为是真实用户"的身份误判。
+     * 现以 starter 为准，另有 `OpenApiPrincipalVirtualIdConsistencyTest` 把三处钉在一起。</p>
      */
-    public static final long VIRTUAL_USER_ID_MAX = -1_000_000_000L;
+    public static final long VIRTUAL_USER_ID_MAX = VirtualPrincipalScopes.DEFAULT_VIRTUAL_USER_ID_MAX;
 
     /**
      * 平台超管权限码 —— **直接引用** starter 常量（StpPermissionAdapter.SUPER_ADMIN）。
@@ -90,11 +97,13 @@ public final class OpenApiPrincipal {
     /**
      * 判定是否为开放 API 的虚拟主体。
      *
+     * <p>直接委托 starter 通用判定（语义相同：非空且 `<=` 上界），上界本身也是 starter 常量。</p>
+     *
      * @param userId 解析出的用户 ID（可为 `null`）
      * @return 虚拟主体返回 `true`
      */
     public static boolean isVirtualPrincipal(Long userId) {
-        return userId != null && userId <= VIRTUAL_USER_ID_MAX;
+        return VirtualPrincipalScopes.isVirtualPrincipal(userId);
     }
 
     /**
@@ -105,6 +114,14 @@ public final class OpenApiPrincipal {
      * 若一把只该"看数据"的 Key 的作用域里出现通配符，它就会**越权为超管**——
      * 这正是设计 §2.3 警告的"作用域隔离形同虚设"。故此处按 **fail-closed** 过滤，
      * 并把该情况**记日志**（不静默）。</p>
+     *
+     * <p>⚠️ <b>刻意不委托 starter 的 `VirtualPrincipalScopes.containsWildcard`</b>：
+     * 那个判定是"含 `*` 即算"（宽口径，用于底层统一剥离一切 pattern）；
+     * 而本方法是"只认 `*` 与 `*:*:*` 两种精确形态"（窄口径，**仅用于日志分类**，
+     * 见 `wildcardsIn` 与 `OpenApiPrincipalTest.isWildcardIsOnlyForLoggingNotSecurity`）。
+     * 真正的安全判据是**白名单**（`isAllowedScope` 精确匹配），不是本方法 ——
+     * `iot:*` 这类段内星号在本方法返回 false，但白名单同样拒绝它。
+     * 若把本方法改成宽口径，会改变日志语义并破坏既有测试，故保持窄口径。</p>
      *
      * @param code 待判的码
      * @return 是通配符返回 `true`
