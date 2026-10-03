@@ -4,6 +4,7 @@ import cn.ypbin.admin.iot.entity.IotOpenApiKey;
 import cn.ypbin.admin.iot.mapper.IotOpenApiKeyMapper;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.core.util.LogSanitizer;
+import cn.ypbin.starter.sign.core.ApiKeyCredentials;
 import cn.ypbin.starter.sign.core.InMemoryNonceStore;
 import cn.ypbin.starter.sign.core.NonceStore;
 import cn.ypbin.starter.sign.core.SignAlgorithm;
@@ -11,19 +12,11 @@ import cn.ypbin.starter.data.core.EntityStatus;
 import cn.ypbin.starter.security.core.LoginUser;
 import cn.ypbin.starter.security.identity.IdentityContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import java.nio.charset.StandardCharsets;
-import java.security.GeneralSecurityException;
-import java.security.MessageDigest;
-import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
-import java.util.Base64;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
@@ -35,6 +28,8 @@ import org.springframework.stereotype.Service;
  *
  * 安全要点（设计 §2.5）：只存 HMAC-SHA256(pepper, secret) 哈希与前 8 位明文前缀；
  * 明文仅创建响应返回一次；校验用常量时间比较；失败统一 INVALID 防枚举。
+ * 凭证原语（随机串/哈希/比对/回显）委托 starter {@code ApiKeyCredentials}（3.7.0），
+ * 本类只留租户/作用域/配额/落库等纯业务。
  *
  * <p>pepper 由环境变量 YPBIN_OPENAPI_SECRET_PEPPER 经 relaxed binding 注入
  * （ypbin.openapi.secret-pepper），真值不入库不入配置文件；iot 与网关两侧必须同值。</p>
@@ -120,16 +115,17 @@ public class OpenApiKeyService {
         if (scopes.isEmpty()) {
             throw new BusinessException("至少需要一个作用域（如 iot:series:get）");
         }
-        String accessKey = randomToken(OpenApiKeyConstants.ACCESS_KEY_BYTE_LENGTH);
-        String secret = randomToken(OpenApiKeyConstants.SECRET_BYTE_LENGTH);
+        String accessKey = ApiKeyCredentials.generateSecret(OpenApiKeyConstants.ACCESS_KEY_BYTE_LENGTH);
+        String secret = ApiKeyCredentials.generateSecret(OpenApiKeyConstants.SECRET_BYTE_LENGTH);
 
         IotOpenApiKey row = new IotOpenApiKey();
         row.setAppName(req.getAppName().trim());
         row.setAccessKeyId(OpenApiKeyConstants.ACCESS_KEY_PREFIX + accessKey);
         // 完整密钥串 = PREFIX + secret（第三方持有的就是完整串）⇒ hash 也按完整串计算，与校验口径一致
-        row.setSecretHash(hmacHex(pepper, OpenApiKeyConstants.SECRET_PREFIX + secret));
-        row.setSecretPrefix(OpenApiKeyConstants.SECRET_PREFIX
-            + secret.substring(0, OpenApiKeyConstants.SECRET_PREFIX_LENGTH));
+        row.setSecretHash(ApiKeyCredentials.hashSecret(pepper, OpenApiKeyConstants.SECRET_PREFIX + secret));
+        row.setSecretPrefix(ApiKeyCredentials.displayPrefix(
+            OpenApiKeyConstants.SECRET_PREFIX + secret, OpenApiKeyConstants.SECRET_PREFIX,
+            OpenApiKeyConstants.SECRET_PREFIX_LENGTH));
         row.setScopes(String.join(",", scopes));
         row.setStatus(EntityStatus.ENABLED.getCode());
         row.setRateLimitQps(req.getRateLimitQps() == null
@@ -211,8 +207,7 @@ public class OpenApiKeyService {
             || (row.getExpireAt() != null && row.getExpireAt().isBefore(LocalDateTime.now()))) {
             return OpenApiKeyVerifyDtos.VerifyResp.invalid();
         }
-        boolean matches = constantTimeEquals(hmacHex(pepper, req.getSecret().trim()),
-            row.getSecretHash());
+        boolean matches = ApiKeyCredentials.matches(pepper, req.getSecret(), row.getSecretHash());
         if (!matches) {
             return OpenApiKeyVerifyDtos.VerifyResp.invalid();
         }
@@ -325,31 +320,5 @@ public class OpenApiKeyService {
         if (pepper == null || pepper.isEmpty()) {
             throw new BusinessException("缺少密钥 pepper（ypbin.openapi.secret-pepper），拒绝创建");
         }
-    }
-
-    private static String randomToken(int byteLength) {
-        byte[] bytes = new byte[byteLength];
-        new SecureRandom().nextBytes(bytes);
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
-    }
-
-    private static String hmacHex(String pepper, String secret) {
-        try {
-            Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(pepper.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
-            byte[] digest = mac.doFinal(secret.getBytes(StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(digest);
-        } catch (GeneralSecurityException ex) {
-            throw new IllegalStateException("HMAC 初始化失败", ex);
-        }
-    }
-
-    /** 常量时间比较（防时序侧信道）。 */
-    private static boolean constantTimeEquals(String a, String b) {
-        if (a == null || b == null) {
-            return false;
-        }
-        return MessageDigest.isEqual(a.getBytes(StandardCharsets.US_ASCII),
-            b.getBytes(StandardCharsets.US_ASCII));
     }
 }
