@@ -132,6 +132,54 @@ class OpenApiKeyServiceTest {
     }
 
     @Test
+    @DisplayName("校验：正确 ak + 错误 secret ⇒ invalid（密钥比较真实被 exercise）")
+    void verifyWrongSecretMustBeInvalid() {
+        when(mapper.insert(any(IotOpenApiKey.class))).thenReturn(1);
+        OpenApiKeyDtos.CreateResp created = service.create(req("a", "iot:series:get"));
+
+        org.mockito.ArgumentCaptor<IotOpenApiKey> cap =
+            org.mockito.ArgumentCaptor.forClass(IotOpenApiKey.class);
+        org.mockito.Mockito.verify(mapper).insert(cap.capture());
+
+        IotOpenApiKey row = new IotOpenApiKey();
+        row.setId(6L);
+        row.setTenantId(1L);
+        row.setAccessKeyId(created.accessKeyId());
+        row.setSecretHash(cap.getValue().getSecretHash());
+        row.setSecretPrefix(created.secretPrefix());
+        row.setScopes("iot:series:get");
+        row.setStatus(1);
+        when(mapper.selectOne(any())).thenReturn(row);
+
+        // 错误密钥：行存在且启用 ⇒ 必然走到密钥比较分支
+        OpenApiKeyVerifyDtos.VerifyReq wrong = new OpenApiKeyVerifyDtos.VerifyReq();
+        wrong.setAccessKeyId(created.accessKeyId());
+        wrong.setSecret("sk_00000000000000000000000000000000000000");
+        assertThat(service.verify(wrong)).isEqualTo(OpenApiKeyVerifyDtos.VerifyResp.invalid());
+
+        // 对照：正确密钥放行（证明上一条不是"一律拒绝"）
+        OpenApiKeyVerifyDtos.VerifyReq right = new OpenApiKeyVerifyDtos.VerifyReq();
+        right.setAccessKeyId(created.accessKeyId());
+        right.setSecret(created.secret());
+        assertThat(service.verify(right).valid()).isTrue();
+    }
+
+    @Test
+    @DisplayName("创建：回显前缀 == sk_ + 明文体前 8 位（长度 11）")
+    void createPrefixFormatMustBeExact() {
+        when(mapper.insert(any(IotOpenApiKey.class))).thenReturn(1);
+        OpenApiKeyDtos.CreateResp created = service.create(req("a", "iot:series:get"));
+
+        assertThat(created.secret()).startsWith(OpenApiKeyConstants.SECRET_PREFIX);
+        String body = created.secret()
+            .substring(OpenApiKeyConstants.SECRET_PREFIX.length());
+        assertThat(created.secretPrefix())
+            .isEqualTo(OpenApiKeyConstants.SECRET_PREFIX + body.substring(0, 8));
+        assertThat(created.secretPrefix()).hasSize(
+            OpenApiKeyConstants.SECRET_PREFIX.length() + OpenApiKeyConstants.SECRET_PREFIX_LENGTH);
+    }
+
+    @Test
     @DisplayName("自检：虚拟主体返回自身信息（不含明文）")
     void whoamiReturnsOwnKeyInfo() {
         long keyRowId = 7L;
