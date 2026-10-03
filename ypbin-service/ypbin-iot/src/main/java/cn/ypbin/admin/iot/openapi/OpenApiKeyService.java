@@ -20,6 +20,7 @@ import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -60,6 +61,7 @@ public class OpenApiKeyService {
      */
     private final boolean localRequireSignature;
 
+    @Autowired
     public OpenApiKeyService(IotOpenApiKeyMapper keyMapper,
                              @Value("${ypbin.openapi.secret-pepper:}") String pepper,
                              @Value("${ypbin.openapi.require-signature:false}") boolean localRequireSignature,
