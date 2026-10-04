@@ -92,7 +92,7 @@ jobs:
 
       - name: 上传集成测试报告
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: iot-iotdb-failsafe-reports
           path: ypbin-service/ypbin-iot/target/failsafe-reports/
