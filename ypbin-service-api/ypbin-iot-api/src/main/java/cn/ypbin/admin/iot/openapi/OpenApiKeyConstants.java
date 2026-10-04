@@ -1,5 +1,7 @@
 package cn.ypbin.admin.iot.openapi;
 
+import java.time.LocalDate;
+
 /**
  * 开放 API 具名常量（看板 #11 第 1 批；对照设计 §2.4/§3.3）。
  *
@@ -52,6 +54,27 @@ public final class OpenApiKeyConstants {
 
     /** nonce 防重放计数 Redis key 前缀（按 Key + nonce 唯一）。 */
     public static final String SIGN_NONCE_KEY_PREFIX = "ypbin:openapi:sign:nonce:";
+
+    /**
+     * 日配额计数 Redis key 前缀（按 Key + 自然日唯一）。
+     *
+     * <p><b>必须与网关侧限流写入的前缀一致</b>：`deploy/nacos/ypbin-gateway.yaml` 的
+     * `ypbin.gateway.rate-limit.quota-key-prefix`。两处各写一遍字面量，
+     * 一致性由 `OpenApiQuotaUsageConsistencyTest` 钉住（漂移即转红；
+     * 漂移的后果是"用量查询永远 0 / 限流计数另起一套"，静默错）。</p>
+     */
+    public static final String QUOTA_KEY_PREFIX = "ypbin:openapi:quota:";
+
+    /**
+     * 当日配额计数 key。
+     *
+     * @param accessKeyId 公开标识（定位行用，不含密钥）
+     * @param date        自然日（与网关侧 `LocalDate.now()` 同口径：服务端时区自然日）
+     * @return Redis key
+     */
+    public static String quotaKey(String accessKeyId, LocalDate date) {
+        return QUOTA_KEY_PREFIX + accessKeyId + ":" + date;
+    }
 
     /** 计算单 Key 虚拟主体 ID（保留段内、不重叠真实用户）。 */
     public static long virtualUserId(long keyRowId) {
