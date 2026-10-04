@@ -65,7 +65,7 @@ class OpenApiSignVerifierTest {
     // ==================== 齐备性 ====================
 
     @Test
-    @DisplayName("四件套缺一即不齐备")
+    @DisplayName("四件套缺一即不齐备；但空参数集是合法的（无业务参数的端点）")
     void shouldRequireAllParts() {
         Map<String, String> p = params();
         assertThat(OpenApiSignVerifier.complete("1", "n", "s", p)).isTrue();
@@ -74,8 +74,10 @@ class OpenApiSignVerifierTest {
         assertThat(OpenApiSignVerifier.complete("1", null, "s", p)).isFalse();
         assertThat(OpenApiSignVerifier.complete("1", "n", null, p)).isFalse();
         assertThat(OpenApiSignVerifier.complete("1", "n", "s", null)).isFalse();
-        assertThat(OpenApiSignVerifier.complete("1", "n", "s", Map.of())).isFalse();
-        assertThat(OpenApiSignVerifier.complete("1", "n", "s", Map.of("", ""))).isFalse();
+        // 空 Map = "没有可签参数"，不是"缺参数"：whoami 这类端点收集到空集，
+        // 此时签名覆盖空规范串 —— 若判不齐备，这类端点将永远过不了签名。
+        assertThat(OpenApiSignVerifier.complete("1", "n", "s", Map.of())).isTrue();
+        assertThat(OpenApiSignVerifier.complete("1", "n", "s", Map.of("", ""))).isTrue();
     }
 
     // ==================== 时间戳 ====================
@@ -154,14 +156,23 @@ class OpenApiSignVerifierTest {
     void shouldNotThrowOnMissingInputs() {
         Map<String, String> p = params();
         assertThat(OpenApiSignVerifier.signatureMatches(null, SECRET, "x", SignAlgorithm.HMAC_SHA256)).isFalse();
-        assertThat(OpenApiSignVerifier.signatureMatches(Map.of(), SECRET, "x",
-            SignAlgorithm.HMAC_SHA256)).isFalse();
         assertThat(OpenApiSignVerifier.signatureMatches(p, null, "x", SignAlgorithm.HMAC_SHA256)).isFalse();
         assertThat(OpenApiSignVerifier.signatureMatches(p, "", "x", SignAlgorithm.HMAC_SHA256)).isFalse();
         // 空密钥会让 HMAC 抛 IllegalArgumentException —— 必须被吞成 false 而非冒泡
         assertThat(OpenApiSignVerifier.signatureMatches(p, " ", "x", SignAlgorithm.HMAC_SHA256)).isFalse();
         assertThat(OpenApiSignVerifier.signatureMatches(p, SECRET, null, SignAlgorithm.HMAC_SHA256)).isFalse();
         assertThat(OpenApiSignVerifier.signatureMatches(p, SECRET, "  ", SignAlgorithm.HMAC_SHA256)).isFalse();
+    }
+
+    @Test
+    @DisplayName("空参数集可签空规范串（无业务参数端点的合法形态）")
+    void shouldSignEmptyParams() {
+        // 空集不是"缺失"：规范化为空串后仍可计算签名，错签名同样判不通过。
+        String emptySign = SignGenerator.generate(Map.of(), SECRET, SignAlgorithm.HMAC_SHA256);
+        assertThat(OpenApiSignVerifier.signatureMatches(Map.of(), SECRET, emptySign,
+            SignAlgorithm.HMAC_SHA256)).isTrue();
+        assertThat(OpenApiSignVerifier.signatureMatches(Map.of(), SECRET, "x",
+            SignAlgorithm.HMAC_SHA256)).isFalse();
     }
 
     @Test

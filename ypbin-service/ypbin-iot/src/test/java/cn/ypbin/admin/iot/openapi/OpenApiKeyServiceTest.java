@@ -305,6 +305,25 @@ class OpenApiKeyServiceTest {
     }
 
     @Test
+    @DisplayName("签名：空参数集可验空规范串（whoami 这类无业务参数端点的合法形态）")
+    void verifyWithEmptyParamsSignsEmptyCanonical() {
+        when(mapper.insert(any(IotOpenApiKey.class))).thenReturn(1);
+        OpenApiKeyDtos.CreateResp created = service.create(req("a", "iot:series:get"));
+        seedKey(created, 5L);
+
+        Map<String, String> empty = new HashMap<>();
+        OpenApiKeyVerifyDtos.VerifyReq r = new OpenApiKeyVerifyDtos.VerifyReq();
+        r.setAccessKeyId(created.accessKeyId());
+        r.setSecret(created.secret());
+        r.setTimestamp(nowTs());
+        r.setNonce("nonce-empty");
+        r.setSign(SignGenerator.generate(empty, created.secret(), SignAlgorithm.HMAC_SHA256));
+        r.setSignParams(empty);
+
+        assertThat(service.verify(r).valid()).isTrue();
+    }
+
+    @Test
     @DisplayName("🔴 签名：只带部分参数 ⇒ 拒绝（防降级绕过）")
     void verifyWithPartialSignatureMustFail() {
         when(mapper.insert(any(IotOpenApiKey.class))).thenReturn(1);
