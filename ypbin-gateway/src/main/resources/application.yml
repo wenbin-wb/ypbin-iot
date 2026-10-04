@@ -52,6 +52,11 @@ spring:
   config:
     import:
       - optional:nacos:ypbin-common.yaml
+      # 网关自身配置（限流/签名开关/路由/白名单）：必须显式列出 ——
+      # spring.config.import 存在时只加载列出的 dataId，**不会**自动加载
+      # `${spring.application.name}.yaml`。曾因此漏配导致 nacos 上的
+      # `ypbin.gateway.rate-limit` 修改静默不生效（starter 限流器从未装配）。
+      - optional:nacos:ypbin-gateway.yaml
 
 # Sa-Token 与 auth 保持一致（网关读取 Redis 中的登录会话）
 sa-token:

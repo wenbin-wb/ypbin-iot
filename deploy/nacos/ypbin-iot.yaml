@@ -31,6 +31,17 @@ ypbin:
   security:
     interceptor: false
 
+  # ---------------------------------------------------------------------------
+  # 开放 API 签名强制（与网关侧 `ypbin-gateway.yaml` 的同名开关取**逻辑或**）
+  #
+  # `true` ⇒ 未携带签名参数的请求直接拒绝（fail-closed）；第三方必须按
+  # accessKey + timestamp + nonce + sign 四件套接入。
+  # 本开关与网关下发的 `requireSignature` 取或 —— 任一说要强制就强制，
+  # 即便内部校验请求的该字段被篡改也**关不掉**强制模式（纵深防御）。
+  # ---------------------------------------------------------------------------
+  openapi:
+    require-signature: true
+
   # EMQX 接入（设计 §8.4，落地形态见 docs/EMQX-INTEGRATION.md §2 的拓扑与方向）
   # ⚠️ api-key/api-secret 写的是**占位符**：真值只在 deploy/.env(600) 与容器 env 里，
   #    由 Spring 读取本配置时从 Environment 解析（方案 α）。**不要把真值填进本文件**——
