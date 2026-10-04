@@ -23,6 +23,8 @@ public final class OpenApiKeyDtos {
         private Integer rateLimitQps;
         /** 日配额（空 = 默认 100_000；0 = 不限）。 */
         private Integer dailyQuota;
+        /** 来源 IP 白名单（逗号分隔的 IP/CIDR；空 = 不限来源；非法条目建 Key 时直接拒绝）。 */
+        private String ipWhitelist;
         /** 过期时间（空 = 永不过期）。 */
         private LocalDateTime expireAt;
     }

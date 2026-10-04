@@ -2,6 +2,7 @@ package cn.ypbin.admin.gateway.openapi;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -152,7 +153,10 @@ public class OpenApiKeyAuthFilter implements GlobalFilter, Ordered {
      * <ul>
      *     <li>{@code signParams} <b>始终存在</b>，即便为空 Map —— 若"空就省略"，
      *     iot 无法区分"客户端没打算签名"与"网关把参数弄丢了"，前者正是降级攻击要伪造的形态；</li>
-     *     <li>{@code requireSignature} 由<b>服务端配置</b>下发，客户端无法通过少发参数降级。</li>
+     *     <li>{@code requireSignature} 由<b>服务端配置</b>下发，客户端无法通过少发参数降级；</li>
+     *     <li>{@code clientIp} 为<b>连接远端地址</b>（`getRemoteAddress`），<b>不是</b>
+     *     `X-Forwarded-For` —— 网关前无可信代理，XFF 完全可伪造；连接地址伪造成本 =
+     *     真实网络位置（TCP 握手绑定）。供 iot 侧 `ip_whitelist`（CIDR）校验。</li>
      * </ul>
      *
      * @param exchange 请求
@@ -176,7 +180,34 @@ public class OpenApiKeyAuthFilter implements GlobalFilter, Ordered {
         // 始终放入（即使为空 Map）
         out.put("signParams", collectSignParams(exchange));
         out.put("requireSignature", require);
+        String clientIp = clientIp(exchange);
+        if (clientIp != null) {
+            out.put("clientIp", clientIp);
+        }
         return out;
+    }
+
+    /**
+     * 取客户端来源 IP（连接远端地址）。
+     *
+     * <p>刻意<b>不读 `X-Forwarded-For`</b>：本网关直接暴露（openresty 只是默认 stub，
+     * 不代理网关端口），前面没有可信代理会覆盖/追加 XFF，客户端自带什么就是什么。
+     * 若将来前面加了可信代理，必须同步把"信任 XFF"做成显式配置（默认关闭），
+     * 否则等于把 IP 白名单的钥匙交给请求方自己。</p>
+     *
+     * @return IP 字面量；取不到返回 {@code null}（iot 侧按无法判定拒绝，fail-closed）
+     */
+    static String clientIp(ServerWebExchange exchange) {
+        try {
+            InetSocketAddress remote = exchange.getRequest().getRemoteAddress();
+            if (remote == null || remote.getAddress() == null) {
+                return null;
+            }
+            return remote.getAddress().getHostAddress();
+        } catch (RuntimeException ex) {
+            log.warn("[gateway] openapi 取客户端 IP 失败，按缺失处理: {}", ex.toString());
+            return null;
+        }
     }
 
     /**

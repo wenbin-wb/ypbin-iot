@@ -57,6 +57,17 @@ public final class OpenApiKeyVerifyDtos {
          * 不强制读取流式 body（见方案 c 的取舍说明）。</p>
          */
         private Map<String, String> signParams;
+
+        /**
+         * 客户端来源 IP（由网关注入：连接远端地址）。
+         *
+         * <p><b>刻意取连接远端，不取 `X-Forwarded-For`</b>：网关前无可信代理
+         * （openresty 只是默认 stub，不代理网关端口），XFF 完全由客户端可控、
+         * 可伪造。用连接地址则伪造成本 = 真实网络位置（TCP 握手绑定）。</p>
+         *
+         * <p>供 `IotOpenApiKey.ipWhitelist`（CIDR 白名单）校验；空表示网关未提供。</p>
+         */
+        private String clientIp;
     }
 
     /**

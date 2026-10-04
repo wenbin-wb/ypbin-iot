@@ -6,6 +6,7 @@ import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.core.util.LogSanitizer;
 import cn.ypbin.starter.sign.core.ApiKeyCredentials;
 import cn.ypbin.starter.sign.core.InMemoryNonceStore;
+import cn.ypbin.starter.sign.core.IpWhitelist;
 import cn.ypbin.starter.sign.core.NonceStore;
 import cn.ypbin.starter.sign.core.SignAlgorithm;
 import cn.ypbin.starter.data.core.EntityStatus;
@@ -117,6 +118,7 @@ public class OpenApiKeyService {
         if (scopes.isEmpty()) {
             throw new BusinessException("至少需要一个作用域（如 iot:series:get）");
         }
+        String ipWhitelist = normalizeIpWhitelist(req.getIpWhitelist());
         String accessKey = ApiKeyCredentials.generateSecret(OpenApiKeyConstants.ACCESS_KEY_BYTE_LENGTH);
         String secret = ApiKeyCredentials.generateSecret(OpenApiKeyConstants.SECRET_BYTE_LENGTH);
 
@@ -134,6 +136,7 @@ public class OpenApiKeyService {
             ? OpenApiKeyConstants.DEFAULT_RATE_LIMIT_QPS : req.getRateLimitQps());
         row.setDailyQuota(req.getDailyQuota() == null
             ? OpenApiKeyConstants.DEFAULT_DAILY_QUOTA : req.getDailyQuota());
+        row.setIpWhitelist(ipWhitelist);
         row.setExpireAt(req.getExpireAt());
         keyMapper.insert(row);
         return new OpenApiKeyDtos.CreateResp(String.valueOf(row.getId()), row.getAccessKeyId(),
@@ -213,6 +216,11 @@ public class OpenApiKeyService {
         if (!matches) {
             return OpenApiKeyVerifyDtos.VerifyResp.invalid();
         }
+        // 来源 IP 白名单（配了才查；放在签名校验之前：IP 不对连 HMAC 都不必算，
+        // 且失败同样统一 invalid，不泄露"哪一关没过"）。
+        if (!checkIpWhitelist(req, row)) {
+            return OpenApiKeyVerifyDtos.VerifyResp.invalid();
+        }
         // 密钥已确认属于该 Key ⇒ 此时才具备"验签"的前提（密钥错就没必要继续）
         if (!verifySignatureIfPresent(req, row)) {
             return OpenApiKeyVerifyDtos.VerifyResp.invalid();
@@ -283,6 +291,36 @@ public class OpenApiKeyService {
         return true;
     }
 
+    /**
+     * 来源 IP 白名单校验（未配置白名单时直接通过）。
+     *
+     * <p>调用方（网关）传入的是<b>连接远端地址</b>，不是 `X-Forwarded-For`
+     * （网关前无可信代理，XFF 完全可伪造）。匹配逻辑委托 starter `IpWhitelist`
+     * （精确 IP + CIDR，非法条目 fail-closed）。</p>
+     *
+     * @return 通过返回 {@code true}
+     */
+    private boolean checkIpWhitelist(OpenApiKeyVerifyDtos.VerifyReq req, IotOpenApiKey row) {
+        String whitelist = row.getIpWhitelist();
+        if (whitelist == null || whitelist.isBlank()) {
+            // 未配置 = 不限来源（保持旧行为；存量 Key 全是空）
+            return true;
+        }
+        List<String> invalid = IpWhitelist.invalidEntries(whitelist);
+        if (!invalid.isEmpty()) {
+            // 配置了却写错 ⇒ 若静默会变成"以为有限制、实际全放行"；
+            // 故记 WARN 让运维可见（校验本身仍按 fail-closed 执行）。
+            log.warn("[iot] 开放 API 的 IP 白名单含无法解析的条目（已忽略，不匹配任何地址）：ak={}, invalid={}",
+                LogSanitizer.sanitize(row.getAccessKeyId()), invalid);
+        }
+        if (!IpWhitelist.matches(whitelist, req.getClientIp())) {
+            log.warn("[iot] 开放 API 来源 IP 不在白名单：ak={}, ip={}",
+                LogSanitizer.sanitize(row.getAccessKeyId()), LogSanitizer.sanitize(req.getClientIp()));
+            return false;
+        }
+        return true;
+    }
+
     /** 作用域归一化 + 白名单校验（只允许既有开放作用域）。 */
     private static List<String> normalizeScopes(String scopes) {
         List<String> out = new ArrayList<>();
@@ -302,6 +340,32 @@ public class OpenApiKeyService {
             }
         }
         return out;
+    }
+
+    /**
+     * IP 白名单归一化 + 合法性校验（空 = 不限来源）。
+     *
+     * <p>非法条目在**创建时直接拒绝**（而不是存进去、校验时静默忽略）：
+     * 否则就是"配了限制、实际没限制"的静默失效 —— 与 `normalizeScopes` 同一纪律。</p>
+     *
+     * @return 归一化后的白名单（去空白、去重；未配置返回 {@code null}）
+     */
+    private static String normalizeIpWhitelist(String ipWhitelist) {
+        if (ipWhitelist == null || ipWhitelist.isBlank()) {
+            return null;
+        }
+        List<String> out = new ArrayList<>();
+        for (String raw : ipWhitelist.split(",")) {
+            String token = raw.trim();
+            if (token.isEmpty() || out.contains(token)) {
+                continue;
+            }
+            if (!IpWhitelist.isValidEntry(token)) {
+                throw new BusinessException("IP 白名单条目非法（需为 IP 或 CIDR，如 10.0.0.0/8）：" + token);
+            }
+            out.add(token);
+        }
+        return out.isEmpty() ? null : String.join(",", out);
     }
 
     private static List<String> splitScopes(String scopes) {
