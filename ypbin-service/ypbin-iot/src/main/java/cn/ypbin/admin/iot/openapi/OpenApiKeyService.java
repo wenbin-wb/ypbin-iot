@@ -14,6 +14,7 @@ import cn.ypbin.starter.security.core.LoginUser;
 import cn.ypbin.starter.security.identity.IdentityContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import java.time.Duration;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -23,6 +24,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
 /**
@@ -62,13 +64,22 @@ public class OpenApiKeyService {
      */
     private final boolean localRequireSignature;
 
+    /**
+     * Redis 访问（配额用量查询用；可空）。
+     *
+     * <p>为 {@code null} 表示调用方未提供（如单测的简化构造）⇒ 用量一律回"未知"，
+     * 不影响鉴权主链路。用量查询是**可观测性**，绝不能因为 Redis 缺失而拒绝合法请求。</p>
+     */
+    private final ObjectProvider<StringRedisTemplate> redisTemplateProvider;
+
     @Autowired
     public OpenApiKeyService(IotOpenApiKeyMapper keyMapper,
                              @Value("${ypbin.openapi.secret-pepper:}") String pepper,
                              @Value("${ypbin.openapi.require-signature:false}") boolean localRequireSignature,
-                             ObjectProvider<NonceStore> nonceStoreProvider) {
+                             ObjectProvider<NonceStore> nonceStoreProvider,
+                             ObjectProvider<StringRedisTemplate> redisTemplateProvider) {
         this(keyMapper, pepper, nonceStoreProvider.getIfAvailable(
-            InMemoryNonceStore::new), localRequireSignature);
+            InMemoryNonceStore::new), localRequireSignature, redisTemplateProvider);
     }
 
     /**
@@ -102,10 +113,70 @@ public class OpenApiKeyService {
      */
     public OpenApiKeyService(IotOpenApiKeyMapper keyMapper, String pepper, NonceStore nonceStore,
                              boolean localRequireSignature) {
+        this(keyMapper, pepper, nonceStore, localRequireSignature, null);
+    }
+
+    /**
+     * 全参构造（供需要用量查询的调用方传入 Redis）。
+     *
+     * @param keyMapper              Key 表 Mapper
+     * @param pepper                 pepper
+     * @param nonceStore             nonce 存储
+     * @param localRequireSignature  iot 自身配置的强制签名开关
+     * @param redisTemplateProvider  Redis 访问（可为 null；为 null 时用量一律回"未知"）
+     */
+    public OpenApiKeyService(IotOpenApiKeyMapper keyMapper, String pepper, NonceStore nonceStore,
+                             boolean localRequireSignature,
+                             ObjectProvider<StringRedisTemplate> redisTemplateProvider) {
         this.keyMapper = keyMapper;
         this.pepper = pepper;
         this.nonceStore = nonceStore;
         this.localRequireSignature = localRequireSignature;
+        this.redisTemplateProvider = redisTemplateProvider;
+    }
+
+    /**
+     * 读当日配额用量（可观测性，fail-soft）。
+     *
+     * <p>计数键与网关限流器同源（`OpenApiKeyConstants#quotaKey`）：网关每次放行 `INCR`，
+     * 故该值 = 当日实际放行数。Redis 不可用 / 值非法时回 {@code null}（未知），
+     * **绝不因此拒绝请求** —— 用量查询挂了不该把鉴权链路一起带崩。</p>
+     *
+     * @param accessKeyId 公开标识
+     * @return 当日已用次数；未知返回 {@code null}
+     */
+    Long readQuotaUsage(String accessKeyId) {
+        ObjectProvider<StringRedisTemplate> provider = redisTemplateProvider;
+        if (provider == null || accessKeyId == null || accessKeyId.isBlank()) {
+            return null;
+        }
+        StringRedisTemplate redisTemplate = provider.getIfAvailable();
+        if (redisTemplate == null) {
+            return null;
+        }
+        try {
+            String key = OpenApiKeyConstants.quotaKey(accessKeyId.trim(),
+                LocalDate.now());
+            String value = redisTemplate.opsForValue().get(key);
+            if (value == null) {
+                // 键不存在 = 今日尚无放行调用（计数器是放行时才 INCR 创建的）
+                return 0L;
+            }
+            return Long.parseLong(value.trim());
+        } catch (RuntimeException ex) {
+            log.warn("[iot] 开放 API 配额用量读取失败，按未知处理（不影响鉴权）：ak={}",
+                LogSanitizer.sanitize(accessKeyId));
+            return null;
+        }
+    }
+
+    /**
+     * 配额重置时刻（次日零点，服务端时区自然日；与网关配额 TTL 口径一致）。
+     *
+     * @return 次日零点
+     */
+    static LocalDateTime quotaResetAt() {
+        return LocalDate.now().plusDays(1).atStartOfDay();
     }
 
     /** 创建 Key：明文仅此一次。 */
@@ -152,7 +223,8 @@ public class OpenApiKeyService {
             out.add(new OpenApiKeyDtos.ListItemResp(
                 String.valueOf(row.getId()), row.getAppName(), row.getAccessKeyId(), row.getSecretPrefix(),
                 splitScopes(row.getScopes()), row.getStatus(), row.getExpireAt(), row.getLastUsedAt(),
-                row.getCreateTime()));
+                row.getCreateTime(), readQuotaUsage(row.getAccessKeyId()),
+                row.getRateLimitQps(), row.getDailyQuota()));
         }
         return out;
     }
@@ -192,7 +264,8 @@ public class OpenApiKeyService {
         }
         return new OpenApiKeyDtos.WhoamiResp(row.getAccessKeyId(), row.getAppName(), row.getTenantId(),
             splitScopes(row.getScopes()), row.getStatus(), row.getRateLimitQps(), row.getDailyQuota(),
-            row.getExpireAt(), row.getLastUsedAt());
+            row.getExpireAt(), row.getLastUsedAt(),
+            readQuotaUsage(row.getAccessKeyId()), quotaResetAt());
     }
 
     /** 内部校验（网关调用）。失败统一 invalid()，不区分不存在/secret 错/禁用/过期（防枚举）。 */

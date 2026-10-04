@@ -34,10 +34,11 @@ public final class OpenApiKeyDtos {
                              List<String> scopes, LocalDateTime expireAt) {
     }
 
-    /** 列表项（只回 prefix，不给明文）。 */
+    /** 列表项（只回 prefix，不给明文；usedToday 为 null 表示用量未知/Redis 不可用）。 */
     public record ListItemResp(String id, String appName, String accessKeyId, String secretPrefix,
                                List<String> scopes, Integer status, LocalDateTime expireAt,
-                               LocalDateTime lastUsedAt, LocalDateTime createTime) {
+                               LocalDateTime lastUsedAt, LocalDateTime createTime, Long usedToday,
+                               Integer rateLimitQps, Integer dailyQuota) {
     }
 
     /**
@@ -45,9 +46,13 @@ public final class OpenApiKeyDtos {
      *
      * <p>用途：第三方接入第一件事就是自检（我是谁、有几个 scope、配额剩多少），大幅降低
      * 「为什么查不到/调不通」的沟通成本；同时把已授予 scopes 摆明，天然解释作用域隔离。</p>
+     *
+     * <p>`usedToday` 为 null 表示用量未知（Redis 不可用）；`quotaResetAt` 为次日零点
+     * （服务端时区自然日；`dailyQuota=0` 不限时同样返回重置时刻，供展示）。</p>
      */
     public record WhoamiResp(String accessKeyId, String appName, Long tenantId, List<String> scopes,
                              Integer status, Integer rateLimitQps, Integer dailyQuota,
-                             LocalDateTime expireAt, LocalDateTime lastUsedAt) {
+                             LocalDateTime expireAt, LocalDateTime lastUsedAt,
+                             Long usedToday, LocalDateTime quotaResetAt) {
     }
 }
