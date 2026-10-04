@@ -11,9 +11,19 @@
 # 容器重建不漂移 IP —— 避免 nginx 等"启动时解析一次"的代理因上游 IP 变化 502。
 # 服务间仍优先用服务名（Docker DNS）通信；固定 IP 作为 DNS 解析的稳定兜底。
 
+# 日志限额（防 json.log 无上限吃满磁盘：曾出现单容器 350MB 日志）。
+# 每个容器最多 5×50MB，轮转覆盖。改动本节后需重建容器才生效（logging 驱动只在 create 时绑定）。
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "50m"
+      max-file: "5"
+
 services:
   # ---------- 基础设施 ----------
   nacos:
+    <<: *logging
     image: ${REGISTRY_PREFIX:-}nacos/nacos-server:v3.2.4
     container_name: ypbin-nacos
     environment:
@@ -50,6 +60,7 @@ services:
         ipv4_address: 172.20.0.10
 
   redis:
+    <<: *logging
     image: ${REGISTRY_PREFIX:-}redis:7-alpine
     container_name: ypbin-redis
     # requirepass 由**受管 600 文件**（deploy/redis-requirepass.conf，deploy/redis-auth-conf.sh 从 .env 生成、
@@ -86,6 +97,7 @@ services:
         ipv4_address: 172.20.0.11
 
   mysql:
+    <<: *logging
     image: ${REGISTRY_PREFIX:-}mysql:8.4
     container_name: ypbin-mysql
     environment:
@@ -120,6 +132,7 @@ services:
   #    官方约束「不要用更新的客户端连更旧的服务端」⇒ 服务端 >= 客户端是安全方向（当前 2.0.11 > 2.0.1-beta）；
   #    若要严格同版本，可改镜像为 apache/iotdb:2.0.1-beta-standalone（该 tag 同样已核实存在）。
   iotdb:
+    <<: *logging
     image: ${REGISTRY_PREFIX:-}apache/iotdb:2.0.11-standalone
     container_name: ypbin-iotdb
     # 与 cn_internal_address/dn_* 同名：官方 standalone compose 也是这么设的（hostname 与内部地址一致），
@@ -192,6 +205,7 @@ services:
   # 放这里则 `docker compose up -d` 一条命令即可复现。
   # 幂等：DDL 全用 IF NOT EXISTS，每次 up 重跑无副作用。
   iotdb-init:
+    <<: *logging
     image: ${REGISTRY_PREFIX:-}apache/iotdb:2.0.11-standalone
     container_name: ypbin-iotdb-init
     depends_on:
@@ -235,6 +249,7 @@ services:
 
   # ---------- 微服务 ----------
   ypbin-gateway:
+    <<: *logging
     build:
       context: ../ypbin-gateway
     image: ypbin/ypbin-gateway:local
@@ -268,6 +283,7 @@ services:
         ipv4_address: 172.20.0.20
 
   ypbin-auth:
+    <<: *logging
     build:
       context: ../ypbin-auth
     image: ypbin/ypbin-auth:local
@@ -300,6 +316,7 @@ services:
         ipv4_address: 172.20.0.21
 
   ypbin-system:
+    <<: *logging
     build:
       context: ../ypbin-service/ypbin-system
     image: ypbin/ypbin-system:local
@@ -332,6 +349,7 @@ services:
         ipv4_address: 172.20.0.22
 
   ypbin-ai:
+    <<: *logging
     build:
       context: ../ypbin-service/ypbin-ai
     image: ypbin/ypbin-ai:local
@@ -365,6 +383,7 @@ services:
   # ---------- IoT 业务服务（第 3 个业务域；接入单元 access 后续单独加）----------
   # ---------- IoT 设备接入单元（有状态、独立部署；不连库，租约来自 ypbin-iot）----------
   ypbin-access:
+    <<: *logging
     build:
       context: ../ypbin-service/ypbin-access
     image: ypbin/ypbin-access:local
@@ -407,6 +426,7 @@ services:
         ipv4_address: 172.20.0.26
 
   ypbin-iot:
+    <<: *logging
     build:
       context: ../ypbin-service/ypbin-iot
     image: ypbin/ypbin-iot:local
@@ -453,6 +473,7 @@ services:
 
   # ---------- XXL-JOB 调度中心（独立中间件，任务调度/日志 UI）----------
   xxl-job-admin:
+    <<: *logging
     image: ${REGISTRY_PREFIX:-}xuxueli/xxl-job-admin:3.4.2
     container_name: ypbin-xxl-job-admin
     environment:
@@ -469,6 +490,7 @@ services:
 
   # ---------- 前端 ----------
   ypbin-admin-ui:
+    <<: *logging
     image: ${REGISTRY_PREFIX:-}nginx:alpine
     container_name: ypbin-admin-ui
     volumes:
@@ -485,6 +507,7 @@ services:
 
   # ---------- IoT 前端（与管理台前端同一模式：nginx 静态托管 + /api 反代网关）----------
   ypbin-iot-ui:
+    <<: *logging
     image: ${REGISTRY_PREFIX:-}nginx:alpine
     container_name: ypbin-iot-ui
     volumes:
