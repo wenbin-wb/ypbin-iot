@@ -2,6 +2,7 @@ package cn.ypbin.admin.gateway.openapi;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.net.InetSocketAddress;
 import java.util.Map;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -127,5 +128,25 @@ class OpenApiSignPayloadContractTest {
 
         assertThat(payload).isNotNull();
         assertThat(payload.get("signParams")).isNotNull();
+    }
+
+    @Test
+    @DisplayName("clientIp 透传连接远端地址（供 iot 侧白名单校验）")
+    void clientIpForwardedFromRemoteAddress() {
+        MockServerHttpRequest.BaseBuilder<?> builder = MockServerHttpRequest.get("/iot/open-api/v1/devices")
+            .remoteAddress(new InetSocketAddress("10.1.2.3", 54321));
+        ServerWebExchange exchange = MockServerWebExchange.from(builder.build());
+
+        Map<String, Object> payload = OpenApiKeyAuthFilter.buildSignPayload(exchange, false);
+
+        assertThat(payload).containsEntry("clientIp", "10.1.2.3");
+    }
+
+    @Test
+    @DisplayName("取不到远端地址时不放 clientIp 键（iot 侧按无法判定拒绝，不伪造）")
+    void missingRemoteAddressOmitsClientIp() {
+        Map<String, Object> payload = OpenApiKeyAuthFilter.buildSignPayload(exchange(null), false);
+
+        assertThat(payload).doesNotContainKey("clientIp");
     }
 }
