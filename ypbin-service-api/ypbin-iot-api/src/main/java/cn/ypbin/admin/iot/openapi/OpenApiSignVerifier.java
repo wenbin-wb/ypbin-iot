@@ -50,6 +50,13 @@ public final class OpenApiSignVerifier {
     /**
      * 校验签名四件套是否齐备（意图使用签名时，缺一即不可验）。
      *
+     * <p>`signParams` 只要求**键存在**（可为空 Map）：无业务参数的端点（whoami 等）
+     * 收集到的是空集，此时签名覆盖空规范串 —— "没有可签参数"不等于"缺参数"。
+     * 若要求非空，这类端点将**永远**过不了签名（曾因此导致 whoami 在强制模式下恒 401）。</p>
+     *
+     * <p>`signParams == null`（调用方连键都没传）仍判不齐备：网关契约要求始终下发该键，
+     * 缺键说明调用链异常，按 fail-closed 拒绝。</p>
+     *
      * @param timestamp 时间戳
      * @param nonce     nonce
      * @param sign      签名值
@@ -59,7 +66,7 @@ public final class OpenApiSignVerifier {
     public static boolean complete(String timestamp, String nonce, String sign,
                                    Map<String, String> signParams) {
         return notBlank(timestamp) && notBlank(nonce) && notBlank(sign)
-            && hasSignableParam(signParams);
+            && signParams != null;
     }
 
     /**
@@ -96,7 +103,7 @@ public final class OpenApiSignVerifier {
      * <p>参数 Map 直接交给 starter 的 {@link SignGenerator#generate} 规范化 ——
      * <b>不得</b>先自行拼串再传入（那会被二次 percent-encode，与客户端永不匹配）。</p>
      *
-     * @param params    参与签名的参数（非空、非空集）
+     * @param params    参与签名的参数（非空；可为空集＝无业务参数时签空规范串）
      * @param rawSecret 明文密钥（非空）
      * @param sign      客户端签名
      * @param algorithm 算法（与客户端约定一致）
@@ -104,7 +111,7 @@ public final class OpenApiSignVerifier {
      */
     public static boolean signatureMatches(Map<String, String> params, String rawSecret, String sign,
                                            SignAlgorithm algorithm) {
-        if (params == null || params.isEmpty() || !notBlank(rawSecret) || !notBlank(sign)) {
+        if (params == null || !notBlank(rawSecret) || !notBlank(sign)) {
             return false;
         }
         String expected;
