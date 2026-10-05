@@ -11,6 +11,7 @@ package cn.ypbin.admin.iot.core;
 
 import cn.ypbin.admin.iot.openapi.OpenApiPrincipal;
 import cn.ypbin.admin.system.api.cache.SysCache;
+import cn.ypbin.starter.core.util.LogSanitizer;
 import cn.ypbin.starter.security.core.LoginUser;
 import cn.ypbin.starter.security.core.PermissionProvider;
 import cn.ypbin.starter.security.identity.IdentityContext;
@@ -119,9 +120,10 @@ public class IotPermissionProvider implements PermissionProvider {
         }
         List<String> wildcards = OpenApiPrincipal.wildcardsIn(scopes);
         if (!wildcards.isEmpty()) {
-            // 不静默：通配符被剔除是"Key 配错了/想越权"的信号，必须能查出来
+            // 不静默：通配符被剔除是"Key 配错了/想越权"的信号，必须能查出来。
+            // wildcards 来自 X-Roles 头（外部可控），必须 sanitize（CodeQL java/sensitive-log）。
             log.warn("[iot] 虚拟主体 scopes 含通配符，已剔除（防止越权为超管）：userId={}, wildcards={}",
-                userId, wildcards);
+                userId, LogSanitizer.sanitize(wildcards));
         }
         List<String> dropped = OpenApiPrincipal.droppedScopes(scopes);
         if (!dropped.isEmpty()) {
@@ -129,8 +131,9 @@ public class IotPermissionProvider implements PermissionProvider {
             // 注意 droppedScopes 已含通配符项，故这里用去掉通配符后的差集描述"非通配符的未知 scope"。
             List<String> unknown = dropped.stream().filter(item -> !wildcards.contains(item)).toList();
             if (!unknown.isEmpty()) {
+                // 同上：unknown 同样来自外部头，sanitize 后再记。
                 log.warn("[iot] 虚拟主体 scopes 含白名单外的值，已丢弃（不允许授予）：userId={}, dropped={}",
-                    userId, unknown);
+                    userId, LogSanitizer.sanitize(unknown));
             }
         }
         List<String> permissions = OpenApiPrincipal.scopesToPermissions(scopes);

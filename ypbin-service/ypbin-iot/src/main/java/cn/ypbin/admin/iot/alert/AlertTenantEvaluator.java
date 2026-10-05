@@ -254,7 +254,7 @@ public class AlertTenantEvaluator {
             && active.getStartTs() != null
             && Duration.between(active.getStartTs(), now).getSeconds() >= threshold) {
             windowSatisfied = verifyDurationWindow(device.getId(), point, active.getStartTs(), now, nowMs,
-                stalenessTtlMs, pollIntervalMs);
+                pollIntervalMs);
         }
         AlertStateMachine.Decision decision = AlertStateMachine.decide(currentState,
             active == null || active.getConsecutiveCount() == null ? 0 : active.getConsecutiveCount(),
@@ -359,14 +359,15 @@ public class AlertTenantEvaluator {
      *   <li>窗口内的点必须**全部可判定且全部越界**才算满足（任一不可判定点即不可求值）。</li>
      * </ul>
      *
-     * <p>窗口内的点**天然是历史点**，故这里不做「相对 now 的陈旧判定」（传 0 = 关闭）：那个判据回答的是
-     * 「我当作当前值的点是否新鲜」，而本方法的时间范围已由窗口本身（startTs ~ now）界定。</p>
+     * <p>窗口内的点**天然是历史点**，故这里不做「相对 now 的陈旧判定」：那个判据回答的是
+     * 「我当作当前值的点是否新鲜」，而本方法的时间范围已由窗口本身（startTs ~ now）界定
+     * （陈旧判定只用于「当前值」路径，见调用方）。</p>
      *
      * @return {@code TRUE} = 窗口被完整覆盖且每个点都越界；{@code FALSE} = 存在未越界的点；
      *         {@code null} = **不可求值**（库读不到 / 无点 / 有不可判定点 / 窗口未被覆盖）
      */
     private Boolean verifyDurationWindow(Long deviceId, IotAlertRulePoint point, LocalDateTime startTs,
-                                         LocalDateTime now, long nowMs, long stalenessTtlMs,
+                                         LocalDateTime now, long nowMs,
                                          Integer pollIntervalMs) {
         TimeSeriesQueryReq req = new TimeSeriesQueryReq();
         req.setPropertyId(point.getPropertyId());

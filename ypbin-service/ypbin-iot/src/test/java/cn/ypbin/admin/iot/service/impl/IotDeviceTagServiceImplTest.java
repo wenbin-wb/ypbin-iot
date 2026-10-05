@@ -127,4 +127,38 @@ class IotDeviceTagServiceImplTest {
         req.setTagValue(value);
         return req;
     }
+
+    @Test
+    @DisplayName("🔴 父子错配：经其它设备的路径改/删标签 ⇒ 拒绝（路径父 ID 不是装饰）")
+    void parentMismatchMustBeRejected() {
+        IotDeviceTag tag = new IotDeviceTag();
+        tag.setId(50L);
+        tag.setDeviceId(DEVICE_ID);
+        when(tagMapper.selectById(50L)).thenReturn(tag);
+
+        // 改：路径设备 99 ≠ 标签所属设备 1
+        assertThatThrownBy(() -> service.update(99L, 50L, req("location", "B 区")))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("标签不存在");
+        // 删：同理
+        assertThatThrownBy(() -> service.remove(99L, 50L))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("标签不存在");
+        verify(tagMapper, never()).updateById(any(IotDeviceTag.class));
+        verify(tagMapper, never()).deleteById(any(Long.class));
+    }
+
+    @Test
+    @DisplayName("父子一致：同设备路径改/删标签 ⇒ 放行")
+    void parentMatchMustProceed() {
+        IotDeviceTag tag = new IotDeviceTag();
+        tag.setId(50L);
+        tag.setDeviceId(DEVICE_ID);
+        when(tagMapper.selectById(50L)).thenReturn(tag);
+
+        service.update(DEVICE_ID, 50L, req("location", "B 区"));
+        verify(tagMapper).updateById(any(IotDeviceTag.class));
+        service.remove(DEVICE_ID, 50L);
+        verify(tagMapper).deleteById(50L);
+    }
 }

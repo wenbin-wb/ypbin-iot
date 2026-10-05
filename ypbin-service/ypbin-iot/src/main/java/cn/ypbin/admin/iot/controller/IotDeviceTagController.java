@@ -82,7 +82,7 @@ public class IotDeviceTagController {
     @Log("编辑 IoT 设备标签")
     public R<Void> update(@PathVariable Long deviceId, @PathVariable Long id,
                           @Valid @RequestBody IotDeviceTagReq req) {
-        iotDeviceTagService.update(id, req);
+        iotDeviceTagService.update(deviceId, id, req);
         return R.ok();
     }
 
@@ -98,7 +98,7 @@ public class IotDeviceTagController {
     @Idempotent
     @Log("删除 IoT 设备标签")
     public R<Void> remove(@PathVariable Long deviceId, @PathVariable Long id) {
-        iotDeviceTagService.remove(id);
+        iotDeviceTagService.remove(deviceId, id);
         return R.ok();
     }
 }

@@ -96,7 +96,7 @@ public class IotThingModelController {
     @Log("编辑 IoT 物模型服务")
     public R<Void> updateService(@PathVariable Long productId, @PathVariable Long id,
                                  @Valid @RequestBody IotServiceReq req) {
-        iotThingModelService.updateService(id, req);
+        iotThingModelService.updateService(productId, id, req);
         return R.ok();
     }
 
@@ -112,7 +112,7 @@ public class IotThingModelController {
     @Idempotent
     @Log("删除 IoT 物模型服务")
     public R<Void> removeService(@PathVariable Long productId, @PathVariable Long id) {
-        iotThingModelService.removeService(id);
+        iotThingModelService.removeService(productId, id);
         return R.ok();
     }
 
@@ -126,8 +126,9 @@ public class IotThingModelController {
      */
     @GetMapping("/services/{serviceId}/properties")
     @SaCheckPermission("iot:product:list")
-    public R<List<IotPropertyResp>> listProperties(@PathVariable Long serviceId) {
-        return R.ok(iotThingModelService.listProperties(serviceId));
+    public R<List<IotPropertyResp>> listProperties(@PathVariable Long productId,
+                                                       @PathVariable Long serviceId) {
+        return R.ok(iotThingModelService.listProperties(productId, serviceId));
     }
 
     /**
@@ -160,7 +161,7 @@ public class IotThingModelController {
     @Log("编辑 IoT 物模型属性")
     public R<Void> updateProperty(@PathVariable Long serviceId, @PathVariable Long id,
                                   @Valid @RequestBody IotPropertyReq req) {
-        iotThingModelService.updateProperty(id, req);
+        iotThingModelService.updateProperty(serviceId, id, req);
         return R.ok();
     }
 
@@ -176,7 +177,7 @@ public class IotThingModelController {
     @Idempotent
     @Log("删除 IoT 物模型属性")
     public R<Void> removeProperty(@PathVariable Long serviceId, @PathVariable Long id) {
-        iotThingModelService.removeProperty(id);
+        iotThingModelService.removeProperty(serviceId, id);
         return R.ok();
     }
 
@@ -190,8 +191,9 @@ public class IotThingModelController {
      */
     @GetMapping("/services/{serviceId}/commands")
     @SaCheckPermission("iot:product:list")
-    public R<List<IotCommandResp>> listCommands(@PathVariable Long serviceId) {
-        return R.ok(iotThingModelService.listCommands(serviceId));
+    public R<List<IotCommandResp>> listCommands(@PathVariable Long productId,
+                                                     @PathVariable Long serviceId) {
+        return R.ok(iotThingModelService.listCommands(productId, serviceId));
     }
 
     /**
@@ -224,7 +226,7 @@ public class IotThingModelController {
     @Log("编辑 IoT 物模型命令")
     public R<Void> updateCommand(@PathVariable Long serviceId, @PathVariable Long id,
                                  @Valid @RequestBody IotCommandReq req) {
-        iotThingModelService.updateCommand(id, req);
+        iotThingModelService.updateCommand(serviceId, id, req);
         return R.ok();
     }
 
@@ -240,7 +242,7 @@ public class IotThingModelController {
     @Idempotent
     @Log("删除 IoT 物模型命令")
     public R<Void> removeCommand(@PathVariable Long serviceId, @PathVariable Long id) {
-        iotThingModelService.removeCommand(id);
+        iotThingModelService.removeCommand(serviceId, id);
         return R.ok();
     }
 
@@ -254,8 +256,9 @@ public class IotThingModelController {
      */
     @GetMapping("/services/{serviceId}/events")
     @SaCheckPermission("iot:product:list")
-    public R<List<IotEventResp>> listEvents(@PathVariable Long serviceId) {
-        return R.ok(iotThingModelService.listEvents(serviceId));
+    public R<List<IotEventResp>> listEvents(@PathVariable Long productId,
+                                                 @PathVariable Long serviceId) {
+        return R.ok(iotThingModelService.listEvents(productId, serviceId));
     }
 
     /**
@@ -288,7 +291,7 @@ public class IotThingModelController {
     @Log("编辑 IoT 物模型事件")
     public R<Void> updateEvent(@PathVariable Long serviceId, @PathVariable Long id,
                                @Valid @RequestBody IotEventReq req) {
-        iotThingModelService.updateEvent(id, req);
+        iotThingModelService.updateEvent(serviceId, id, req);
         return R.ok();
     }
 
@@ -304,7 +307,7 @@ public class IotThingModelController {
     @Idempotent
     @Log("删除 IoT 物模型事件")
     public R<Void> removeEvent(@PathVariable Long serviceId, @PathVariable Long id) {
-        iotThingModelService.removeEvent(id);
+        iotThingModelService.removeEvent(serviceId, id);
         return R.ok();
     }
 

@@ -138,7 +138,7 @@ public class IotDeviceGroupController {
     @Idempotent
     @Log("从 IoT 设备分组移除设备")
     public R<Void> removeMember(@PathVariable Long id, @PathVariable Long memberId) {
-        iotDeviceGroupService.removeMember(memberId);
+        iotDeviceGroupService.removeMember(id, memberId);
         return R.ok();
     }
 }

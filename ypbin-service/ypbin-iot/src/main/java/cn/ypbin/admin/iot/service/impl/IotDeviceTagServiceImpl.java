@@ -70,8 +70,8 @@ public class IotDeviceTagServiceImpl extends BaseServiceImpl<IotDeviceTagMapper,
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void update(Long id, IotDeviceTagReq req) {
-        IotDeviceTag tag = requireTag(id);
+    public void update(Long deviceId, Long id, IotDeviceTagReq req) {
+        IotDeviceTag tag = requireTagInDevice(deviceId, id);
         tag.setTagKey(req.getTagKey());
         tag.setTagValue(req.getTagValue());
         updateById(tag);
@@ -79,8 +79,8 @@ public class IotDeviceTagServiceImpl extends BaseServiceImpl<IotDeviceTagMapper,
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void remove(Long id) {
-        requireTag(id);
+    public void remove(Long deviceId, Long id) {
+        requireTagInDevice(deviceId, id);
         removeById(id);
     }
 
@@ -96,6 +96,22 @@ public class IotDeviceTagServiceImpl extends BaseServiceImpl<IotDeviceTagMapper,
         IotDeviceTag tag = getById(id);
         if (tag == null) {
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "标签不存在：" + id);
+        }
+        return tag;
+    }
+
+    /**
+     * 父子一致性：标签必须归属指定设备（路径父 ID 不是装饰）。
+     *
+     * @param deviceId 路径上的设备主键
+     * @param id       标签主键
+     * @return 标签实体
+     */
+    private IotDeviceTag requireTagInDevice(Long deviceId, Long id) {
+        IotDeviceTag tag = requireTag(id);
+        if (!deviceId.equals(tag.getDeviceId())) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "标签不存在：" + id);
         }
         return tag;
     }

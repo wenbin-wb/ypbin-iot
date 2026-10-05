@@ -80,7 +80,7 @@ public class OpenApiProductController {
     @SaCheckPermission("iot:product:list")
     public R<List<IotPropertyResp>> properties(@PathVariable("productId") Long productId,
                                                @PathVariable("serviceId") Long serviceId) {
-        return R.ok(iotThingModelService.listProperties(serviceId));
+        return R.ok(iotThingModelService.listProperties(productId, serviceId));
     }
 
     /** O-5 物模型命令列表（只读定义，不含下发）。 */
@@ -88,7 +88,7 @@ public class OpenApiProductController {
     @SaCheckPermission("iot:product:list")
     public R<List<IotCommandResp>> commands(@PathVariable("productId") Long productId,
                                             @PathVariable("serviceId") Long serviceId) {
-        return R.ok(iotThingModelService.listCommands(serviceId));
+        return R.ok(iotThingModelService.listCommands(productId, serviceId));
     }
 
     /** O-5 物模型事件列表。 */
@@ -96,7 +96,7 @@ public class OpenApiProductController {
     @SaCheckPermission("iot:product:list")
     public R<List<IotEventResp>> events(@PathVariable("productId") Long productId,
                                         @PathVariable("serviceId") Long serviceId) {
-        return R.ok(iotThingModelService.listEvents(serviceId));
+        return R.ok(iotThingModelService.listEvents(productId, serviceId));
     }
 
     /** O-5 TSL 文档导出（独立权限码，不与 list 共用）。 */

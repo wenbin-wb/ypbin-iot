@@ -41,15 +41,17 @@ public interface IotDeviceTagService {
     /**
      * 编辑标签值。
      *
-     * @param id  标签主键
-     * @param req 标签信息
+     * @param deviceId 设备主键（路径父 ID，必须拥有该标签）
+     * @param id       标签主键
+     * @param req      标签信息
      */
-    void update(Long id, IotDeviceTagReq req);
+    void update(Long deviceId, Long id, IotDeviceTagReq req);
 
     /**
      * 删除标签。
      *
-     * @param id 标签主键
+     * @param deviceId 设备主键（路径父 ID，必须拥有该标签）
+     * @param id       标签主键
      */
-    void remove(Long id);
+    void remove(Long deviceId, Long id);
 }

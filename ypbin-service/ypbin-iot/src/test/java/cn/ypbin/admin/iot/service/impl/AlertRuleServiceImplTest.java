@@ -36,8 +36,12 @@ import cn.ypbin.admin.iot.model.resp.AlertPresetResp;
 import cn.ypbin.admin.iot.model.resp.AlertRuleResp;
 import cn.ypbin.admin.iot.service.AlertInstanceService;
 import cn.ypbin.starter.core.exception.BusinessException;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -379,5 +383,35 @@ class AlertRuleServiceImplTest {
             deviceMapper, productMapper, alertInstanceService, new AlertGate(disabled), disabled);
         assertThatThrownBy(gated::presets).isInstanceOf(BusinessException.class)
             .hasMessageContaining("告警能力未启用");
+    }
+
+    @Test
+    @DisplayName("🔴 规则名含换行不得跨行伪造日志（CodeQL java/log-injection）")
+    void ruleNameWithNewlineMustNotForgeLogLines() {
+        Logger logger =
+            (Logger) org.slf4j.LoggerFactory.getLogger(AlertRuleServiceImpl.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            AlertRuleSaveReq req = request("DEVICE");
+            req.setScopeDeviceId(9L);
+            req.setPoints(List.of(pointReq()));
+            // 攻击载荷：规则名里塞换行 + 伪造的审计行
+            req.setRuleName("正常规则\nWARN 伪造的放行记录");
+            service.create(req);
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+        }
+
+        String allLogs = appender.list.stream()
+            .map(ILoggingEvent::getFormattedMessage)
+            .collect(Collectors.joining("\n"));
+        // 必须真的产生了创建日志（否则用例空跑，证明不了调用方行为）
+        assertThat(allLogs).as("应产生规则创建日志").contains("告警规则已创建");
+        // 换行必须已被 sanitize，不得出现伪造行
+        assertThat(allLogs).as("换行必须被替换，不得跨行伪造")
+            .doesNotContain("\nWARN 伪造的放行记录");
     }
 }

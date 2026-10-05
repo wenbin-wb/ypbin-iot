@@ -179,7 +179,7 @@ public class DeviceTraceServiceImpl implements DeviceTraceService {
         item.setStage(stage.getCode());
         item.setStageDesc(stage.getDesc());
         item.setDirection(stage.getDirection().getCode());
-        item.setOutcome(resolveOutcome(row, status, acked).getCode());
+        item.setOutcome(resolveOutcome(status).getCode());
         item.setTitle(buildCommandTitle(row));
         item.setSource(SOURCE_COMMAND);
         item.setSourceId(row.getId());
@@ -219,15 +219,12 @@ public class DeviceTraceServiceImpl implements DeviceTraceService {
     }
 
     /**
-     * 把命令行的状态与归因码映射为结果。
+     * 把命令行的状态映射为结果（仅看状态码；回执阶段由调用方另行判定，不在此重复）。
      *
-     * @param row    命令行
      * @param status 状态
-     * @param acked  是否已收到回执
      * @return 结果
      */
-    private TraceOutcome resolveOutcome(IotCommandInstance row, CommandInstanceStatus status,
-                                        boolean acked) {
+    private TraceOutcome resolveOutcome(CommandInstanceStatus status) {
         if (status == null) {
             return TraceOutcome.UNKNOWN;
         }

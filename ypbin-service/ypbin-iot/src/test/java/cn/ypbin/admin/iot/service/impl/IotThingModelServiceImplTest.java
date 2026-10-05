@@ -235,12 +235,12 @@ class IotThingModelServiceImplTest {
 
         assertThat(service.listServices(9L)).extracting(r -> r.getServiceId())
             .containsExactly("DemoThService");
-        assertThat(service.listProperties(1000L)).hasSize(6)
+        assertThat(service.listProperties(9L, 1000L)).hasSize(6)
             .extracting(IotPropertyResp::getIdentifier)
             .containsExactly("temperature", "humidity", "switchState", "serialNo", "workMode",
                 "demoBoundary");
-        assertThat(service.listCommands(1000L)).isEmpty();
-        assertThat(service.listEvents(1000L)).isEmpty();
+        assertThat(service.listCommands(9L, 1000L)).isEmpty();
+        assertThat(service.listEvents(9L, 1000L)).isEmpty();
     }
 
     @Test
@@ -270,7 +270,7 @@ class IotThingModelServiceImplTest {
             .hasMessageContaining("仅草稿状态可编辑物模型");
 
         // 删除同理
-        assertThatThrownBy(() -> service.removeService(1000L))
+        assertThatThrownBy(() -> service.removeService(9L, 1000L))
             .isInstanceOf(BusinessException.class)
             .hasMessageContaining("仅草稿状态可编辑物模型");
     }
@@ -285,13 +285,13 @@ class IotThingModelServiceImplTest {
         assertThatThrownBy(() -> service.listServices(9L))
             .isInstanceOf(BusinessException.class)
             .hasMessageContaining("产品不存在");
-        assertThatThrownBy(() -> service.listProperties(1000L))
+        assertThatThrownBy(() -> service.listProperties(9L, 1000L))
             .isInstanceOf(BusinessException.class)
             .hasMessageContaining("服务不存在");
-        assertThatThrownBy(() -> service.listCommands(1000L))
+        assertThatThrownBy(() -> service.listCommands(9L, 1000L))
             .isInstanceOf(BusinessException.class)
             .hasMessageContaining("服务不存在");
-        assertThatThrownBy(() -> service.listEvents(1000L))
+        assertThatThrownBy(() -> service.listEvents(9L, 1000L))
             .isInstanceOf(BusinessException.class)
             .hasMessageContaining("服务不存在");
     }
@@ -460,7 +460,7 @@ class IotThingModelServiceImplTest {
         when(serviceMapper.selectById(801L)).thenReturn(existing);
         when(productMapper.selectById(9L)).thenReturn(draftProduct(9L));
 
-        service.removeService(801L);
+        service.removeService(9L, 801L);
 
         verify(propertyMapper).physicalDeleteByServiceIds(List.of(801L));
         verify(commandMapper).physicalDeleteByServiceIds(List.of(801L));
@@ -479,22 +479,60 @@ class IotThingModelServiceImplTest {
         property.setServiceId(1000L);
         when(propertyMapper.selectById(901L)).thenReturn(property);
         when(serviceMapper.selectById(1000L)).thenReturn(draftService(1000L));
-        service.removeProperty(901L);
+        service.removeProperty(1000L, 901L);
         verify(propertyMapper).physicalDeleteByIds(List.of(901L));
 
         IotCommand command = new IotCommand();
         command.setId(902L);
         command.setServiceId(1000L);
         when(commandMapper.selectById(902L)).thenReturn(command);
-        service.removeCommand(902L);
+        service.removeCommand(1000L, 902L);
         verify(commandMapper).physicalDeleteByIds(List.of(902L));
 
         IotEvent event = new IotEvent();
         event.setId(903L);
         event.setServiceId(1000L);
         when(eventMapper.selectById(903L)).thenReturn(event);
-        service.removeEvent(903L);
+        service.removeEvent(1000L, 903L);
         verify(eventMapper).physicalDeleteByIds(List.of(903L));
+    }
+
+    @Test
+    @DisplayName("🔴 父子错配：经其它产品的路径删服务 ⇒ 拒绝且不删（路径父 ID 不是装饰）")
+    void parentMismatchMustBeRejected() {
+        IotService existing = new IotService();
+        existing.setId(801L);
+        existing.setProductId(9L);
+        when(serviceMapper.selectById(801L)).thenReturn(existing);
+
+        // 服务 801 归属产品 9，却经产品 8 的路径删除
+        assertThatThrownBy(() -> service.removeService(8L, 801L))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("服务不存在");
+        verify(serviceMapper, never()).physicalDeleteByIds(anyList());
+    }
+
+    @Test
+    @DisplayName("🔴 父子错配：经其它产品的路径读属性 ⇒ 拒绝（读路径同样校验归属）")
+    void parentMismatchOnReadMustBeRejected() {
+        when(serviceMapper.selectById(1000L)).thenReturn(serviceEntity(1000L, "DemoThService", 0));
+
+        assertThatThrownBy(() -> service.listProperties(8L, 1000L))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("服务不存在");
+        verify(propertyMapper, never()).selectList(any());
+    }
+
+    @Test
+    @DisplayName("🔴 父子错配：经其它服务的路径改属性 ⇒ 拒绝且不改")
+    void childMismatchMustBeRejected() {
+        IotProperty property = propertyEntity(901L, 1000L, "temperature");
+        when(propertyMapper.selectById(901L)).thenReturn(property);
+
+        assertThatThrownBy(() -> service.updateProperty(1001L, 901L, new IotPropertyReq()))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("属性不存在");
+        verify(propertyMapper, never()).updateById(any(IotProperty.class));
     }
 
     @Test
