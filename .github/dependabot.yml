@@ -20,7 +20,6 @@ updates:
           - "org.assertj*"
           - "org.mockito*"
           - "org.testcontainers*"
-          - "com.tngtech.archunit*"
       # 静态分析工具链：Error Prone 与 NullAway 存在版本耦合（新版 EP 会改变插件调用方式），
       # 必须同批升级、同批验证，避免只升其一导致「插件起不来/分析空转」
       analysis:
@@ -28,6 +27,11 @@ updates:
           - "com.google.errorprone*"
           - "com.uber.nullaway*"
           - "org.jspecify*"
+    # ArchUnit 版本钉死跟 starter 走（见 ypbin-architecture-tests/pom.xml 注释），且该 pom
+    # 属上游模块、Sync Whitelist 禁止修改 —— dependabot 提了也合不了（如 #172），直接忽略，
+    # starter 侧升级时手动同步。
+    ignore:
+      - dependency-name: "com.tngtech.archunit*"
     labels:
       - dependencies
 
