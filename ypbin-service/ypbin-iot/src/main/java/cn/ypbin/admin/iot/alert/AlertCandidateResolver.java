@@ -205,6 +205,10 @@ public class AlertCandidateResolver {
                     addIfPresent(explicitDeviceIds, rule.getScopeDeviceId());
                     addIfPresent(productIds, rule.getScopeProductId());
                 }
+                // 防御分支：枚举今日全覆盖，但将来新增作用域类型时，无此分支会静默跳过
+                // （该作用域的规则永远评估不到，且无任何报错）—— 必须 loud 失败。
+                // 不可单测（无法构造不存在的枚举值）；CodeQL 的 missing-case 告警由此关闭。
+                default -> throw new IllegalStateException("未知告警作用域类型：" + scope);
             }
         }
         Map<Long, IotDevice> devices = new LinkedHashMap<>();

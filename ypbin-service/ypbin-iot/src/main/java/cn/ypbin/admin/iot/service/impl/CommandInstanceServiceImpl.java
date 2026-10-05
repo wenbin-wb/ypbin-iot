@@ -61,7 +61,6 @@ import org.slf4j.LoggerFactory;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ObjectNode;
 
@@ -202,7 +201,9 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
         // 体积与形态：params 必须在**构造 payload 之前**校验（评审核心要求：校验失败一律不发布）
         // DTO 里是 Object（客户端发的是 JSON 对象）；这里统一序列化成文本再走"必须是对象 + ≤64KB"的校验
         String paramsJson = toJsonText(req.getParams());
-        JsonNode params = CommandPayloads.readObjectOrNull(paramsJson, objectMapper);
+        // 显式校验式调用：返回值故意丢弃 —— 只要"必须是对象 + ≤64KB"的拒绝语义，
+        // 解析出的树下游不用（payload 走文本重建）。写成赋值再弃读会被告警，且删掉会丢校验。
+        CommandPayloads.readObjectOrNull(paramsJson, objectMapper);
         ThingModel model = loadThingModel(device.getProductId());
         Target target = resolveTarget(kind, model, req.getIdentifier());
         int timeoutMs = req.getTimeoutMs() == null

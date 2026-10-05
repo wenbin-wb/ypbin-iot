@@ -251,7 +251,7 @@ public interface IotAlertInstanceMapper extends BaseMapper<IotAlertInstance> {
      * 按活动去重键批量查实例（**并发冲突后的重同步**：唯一键拒绝了一批插入时，用它把「已经被别的轮次
      * 创建的键」查回来，剔除后重试剩余部分，仍然只是一条语句）。
      *
-     * @param activeDedupKeys 活动去重键（先判空短路）
+     * @param keys 活动去重键（先判空短路）
      * @return 命中的实例（仅 id 与 active_dedup_key 有用）
      */
     @Select("<script>SELECT id, active_dedup_key FROM iot_alert_instance "

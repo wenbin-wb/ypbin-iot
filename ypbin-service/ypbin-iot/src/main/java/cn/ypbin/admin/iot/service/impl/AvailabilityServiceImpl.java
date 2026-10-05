@@ -740,7 +740,8 @@ public class AvailabilityServiceImpl implements AvailabilityService {
             // 否则租户插件会以「缺少租户上下文」直接拒绝（fail-closed），把整轮扫描打断——
             // 这是 CI 真库用例实测出来的：只跳过不清理会饥饿，清理写法不对会整轮失败。
             // 安全性来自显式 id 列表（取自本轮刚读到的候选行），且只删「设备已不存在/停用」的那些。
-            TenantContext.executeIgnore(() -> livenessMapper.deleteBatchIds(orphanIds));
+            // deleteByIds 是 deleteBatchIds 的去废弃替代（MP 3.5.12+，同语义按主键批量删）。
+            TenantContext.executeIgnore(() -> livenessMapper.deleteByIds(orphanIds));
             log.info("[iot] 断档扫描清理了 {} 条设备已删除/停用的活性行（它们不再参与断档判定）",
                 orphanIds.size());
         }

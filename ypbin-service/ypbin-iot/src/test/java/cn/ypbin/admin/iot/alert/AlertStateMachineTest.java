@@ -361,4 +361,23 @@ class AlertStateMachineTest {
             AlertValueVerdict.OUT_OF_RANGE, false, null, null, 3, 300, T0);
         assertThat(decision.kind()).isEqualTo(AlertStateMachine.Kind.NONE);
     }
+
+    @Test
+    @DisplayName("🔴 不变式：无活动实例时只产出 NONE/CREATE_*（评估器据此才敢解引用 active）")
+    void nullStateNeverProducesActiveRequiringKinds() {
+        // AlertTenantEvaluator 的 fail-loud 守卫依赖本不变式：
+        // DROP_PENDING/PROMOTE/PROGRESS/RESOLVE 四分支都会解引用 active，
+        // 若状态机将来对 null state 产出它们，评估器会 NPE。此处全组合锁定。
+        for (AlertTriggerMode mode : AlertTriggerMode.values()) {
+            for (AlertValueVerdict verdict : AlertValueVerdict.values()) {
+                AlertStateMachine.Decision decision = AlertStateMachine.decide(null, 0, null,
+                    verdict, false, null, mode, 3, 300, T0);
+                assertThat(decision.kind())
+                    .as("mode=%s verdict=%s", mode, verdict)
+                    .isIn(AlertStateMachine.Kind.NONE,
+                        AlertStateMachine.Kind.CREATE_PENDING,
+                        AlertStateMachine.Kind.CREATE_FIRING);
+            }
+        }
+    }
 }

@@ -222,7 +222,7 @@ public class LatestValueQueryService {
     /**
      * 解析写入器落的紧凑 JSON（单个点位）。损坏的条目**跳过并报错**，不让整台设备的最新值全丢。
      *
-     * @param form     哈希 field 的**原始形态**（可能是属性标识，也可能是历史的主键字符串形态；
+     * @param propertyId 哈希 field 的**原始形态**（可能是属性标识，也可能是历史的主键字符串形态；
      *                 归一由调用方在解析后完成，见 {@link #listLatest(Long)}）
      * @param json     紧凑 JSON（哈希 value）
      * @param deviceId 设备 ID（仅用于告警定位）
