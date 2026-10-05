@@ -190,10 +190,10 @@ public class AlertInstanceServiceImpl implements AlertInstanceService {
             return counts;
         }
         for (Map<String, Object> row : instanceMapper.countActiveByDeviceIds(deviceIds)) {
-            Long deviceId = asLong(row.get("deviceId"));
-            if (deviceId != null) {
-                counts.put(deviceId, (int) asLong(row.get("activeCount")));
-            }
+            // asLong 返回 primitive long（永不为 null），故原判空是死代码（恒为 false），直接删掉；
+            // 行为无变化：原来全量行都会入 map（判空恒不成立），现在亦然。
+            long deviceId = asLong(row.get("deviceId"));
+            counts.put(deviceId, (int) asLong(row.get("activeCount")));
         }
         return counts;
     }

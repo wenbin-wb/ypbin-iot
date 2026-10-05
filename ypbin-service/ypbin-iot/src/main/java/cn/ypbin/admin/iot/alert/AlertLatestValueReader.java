@@ -187,9 +187,10 @@ public class AlertLatestValueReader {
     /** 同标识两形态的裁决：ts 更新者胜；并列取规范标识形态（与 {@code LatestValueQueryService} 同口径）。 */
     private static boolean isBetter(AlertSample candidate, String candidateForm, String canonical,
                                     AlertSample known) {
-        Long candidateTs = candidate.ts() == null ? Long.MIN_VALUE : candidate.ts();
-        Long knownTs = known.ts() == null ? Long.MIN_VALUE : known.ts();
-        if (!candidateTs.equals(knownTs)) {
+        // 三元两边都不可能是 null（null 已被 MIN_VALUE 兜底），用 primitive 省掉装箱判空噪音。
+        long candidateTs = candidate.ts() == null ? Long.MIN_VALUE : candidate.ts();
+        long knownTs = known.ts() == null ? Long.MIN_VALUE : known.ts();
+        if (candidateTs != knownTs) {
             return candidateTs > knownTs;
         }
         return candidateForm.equals(canonical);

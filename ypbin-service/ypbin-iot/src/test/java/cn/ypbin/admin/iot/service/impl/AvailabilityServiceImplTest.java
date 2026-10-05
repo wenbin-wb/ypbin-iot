@@ -871,7 +871,7 @@ class AvailabilityServiceImplTest {
         verify(livenessMapper, never()).markOpenOutage(anyLong(), anyLong());
         // 关键：清理掉（一次批量删，不是循环逐条），否则候选查询（id 升序 + LIMIT 批次上限）
         // 会被这类行永久占满 ⇒ 其它设备的断档再也不会被发现
-        verify(livenessMapper).deleteBatchIds(List.of(5L));
+        verify(livenessMapper).deleteByIds(List.of(5L));
     }
 
     @Test

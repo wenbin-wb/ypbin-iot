@@ -263,6 +263,16 @@ public class AlertTenantEvaluator {
 
         String rawValue = sample == null ? null : sample.value();
         String dedupKey = AlertRules.dedupKey(rule.getId(), device.getId(), point.getPropertyId());
+        // 不变式守卫（fail-loud）：需要活动实例的四种决策只在 currentState 非空时产生，
+        // 而 currentState 非空 ⟺ active 非空 —— 若状态机将来改出其它组合，
+        // 下面的分支会 NPE。在此先 loud 失败，不给静默 NPE 机会。
+        // （CodeQL 看不出 kind↔active 的关联而报 dereferenced-value；单测锁定状态机侧的不变式。）
+        if (active == null && switch (decision.kind()) {
+            case DROP_PENDING, PROMOTE, PROGRESS, RESOLVE -> true;
+            default -> false;
+        }) {
+            throw new IllegalStateException("告警决策需要活动实例但 active 为 null：kind=" + decision.kind());
+        }
         switch (decision.kind()) {
             case NONE -> {
                 return new Outcome(0, 0);
