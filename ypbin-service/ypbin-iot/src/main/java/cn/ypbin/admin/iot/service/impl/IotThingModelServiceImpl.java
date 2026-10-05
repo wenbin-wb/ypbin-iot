@@ -149,8 +149,8 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void updateService(Long id, IotServiceReq req) {
-        IotService service = requireService(id);
+    public void updateService(Long productId, Long id, IotServiceReq req) {
+        IotService service = requireServiceInProduct(productId, id);
         requireProductDraft(service.getProductId());
         service.setServiceId(req.getServiceId());
         service.setServiceName(req.getServiceName());
@@ -162,8 +162,8 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void removeService(Long id) {
-        IotService service = requireService(id);
+    public void removeService(Long productId, Long id) {
+        IotService service = requireServiceInProduct(productId, id);
         requireProductDraft(service.getProductId());
         // 物理删除并与全量替换同口径；同时级联清掉子表，避免留下指向已删服务的活子行
         iotPropertyMapper.physicalDeleteByServiceIds(List.of(id));
@@ -177,12 +177,13 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
     /**
      * 查询服务下的属性列表（**读**：任何物模型状态都可读）。
      *
+     * @param productId 产品主键（路径父 ID，必须拥有该服务）
      * @param serviceId 服务主键
      * @return 属性列表
      */
     @Override
-    public List<IotPropertyResp> listProperties(Long serviceId) {
-        requireService(serviceId);
+    public List<IotPropertyResp> listProperties(Long productId, Long serviceId) {
+        requireServiceInProduct(productId, serviceId);
         LambdaQueryWrapper<IotProperty> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(IotProperty::getServiceId, serviceId)
             .orderByAsc(IotProperty::getSort)
@@ -202,8 +203,8 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void updateProperty(Long id, IotPropertyReq req) {
-        IotProperty property = requireProperty(id);
+    public void updateProperty(Long serviceId, Long id, IotPropertyReq req) {
+        IotProperty property = requirePropertyInService(serviceId, id);
         requireDraftByServiceId(property.getServiceId());
         applyProperty(property, req);
         iotPropertyMapper.updateById(property);
@@ -211,8 +212,8 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void removeProperty(Long id) {
-        IotProperty property = requireProperty(id);
+    public void removeProperty(Long serviceId, Long id) {
+        IotProperty property = requirePropertyInService(serviceId, id);
         requireDraftByServiceId(property.getServiceId());
         iotPropertyMapper.physicalDeleteByIds(List.of(id));
     }
@@ -222,12 +223,13 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
     /**
      * 查询服务下的命令列表（**读**：任何物模型状态都可读）。
      *
+     * @param productId 产品主键（路径父 ID，必须拥有该服务）
      * @param serviceId 服务主键
      * @return 命令列表
      */
     @Override
-    public List<IotCommandResp> listCommands(Long serviceId) {
-        requireService(serviceId);
+    public List<IotCommandResp> listCommands(Long productId, Long serviceId) {
+        requireServiceInProduct(productId, serviceId);
         LambdaQueryWrapper<IotCommand> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(IotCommand::getServiceId, serviceId)
             .orderByAsc(IotCommand::getSort)
@@ -247,8 +249,8 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void updateCommand(Long id, IotCommandReq req) {
-        IotCommand command = requireCommand(id);
+    public void updateCommand(Long serviceId, Long id, IotCommandReq req) {
+        IotCommand command = requireCommandInService(serviceId, id);
         requireDraftByServiceId(command.getServiceId());
         applyCommand(command, req);
         iotCommandMapper.updateById(command);
@@ -256,8 +258,8 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void removeCommand(Long id) {
-        IotCommand command = requireCommand(id);
+    public void removeCommand(Long serviceId, Long id) {
+        IotCommand command = requireCommandInService(serviceId, id);
         requireDraftByServiceId(command.getServiceId());
         iotCommandMapper.physicalDeleteByIds(List.of(id));
     }
@@ -267,12 +269,13 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
     /**
      * 查询服务下的事件列表（**读**：任何物模型状态都可读）。
      *
+     * @param productId 产品主键（路径父 ID，必须拥有该服务）
      * @param serviceId 服务主键
      * @return 事件列表
      */
     @Override
-    public List<IotEventResp> listEvents(Long serviceId) {
-        requireService(serviceId);
+    public List<IotEventResp> listEvents(Long productId, Long serviceId) {
+        requireServiceInProduct(productId, serviceId);
         LambdaQueryWrapper<IotEvent> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(IotEvent::getServiceId, serviceId)
             .orderByAsc(IotEvent::getSort)
@@ -292,8 +295,8 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void updateEvent(Long id, IotEventReq req) {
-        IotEvent event = requireEvent(id);
+    public void updateEvent(Long serviceId, Long id, IotEventReq req) {
+        IotEvent event = requireEventInService(serviceId, id);
         requireDraftByServiceId(event.getServiceId());
         applyEvent(event, req);
         iotEventMapper.updateById(event);
@@ -301,8 +304,8 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void removeEvent(Long id) {
-        IotEvent event = requireEvent(id);
+    public void removeEvent(Long serviceId, Long id) {
+        IotEvent event = requireEventInService(serviceId, id);
         requireDraftByServiceId(event.getServiceId());
         iotEventMapper.physicalDeleteByIds(List.of(id));
     }
@@ -919,6 +922,71 @@ public class IotThingModelServiceImpl extends BaseServiceImpl<IotServiceMapper, 
         IotEvent event = iotEventMapper.selectById(id);
         if (event == null) {
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "事件不存在：" + id);
+        }
+        return event;
+    }
+
+    /**
+     * 父子一致性：服务必须归属指定产品（路径父 ID 不是装饰）。
+     *
+     * @param productId 路径上的产品主键
+     * @param serviceId 路径上的服务主键
+     * @return 服务实体
+     * @throws BusinessException 服务不存在，或归属其它产品（fail-closed，两种情形同话术防枚举）
+     */
+    private IotService requireServiceInProduct(Long productId, Long serviceId) {
+        IotService service = requireService(serviceId);
+        if (!productId.equals(service.getProductId())) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "服务不存在：" + serviceId);
+        }
+        return service;
+    }
+
+    /**
+     * 父子一致性：属性必须归属指定服务。
+     *
+     * @param serviceId 路径上的服务主键
+     * @param id        属性主键
+     * @return 属性实体
+     */
+    private IotProperty requirePropertyInService(Long serviceId, Long id) {
+        IotProperty property = requireProperty(id);
+        if (!serviceId.equals(property.getServiceId())) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "属性不存在：" + id);
+        }
+        return property;
+    }
+
+    /**
+     * 父子一致性：命令必须归属指定服务。
+     *
+     * @param serviceId 路径上的服务主键
+     * @param id        命令主键
+     * @return 命令实体
+     */
+    private IotCommand requireCommandInService(Long serviceId, Long id) {
+        IotCommand command = requireCommand(id);
+        if (!serviceId.equals(command.getServiceId())) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "命令不存在：" + id);
+        }
+        return command;
+    }
+
+    /**
+     * 父子一致性：事件必须归属指定服务。
+     *
+     * @param serviceId 路径上的服务主键
+     * @param id        事件主键
+     * @return 事件实体
+     */
+    private IotEvent requireEventInService(Long serviceId, Long id) {
+        IotEvent event = requireEvent(id);
+        if (!serviceId.equals(event.getServiceId())) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "事件不存在：" + id);
         }
         return event;
     }

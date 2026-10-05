@@ -174,7 +174,14 @@ public class IotDeviceGroupServiceImpl extends BaseServiceImpl<IotDeviceGroupMap
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void removeMember(Long memberId) {
+    public void removeMember(Long groupId, Long memberId) {
+        // 父子一致性：成员行必须归属路径上的分组 —— 否则经任意分组路径可删任意成员行。
+        // 先查后删（两条语句同一事务；成员行无并发变更场景，check-then-act 可接受）。
+        IotDeviceGroupMember member = iotDeviceGroupMemberMapper.selectById(memberId);
+        if (member == null || !groupId.equals(member.getGroupId())) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "分组成员不存在：" + memberId);
+        }
         iotDeviceGroupMemberMapper.deleteById(memberId);
     }
 

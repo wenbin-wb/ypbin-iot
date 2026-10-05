@@ -10,6 +10,7 @@
 package cn.ypbin.admin.iot.service.impl;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -25,6 +26,7 @@ import cn.ypbin.admin.iot.mapper.IotDeviceGroupMemberMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.IotProductMapper;
 import cn.ypbin.admin.iot.model.resp.IotDeviceGroupMemberResp;
+import cn.ypbin.starter.core.exception.BusinessException;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import java.time.LocalDateTime;
@@ -149,5 +151,33 @@ class IotDeviceGroupServiceImplTest {
 
         assertThat(resp).isEmpty();
         verify(deviceMapper, never()).selectBatchIds(any());
+    }
+
+    @Test
+    @DisplayName("🔴 父子错配：经其它分组路径删成员行 ⇒ 拒绝且不删（路径父 ID 不是装饰）")
+    void parentMismatchMustBeRejected() {
+        IotDeviceGroupMember member = new IotDeviceGroupMember();
+        member.setId(11L);
+        member.setGroupId(1L);
+        when(memberMapper.selectById(11L)).thenReturn(member);
+
+        // 成员行归属分组 1，却经分组 2 的路径删除
+        assertThatThrownBy(() -> service.removeMember(2L, 11L))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("分组成员不存在");
+        verify(memberMapper, never()).deleteById(any(Long.class));
+    }
+
+    @Test
+    @DisplayName("父子一致：同分组路径删成员行 ⇒ 放行")
+    void parentMatchMustProceed() {
+        IotDeviceGroupMember member = new IotDeviceGroupMember();
+        member.setId(11L);
+        member.setGroupId(1L);
+        when(memberMapper.selectById(11L)).thenReturn(member);
+
+        service.removeMember(1L, 11L);
+
+        verify(memberMapper).deleteById(11L);
     }
 }

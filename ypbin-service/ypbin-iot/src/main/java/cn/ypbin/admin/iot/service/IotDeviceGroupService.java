@@ -73,7 +73,8 @@ public interface IotDeviceGroupService {
     /**
      * 移除分组设备成员。
      *
+     * @param groupId  分组主键（路径父 ID，成员行必须归属该分组）
      * @param memberId 成员主键
      */
-    void removeMember(Long memberId);
+    void removeMember(Long groupId, Long memberId);
 }

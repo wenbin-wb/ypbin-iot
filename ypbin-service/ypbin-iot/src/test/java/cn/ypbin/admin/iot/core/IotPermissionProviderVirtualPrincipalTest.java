@@ -19,8 +19,12 @@ import cn.ypbin.admin.iot.openapi.OpenApiPrincipal;
 import cn.ypbin.admin.system.api.cache.SysCache;
 import cn.ypbin.starter.security.core.LoginUser;
 import cn.ypbin.starter.security.identity.IdentityContext;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import java.util.List;
 import java.util.Set;
+import java.util.stream.Collectors;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -189,5 +193,37 @@ class IotPermissionProviderVirtualPrincipalTest {
             cache.when(() -> SysCache.getUserPermissions(7L)).thenReturn(null);
             assertThat(provider.getPermissions("7", "identity")).isEmpty();
         }
+    }
+
+    @Test
+    @DisplayName("🔴 白名单外 scope 含换行不得跨行伪造日志（CodeQL java/sensitive-log）")
+    void droppedScopeWithNewlineMustNotForgeLogLines() {
+        Logger logger =
+            (Logger) org.slf4j.LoggerFactory.getLogger(IotPermissionProvider.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            // 攻击载荷：X-Roles 里的 scope 带内部换行（首尾空白会被 trim，
+            // 但内部换行会留下来进入 dropped 集合）
+            givenVirtualIdentity(OpenApiPrincipal.VIRTUAL_USER_ID_MAX,
+                Set.of("iot:series:get", "evil\nWARN 伪造的放行记录"));
+            try (MockedStatic<SysCache> cache = mockStatic(SysCache.class)) {
+                // 非法 scope 被丢弃，有效 scope 照常生效
+                assertThat(provider.getPermissions(
+                    String.valueOf(OpenApiPrincipal.VIRTUAL_USER_ID_MAX), "identity"))
+                    .containsExactly("iot:series:get");
+            }
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+        }
+
+        String allLogs = appender.list.stream()
+            .map(ILoggingEvent::getFormattedMessage)
+            .collect(Collectors.joining("\n"));
+        assertThat(allLogs).as("应产生白名单外丢弃日志").contains("已丢弃");
+        assertThat(allLogs).as("换行必须被替换，不得跨行伪造")
+            .doesNotContain("\nWARN 伪造的放行记录");
     }
 }

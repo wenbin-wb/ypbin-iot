@@ -36,6 +36,7 @@ import cn.ypbin.admin.iot.model.resp.AlertRuleResp;
 import cn.ypbin.admin.iot.service.AlertInstanceService;
 import cn.ypbin.admin.iot.service.AlertRuleService;
 import cn.ypbin.starter.core.exception.BusinessException;
+import cn.ypbin.starter.core.util.LogSanitizer;
 import cn.ypbin.starter.data.core.EntityStatus;
 import cn.ypbin.starter.crud.model.PageResult;
 import cn.ypbin.starter.security.core.UserContext;
@@ -148,8 +149,9 @@ public class AlertRuleServiceImpl implements AlertRuleService {
         // 直接拿 rule.getTenantId() 去写条件行会得到 NULL（生产实测：Column 'tenant_id' cannot be null）。
         // 因此这里显式回读一次（主键查询，代价一次点查），拿不准就明确失败、绝不带 NULL 落库。
         insertPoints(rule, validated, requireTenantId(rule));
+        // ruleName 是用户输入（含换行即跨行伪造日志），必须 sanitize（CodeQL java/log-injection）
         log.info("[iot] 告警规则已创建：id={} name={} scope={} 点位条件 {} 条", rule.getId(),
-            rule.getRuleName(), rule.getScopeType(), validated.points().size());
+            LogSanitizer.sanitize(rule.getRuleName()), rule.getScopeType(), validated.points().size());
         return detail(rule.getId());
     }
 
@@ -166,7 +168,7 @@ public class AlertRuleServiceImpl implements AlertRuleService {
         pointMapper.deleteByRuleId(id);
         insertPoints(rule, validated, requireTenantId(rule));
         log.info("[iot] 告警规则已修改：id={} name={} 点位条件 {} 条（已产生的实例不受影响）", id,
-            rule.getRuleName(), validated.points().size());
+            LogSanitizer.sanitize(rule.getRuleName()), validated.points().size());
         return detail(id);
     }
 
