@@ -116,3 +116,4 @@
 | 2026-10-06 | **管理台前端部署 dev（用户查看系统应用页）**：构建 admin-ui main 产物，部署目录 `../admin-ui-dist`（此前指向已删旧仓），端口 `ADMIN_UI_PORT=19001`（避开 iot-ui 的 19000；此前两键都是 19000，全量 up 会撞）。`.env` 已备份 `/tmp/env.bak-adminui`。admin-ui/ui 均 200。 |
 | 2026-10-06 | **更正：管理台单部署已回退**：核实 iot-ui 即超集（含 `views/system/app`，菜单 2900 在库），第二套无存在必要。已 `stop/rm` 该容器、`.env` 恢复原值、删产物目录；iot-ui 19000 不受影响（200）。教训：动手前先核 fork 关系（views 对比），不预设缺失。 |
 | 2026-10-06 | **Key 页归属拍板：A 维持（用户确认）**：IoT Key（租户+iot 作用域+配额）留 iot-ui，系统 App（平台 AK/SK）留 admin-ui；数据模型与受众不同，不硬合。 |
+| 2026-10-06 | **#160–#162 部署验证（本批，dev 重建 main HEAD 双 jar）**。过程插曲：registry 镜像源抖动致 build 失败 3 次（base 层拉取超时），改用 `docker cp` 热换 jar + restart 落盘（已声明：下次 recreate 即回归镜像，请勿当常规流程）。实测矩阵（带签名 Key）：whoami 200 / 台账 200 / 未授权 scope 403 / O-7 property_get 200 FAILED（设备离线零物理影响）/ 同键重放同 requestId / 错密钥 401 / 强制模式无签名 401 / 无 Key 401 / qps=2 连打 200,200,429,429,429,429。结论：签名（#160）、starter 限流（#162→429 实锤）、VPS 常量 + P1 凭证（#163，经 whoami/错密/吊销全链路）均在线生效。验证 Key 均已吊销清理。 |
