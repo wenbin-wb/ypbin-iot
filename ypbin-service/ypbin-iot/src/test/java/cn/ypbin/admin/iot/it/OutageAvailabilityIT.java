@@ -18,7 +18,7 @@ import cn.ypbin.admin.iot.service.impl.MaintenanceWindowServiceImpl;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.admin.iot.availability.AvailabilityProperties;
 import cn.ypbin.admin.iot.availability.AvailabilityResp;
-import cn.ypbin.admin.iot.availability.AvailabilityRules;
+import cn.ypbin.starter.iot.availability.AvailabilityRules;
 import cn.ypbin.admin.iot.availability.ReadingIngestReq;
 import cn.ypbin.admin.iot.availability.ReadingObservationDto;
 import cn.ypbin.admin.iot.entity.DeviceLiveness;

@@ -14,7 +14,7 @@ import lombok.Setter;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 /**
- * 断档与可用率参数（口径的**可调部分**；口径本身见 {@link AvailabilityRules}）。
+ * 断档与可用率参数（口径的**可调部分**；口径本身见 {@link cn.ypbin.starter.iot.availability.AvailabilityRules}）。
  *
  * @author wenbin
  * @since 2026-09-22

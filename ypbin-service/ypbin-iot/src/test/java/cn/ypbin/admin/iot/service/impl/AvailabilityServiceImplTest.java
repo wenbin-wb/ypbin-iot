@@ -27,7 +27,7 @@ import static org.mockito.Mockito.when;
 
 import cn.ypbin.admin.iot.availability.AvailabilityProperties;
 import cn.ypbin.admin.iot.availability.AvailabilityResp;
-import cn.ypbin.admin.iot.availability.AvailabilityRules;
+import cn.ypbin.starter.iot.availability.AvailabilityRules;
 import cn.ypbin.admin.iot.availability.OutageReason;
 import cn.ypbin.admin.iot.availability.ReadingIngestReq;
 import cn.ypbin.admin.iot.availability.ReadingObservationDto;

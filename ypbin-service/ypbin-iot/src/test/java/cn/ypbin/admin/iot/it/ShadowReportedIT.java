@@ -12,7 +12,7 @@ package cn.ypbin.admin.iot.it;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import cn.ypbin.admin.iot.availability.AvailabilityProperties;
-import cn.ypbin.admin.iot.availability.AvailabilityRules;
+import cn.ypbin.starter.iot.availability.AvailabilityRules;
 import cn.ypbin.admin.iot.availability.ReadingIngestReq;
 import cn.ypbin.admin.iot.availability.ReadingObservationDto;
 import cn.ypbin.admin.iot.entity.DeviceLiveness;

@@ -18,7 +18,7 @@ import java.util.List;
 /**
  * 可用率计算（纯逻辑，无 IO）：把断档窗口按统计窗口裁剪后聚合。
  *
- * <p>口径见 {@link AvailabilityRules}。三处刻意写死的边界：</p>
+ * <p>口径见 {@link cn.ypbin.starter.iot.availability.AvailabilityRules}。三处刻意写死的边界：</p>
  * <ol>
  *   <li><b>窗口时长为 0</b>（{@code from >= to}，通常是把区间给反了）：不判不达标、可用率记 100%——
  *       否则「参数写反」会伪装成「设备全窗口断档」；</li>

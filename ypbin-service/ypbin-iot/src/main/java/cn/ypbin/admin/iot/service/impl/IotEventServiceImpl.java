@@ -9,7 +9,7 @@
  */
 package cn.ypbin.admin.iot.service.impl;
 
-import cn.ypbin.admin.iot.availability.AvailabilityRules;
+import cn.ypbin.starter.iot.availability.AvailabilityRules;
 import cn.ypbin.admin.iot.entity.IotDevice;
 import cn.ypbin.admin.iot.entity.IotEventLog;
 import cn.ypbin.admin.iot.event.EventIngestItemDto;
