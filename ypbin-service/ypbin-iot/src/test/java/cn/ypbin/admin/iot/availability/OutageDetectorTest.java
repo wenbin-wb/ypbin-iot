@@ -14,6 +14,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import java.time.LocalDateTime;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import cn.ypbin.starter.iot.availability.AvailabilityRules;
 
 /**
  * 断档判定纯逻辑单测（M-2）：边界必须能用可推进的时间精确断言。

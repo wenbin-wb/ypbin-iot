@@ -14,6 +14,7 @@ import java.math.RoundingMode;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.List;
+import cn.ypbin.starter.iot.availability.AvailabilityRules;
 
 /**
  * 可用率计算（纯逻辑，无 IO）：把断档窗口按统计窗口裁剪后聚合。

@@ -15,6 +15,7 @@ import cn.ypbin.admin.iot.availability.AvailabilityCalculator.Summary;
 import java.math.BigDecimal;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import cn.ypbin.starter.iot.availability.AvailabilityRules;
 
 /**
  * 可用率计算纯逻辑单测（M-2 口径）。
