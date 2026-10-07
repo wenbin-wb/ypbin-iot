@@ -11,7 +11,7 @@ package cn.ypbin.admin.iot.command;
 
 import cn.ypbin.admin.iot.credential.DeviceMqttNaming;
 import cn.ypbin.admin.iot.enums.CommandKind;
-import cn.ypbin.admin.iot.timeseries.PropertyIdRules;
+import cn.ypbin.starter.iot.validate.PropertyIdRules;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.core.exception.GlobalErrorCode;
 import tools.jackson.databind.JsonNode;
@@ -32,7 +32,7 @@ import tools.jackson.databind.node.ObjectNode;
  * </ul>
  *
  * <p><b>主题注入防护</b>：{@code identifier} 会进 {@code down/service/{identifier}} 或作为属性键，
- * 因此**一律先过 {@link PropertyIdRules}**（字符集白名单 + 长度上限；它天然排除 {@code /} {@code +}
+ * 因此**一律先过 {@link cn.ypbin.starter.iot.validate.PropertyIdRules}**（字符集白名单 + 长度上限；它天然排除 {@code /} {@code +}
  * {@code #}）。非法标识**在发布之前**就抛业务错误——绝不出现"发出去了但没人收到"的静默失败。</p>
  *
  * <p><b>体积护栏</b>：{@link #MAX_PAYLOAD_LENGTH} 与入站同口径（64KB），超额在构造期即拒绝。</p>

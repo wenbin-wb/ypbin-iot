@@ -55,7 +55,7 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import cn.ypbin.admin.iot.shadow.ShadowReportedUpdate;
 import cn.ypbin.admin.iot.shadow.ShadowReportedWriter;
-import cn.ypbin.admin.iot.timeseries.PropertyIdRules;
+import cn.ypbin.starter.iot.validate.PropertyIdRules;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesPoint;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesProperties;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesWriter;

@@ -20,7 +20,7 @@ import cn.ypbin.admin.iot.availability.OutageReason;
 import cn.ypbin.admin.iot.availability.ReadingIngestReq;
 import cn.ypbin.admin.iot.availability.ReadingObservationDto;
 import cn.ypbin.admin.iot.entity.DeviceLiveness;
-import cn.ypbin.admin.iot.timeseries.PropertyIdRules;
+import cn.ypbin.starter.iot.validate.PropertyIdRules;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesPoint;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesProperties;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesWriter;
