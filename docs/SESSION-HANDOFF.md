@@ -42,7 +42,8 @@
 
 ## 4. 仓库与门禁
 
-- 后端 main `ee39bdaa`（#175）；前端 main `a0c8766`（#49 vxe-grid，之后仅 dependabot）；PR squash、CI 全绿才合；
+- 后端 main `009a4076`（#182 starter-iot 切换）；前端 main `a0c8766`；PR squash、CI 全绿才合；
+- starter master `449a395`（v3.8.0 已发版，开发版 3.8.1-SNAPSHOT）；⚠️ dev 镜像源抖，iot jar 系 docker cp 热换，镜像源恢复后需正规 compose build 收敛（否则 recreate 回退）；
 - 门禁：check-iot-sql-equivalence.sh（007 与 migration 等价、顺序敏感）、arch 48（禁内联 FQCN）、
   iot 全量单测 ~818+、gateway 单测 4、Sync Whitelist（既有 admin 文件改动须白名单+SYNC 登记，现 22 项）、starter 版本最新 Release 检查。
   L2 对外契约/安全链改动须独立复核（#148 经 A–H 独立复核 + 2 变异转红）。
