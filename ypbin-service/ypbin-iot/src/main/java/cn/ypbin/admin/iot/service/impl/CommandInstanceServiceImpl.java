@@ -36,8 +36,8 @@ import cn.ypbin.admin.iot.model.req.CommandQuery;
 import cn.ypbin.admin.iot.model.req.CommandSendReq;
 import cn.ypbin.admin.iot.model.resp.CommandInstanceResp;
 import cn.ypbin.admin.iot.service.CommandInstanceService;
-import cn.ypbin.admin.iot.timeseries.PropertyIdRules;
-import cn.ypbin.admin.iot.util.RequestIdRules;
+import cn.ypbin.starter.iot.validate.PropertyIdRules;
+import cn.ypbin.starter.iot.validate.RequestIdRules;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.core.exception.GlobalErrorCode;
 import cn.ypbin.starter.core.util.LogSanitizer;
@@ -80,7 +80,7 @@ import tools.jackson.databind.node.ObjectNode;
  *
  * <p><b>回执的租户与白名单</b>：{@code /internal/command-replies} 没有租户身份 ⇒ 先按 {@code deviceId}
  * **反查租户**（{@code executeIgnore}）再进该租户上下文（与 {@code AvailabilityServiceImpl} 同构）；
- * {@code requestId} 过 {@link RequestIdRules}；回执里的 {@code deviceId} 必须与实例上的设备一致
+ * {@code requestId} 过 {@link cn.ypbin.starter.iot.validate.RequestIdRules}；回执里的 {@code deviceId} 必须与实例上的设备一致
  * （防"同租户内 A 设备替 B 设备回执"）。</p>
  *
  * @author wenbin

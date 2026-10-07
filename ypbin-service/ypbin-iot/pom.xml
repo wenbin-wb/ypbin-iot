@@ -71,6 +71,11 @@
             <groupId>cn.ypbin</groupId>
             <artifactId>ypbin-starter-security</artifactId>
         </dependency>
+        <!-- IoT 域通用原语（3.8.0 新增模块，版本由 BOM 管） -->
+        <dependency>
+            <groupId>cn.ypbin</groupId>
+            <artifactId>ypbin-starter-iot</artifactId>
+        </dependency>
         <dependency>
             <groupId>cn.ypbin</groupId>
             <artifactId>ypbin-starter-log</artifactId>

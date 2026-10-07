@@ -10,7 +10,7 @@
 package cn.ypbin.admin.iot.mqtt;
 
 import cn.ypbin.admin.iot.availability.ReadingObservationDto;
-import cn.ypbin.admin.iot.util.RequestIdRules;
+import cn.ypbin.starter.iot.validate.RequestIdRules;
 import java.util.ArrayList;
 import java.util.List;
 import lombok.Getter;
@@ -44,10 +44,10 @@ import lombok.Setter;
 @Setter
 public class MqttReadingIngestReq {
 
-    /** 请求 ID 上限（**委托** {@link RequestIdRules}，避免第二份口径）。 */
+    /** 请求 ID 上限（**委托** {@link cn.ypbin.starter.iot.validate.RequestIdRules}，避免第二份口径）。 */
     public static final int MAX_REQUEST_ID_LENGTH = RequestIdRules.MAX_LENGTH;
 
-    /** 请求 ID 形态（**委托** {@link RequestIdRules}）。 */
+    /** 请求 ID 形态（**委托** {@link cn.ypbin.starter.iot.validate.RequestIdRules}）。 */
     public static final String REQUEST_ID_PATTERN = RequestIdRules.PATTERN;
 
     /** 单条 MQTT 消息允许承载的读数条数上限（一条消息 = 一台设备的一小批，防单报文放大）。 */

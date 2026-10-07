@@ -10,6 +10,7 @@
 package cn.ypbin.admin.iot.timeseries;
 
 import cn.ypbin.starter.core.exception.BusinessException;
+import cn.ypbin.starter.iot.validate.PropertyIdRules;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;

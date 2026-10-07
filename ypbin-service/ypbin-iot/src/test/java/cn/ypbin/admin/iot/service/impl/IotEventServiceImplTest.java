@@ -20,7 +20,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-import cn.ypbin.admin.iot.availability.AvailabilityRules;
+import cn.ypbin.starter.iot.availability.AvailabilityRules;
 import cn.ypbin.admin.iot.entity.IotDevice;
 import cn.ypbin.admin.iot.entity.IotEventLog;
 import cn.ypbin.admin.iot.event.EventIngestItemDto;

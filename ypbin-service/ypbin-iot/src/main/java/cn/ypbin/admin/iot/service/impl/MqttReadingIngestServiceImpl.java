@@ -22,7 +22,7 @@ import cn.ypbin.admin.iot.mqtt.MqttReadingIngestResult;
 import cn.ypbin.admin.iot.mqtt.ReadingQuality;
 import cn.ypbin.admin.iot.service.AvailabilityService;
 import cn.ypbin.admin.iot.service.MqttReadingIngestService;
-import cn.ypbin.admin.iot.timeseries.PropertyIdRules;
+import cn.ypbin.starter.iot.validate.PropertyIdRules;
 import cn.ypbin.admin.iot.values.RedisLatestValueWriter;
 import cn.ypbin.starter.core.util.LogSanitizer;
 import cn.ypbin.starter.tenant.core.TenantContext;

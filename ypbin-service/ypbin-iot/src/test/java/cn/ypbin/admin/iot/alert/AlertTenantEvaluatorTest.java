@@ -19,7 +19,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import cn.ypbin.admin.iot.availability.AvailabilityRules;
+import cn.ypbin.starter.iot.availability.AvailabilityRules;
 import cn.ypbin.admin.iot.entity.DeviceLiveness;
 import cn.ypbin.admin.iot.entity.IotAlertInstance;
 import cn.ypbin.admin.iot.entity.IotAlertNotification;

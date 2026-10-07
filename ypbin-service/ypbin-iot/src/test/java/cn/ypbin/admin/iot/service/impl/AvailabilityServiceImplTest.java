@@ -27,7 +27,7 @@ import static org.mockito.Mockito.when;
 
 import cn.ypbin.admin.iot.availability.AvailabilityProperties;
 import cn.ypbin.admin.iot.availability.AvailabilityResp;
-import cn.ypbin.admin.iot.availability.AvailabilityRules;
+import cn.ypbin.starter.iot.availability.AvailabilityRules;
 import cn.ypbin.admin.iot.availability.OutageReason;
 import cn.ypbin.admin.iot.availability.ReadingIngestReq;
 import cn.ypbin.admin.iot.availability.ReadingObservationDto;
@@ -55,7 +55,7 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import cn.ypbin.admin.iot.shadow.ShadowReportedUpdate;
 import cn.ypbin.admin.iot.shadow.ShadowReportedWriter;
-import cn.ypbin.admin.iot.timeseries.PropertyIdRules;
+import cn.ypbin.starter.iot.validate.PropertyIdRules;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesPoint;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesProperties;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesWriter;
