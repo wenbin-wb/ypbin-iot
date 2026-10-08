@@ -141,6 +141,9 @@ public class PlatformAlertService {
 
         IotPlatformAlert alert = new IotPlatformAlert();
         alert.setId(IdWorker.getId());
+        // 平台告警是全局语义，但表列 tenant_id 为 NOT NULL 且参与去重唯一键 ⇒ 必须显式落主租户，
+        // 不能依赖租户拦截器（runIgnore 下不补值，留空即被库拒绝，见常量注释）
+        alert.setTenantId(PlatformAlertProperties.PLATFORM_TENANT_ID);
         alert.setRuleCode(rule.getCode());
         alert.setDedupKey(buildDedupKey(rule));
         // 活动去重键 = 去重键（恢复时被置 NULL）⇒ 同键至多一条活动告警
