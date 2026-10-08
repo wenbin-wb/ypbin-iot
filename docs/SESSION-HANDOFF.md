@@ -1,7 +1,7 @@
-# SESSION-HANDOFF · ypbin-iot 断点交接（2026-10-01 更新）
+# SESSION-HANDOFF · ypbin-iot 断点交接（2026-10-08 更新）
 
 > 用途：新会话读本文 + `docs/TASK-BOARD.md` 即可无缝接续，无需翻历史对话。
-> 更新：2026-10-01（门面/#148 落库版；上一版同日稍早；O-7 版）。
+> 更新：2026-10-08（#10 平台告警写路径修复 + 通知开关单一来源；上一版 2026-10-01）。
 
 ## 0. 新会话第一句话（可直接粘）
 
@@ -22,11 +22,20 @@
 
 - ✅：#7 盘点、#8 一批、#10 一批+前端列表+通知投递代码（默认关）、#11 第 1 批（Key+网关鉴权+e2e）与第 2 批（限流 429）
   + 第 3 批 Key 管理前端页（前端 #46）+ 门面/whoami/F-3/F-4（后端 #148）、#12、#13、#14；
-- ✅ #10 flip 已开通（#157：收件人 wenbin_hyp@163.com，firing=0 无刷屏；163 端到端送达待用户验证）；
 - ✅ #11 整项完成（含 O-7 #150）+ 加固批（签名 #160/IP 白名单 #167/配额可见 #168/验签补洞 #169/运维质量 #170/#171/#175）；
 - ⏸ #8 二批（立项完成 PR #152，只立项不实施，触发条件见 PHASE2 §1）；
 - ➖ #9（用户 2026-10-01 拍板：基本是内网项目，TLS 先不用管——维持自签 8883 与 1883 并存，不换正式 CA、不收回 1883、不做限来源）。
-- 🔄 #10 投递观察中（163 送达待验证；firing 持续 0）。
+- ⚠️ #10 两个真缺陷已定位并修复（2026-10-08，分支 `eea5b858`，待 CI/合并）：
+  ① **通知开关双源打架**——服务器 compose override 里的 `YPBIN_PLATFORM_ALERT_NOTIFY_ENABLED=false`
+  （OS 环境变量，优先级高于 config data）覆盖了 Nacos live 的 `notify-enabled: true` ⇒ #157 的 flip **实际没生效**；
+  已删除该 env 键（通知开关单一来源 = Nacos），dev 容器 env 已实证 `NOTIFY_ENV=<unset>`。
+  ② **写路径整条不通**——`iot_platform_alert.tenant_id` 为 NOT NULL，而开单在 `TenantContext.runIgnore` 下
+  租户拦截器不补值 ⇒ 每次 FIRING 都被库拒绝（`Column 'tenant_id' cannot be null`），
+  「观察期 firing 恒 0」把这条彻底掩盖了（该表此前**一行都没有**）。
+- ✅ #10 dev 端到端实证（2026-10-08，修复后部署）：造真实入站丢弃 → 判定 PENDING→FIRING→RESOLVED 全链落库
+  （`iot_platform_alert` 1 行、`tenant_id=1`、`observed_rounds=2`、13:55:40 开单 / 13:56:41 收口），
+  容器启动后 tenant_id 报错 **0 条**；FIRING/RESOLVED 两次通知**无失败日志**（iot 侧 WARN / system 侧 ERROR 均无）——
+  **邮件是否到达 163 邮箱待用户确认**（不确认不算闭环）。
 
 ## 3. 开放 API 第 1/2 批速览
 
@@ -42,21 +51,31 @@
 
 ## 4. 仓库与门禁
 
-- 后端 main `009a4076`（#182 starter-iot 切换）；前端 main `a0c8766`；PR squash、CI 全绿才合；
-- starter master `449a395`（v3.8.0 已发版，开发版 3.8.1-SNAPSHOT）；⚠️ dev 镜像源抖，iot jar 系 docker cp 热换，镜像源恢复后需正规 compose build 收敛（否则 recreate 回退）；
+- 后端 main `b70cdd14`（#183 收尾回写）+ 本次修复分支 `eea5b858`（平台告警 tenant_id，待合并）；前端 main `a0c8766`；PR squash、CI 全绿才合；
+- starter master `449a395`（v3.8.0 已发版，开发版 3.8.1-SNAPSHOT）；
+- 🔴 **dev 镜像与容器 jar 已不一致（P0 运维债，已实测）**：镜像 `ypbin/ypbin-iot:local`（构建于 2026-10-05T12:54Z）
+  内 `/app/app.jar` md5 **`9212136454d2…`**，而容器内实际运行的是 docker cp 热换进去的 **`2472d8faba1b…`**
+  （2026-10-08 修复版）⇒ **任何 `compose up`（recreate）都会静默回退到 #182 之前的旧代码**，health 仍 200、无任何告警。
+  收敛动作：镜像源恢复后 `docker compose build ypbin-iot && up -d --no-deps --force-recreate`，并核对
+  「构建机 jar = 镜像内 jar = 容器内 jar」三方 md5 一致。回滚资产：`/opt/ypbin/ypbin-iot/backup/app-*.jar`；
 - 门禁：check-iot-sql-equivalence.sh（007 与 migration 等价、顺序敏感）、arch 48（禁内联 FQCN）、
   iot 全量单测 ~818+、gateway 单测 4、Sync Whitelist（既有 admin 文件改动须白名单+SYNC 登记，现 22 项）、starter 版本最新 Release 检查。
   L2 对外契约/安全链改动须独立复核（#148 经 A–H 独立复核 + 2 变异转红）。
 
 ## 5. 下一步（建议顺序）
 
-1. #8 二批立项设计 + 外委独立复核；
-2. #10 送达验证（用户查 163 邮件）+ 持续观察 firing；
-3. ~~#9~~ 已搁置（见 §2 用户拍板）。
-   （#11 整项已完成并加固：O-1~O-7 + Key 页 + 限流 + 门面 + whoami + 签名/IP/配额可见；dev 部署中（容器 1h 前重建，健康 200/nokey-401  smoke 通过）。）
+1. **合并本次修复**（分支 `eea5b858`：平台告警 tenant_id）——CI 绿后 squash；合后 dev 侧无需再动（容器已是该 jar）。
+2. **dev 镜像收敛**（P0 运维债，见 §4）：镜像源可用后正规 `build` + `--force-recreate`，核对三方 md5；
+   在收敛前**禁止**对 `ypbin-iot` 做 recreate/down-up（会静默回退旧代码）。
+3. **#10 后续（数据驱动）**：写路径与通知链路已实证可用；下一步是让真实 FIRING 自然出现后校准阈值
+   （现有 4 条规则里只有「评估器停摆」的 45s 是实测定的，其余三条是「增长即告警」，恒 0 未观测）
+   与 163 送达确认（本次两次通知待用户查收）。
+4. **#8 二批**：触发条件仍未满足（`docs/MESSAGE-TRACE-PHASE2.md` §1）⇒ 维持只立项不实施；**#9** 已搁置。
 
 ## 6. 遗留风险（如实）
 
 - 限流 Redis 异常 fail-open（仅记日志）——429 语义缺失风险已登记；
 - 网关配置随源码 application.yml 发布（nacos 3.x 无法脚本化更新），nacos 恢复 API 后可回退（SYNC 登记）；
-- 平台告警通知收件人默认空、notify 默认关——开通前必须配齐。
+- 平台告警通知收件人只有外部邮箱、`recipient-user-ids` 为空（站内信通道空跑）；平台告警实例/收件人固定写主租户
+  1（多租户部署需显式裁定，已在 `PlatformAlertProperties.PLATFORM_TENANT_ID` 与通知器注释登记）；
+- dev `ypbin-iot` 容器 jar ≠ 镜像 jar（热换未收敛），见 §4。

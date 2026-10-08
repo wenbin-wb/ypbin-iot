@@ -231,6 +231,11 @@ ypbin:
   # 供给（此处不重复，避免双源打架）；`notify-enabled` 默认 false。
   # dev live 已 flip（2026-10-01，用户指定收件人）：`notify-enabled: true` +
   # `recipient-extra-emails: [wenbin_hyp@163.com]`，见 Nacos 回读与看板变更记录。
+  # 🔴 **硬规矩（2026-10-08 实测血案）**：`notify-enabled` 与 `recipient-*` **只允许在本文件（Nacos）改**；
+  #    compose env **不得**再写 `YPBIN_PLATFORM_ALERT_NOTIFY_ENABLED`——OS 环境变量优先级高于本文件
+  #    （Spring Boot 外部化配置：env(5) > config data(3)），写一次就把这里的 true 静默盖成 false，
+  #    而开关关闭只记 DEBUG 日志 ⇒ 「flip 了却没人收到」无法被观测（#157 的 flip 就这样空转了一个月）。
+  #    若要临时关闭通知：**改本文件的 `notify-enabled: false`**（Nacos 刷新即时生效），不要动 env。
   platform-alert:
     notify-enabled: false
     recipient-user-ids: []
