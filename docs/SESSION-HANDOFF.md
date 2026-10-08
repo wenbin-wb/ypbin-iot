@@ -12,11 +12,17 @@
 
 - 主机：`113.142.217.42`（ssh 别名 `ypbin-prod`，key `~/.ssh/id_ed25519_iot_test`）；用户已确认是开发测试环境，可放心调试/清理；
 - 部署根 `/opt/ypbin/ypbin-iot`；容器 ypbin-iot（18084）、ypbin-gateway（18080）、ypbin-mysql（库 `ypbin_admin`）、
-  ypbin-iotdb、ypbin-nacos（3.2.4，脚本化配置 API 已移除全 404）、ypbin-redis（有密码）、ypbin-iot-ui、EMQX（外部 43.242.200.8）；
+  ypbin-iotdb、ypbin-nacos（3.2.4；**v1 配置 API 已移除（全 404），但 v3 admin API 可用**——`/nacos/v3/auth/user/login` +
+  `/nacos/v3/admin/cs/config` 的 GET/POST，2026-10-08 实测读写均通，工具见 `tools/set-nacos-flag.py`）、ypbin-redis（有密码）、ypbin-iot-ui、EMQX（外部 43.242.200.8）；
 - 凭据 `deploy/.env`（600）：GATEWAY_SIGN_TOKEN/INTERNAL_TOKEN/REDIS_PASSWORD/YPBIN_OPENAPI_SECRET_PEPPER 等；真值不入库不入日志。
 - 踩过的坑：① compose 必须在 deploy 目录跑（.env 按 cwd）；② 容器 `${GATEWAY_SIGN_TOKEN}` 等须 compose environment 注入（已补键）；
   ③ 网关 GlobalFilter 顺序 sanitize(+1)<签发(+2)<OpenApiKeyAuth(+3)<限流(+4)，WebFilter 在 sanitize 前会丢转签头；
-  ④ BaseEntity create_user/update_user 为 BIGINT（Long 用户 ID，fill 注入），裸 SQL 塞字符串会炸。
+  ④ BaseEntity create_user/update_user 为 BIGINT（Long 用户 ID，fill 注入），裸 SQL 塞字符串会炸；
+  ⑤ **改 Nacos live 单键必须用 `tools/set-nacos-flag.py`**（按行号定位 + 发布前断言"恰好 1 行变化" + 发布后回读 + 改前逐字节备份）：
+     2026-10-08 用 `content.replace(…,1)` 的临时脚本改 `alert.enabled`，命中全文**首个**匹配 ⇒ 实际关掉的是
+     `ypbin.tenant.enabled`（租户隔离总开关）；靠"改后立即回读"发现、2 分钟内还原（评估=无运行时影响，详见 PROD-OPS-NOTES 第 16 行）；
+  ⑥ **Nacos live 刷新对 `@ConfigurationProperties` 即时生效（无需重启）**：实测 `Refresh keys changed: [ypbin.alert.enabled]`
+     → 下一 tick 评估器即停/即恢复；但 `@Scheduled` 的**周期**仍只在启动绑定，`@ConditionalOnProperty` 的装配也不会因 live 改而增删 Bean（PROD-OPS-NOTES 第 17 行）。
 
 ## 2. 看板状态（详见 docs/TASK-BOARD.md）
 
@@ -41,6 +47,11 @@
   累计观察：修复前约 13h（1605 轮、firing=0）+ 修复后 111 轮（firing=0）≈ **1,716 轮无自发 FIRING**（四指标现值 `lag=7166ms`、其余 0）。
   ⚠️ 强度如实：窗口内**无真实故障注入** ⇒ 只证"正常运行期未误报"，不证"故障态已确证"；**保留运维动作**：
   首次自然 FIRING 出现时人工确认一次投递与观感（非待办）。
+- ✅ **#10 失败态验收（2026-10-08 补）**：4 条规则里 **2 条真实注入通过**——
+  `PLATFORM_EVALUATOR_STALLED`（`tools/set-nacos-flag.py` live 置 `alert.enabled=false`、**无需重启**：rounds 冻结 303 → lag 24s→45s+ →
+  23:36:05 FIRING（observed_rounds 续期到 8）→ 置回 true → lag 回 ~8s → 23:40:06 RESOLVED）与
+  `PLATFORM_INGEST_DROPPING`（13:55–13:56）。两次通知均无失败日志；**FIRING/RESOLVED 两封邮件已由用户确认收到**（2026-10-08：「两封都收到」）。
+  **未注入**：`ROUND_FAILED`（需不健康轮次，唯一低风险手段动共享 Redis ⇒ 不做）、`NOTIFY_FAILING`（需设备告警投递失败，属功能性写路径，另立批）。
 
 ## 3. 开放 API 第 1/2 批速览
 
@@ -86,7 +97,9 @@
 ## 6. 遗留风险（如实）
 
 - 限流 Redis 异常 fail-open（仅记日志）——429 语义缺失风险已登记；
-- 网关配置随源码 application.yml 发布（nacos 3.x 无法脚本化更新），nacos 恢复 API 后可回退（SYNC 登记）；
+- 网关配置随源码 application.yml 发布，当时的理由是"nacos 3.x 无法脚本化更新"——**该理由 2026-10-08 已被证伪**
+  （v1 全 404，但 v3 admin API 读写均通，见 §1）⇒ "网关配置可回退到 Nacos"这件事**证据已成立、决策未做**，属待评估项
+  （SYNC 白名单里那条登记可据此复核）；
 - 平台告警通知收件人只有外部邮箱、`recipient-user-ids` 为空（站内信通道空跑）；平台告警实例/收件人固定写主租户
   1（多租户部署需显式裁定，已在 `PlatformAlertProperties.PLATFORM_TENANT_ID` 与通知器注释登记）；
 - dev `ypbin-iot` 镜像 lineage 非 `compose build` 产物（由旧镜像 + COPY jar 得到，见 §4）；
