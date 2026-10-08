@@ -36,6 +36,11 @@
   （`iot_platform_alert` 1 行、`tenant_id=1`、`observed_rounds=2`、13:55:40 开单 / 13:56:41 收口），
   容器启动后 tenant_id 报错 **0 条**；FIRING/RESOLVED 两次通知**无失败日志**（iot 侧 WARN / system 侧 ERROR 均无），
   且**邮件到达已由用户确认**（163 收件箱**两封都收到**，FIRING + RESOLVED）⇒ **端到端闭环**。
+- ✅ **#10 已结项（2026-10-08）**：机制闭环、**无遗留阈值校准项**——三条计数规则（`round.failed`/`notify.failed`/入站丢弃）
+  在健康平台结构上恒 0，"增长即告警"即正确口径；唯一需实测的「评估器停摆」有 45s=3×周期的实测依据。
+  累计观察：修复前约 13h（1605 轮、firing=0）+ 修复后 111 轮（firing=0）≈ **1,716 轮无自发 FIRING**（四指标现值 `lag=7166ms`、其余 0）。
+  ⚠️ 强度如实：窗口内**无真实故障注入** ⇒ 只证"正常运行期未误报"，不证"故障态已确证"；**保留运维动作**：
+  首次自然 FIRING 出现时人工确认一次投递与观感（非待办）。
 
 ## 3. 开放 API 第 1/2 批速览
 
@@ -58,21 +63,25 @@
   并把该 jar 放回服务器 `ypbin-service/ypbin-iot/target/`（旧 jar 已备份）⇒ 三方 md5 一致：
   镜像内 = 容器内 = 服务器 target = 本地构建制品 = **`2472d8faba1b…`**（health UP、`NOTIFY_ENV=<unset>`、tenant_id 报错 0）。
   回滚：旧镜像保留为 `ypbin/ypbin-iot:pre-converge-20261008-141749`（`cbe4c20782e9`，2026-10-05）；
-  回滚资产 `/opt/ypbin/ypbin-iot/backup/app-*.jar`。⚠️ 未收敛项：镜像源恢复后仍应走一次**真正的** `compose build`
-  （当前镜像 lineage 来自旧镜像，且服务器检出停在 `ad80e3f`，直接 `compose build` 会打包陈旧源码 ⇒ 不要盲目 build）；
+  回滚资产 `/opt/ypbin/ypbin-iot/backup/app-*.jar`。
+  ⚠️ **为什么没走"真正的 `compose build`"（2026-10-08 查清，不是"镜像源偶发抖动"）**：dev 应用机**当前无出网**——
+  `registry-1.docker.io/v2/`、`repo1.maven.org/maven2/`、`github.com` 三个端点 20s 全部超时（curl exit 124），
+  `docker pull alpine` FAIL（本机侧 git/PR 正常）。⇒ 该机上既拉不到 `eclipse-temurin:21-jre` 基础镜像，也无法用 Maven 自行构建 jar
+  ⇒ **构建机出制品 + 传 jar + 刷新镜像/recreate 是该环境的唯一可行路径**。另注：镜像 lineage 现来自旧镜像（`FROM <旧镜像> + COPY jar`）；
+  且服务器检出停在 `ad80e3f`（`deploy/*` 有运维本地改动）⇒ **不要在那台机上盲目 `compose build`**（会把陈旧源码打进镜像）；
 - 门禁：check-iot-sql-equivalence.sh（007 与 migration 等价、顺序敏感）、arch 48（禁内联 FQCN）、
   iot 全量单测 ~818+、gateway 单测 4、Sync Whitelist（既有 admin 文件改动须白名单+SYNC 登记，现 22 项）、starter 版本最新 Release 检查。
   L2 对外契约/安全链改动须独立复核（#148 经 A–H 独立复核 + 2 变异转红）。
 
 ## 5. 下一步（建议顺序）
 
-1. ~~**合并本次修复**~~ **已合并**（#184 → main `b32e6c34`，CI 6/6 绿：构建校验 + 两个 `-Pit` 集成测试 + CodeQL ×2 + whitelist）；dev 侧无需再动（容器已是该 jar）。
-2. ~~**dev 镜像收敛**~~ **已完成**（2026-10-08，见 §4）。**临时禁手已解除**：现在 recreate 不会再回退旧代码（镜像内已是修复版 jar）；
-   但镜像源恢复后仍应补一次真正的 `compose build`（见 §4 的 ⚠️）。
-3. **#10 后续（数据驱动）**：写路径与通知链路已实证可用；下一步是让真实 FIRING 自然出现后校准阈值
-   （现有 4 条规则里只有「评估器停摆」的 45s 是实测定的，其余三条是「增长即告警」，恒 0 未观测）
-   与 163 送达确认（**已确认：两封都收到**）。
+1. ~~**合并本次修复**~~ **已合并**（#184 → main；随后 #185 文档、#186 镜像收敛+测试修复，CI 均 6/6）；dev 侧无需再动（容器已是该 jar）。
+2. ~~**dev 镜像收敛**~~ **已完成**（2026-10-08，见 §4）。**临时禁手已解除**：recreate 不会再回退旧代码（镜像内已是修复版 jar）。
+3. ~~**#10 平台自告警**~~ **已结项（2026-10-08，看板转 ✅）**：机制闭环、**无遗留阈值校准项**
+   （三条计数规则恒 0 属预期、无需再定阈值；「评估器停摆」45s 有 3×周期实测依据；链路已端到端证明；
+   累计 ~1,716 轮无自发 FIRING）。**保留的运维动作（非待办）**：首次自然 FIRING 出现时人工确认一次投递与观感。
 4. **#8 二批**：触发条件仍未满足（`docs/MESSAGE-TRACE-PHASE2.md` §1）⇒ 维持只立项不实施；**#9** 已搁置。
+5. 若要在 dev 上做"故障注入式验收"或"更长观察窗口"，另立验收批（不要把它当成 #10 的默认尾巴）。
 
 ## 6. 遗留风险（如实）
 
@@ -80,5 +89,7 @@
 - 网关配置随源码 application.yml 发布（nacos 3.x 无法脚本化更新），nacos 恢复 API 后可回退（SYNC 登记）；
 - 平台告警通知收件人只有外部邮箱、`recipient-user-ids` 为空（站内信通道空跑）；平台告警实例/收件人固定写主租户
   1（多租户部署需显式裁定，已在 `PlatformAlertProperties.PLATFORM_TENANT_ID` 与通知器注释登记）；
-- dev `ypbin-iot` 镜像 lineage 非 `compose build` 产物（由旧镜像 + COPY jar 得到，见 §4）；镜像源恢复后需补一次真 build；
-- 服务器检出停在 `ad80e3f`（且 `deploy/*` 有运维本地改动）⇒ 直接在服务器 `compose build` 会打包陈旧源码，属陷阱（见 §4）。
+- dev `ypbin-iot` 镜像 lineage 非 `compose build` 产物（由旧镜像 + COPY jar 得到，见 §4）；
+- **dev 应用机当前无外网出口**（registry / Maven Central / GitHub 三端点 20s 超时）⇒ 该机上不能 `docker pull`、不能 `mvn` 拉依赖、
+  不能 `compose build`；部署只能走"本机构建 → 传 jar"（见 §4）。恢复出网前不要在该机尝试构建类操作；
+- 服务器检出停在 `ad80e3f`（且 `deploy/*` 有运维本地改动）⇒ 直接在那台机 `compose build` 会打包陈旧源码，属陷阱（见 §4）。
