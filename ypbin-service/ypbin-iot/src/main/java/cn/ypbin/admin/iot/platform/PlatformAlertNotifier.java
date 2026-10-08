@@ -62,8 +62,8 @@ public class PlatformAlertNotifier {
         }
         for (Long userId : properties.getRecipientUserIds()) {
             InboxMessageSendReq req = new InboxMessageSendReq();
-            // 平台告警调度线程无租户上下文，按主租户 1（多租户部署需显式收件租户，登记见看板）
-            req.setTenantId(1L);
+            // 平台告警调度线程无租户上下文 ⇒ 与告警实例同口径取主租户（多租户部署需显式收件租户，登记见看板）
+            req.setTenantId(PlatformAlertProperties.PLATFORM_TENANT_ID);
             req.setReceiverUserId(userId);
             req.setTitle(rule.getTitle() + "（" + kind + "）");
             req.setContent(content);

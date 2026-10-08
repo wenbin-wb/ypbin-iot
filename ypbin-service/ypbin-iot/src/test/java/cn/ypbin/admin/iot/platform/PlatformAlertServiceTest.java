@@ -152,6 +152,23 @@ class PlatformAlertServiceTest {
     }
 
     @Test
+    @DisplayName("🔴 开单必须带 tenant_id（表列 NOT NULL ⇒ 留空则整条 INSERT 被库拒绝，告警一条都落不了）")
+    void openMustCarryTenantId() {
+        registerStalledLag(120_000L);
+        when(alertMapper.selectOne(any())).thenReturn(null);
+
+        service.evaluateOnce();
+
+        ArgumentCaptor<IotPlatformAlert> captor =
+            ArgumentCaptor.forClass(IotPlatformAlert.class);
+        verify(alertMapper).upsertActive(captor.capture());
+        assertThat(captor.getValue().getTenantId())
+            .as("tenant_id 留空 ⇒ MySQL 报 Column 'tenant_id' cannot be null"
+                + "（2026-10-08 dev 真实 FIRING 时实测；runIgnore 下拦截器不补值）")
+            .isEqualTo(PlatformAlertProperties.PLATFORM_TENANT_ID);
+    }
+
+    @Test
     @DisplayName("恢复正常且有活动告警 ⇒ 收口（且由 mapper 的 SQL 负责置 NULL 去重键）")
     void recoveredMustResolveActiveAlert() {
         registerStalledLag(1_000L);
