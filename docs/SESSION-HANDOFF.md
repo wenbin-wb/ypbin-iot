@@ -53,11 +53,13 @@
 
 - 后端 main `b32e6c34`（#184：平台告警 tenant_id 修复 + 通知开关单一来源 + 文档回写，CI 6/6 全绿后 squash；上一版 `b70cdd14` = #183）；前端 main `a0c8766`；PR squash、CI 全绿才合；
 - starter master `449a395`（v3.8.0 已发版，开发版 3.8.1-SNAPSHOT）；
-- 🔴 **dev 镜像与容器 jar 已不一致（P0 运维债，已实测）**：镜像 `ypbin/ypbin-iot:local`（构建于 2026-10-05T12:54Z）
-  内 `/app/app.jar` md5 **`9212136454d2…`**，而容器内实际运行的是 docker cp 热换进去的 **`2472d8faba1b…`**
-  （2026-10-08 修复版）⇒ **任何 `compose up`（recreate）都会静默回退到 #182 之前的旧代码**，health 仍 200、无任何告警。
-  收敛动作：镜像源恢复后 `docker compose build ypbin-iot && up -d --no-deps --force-recreate`，并核对
-  「构建机 jar = 镜像内 jar = 容器内 jar」三方 md5 一致。回滚资产：`/opt/ypbin/ypbin-iot/backup/app-*.jar`；
+- ✅ **dev 镜像与容器 jar 已收敛（2026-10-08，A 项完成）**：镜像源仍不可用（`docker pull alpine` FAIL），故**未**走 `compose build`，
+  改为「FROM 旧镜像 + COPY 已实证 jar」重建 `ypbin/ypbin-iot:local`（新 ID `e1d414ca`，构建于 14:17Z），
+  并把该 jar 放回服务器 `ypbin-service/ypbin-iot/target/`（旧 jar 已备份）⇒ 三方 md5 一致：
+  镜像内 = 容器内 = 服务器 target = 本地构建制品 = **`2472d8faba1b…`**（health UP、`NOTIFY_ENV=<unset>`、tenant_id 报错 0）。
+  回滚：旧镜像保留为 `ypbin/ypbin-iot:pre-converge-20261008-141749`（`cbe4c20782e9`，2026-10-05）；
+  回滚资产 `/opt/ypbin/ypbin-iot/backup/app-*.jar`。⚠️ 未收敛项：镜像源恢复后仍应走一次**真正的** `compose build`
+  （当前镜像 lineage 来自旧镜像，且服务器检出停在 `ad80e3f`，直接 `compose build` 会打包陈旧源码 ⇒ 不要盲目 build）；
 - 门禁：check-iot-sql-equivalence.sh（007 与 migration 等价、顺序敏感）、arch 48（禁内联 FQCN）、
   iot 全量单测 ~818+、gateway 单测 4、Sync Whitelist（既有 admin 文件改动须白名单+SYNC 登记，现 22 项）、starter 版本最新 Release 检查。
   L2 对外契约/安全链改动须独立复核（#148 经 A–H 独立复核 + 2 变异转红）。
@@ -65,8 +67,8 @@
 ## 5. 下一步（建议顺序）
 
 1. ~~**合并本次修复**~~ **已合并**（#184 → main `b32e6c34`，CI 6/6 绿：构建校验 + 两个 `-Pit` 集成测试 + CodeQL ×2 + whitelist）；dev 侧无需再动（容器已是该 jar）。
-2. **dev 镜像收敛**（P0 运维债，见 §4）：镜像源可用后正规 `build` + `--force-recreate`，核对三方 md5；
-   在收敛前**禁止**对 `ypbin-iot` 做 recreate/down-up（会静默回退旧代码）。
+2. ~~**dev 镜像收敛**~~ **已完成**（2026-10-08，见 §4）。**临时禁手已解除**：现在 recreate 不会再回退旧代码（镜像内已是修复版 jar）；
+   但镜像源恢复后仍应补一次真正的 `compose build`（见 §4 的 ⚠️）。
 3. **#10 后续（数据驱动）**：写路径与通知链路已实证可用；下一步是让真实 FIRING 自然出现后校准阈值
    （现有 4 条规则里只有「评估器停摆」的 45s 是实测定的，其余三条是「增长即告警」，恒 0 未观测）
    与 163 送达确认（**已确认：两封都收到**）。
@@ -78,4 +80,5 @@
 - 网关配置随源码 application.yml 发布（nacos 3.x 无法脚本化更新），nacos 恢复 API 后可回退（SYNC 登记）；
 - 平台告警通知收件人只有外部邮箱、`recipient-user-ids` 为空（站内信通道空跑）；平台告警实例/收件人固定写主租户
   1（多租户部署需显式裁定，已在 `PlatformAlertProperties.PLATFORM_TENANT_ID` 与通知器注释登记）；
-- dev `ypbin-iot` 容器 jar ≠ 镜像 jar（热换未收敛），见 §4。
+- dev `ypbin-iot` 镜像 lineage 非 `compose build` 产物（由旧镜像 + COPY jar 得到，见 §4）；镜像源恢复后需补一次真 build；
+- 服务器检出停在 `ad80e3f`（且 `deploy/*` 有运维本地改动）⇒ 直接在服务器 `compose build` 会打包陈旧源码，属陷阱（见 §4）。
