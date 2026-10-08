@@ -33,10 +33,10 @@ import org.springframework.transaction.annotation.Transactional;
  *
  * <p><b>一轮做什么</b>：读指标快照 → 逐规则判定（纯函数）→ 落库（开单 / 续期 / 收口）。</p>
  *
- * <p><b>🔴 一期"只落库不通知"</b>（设计 §5 与 §2.1）：阈值刚由实测确定，尚未经观察期验证；
- * 此时开通通知若阈值偏紧会**刷屏**，而"无人再看的告警等于没做"。
- * ⇒ 一期只落库 + 记日志，通知待观察期后再开（`ypbin.platform-alert.notify-enabled` 预留开关，
- * 默认 false 且**当前实现不投递**）。</p>
+ * <p><b>通知的闸门在哪</b>：本服务**无条件**把 FIRING/RESOLVED 交给 {@link PlatformAlertNotifier}，
+ * 由它按 `ypbin.platform-alert.notify-enabled`（及收件人是否为空）决定是否真的投递。
+ * 开关的**唯一归属是投递器**，服务层不判断——两处都判会出现"口径漂移且互相掩盖"（2026-10-01 开通通知后的口径）。</p>
+ * <p>观察期的"只落库、不通知"是**配置态**（`notify-enabled=false`），不是代码里的分支。</p>
  *
  * <p><b>为什么读指标不做异常兜底</b>：读不到就留 `null` ⇒ 判定为 `UNKNOWN` ⇒ 不告警但记日志。
  * 刻意**不**把"读指标失败"当成告警：那样指标系统自身抖动会造成告警风暴，

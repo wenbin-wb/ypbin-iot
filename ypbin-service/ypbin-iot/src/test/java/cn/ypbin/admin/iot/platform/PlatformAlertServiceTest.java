@@ -43,7 +43,8 @@ import org.mockito.ArgumentCaptor;
  *   <li>**恢复必须把 `active_dedup_key` 置 NULL**（靠 mapper 的 SQL 保证）——
  *       忘了置 NULL 会让"问题第二次发生"时**不再告警**（静默失效）；</li>
  *   <li>**未达连续轮次门槛时为 PENDING，达门槛才 FIRING**（抗抖动）；</li>
- *   <li>**只落库、不通知**（一期口径）——不new任何通知调用。</li>
+ *   <li>**通知闸门不在本服务**——服务无条件委托 {@link PlatformAlertNotifier}，
+ *       开关/收件人判定归投递器（覆盖见 {@code PlatformAlertNotifierTest}）。</li>
  * </ol>
  *
  * @author wenbin
@@ -220,16 +221,16 @@ class PlatformAlertServiceTest {
     }
 
     @Test
-    @DisplayName("约定式断言：一期「只落库不通知」——服务不依赖任何通知组件")
-    void mustNotNotifyInPhaseOne() {
-        // 通过反射确认类上没有注入通知相关字段（设计 §2.1：一期只落库）
+    @DisplayName("通知闸门不得搬进服务层：服务里不得出现布尔开关字段（否则与投递器的 notify-enabled 形成双闸门/口径漂移）")
+    void notificationGateMustStayInNotifier() {
+        // 2026-10-08 更正：原用例（mustNotNotifyInPhaseOne）靠 "类型名里是否含 Notify" 判空，
+        // 而 PlatformAlertNotifier 的类名不含 "Notify" 子串 ⇒ 该断言恒真、已不表达它宣称的不变量
+        // （#132 起服务确实注入并调用投递器）。改为锁**真正的**架构不变量：闸门只有一处。
         for (Field field : PlatformAlertService.class.getDeclaredFields()) {
-            String type = field.getType().getSimpleName();
-            assertThat(type)
-                .as("一期只落库不通知；出现通知组件（%s）说明口径被改，须先裁定收件人", type)
-                .doesNotContain("Notify")
-                .doesNotContain("Mail")
-                .doesNotContain("Dispatcher");
+            Class<?> type = field.getType();
+            assertThat(type == boolean.class || type == Boolean.class)
+                .as("字段 %s 是布尔开关 ⇒ 服务层也判通知开关，会与 PlatformAlertNotifier 形成双重判断", field.getName())
+                .isFalse();
         }
     }
 }

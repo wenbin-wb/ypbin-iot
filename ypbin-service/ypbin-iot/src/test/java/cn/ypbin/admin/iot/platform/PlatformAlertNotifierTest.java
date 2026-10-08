@@ -1,5 +1,6 @@
 package cn.ypbin.admin.iot.platform;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -16,6 +17,7 @@ import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.ObjectProvider;
 
 /**
@@ -68,7 +70,7 @@ class PlatformAlertNotifierTest {
     }
 
     @Test
-    @DisplayName("开关开 + 有收件人 ⇒ 站内信按用户逐个、邮件按地址逐个")
+    @DisplayName("开关开 + 有收件人 ⇒ 站内信按用户逐个、邮件按地址逐个（站内信须带主租户，system 侧校验归属）")
     void notifyEnabledWithRecipientsMustSendBothChannels() {
         properties.setNotifyEnabled(true);
         properties.setRecipientUserIds(List.of(1L, 2L));
@@ -78,8 +80,21 @@ class PlatformAlertNotifierTest {
 
         notifier.notifyFiring(PlatformHealthRule.NOTIFY_FAILING, "s", "{}");
 
-        verify(client, times(2)).sendInboxMessage(any(InboxMessageSendReq.class));
-        verify(client, times(1)).sendMail(any(MailSendReq.class));
+        ArgumentCaptor<InboxMessageSendReq> inbox =
+            ArgumentCaptor.forClass(InboxMessageSendReq.class);
+        verify(client, times(2)).sendInboxMessage(inbox.capture());
+        assertThat(inbox.getAllValues())
+            .extracting(InboxMessageSendReq::getReceiverUserId)
+            .containsExactly(1L, 2L);
+        assertThat(inbox.getAllValues())
+            .extracting(InboxMessageSendReq::getTenantId)
+            .as("站内信租户必须与平台告警实例同源（PLATFORM_TENANT_ID）：system 侧会校验收件人属于该租户，"
+                + "不一致只会得到 WARN「站内信发送失败」而无人收到")
+            .containsOnly(PlatformAlertProperties.PLATFORM_TENANT_ID);
+
+        ArgumentCaptor<MailSendReq> mail = ArgumentCaptor.forClass(MailSendReq.class);
+        verify(client, times(1)).sendMail(mail.capture());
+        assertThat(mail.getValue().getTo()).isEqualTo("a@b.com");
     }
 
     @Test
