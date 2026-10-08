@@ -25,7 +25,7 @@
 - ✅ #11 整项完成（含 O-7 #150）+ 加固批（签名 #160/IP 白名单 #167/配额可见 #168/验签补洞 #169/运维质量 #170/#171/#175）；
 - ⏸ #8 二批（立项完成 PR #152，只立项不实施，触发条件见 PHASE2 §1）；
 - ➖ #9（用户 2026-10-01 拍板：基本是内网项目，TLS 先不用管——维持自签 8883 与 1883 并存，不换正式 CA、不收回 1883、不做限来源）。
-- ⚠️ #10 两个真缺陷已定位并修复（2026-10-08，分支 `eea5b858`，待 CI/合并）：
+- ⚠️ #10 两个真缺陷已定位并修复（2026-10-08，**PR #184 已合并 → main `b32e6c34`**）：
   ① **通知开关双源打架**——服务器 compose override 里的 `YPBIN_PLATFORM_ALERT_NOTIFY_ENABLED=false`
   （OS 环境变量，优先级高于 config data）覆盖了 Nacos live 的 `notify-enabled: true` ⇒ #157 的 flip **实际没生效**；
   已删除该 env 键（通知开关单一来源 = Nacos），dev 容器 env 已实证 `NOTIFY_ENV=<unset>`。
@@ -34,8 +34,8 @@
   「观察期 firing 恒 0」把这条彻底掩盖了（该表此前**一行都没有**）。
 - ✅ #10 dev 端到端实证（2026-10-08，修复后部署）：造真实入站丢弃 → 判定 PENDING→FIRING→RESOLVED 全链落库
   （`iot_platform_alert` 1 行、`tenant_id=1`、`observed_rounds=2`、13:55:40 开单 / 13:56:41 收口），
-  容器启动后 tenant_id 报错 **0 条**；FIRING/RESOLVED 两次通知**无失败日志**（iot 侧 WARN / system 侧 ERROR 均无）——
-  **邮件是否到达 163 邮箱**已由用户确认：两封都收到**（FIRING + RESOLVED）⇒ 端到端闭环。
+  容器启动后 tenant_id 报错 **0 条**；FIRING/RESOLVED 两次通知**无失败日志**（iot 侧 WARN / system 侧 ERROR 均无），
+  且**邮件到达已由用户确认**（163 收件箱**两封都收到**，FIRING + RESOLVED）⇒ **端到端闭环**。
 
 ## 3. 开放 API 第 1/2 批速览
 
@@ -51,7 +51,7 @@
 
 ## 4. 仓库与门禁
 
-- 后端 main `b70cdd14`（#183 收尾回写）+ 本轮平台告警修复 **PR #184**（`eea5b858` 代码修复 + `0160464b`/`8b89fb10` 文档回写）；前端 main `a0c8766`；PR squash、CI 全绿才合；
+- 后端 main `b32e6c34`（#184：平台告警 tenant_id 修复 + 通知开关单一来源 + 文档回写，CI 6/6 全绿后 squash；上一版 `b70cdd14` = #183）；前端 main `a0c8766`；PR squash、CI 全绿才合；
 - starter master `449a395`（v3.8.0 已发版，开发版 3.8.1-SNAPSHOT）；
 - 🔴 **dev 镜像与容器 jar 已不一致（P0 运维债，已实测）**：镜像 `ypbin/ypbin-iot:local`（构建于 2026-10-05T12:54Z）
   内 `/app/app.jar` md5 **`9212136454d2…`**，而容器内实际运行的是 docker cp 热换进去的 **`2472d8faba1b…`**
@@ -64,7 +64,7 @@
 
 ## 5. 下一步（建议顺序）
 
-1. **合并本次修复**（分支 `eea5b858`：平台告警 tenant_id）——CI 绿后 squash；合后 dev 侧无需再动（容器已是该 jar）。
+1. ~~**合并本次修复**~~ **已合并**（#184 → main `b32e6c34`，CI 6/6 绿：构建校验 + 两个 `-Pit` 集成测试 + CodeQL ×2 + whitelist）；dev 侧无需再动（容器已是该 jar）。
 2. **dev 镜像收敛**（P0 运维债，见 §4）：镜像源可用后正规 `build` + `--force-recreate`，核对三方 md5；
    在收敛前**禁止**对 `ypbin-iot` 做 recreate/down-up（会静默回退旧代码）。
 3. **#10 后续（数据驱动）**：写路径与通知链路已实证可用；下一步是让真实 FIRING 自然出现后校准阈值
