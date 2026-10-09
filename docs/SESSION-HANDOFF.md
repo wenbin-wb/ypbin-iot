@@ -69,6 +69,9 @@
 
 - 后端 main `b32e6c34`（#184：平台告警 tenant_id 修复 + 通知开关单一来源 + 文档回写，CI 6/6 全绿后 squash；上一版 `b70cdd14` = #183）；前端 main `a0c8766`；PR squash、CI 全绿才合；
 - starter master `449a395`（v3.8.0 已发版，开发版 3.8.1-SNAPSHOT）；
+- ✅ **已并入 upstream/main（admin@`922d0d50`，真 merge 提交，非 squash）**：采纳 UP-6~UP-9 部署凭据卫生 + XXL-JOB 口令加固；冲突配方与逐文件处置见 `SYNC.md` 第三节（下次同步照抄即可）。
+  ⚠️ 同步必须用 **merge 提交**并入（保留 upstream 祖先），否则干跑合并会再次报冲突；
+- 🛠 **`dry-run-merge` 判据已修正**（2026-10-09）：从「必须无冲突」改为「**冲突 ⊆ 白名单**」；白名单单一来源 = `tools/sync-whitelist-regex.sh`（两个 workflow 共用，勿再内联第二份）。
 - ✅ **dev 镜像与容器 jar 已收敛（2026-10-08，A 项完成）**：镜像源仍不可用（`docker pull alpine` FAIL），故**未**走 `compose build`，
   改为「FROM 旧镜像 + COPY 已实证 jar」重建 `ypbin/ypbin-iot:local`（新 ID `e1d414ca`，构建于 14:17Z），
   并把该 jar 放回服务器 `ypbin-service/ypbin-iot/target/`（旧 jar 已备份）⇒ 三方 md5 一致：
