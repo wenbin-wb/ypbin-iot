@@ -1,7 +1,7 @@
-# SESSION-HANDOFF · ypbin-iot 断点交接（2026-10-08 更新）
+# SESSION-HANDOFF · ypbin-iot 断点交接（2026-10-09 更新）
 
 > 用途：新会话读本文 + `docs/TASK-BOARD.md` 即可无缝接续，无需翻历史对话。
-> 更新：2026-10-08（#10 平台告警写路径修复 + 通知开关单一来源；上一版 2026-10-01）。
+> 更新：2026-10-09（并入 upstream/main + 修正 `dry-run-merge` 判据 + 分支/工作区收敛 + R8 技术债逐条立项；上一版 2026-10-08）。
 
 ## 0. 新会话第一句话（可直接粘）
 
@@ -52,6 +52,17 @@
   23:36:05 FIRING（observed_rounds 续期到 8）→ 置回 true → lag 回 ~8s → 23:40:06 RESOLVED）与
   `PLATFORM_INGEST_DROPPING`（13:55–13:56）。两次通知均无失败日志；**FIRING/RESOLVED 两封邮件已由用户确认收到**（2026-10-08：「两封都收到」）。
   **未注入**：`ROUND_FAILED`（需不健康轮次，唯一低风险手段动共享 Redis ⇒ 不做）、`NOTIFY_FAILING`（需设备告警投递失败，属功能性写路径，另立批）。
+- ✅ **并入 upstream/main（2026-10-09，PR #189，真 merge 提交 `7a8be780`）**：纳入 upstream UP-6~UP-9（Nacos 配置导入 `SCRIPT_DIR`+自动枚举、
+  XXL-JOB 口令加固、凭据卫生），保留本仓逐项加固；**`dry-run-merge` 判据修正为「冲突 ⊆ 白名单」**（旧判据与白名单策略自相矛盾，
+  `b70cdd14`(10-07) 起每个 main 提交恒红、被当噪音）⇒ 此后 main 上该工作流恒绿；与 upstream/main 差 **0 提交**；
+  CI 三绿（Upstream Sync Check / CI / CodeQL）。白名单抽成单一来源 `tools/sync-whitelist-regex.sh`，条目 22 → **20**（删 2 条死条目）。
+- ✅ **分支与工作区收敛（2026-10-09）**：8 仓远端只剩 `main`/`master`（`ypbin-iot` 另留 1 条有意保留的分支）；本地会话分支 **33 条已删**
+  （先做完整 bundle 归档：`temp/local-branch-archive-20261009-062750/*.bundle` + `manifest.json`，恢复命令 `git fetch <bundle> 'refs/heads/*:refs/heads/*'`）；
+  10 个 worktree 全部清理（4 个已注册 + 6 个失效残留，游离 HEAD 已打 `archive/*-20261009` tag 保命）；`remote.origin.fetch` 恢复为全分支 refspec。
+- ✅ **#15 访问层技术债 R8 系列逐条立项（2026-10-09，纯文档）**：`docs/ACCESS-TECHDEBT-R8.md`（R8-2/R8-4~R8-9，每条含一手证据/触发前提/方案/验收标准/建议顺序）。
+  **只立项不实施**，排期仍为「扩展前」。**两处判定更正**：R8-7「无门禁」已过时（反向门禁自 PR #48/2026-09-26 已存在，真实缺口是覆盖面）；
+  R8-9「iot 无指标暴露配置」已过时（#53 已补）。**两个「需 e2e 核实」推进为源码判定**：框架 0.2.0 每次 ADD 都换新会话实例
+  ⇒ R8-5/R8-6 的静默零数据不成立，残余是「引用只增不减 + 隐式契约零测试」。**未跑 Maven** ⇒ 门禁实际通过状态未核实。
 
 ## 3. 开放 API 第 1/2 批速览
 
@@ -84,7 +95,8 @@
   ⇒ **构建机出制品 + 传 jar + 刷新镜像/recreate 是该环境的唯一可行路径**。另注：镜像 lineage 现来自旧镜像（`FROM <旧镜像> + COPY jar`）；
   且服务器检出停在 `ad80e3f`（`deploy/*` 有运维本地改动）⇒ **不要在那台机上盲目 `compose build`**（会把陈旧源码打进镜像）；
 - 门禁：check-iot-sql-equivalence.sh（007 与 migration 等价、顺序敏感）、arch 48（禁内联 FQCN）、
-  iot 全量单测 ~818+、gateway 单测 4、Sync Whitelist（既有 admin 文件改动须白名单+SYNC 登记，现 22 项）、starter 版本最新 Release 检查。
+  iot 全量单测 ~818+、gateway 单测 4、Sync Whitelist（既有 admin 文件改动须白名单+SYNC 登记，**现 20 项**，白名单单一来源
+  = `tools/sync-whitelist-regex.sh`）、starter 版本最新 Release 检查。
   L2 对外契约/安全链改动须独立复核（#148 经 A–H 独立复核 + 2 变异转红）。
 
 ## 5. 下一步（建议顺序）
@@ -96,6 +108,10 @@
    累计 ~1,716 轮无自发 FIRING）。**保留的运维动作（非待办）**：首次自然 FIRING 出现时人工确认一次投递与观感。
 4. **#8 二批**：触发条件仍未满足（`docs/MESSAGE-TRACE-PHASE2.md` §1）⇒ 维持只立项不实施；**#9** 已搁置。
 5. 若要在 dev 上做"故障注入式验收"或"更长观察窗口"，另立验收批（不要把它当成 #10 的默认尾巴）。
+6. **#15 R8 技术债（2026-10-09 已立项，未实施）**：排期仍为「多租户/多节点扩展前」，建议顺序见
+   `docs/ACCESS-TECHDEBT-R8.md` §4（R8-4 → R8-9 A/B → R8-5+R8-6 → R8-2 → R8-8 → R8-7）。
+   若只想先做一件：**R8-7 补门禁覆盖面**（半天、零运行时代价）或 **R8-4**（上多节点前的硬前置）。
+7. 其他未开工方向（用户已提及、未选定）：**D**（`TASK-BOARD.md` §3 的 P2 增强项）；**访问控制技术债之外的**技术债批次。
 
 ## 6. 遗留风险（如实）
 

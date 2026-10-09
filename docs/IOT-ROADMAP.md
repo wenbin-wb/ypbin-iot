@@ -400,6 +400,9 @@ ERROR The build could not read 1 project
 
 **本轮仍未闭环（如实登记，勿当已完成）**
 
+> **2026-10-09 更新**：本表 R8-2/R8-4~R8-9 已于当日**逐条立项**，含一手证据、触发前提、方案选项、可复现验收标准与扩展前建议顺序 ⇒ 见 `docs/ACCESS-TECHDEBT-R8.md`。
+> 复核同时更正了本表两处过期记述（R8-7 的门禁、R8-9 的指标暴露配置）与一处口径混用（R8-2 的 6s/4s 分属两个客户端），详见该文件 §0.1。
+
 | # | 事项 | 现状 |
 |---|---|---|
 | **G1** | 订阅失败**无退避、无在途去重** | ✅ **已处置**（2026-09-22，M-2 链路自愈）：订阅失败改**指数退避**（30s→2min；退避状态记住失败所在的**会话实例**，实例变化即作废——否则框架重连后的立刻重试会被退避挡住）+ **在途去重**（异步未完成的订阅不得被下一轮重复发起）；新增 `iot.access.subscribe.inflight.skipped` / `...backoff.skipped` 指标；门禁 7 条用例（含「退避窗口内不得重发」「翻倍」「成功清除」「forget 清退避」） |
@@ -411,9 +414,9 @@ ERROR The build could not read 1 project
 | **R8-4** | `/internal/lease/epochs` **不按节点过滤**：每节点每 10s 拉全平台 assignment × ledger（O(节点数 × 全平台租户)） | 未做（可加 `?accessNode=` 只返回本节点持有租户，或分页） |
 | **R8-5** | `fence()` **不清理订阅跟踪**（与 `removeAllDevices` 不对称），`SubscriptionPlanner.forget` 默认空实现无门禁 | 未做；重领后是否漏订阅取决于框架 REMOVE→ADD 是否复用同一 `DeviceSession` 实例（**需真 socket e2e 核实**） |
 | **R8-6** | **规格变化路径只重发 ADD**，依赖「框架先解绑再绑定 ⇒ 新会话实例 ⇒ 重新订阅」 | 未做（同上：若框架复用会话实例，新点位永不订阅 ⇒ 静默零数据；需 e2e 核实并登记依赖） |
-| **R8-7** | P5 的**平台级不变量无门禁**：`platform_only=1` 与「不进 `sys_template_menu`」只靠人眼（`IotPermissionCodeGateTest` 只校验权限码存在性） | 未做（建议加一条 SQL/源码级门禁，防后续补授把跨租户越权面授给租户管理员） |
+| **R8-7** | P5 的**平台级不变量无门禁**：`platform_only=1` 与「不进 `sys_template_menu`」只靠人眼（`IotPermissionCodeGateTest` 只校验权限码存在性） | ⚠️ **本行前段「无门禁」已过时（2026-10-09 更正）**：反向门禁 `IotMaintenanceAdminGateTest#platformOnlyMenusMustNeverEnterTenantTemplate` **自 PR #48（2026-09-26）已存在**，另有两条正向门禁（`:119` 菜单必须被授权、`:163` K2 防孤儿补授）。真实缺口是**覆盖面**——不扫 `deploy/sql/migration/*.sql`、只认 `32xx/33xx` 前缀、只认 `INSERT … id IN (...)` 形态（`007-iot-data.sql:226-228` 的 `INSERT IGNORE … SELECT …, 3320` 目标菜单 **3320 为 `platform_only=1`**，在门禁视野外且当前命中 0 行 ⇒ 安全性由数据巧合维持）。立项与验收标准见 `docs/ACCESS-TECHDEBT-R8.md` §2.5 |
 | **R8-8** | 「设备/点位变更与版本号**同一事务**」**无自动守卫**：单测用 mock 只能证明「被调用 3 次」；且台账表故障会**阻断设备/点位写入**（可用性耦合） | 未做（可加「bump 失败 ⇒ 业务写入回滚」的真库用例与事务边界门禁） |
-| **R8-9** | **安全网的成本与可观测性**：健康系统也每租户每周期多一次全量 `loadByTenant`（见 G8 行的如实说明）；新指标 `iot.access.config.reconcile.forced`/`...not_applied`/`...changed` 已注册但**未作为指标登记进任何指标文档/大盘**（本文档仅文字提及），且 `deploy/nacos/ypbin-iot.yaml` **没有指标暴露配置**（`/actuator/**` 白名单只在 `ypbin-system.yaml`）⇒ 「可观测」目前只是潜在 | 未做（登记指标 + 补 iot 服务指标暴露配置；如需降低安全网成本，可收敛触发条件或调大间隔） |
+| **R8-9** | **安全网的成本与可观测性**：健康系统也每租户每周期多一次全量 `loadByTenant`（见 G8 行的如实说明）；新指标 `iot.access.config.reconcile.forced`/`...not_applied`/`...changed` 已注册但**未作为指标登记进任何指标文档/大盘**（本文档仅文字提及），且 `deploy/nacos/ypbin-iot.yaml` **没有指标暴露配置**（`/actuator/**` 白名单只在 `ypbin-system.yaml`）⇒ 「可观测」目前只是潜在 | ⚠️ **前半已闭合、后段已过时（2026-10-09 更正）**：`deploy/nacos/ypbin-iot.yaml:264-275` **已有** `management.endpoints.web.exposure.include: health,metrics,info`（#53 / 2026-09-26），`ypbin-access.yaml:87-105` 同款（#75 / 2026-09-27），HEAD 复核仍在；网关 `exclude-paths` 不放行 `/iot/actuator/**` 是**刻意设计**（需登录态，非缺陷）。**剩余未做**：新指标 `iot.access.config.reconcile.*` 仍未登记进任何指标文档/大盘（全仓无 Prometheus/Grafana）+ 安全网成本。立项与验收标准见 `docs/ACCESS-TECHDEBT-R8.md` §2.7 |
 | **P6/P7/P8/P10** | 台账全置 false 静默回落配置／容量不回收存量／`status` 未参与过滤／`renew/release/markExpired` 取节点行锁的残余死锁面 | 与「四点十」登记一致，本轮未动 |
 | **M0b-4 残留** | 接入侧 `AccessLeaseManager` 仍用**本机时钟**做本地过期自停采 | 需租约契约带「服务端时间」，未做 |
 
