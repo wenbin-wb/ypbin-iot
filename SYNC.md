@@ -24,7 +24,15 @@ mvn -B -ntp -fae clean verify               # 同步后必须重跑门禁
 ## 二、允许改 admin 的文件（全清单，越少越好）
 
 IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，改动要尽量是「加法一行」。
-**本清单与 `.github/workflows/sync-whitelist.yml` 里的白名单必须保持一致**（改了这里就改那里）。
+**本清单与 `tools/sync-whitelist-regex.sh` 保持一致**（2026-10-09 起白名单只有一个来源：
+`sync-whitelist.yml` 的「改动的既有文件」检查与 `upstream-sync.yml` 的「干跑合并」检查**共用**它；
+改了本清单就改那个脚本，不要再在 workflow 里内联第二份）。
+
+> **判据（2026-10-09 更正）**：`Upstream Sync Check` 的干跑合并要求「**冲突必须 ⊆ 白名单**」，
+> 而不是「必须无冲突」——白名单里的文件本仓**必然**有改动 ⇒ 它们与 upstream 冲突是**设计使然**；
+> 旧判据因此在 main 上**恒红**（`b70cdd14` 起每个提交都红，见 TASK-BOARD 2026-10-09 变更记录），
+> 只会被当噪音忽略。现在：白名单内冲突 = warning + summary 列出；白名单外冲突 = 判红（那才是
+> 「分歧面失控」的信号）。
 
 > **白名单膨胀要记账**：目前 **22** 个文件（2026-10-01 两次增至 22：新增 `ypbin-gateway/src/main/resources/application.yml` 与 `deploy/sql/007-iot-data.sql`、`deploy/sql/migration/2026-10-05-iot-platform-alert-schema.sql`，理由见下表）。
 > 每增加一个都是「以后同步时的潜在冲突点」；
@@ -83,15 +91,25 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 本仓**不改这些行**（改 52 行 = 每次同步都冲突）；部署时把本仓检出到名为 `ypbin-admin` 的目录即可
 （`git clone <this-repo> ypbin-admin`），或等 admin 侧把目录名做成变量后再收敛。
 
-## 三、冲突处置
+## 三、冲突处置（2026-10-09 实测配方：upstream 5 个提交 / 4 个文件冲突）
 
-1. `pom.xml` 的模块清单冲突：**两边都留**（admin 加了新域 + 我们的 iot 行）。
-2. `deploy/sql/*` 冲突：admin 的 `00X` 编号是**顺序占用**的——若 admin 新增了 `006-*`，
-   把我们的文件**改名顺延**（例如 `008`/`009`），并同步更新本文件、迁移脚本名与等价校验脚本里的路径。
-3. `deploy/install.sh` / `docker-compose.yml` 冲突：同为「加法行」冲突，两边都留（服务块整体保留）。
-4. 共享文件的代码冲突（例如都改了 `ypbin-common`）：**优先接受 admin 的版本**，
-   把我们的需求改到 IoT 自己的模块里实现——这样下一轮同步不会再冲突。
-5. 有任何冲突：修完后在提交信息里写清「同步 admin@`<sha>` + 冲突处置」，便于下次追溯。
+> **通则：逐块判断「保留本仓加固」还是「采纳上游改进」，禁止整体 `--ours` / `--theirs`。**
+> 整体取 ours 会丢掉上游的部署凭据卫生修复；整体取 theirs 会回退本仓红线（禁静默降级）与凭据卫生口径。
+
+| 冲突文件 | 上游这次改了什么 | 本次处置 |
+|---|---|---|
+| `pom.xml` | starter 版本 `3.4.0 → 3.7.0` | **取本仓**（本仓已 `3.8.0`，上游那侧更旧） |
+| `docs/microservice-deployment.md` | 同一句「初始口令」被改写（补 XXL-JOB 随机口令） | **语义合并**：保留本仓「Nacos 不再有默认口令」口径 + 采纳上游 XXL-JOB 事实 |
+| `deploy/docker-compose.yml` | Redis 探活加 `\|\| exit 1`；XXL-JOB 控制台默认只绑回环 | **采纳**（`\|\| exit 1` 是真改进：超时应判失败）；保留本仓更详的探活注释 |
+| `deploy/install.sh` | ① Nacos 导入改「`SCRIPT_DIR` 解析 + 自动枚举 `deploy/nacos/*.yaml`」；② XXL-JOB 口令随机化 + `sha256` 占位符 + `import_xxl_job_sql` | ① **取上游**（比本仓「目录名候选 + 硬编码 7 服务」更稳），但补本仓红线：一份模板都没有时 `die`（上游只 warn 后继续 = 静默降级）；② **采纳（必需）**——上游已把 `005-xxl-job.sql` 的 admin 口令改成 `${XXL_JOB_ADMIN_PASSWORD_HASH}` 占位符，不采纳则 XXL-JOB 登录不了；同时把上游两处「回显口令」改为不回显、并把函数体 `mysql -p<口令>`（口令进 argv）改回本仓既有的 `MYSQL_PWD` 写法 |
+
+其他条目（沿用）：
+
+1. `deploy/sql/*` 冲突：admin 的 `00X` 编号是**顺序占用**的——若 admin 新增 `006-*`，本仓文件**改名顺延**，
+   并同步更新本文件、迁移脚本名与等价校验脚本里的路径。
+2. 共享文件的代码冲突（例如都改了 `ypbin-common`）：**优先接受 admin 的版本**，
+   把本仓需求改到 IoT 自己的模块里实现——这样下一轮同步不会再冲突。
+3. 提交信息写清「同步 admin@`<sha>` + 逐文件处置」，便于下次追溯（本次：admin@`922d0d50`）。
 
 ## 三·五、fork 运维须知（不写在代码里会踩的）
 
@@ -100,8 +118,9 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
    处置：**镜像 admin 的结论**（同 reason + 同理由引用），不要各判各的——否则两边会漂移出两套结论。
 2. **依赖机器人（Dependabot）默认会改 admin 拥有的 workflow 文件**，合入即破坏白名单；
    `Sync Whitelist` 会把这类 PR 判红，正确做法是去 admin 仓升级、本仓靠同步获得。
-3. **部署目录名**：`deploy/install.sh` 按 `ypbin-admin/` 目录名拼路径（52 处，不改）；
-   部署时把本仓检出成 `ypbin-admin` 目录，或等 admin 侧把目录名做成变量。
+3. **部署目录名**：`deploy/install.sh` 多数路径仍按 `ypbin-admin/` 目录名拼（不改）；但 **Nacos 模板目录**
+   自 admin@`922d0d50` 起改为按脚本自身位置解析（`SCRIPT_DIR/nacos`，`bash <(curl)` 时回退 `$ROOT/ypbin-admin/deploy/nacos`）
+   ⇒ fork 检出成任意目录名都能找到自己的模板。
 4. **同步后要重扫 CodeQL**：同步会把 admin 的新代码带进来，其新增/结案状态同样要按第 1 条镜像处置。
 
 ## 四、门禁

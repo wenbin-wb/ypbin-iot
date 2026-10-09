@@ -34,63 +34,10 @@ jobs:
       - name: 校验「改动的既有 admin 文件」都在白名单内
         run: |
           set -euo pipefail
-          # 白名单（与 SYNC.md 第二节保持一致；新增文件不在检查范围内）
-          # 逐项=相对仓库根的**精确路径**正则（^…$ 锚定，不是前缀匹配）。一行一项便于审计与增删。
-          ALLOWED='^('
-          ALLOWED+='pom\.xml|'
-          ALLOWED+='ypbin-service/pom\.xml|'
-          ALLOWED+='ypbin-service-api/pom\.xml|'
-          ALLOWED+='deploy/install\.sh|'
-          ALLOWED+='deploy/docker-compose\.yml|'
-          ALLOWED+='deploy/nacos/ypbin-gateway\.yaml|'
-          ALLOWED+='deploy/\.env\.example|'
-          ALLOWED+='docs/microservice-deployment\.md|'
-          ALLOWED+='ypbin-architecture-tests/src/test/java/cn/ypbin/admin/arch/SourceConventionTest\.java|'
-          # 第 10 项（2026-09-27 加）：修 admin 既有代码里的**缺陷**，无法用新文件实现
-          # （问题就在该方法"每次调用新建 HttpClient 且未指定协议版本"那一行上）。理由与代价见 SYNC.md 第二节。
-          ALLOWED+='ypbin-service/ypbin-ai/src/main/java/cn/ypbin/admin/ai/service/impl/AiModelConfigServiceImpl\.java|'
-          # 第 11–17 项（2026-09-28 加）：告警通知投递必须复用 admin 的 sys_message 表与
-          # system 侧既有 Feign 契约/JavaMail，新增端点只能落在既有契约/实现/兜底上（见 SYNC.md 第二节）。
-          # 11/12：Feign 契约与熔断兜底是既有接口文件，无法用新文件表达「给既有契约加两个内部端点」。
-          ALLOWED+='ypbin-service-api/ypbin-system-api/src/main/java/cn/ypbin/admin/system/api/feign/ISystemClient\.java|'
-          ALLOWED+='ypbin-service-api/ypbin-system-api/src/main/java/cn/ypbin/admin/system/api/feign/ISystemClientFallback\.java|'
-          # 13：端点实现在既有 SystemClientImpl 上（复用 SysMessageMapper/MailService，见 §7.5-M2/M4）。
-          ALLOWED+='ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/feign/SystemClientImpl\.java|'
-          # 14：sys_message 落库与「按收件人查询」复用在既有 Mapper 上（站内信不新造链路）。
-          ALLOWED+='ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/mapper/SysMessageMapper\.java|'
-          # 15–17：构造器注入随 13 增加 SysMessageMapper/MailService ⇒ 既有 3 个单测的构造参数同步更新。
-          ALLOWED+='ypbin-service/ypbin-system/src/test/java/cn/ypbin/admin/system/feign/SystemClientImplUserByIdTest\.java|'
-          ALLOWED+='ypbin-service/ypbin-system/src/test/java/cn/ypbin/admin/system/feign/SystemClientImplPlatformUserTest\.java|'
-          ALLOWED+='ypbin-service/ypbin-system/src/test/java/cn/ypbin/admin/system/feign/SystemClientImplLogIngestTest\.java|'
-          # 第 18 项（2026-09-29 加）：README 整体重写为 IoT 版（M-6）。
-          # 无法用新文件实现：GitHub 默认渲染 README.md，新增 README-IOT.md 只会让访客
-          # 仍然先看到 admin 原版（标题/徽章/截图/功能清单全是基座的）；而 README 的
-          # 能力清单属**对外陈述**，与实际不符不能用「另写一份」补救。
-          # 代价如实登记：上游常改 README ⇒ 下次同步必然冲突，且必须整体取本仓版本。
-          # 理由与代价全文见 SYNC.md 第二节对应行。
-          ALLOWED+='README\.md|'
-          # 第 19 项（2026-09-29 加）：补 identity 入口侧密钥（#6b 部署阻塞面）。
-          # 无法用新文件实现：问题就**在这一行**——starter 3.6.0 起
-          # `ypbin.security.identity.enabled=true`（本文件既有行）必须同时给出
-          # `ypbin.security.identity.trusted-source-token`，否则启动失败；
-          # 新增文件无法表达「给既有键补一个兄弟键」，改成新文件（如另立
-          # ypbin-common-iot.yaml）只会让既有 Key 的约束仍然缺配。
-          # ⚠️ **更好的长期做法是改上游 admin 仓**：本仓下次同步自然继承、分歧面回到 18。
-          # 代价如实登记：多一个 merge 冲突点（本文件上游改动频率低，代价可接受）。
-          # 理由与代价全文见 SYNC.md 第二节对应行。
-          # 第 20 项（2026-10-01 加）：网关配置随源码发布（routes/exclude 等）。
-          # 无法用新文件实现：路由/清洗/白名单必须落在网关既有 application.yml。
-          # ⚠️ 2026-10-08 更正：当时的理由"nacos 3.x 服务端脚本化读写 API 已移除（全 404）"**不成立**——
-          # v1 确实全 404，但 **v3 admin API 读写均可用**（/nacos/v3/auth/user/login + /nacos/v3/admin/cs/config，
-          # 已实测），工具见 tools/set-nacos-flag.py。是否把网关配置回退到 Nacos 属**待评估**，本白名单条目暂不变。
-          # 长期做法：反哺 admin 仓（网关工程属 admin/upstream），见 SYNC.md 第二节。
-          ALLOWED+='ypbin-gateway/src/main/resources/application\.yml|'
-          # 第 21/22 项（2026-10-01 加）：Key 表与平台告警体系共用 007/迁移文件（IoT 建表/菜单），
-          # 既有文件内追加段落（无法用新 SQL 文件：等价门禁按文件次序比对）。
-          ALLOWED+='deploy/sql/007-iot-data\.sql|'
-          ALLOWED+='deploy/sql/migration/2026-10-05-iot-platform-alert-schema\.sql|'
-          ALLOWED+='deploy/nacos/ypbin-common\.yaml'
-          ALLOWED+=')$'
+          # 白名单**单一来源**：tools/sync-whitelist-regex.sh（内容与 SYNC.md 第二节必须一致）。
+          # 抽出来的原因：upstream-sync.yml 的干跑合并也要用同一份清单；
+          # 原来内联在此处 ⇒ 第二处使用就会产生第二份副本（本仓明确反对的漂移面）。
+          ALLOWED="$(bash tools/sync-whitelist-regex.sh)"
           echo "当前白名单正则：$ALLOWED"
           changed="$(git diff --name-only --diff-filter=MDR upstream/main...HEAD)"
           echo "改动的既有文件："
