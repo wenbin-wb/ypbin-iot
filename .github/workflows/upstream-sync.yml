@@ -3,6 +3,11 @@ name: Upstream Sync Check
 # 这个工作流只做一件事：**干跑**一次 `merge upstream/main`，把「与 admin 基座的漂移」
 # 从「将来某天合并爆炸」变成「当次就报」。它不推送、不改动任何东西。
 #
+# 判据（2026-10-09 更正）：**冲突必须 ⊆ 同步白名单**，而不是「必须无冲突」——
+# 白名单里的文件本仓必然有改动 ⇒ 它们与 upstream 冲突是设计使然；旧判据因此
+# 在 main 上**恒红**（b70cdd14 起每个提交都红），只会被当噪音忽略。
+# 白名单单一来源：tools/sync-whitelist-regex.sh（与 sync-whitelist.yml 共用）。
+#
 # 为什么放在单独文件而不是改 admin 的 ci.yml：**零冲突面**。
 # 本仓是 admin 的 fork（基座只更新基础功能），改 admin 的文件越多，`merge upstream/main` 越容易冲突。
 on:
@@ -34,15 +39,49 @@ jobs:
           echo "### 与 admin 基座的差距：$BEHIND 个提交" >> "$GITHUB_STEP_SUMMARY"
           git log --oneline HEAD..upstream/main | head -20 >> "$GITHUB_STEP_SUMMARY" || true
 
-      - name: 干跑合并（必须无冲突）
+      - name: 干跑合并（冲突必须 ⊆ 同步白名单）
         run: |
+          set -uo pipefail
           git config user.email "ci@ypbin.local"
           git config user.name "ypbin-iot ci"
+          # 白名单**单一来源**（与 sync-whitelist.yml 同一份，见 tools/sync-whitelist-regex.sh）
+          ALLOWED="$(bash tools/sync-whitelist-regex.sh)"
+          # 空正则会让 grep -Eq "" 匹配一切 ⇒ 全部冲突被误判为"在册"。显式判死。
+          if [ -z "$ALLOWED" ]; then
+            echo "::error::同步白名单正则为空（tools/sync-whitelist-regex.sh 缺失或执行失败）——拒绝以空白名单放行"
+            exit 1
+          fi
           if git merge --no-commit --no-ff upstream/main; then
             echo "与 upstream/main 可无冲突合并"
             git merge --abort || true
-          else
-            echo "::error::与 upstream/main 合并冲突：该同步了（见 SYNC.md 的冲突处置清单）"
+            exit 0
+          fi
+          conflicted="$(git diff --name-only --diff-filter=U)"
+          if [ -z "$conflicted" ]; then
+            # 合并失败但没有任何冲突文件 ⇒ 非冲突原因（git 自身报错等）。旧写法会打印
+            # "冲突全部落在白名单内（预期）"并放行，属误导性通过，这里判红待人工看日志。
+            echo "::error::干跑合并失败，但没有任何冲突文件（非冲突原因）——请人工看本步日志"
             git merge --abort || true
             exit 1
           fi
+          echo "冲突文件："
+          echo "$conflicted"
+          bad=0
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            if ! printf '%s' "$file" | grep -Eq "$ALLOWED"; then
+              echo "::error file=$file::$file 与 upstream/main 冲突且**不在同步白名单内**：分歧面已扩大到白名单之外，需人工处置（先读 SYNC.md 第二节）"
+              bad=1
+            fi
+          done <<< "$conflicted"
+          git merge --abort || true
+          [ "$bad" -eq 0 ] || exit 1
+          # 白名单内冲突是**设计使然**（这些文件本仓必然改动）⇒ 不再判红，但必须在 summary 里持续可见
+          {
+            echo "### ⚠️ 与 upstream/main 有冲突（全部落在白名单内）"
+            echo "本仓对这些文件**必然**有改动，冲突属预期。请按 SYNC.md 第二节「冲突处置配方」安排一次同步："
+            echo '```'
+            echo "$conflicted"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::warning::与 upstream/main 的冲突全部落在白名单内（预期）；请按 SYNC.md 的配方安排同步"

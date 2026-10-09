@@ -87,7 +87,7 @@ services:
       #   （前者的 `-a` 仍进 argv；后者要求把口令再注入容器 env，换来的是可替代的探活强度）。
       # 折衷（明确记账）：口令正确性不在本探针校验，改由应用侧（auth/system 连 Redis 失败即报错、
       #   登录链路 500）承担——本仓 Redis 侧**没有** IoTDB 那样的专用指标，如实登记为较弱口径。
-      test: ["CMD-SHELL", "timeout 3 nc -z 127.0.0.1 6379"]
+      test: ["CMD-SHELL", "timeout 3 nc -z 127.0.0.1 6379 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -479,7 +479,9 @@ services:
     environment:
       PARAMS: "--spring.datasource.url=jdbc:mysql://mysql:3306/xxl_job?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true --spring.datasource.username=root --spring.datasource.password=${MYSQL_ROOT_PASSWORD:?请在 .env 设置 MYSQL_ROOT_PASSWORD} --xxl.job.accessToken= --server.port=8080"
     ports:
-      - "${INTERNAL_BIND_ADDR:-0.0.0.0}:18085:8080"
+      # XXL-JOB 控制台默认只绑回环（调度中心属内部运维面，默认不对外网暴露；
+      # 需要外部访问时显式设 INTERNAL_BIND_ADDR=0.0.0.0）
+      - "${INTERNAL_BIND_ADDR:-127.0.0.1}:18085:8080"
     depends_on:
       mysql:
         condition: service_healthy
