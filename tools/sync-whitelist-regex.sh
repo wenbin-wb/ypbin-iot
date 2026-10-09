@@ -47,10 +47,10 @@ ALLOWED+='deploy/nacos/ypbin-common\.yaml|'
 # ⚠️ 2026-10-08 更正：当时"nacos 3.x 服务端脚本化读写 API 已移除（全 404）"的理由**不成立**——
 # v1 全 404，但 v3 admin API 读写均可用（工具见 tools/set-nacos-flag.py）。是否回退到 Nacos 待评估。
 ALLOWED+='ypbin-gateway/src/main/resources/application\.yml|'
-# 第 21/22 项（2026-10-01 加）：Key 表与平台告警体系共用 007/迁移文件（IoT 建表/菜单），
-# 既有文件内追加段落（无法用新 SQL 文件：等价门禁按文件次序比对）。
-ALLOWED+='deploy/sql/007-iot-data\.sql|'
-ALLOWED+='deploy/sql/migration/2026-10-05-iot-platform-alert-schema\.sql|'
+# 2026-10-09 移除 2 个**死条目**（`deploy/sql/007-iot-data.sql` 与
+# `deploy/sql/migration/2026-10-05-iot-platform-alert-schema.sql`）：这两份文件在
+# upstream/main **不存在**（git ls-tree 922d0d50 deploy/sql/ 只有 001–005 + 2026-09-17 迁移），
+# 而两个门禁的判据都是「与 upstream 的差异」⇒ 它们永远不会被命中，留着只会让白名单计数虚高。
 ALLOWED+=')$'
 
 printf '%s' "$ALLOWED"

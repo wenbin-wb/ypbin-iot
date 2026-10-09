@@ -46,14 +46,26 @@ jobs:
           git config user.name "ypbin-iot ci"
           # 白名单**单一来源**（与 sync-whitelist.yml 同一份，见 tools/sync-whitelist-regex.sh）
           ALLOWED="$(bash tools/sync-whitelist-regex.sh)"
+          # 空正则会让 grep -Eq "" 匹配一切 ⇒ 全部冲突被误判为"在册"。显式判死。
+          if [ -z "$ALLOWED" ]; then
+            echo "::error::同步白名单正则为空（tools/sync-whitelist-regex.sh 缺失或执行失败）——拒绝以空白名单放行"
+            exit 1
+          fi
           if git merge --no-commit --no-ff upstream/main; then
             echo "与 upstream/main 可无冲突合并"
             git merge --abort || true
             exit 0
           fi
           conflicted="$(git diff --name-only --diff-filter=U)"
+          if [ -z "$conflicted" ]; then
+            # 合并失败但没有任何冲突文件 ⇒ 非冲突原因（git 自身报错等）。旧写法会打印
+            # "冲突全部落在白名单内（预期）"并放行，属误导性通过，这里判红待人工看日志。
+            echo "::error::干跑合并失败，但没有任何冲突文件（非冲突原因）——请人工看本步日志"
+            git merge --abort || true
+            exit 1
+          fi
           echo "冲突文件："
-          echo "${conflicted:-（无）}"
+          echo "$conflicted"
           bad=0
           while IFS= read -r file; do
             [ -z "$file" ] && continue

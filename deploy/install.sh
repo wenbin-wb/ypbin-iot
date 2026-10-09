@@ -1355,24 +1355,33 @@ if [ -n "$NACOS_TOKEN" ]; then
   else
     NACOS_DIR="$ROOT/ypbin-admin/deploy/nacos"
   fi
-  NACOS_CFG_COUNT="$(ls "$NACOS_DIR"/*.yaml 2>/dev/null | wc -l)"
+  # ⚠️ 计数不能用 `ls … | wc -l`：glob 无匹配时 `ls` 退出 2，在 `set -euo pipefail`（本脚本第 62 行）
+  #    下**赋值行就地中止**（2026-10-09 独立复核实测：只打印 ERR trap 的"执行失败于第 N 行"，
+  #    下面的 die 成了死代码、三条自查指引一次都不会显示）。改用 nullglob 数组，计数与遍历同源。
+  shopt -s nullglob
+  NACOS_CFG_FILES=("$NACOS_DIR"/*.yaml)
+  shopt -u nullglob
+  NACOS_CFG_COUNT="${#NACOS_CFG_FILES[@]}"
   # 本仓红线「禁静默降级」：Nacos 可达却一份模板都没有 ⇒ 业务服务启动时必然拿不到配置。
-  # ⚠️ 本仓对上游此段的**唯一偏离**：upstream 在这里只 warn 后继续，本仓选择 `die`
-  #    （「配置没导入」不是可以继续的状态；回退目录名也因此不必再猜，见上面的 SCRIPT_DIR 解析）。
-  if [ "${NACOS_CFG_COUNT:-0}" -eq 0 ]; then
+  # ⚠️ 这是本仓对上游此段的**偏离之一**（upstream 只 warn 后继续）。
+  if [ "$NACOS_CFG_COUNT" -eq 0 ]; then
     die "在 $NACOS_DIR 下找不到任何 *.yaml 配置模板 —— 配置未导入则业务服务启动时拿不到配置，这里直接中止。
      自查：① 检出是否完整（deploy/nacos/ 是否为空）？② 是否在 ypbin-admin / ypbin-iot 之外的目录名里运行？
      后者请用 YPBIN_ROOT（或 --root）指向包含 deploy/nacos 的仓库根。"
   fi
+  # 上游改成"自动枚举存在的模板"后，**发现不了「本该存在却缺失」的模板**（例如 deploy/nacos 里
+  # 少了一份 ypbin-iot.yaml，循环会照常把其余 6 份导入并逐份打印"已导入"，故障要到该服务启动时
+  # 才以"拿不到配置"暴露）——这正是本仓点名的「静默降级」形态。故按期望清单逐份出声（本仓红线）。
+  NACOS_EXPECTED_CFG="ypbin-common ypbin-gateway ypbin-auth ypbin-system ypbin-ai ypbin-iot ypbin-access"
+  for expected in $NACOS_EXPECTED_CFG; do
+    if [ ! -f "$NACOS_DIR/$expected.yaml" ]; then
+      warn "$expected.yaml 在 $NACOS_DIR 下不存在 ⇒ **该服务的配置不会被导入**（服务启动时可能拿不到配置）"
+    fi
+  done
   info "导入 Nacos 配置中心（目录 $NACOS_DIR，$NACOS_CFG_COUNT 份配置）"
   declare -a NACOS_TMP_FILES=()
   trap 'rm -f "${NACOS_TMP_FILES[@]:-}" 2>/dev/null || true' EXIT
-  for cfg_file in "$NACOS_DIR"/*.yaml; do
-    if [ ! -f "$cfg_file" ]; then
-      # 模板缺失不再静默：明确给出期望路径，避免「重跑 install.sh 就能生效」在 fork 上变成假承诺
-      warn "未找到 Nacos 配置模板（期望 $NACOS_DIR/*.yaml），跳过配置导入"
-      continue
-    fi
+  for cfg_file in "${NACOS_CFG_FILES[@]}"; do
     cfg="$(basename "$cfg_file" .yaml)"
     # 占位符替换：仓库 nacos yaml 不提交真实密码/凭证，导入前用 .env 实际值填充。
     # 所有替换以 /^[[:space:]]*#/! 限定「非注释行」——注释里的占位符保持 ${...} 原样，
@@ -1452,11 +1461,22 @@ if [ "$NO_DOCKER" != "1" ]; then
   # 随机生成（不复用 MYSQL_ROOT_PASSWORD），明文只写一次 .env（600）并在部署日志提示；
   # SQL 模板里的 ${XXL_JOB_ADMIN_PASSWORD_HASH} 占位符由 import_xxl_job_sql 导入前替换（仅非注释行）。
   if [ -z "${XXL_JOB_ADMIN_PASSWORD:-}" ]; then
-    # 兼容旧 .env/环境变量缺失：兜底生成并追加到 .env，避免升级部署后丢口令
+    # 兼容旧 .env/环境变量缺失：兜底生成并写入 .env，避免升级部署后丢口令。
+    # ⚠️ 两个坑（2026-10-09 独立复核指出，均为上游原样，这里补掉）：
+    #   ① 只判"键是否存在"不够——键在但**值为空**时，新口令根本落不了 .env，
+    #      而下面照样用新口令算哈希 ⇒ 库内哈希对应任何地方都拿不到的明文（不可恢复）；
+    #   ② 原写法末尾 `|| true` 吞掉写入失败 ⇒ 同上。改为就地改写/追加，失败必须出声（禁静默降级）。
     XXL_JOB_ADMIN_PASSWORD="$(rand_hex 16)"
     if [ -f "$ENV_FILE" ]; then
-      # 幂等：已有键则不重复追加
-      grep -q "^XXL_JOB_ADMIN_PASSWORD=" "$ENV_FILE" || printf 'XXL_JOB_ADMIN_PASSWORD=%s\n' "$XXL_JOB_ADMIN_PASSWORD" >> "$ENV_FILE" || true
+      if grep -q '^XXL_JOB_ADMIN_PASSWORD=' "$ENV_FILE"; then
+        # 就地改写（值仅为 hex，无 sed 元字符风险）
+        sed -i "s|^XXL_JOB_ADMIN_PASSWORD=.*|XXL_JOB_ADMIN_PASSWORD=$XXL_JOB_ADMIN_PASSWORD|" "$ENV_FILE" \
+          || warn "写入 $ENV_FILE 的 XXL_JOB_ADMIN_PASSWORD 失败：库内哈希将无从对应明文，请手工把该口令写进 $ENV_FILE"
+      else
+        printf 'XXL_JOB_ADMIN_PASSWORD=%s\n' "$XXL_JOB_ADMIN_PASSWORD" >> "$ENV_FILE" \
+          || warn "追加 $ENV_FILE 的 XXL_JOB_ADMIN_PASSWORD 失败：库内哈希将无从对应明文，请手工把该口令写进 $ENV_FILE"
+      fi
+      chmod 600 "$ENV_FILE" 2>/dev/null || true
     fi
     warn ">>> 已生成 XXL-Job 初始口令并写入 $ENV_FILE 的 XXL_JOB_ADMIN_PASSWORD（600，不回显；查看：grep ^XXL_JOB_ADMIN_PASSWORD $ENV_FILE）"
   fi
