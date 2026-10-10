@@ -22,6 +22,7 @@ import cn.ypbin.admin.iot.mapper.TenantLedgerMapper;
 import cn.ypbin.admin.iot.model.resp.TenantLedgerResp;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.tenant.core.TenantContext;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.LocalDateTime;
 import java.util.List;
 import org.junit.jupiter.api.DisplayName;
@@ -42,7 +43,8 @@ class TenantLedgerServiceTest {
     private static final Long TENANT = 11L;
 
     private final TenantLedgerMapper ledgerMapper = mock(TenantLedgerMapper.class);
-    private final TenantLedgerService service = new TenantLedgerService(ledgerMapper);
+    private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+    private final TenantLedgerService service = new TenantLedgerService(ledgerMapper, meterRegistry);
 
     @Test
     @DisplayName("★ 配置版本号推进：台账有该租户才推进；无该租户/无租户上下文一律 no-op（不得 insert）")
@@ -115,5 +117,18 @@ class TenantLedgerServiceTest {
         row.setConfigEpoch(configEpoch);
         row.setUpdateTime(LocalDateTime.now());
         return row;
+    }
+
+    @Test
+    @DisplayName("★ R8-8 方案 B：台账写失败**不得**向上抛（否则会连带回滚设备/点位业务写入），但必须计数")
+    void bumpFailureMustNotPropagateButMustBeCounted() {
+        when(ledgerMapper.bumpConfigEpoch(any())).thenThrow(
+            new org.springframework.dao.DataAccessResourceFailureException("ledger table unavailable"));
+
+        boolean bumped = service.bumpConfigEpoch(7L);
+
+        assertThat(bumped).as("失败按「未推进」返回 false，绝不向上抛（可用性优先）").isFalse();
+        assertThat(meterRegistry.get("iot.ledger.bump.failure").counter().count())
+            .as("失败必须计数（版本号不推进 ⇒ 接入侧只能等周期安全网，必须可告警）").isEqualTo(1.0d);
     }
 }

@@ -17,6 +17,8 @@ import cn.ypbin.starter.core.exception.GlobalErrorCode;
 import cn.ypbin.starter.core.util.LogSanitizer;
 import cn.ypbin.starter.tenant.core.TenantContext;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.util.ArrayList;
 import java.util.List;
 import org.slf4j.Logger;
@@ -48,8 +50,19 @@ public class TenantLedgerService {
 
     private final TenantLedgerMapper ledgerMapper;
 
-    public TenantLedgerService(TenantLedgerMapper ledgerMapper) {
+    /**
+     * 台账版本号推进失败的次数（R8-8 方案 B：**失败不回滚业务写入**，但必须计数 + ERROR 以便告警）。
+     *
+     * <p>为什么必须可观测：失败时版本号不推进 ⇒ 接入侧收不到变更信号，只能等周期安全网
+     * （默认 5 分钟/租户轮转）收敛。这条指标增长就是「变更信号正在丢」的直接证据。</p>
+     */
+    private final Counter bumpFailureCounter;
+
+    public TenantLedgerService(TenantLedgerMapper ledgerMapper, MeterRegistry meterRegistry) {
         this.ledgerMapper = ledgerMapper;
+        this.bumpFailureCounter = Counter.builder("iot.ledger.bump.failure")
+            .description("台账版本号推进失败次数（失败不回滚业务写入，靠周期安全网兜底）")
+            .register(meterRegistry);
     }
 
     /**
@@ -150,7 +163,21 @@ public class TenantLedgerService {
         if (tenantId == null) {
             return false;
         }
-        int rows = ledgerMapper.bumpConfigEpoch(tenantId);
+        int rows;
+        try {
+            rows = ledgerMapper.bumpConfigEpoch(tenantId);
+        } catch (RuntimeException ex) {
+            // R8-8 方案 B（用户 2026-10-09 拍板：**可用性优先**）：
+            // 台账表写失败（表锁/DDL 窗口/连接池耗尽）**不得**连带回滚设备/点位的业务写入——
+            // 版本号只是「信号」，不是事实源；而设备写入失败是用户可见故障。
+            // 代价与兜底：版本号未推进 ⇒ 接入侧要等周期安全网（默认 5 分钟/租户轮转）才收敛；
+            // 因此这里必须计数 + ERROR 带完整堆栈（禁静默降级），让「信号正在丢」可告警。
+            // ⚠️ 边界：若故障是连接级（事务本身已不可用），业务写入仍会失败——这不是 catch 能消除的。
+            bumpFailureCounter.increment();
+            log.error("[iot] 台账版本号推进失败（**不回滚业务写入**，接入侧由周期安全网兜底收敛）：tenantId={}",
+                LogSanitizer.sanitize(tenantId), ex);
+            return false;
+        }
         if (rows == 0) {
             log.debug("[iot] 台账无该租户，配置版本号未推进（接入侧不会收到本次变更信号）：tenantId={}",
                 LogSanitizer.sanitize(tenantId));
@@ -168,7 +195,12 @@ public class TenantLedgerService {
      *
      * @return 是否真的推进了版本号
      */
+    @Transactional(rollbackFor = Exception.class)
     public boolean bumpConfigEpochOfCurrentTenant() {
+        // 为什么本方法也要标 @Transactional：它内部是**自调用** bumpConfigEpoch（同一 Bean，不走代理），
+        // 因此 bumpConfigEpoch 上的 @Transactional 在当前调用链里并不生效。标在这里后：
+        //   · 被外层 @Transactional 调用时 ⇒ 加入同一事务（行为不变，业务回滚仍会连带回滚版本号）；
+        //   · 从非事务上下文调用时 ⇒ 自己开一个事务（不再退化成「每条语句各自自动提交」）。
         return bumpConfigEpoch(TenantContext.getTenantId().orElse(null));
     }
 
