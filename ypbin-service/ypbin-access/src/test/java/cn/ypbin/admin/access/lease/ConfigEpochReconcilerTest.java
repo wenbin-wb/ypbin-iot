@@ -61,6 +61,9 @@ class ConfigEpochReconcilerTest {
     /** 本节点标识（epoch 对账的过滤键）。 */
     private static final String NODE_ID = "access-test-node";
 
+    /** 对账时间预算：本类多数用例不受预算影响（linkManager 是内存假实现，耗时 ~0）。 */
+    private static final long RECONCILE_BUDGET_MS = 15_000L;
+
     private ILeaseClient client;
     private RecordingLinkManager linkManager;
     private SimpleMeterRegistry meterRegistry;
@@ -74,7 +77,7 @@ class ConfigEpochReconcilerTest {
         linkManager = new RecordingLinkManager();
         meterRegistry = new SimpleMeterRegistry();
         reconciler = new ConfigEpochReconciler(client, NODE_ID, linkManager, meterRegistry, clock,
-            REFRESH_INTERVAL_MS);
+            REFRESH_INTERVAL_MS, RECONCILE_BUDGET_MS);
     }
 
     @Test
@@ -250,7 +253,7 @@ class ConfigEpochReconcilerTest {
     @DisplayName("安全网可关闭（间隔 <= 0）：版本号恒不变时不再强制对账")
     void safetyNetMustBeSwitchable() {
         ConfigEpochReconciler disabled = new ConfigEpochReconciler(client, NODE_ID, linkManager, meterRegistry,
-            clock, 0L);
+            clock, 0L, RECONCILE_BUDGET_MS);
         when(client.batchEpoch(anyString())).thenReturn(R.ok(batch(item(TENANT_A, 0L))));
 
         disabled.reconcile(Set.of(TENANT_A));
@@ -347,6 +350,9 @@ class ConfigEpochReconcilerTest {
         private final List<Long> reconciled = new ArrayList<>();
         private boolean result = true;
 
+        /** 每次 reconcile 的模拟耗时（毫秒）：预算用例用它把预算撑爆。 */
+        private long reconcileSleepMs;
+
         @Override
         public void startCollecting(Long tenantId) {
             // 本用例不涉及
@@ -364,6 +370,14 @@ class ConfigEpochReconcilerTest {
 
         @Override
         public boolean reconcile(Long tenantId) {
+            if (reconcileSleepMs > 0) {
+                try {
+                    Thread.sleep(reconcileSleepMs);
+                } catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("测试线程被中断", ex);
+                }
+            }
             reconciled.add(tenantId);
             return result;
         }
@@ -387,5 +401,47 @@ class ConfigEpochReconcilerTest {
         reconciler.reconcile(Set.of(TENANT_A));
 
         verify(client, times(1)).batchEpoch(NODE_ID);
+    }
+
+    @Test
+    @DisplayName("★ R8-2 时间预算：预算用尽后本轮剩余候选被推迟（不丢），下一轮补上；并计数")
+    void reconcileMustRespectTimeBudgetAndDeferRemainingTenants() {
+        // 两个持有租户都有版本变化 ⇒ 都需要远端取数；每次取数 40ms，预算 20ms ⇒ 第二轮候选必被推迟
+        ConfigEpochReconciler budgeted = new ConfigEpochReconciler(client, NODE_ID, linkManager, meterRegistry,
+            clock, REFRESH_INTERVAL_MS, 20L);
+        linkManager.reconcileSleepMs = 40L;
+        when(client.batchEpoch(anyString())).thenReturn(
+            R.ok(batch(item(TENANT_A, 1L), item(TENANT_B, 1L))));
+
+        budgeted.reconcile(Set.of(TENANT_A, TENANT_B));
+
+        assertThat(linkManager.reconciled).as("预算 20ms、单次 40ms ⇒ 本轮只能做第一个候选")
+            .containsExactly(TENANT_A);
+        assertThat(meterRegistry.get("iot.access.config.reconcile.deferred").counter().count())
+            .as("被推迟的租户必须计数（与 reconcile.duration 一起看才知道预算是否该调大）")
+            .isEqualTo(1.0d);
+        assertThat(meterRegistry.get("iot.access.config.reconcile.forced").counter().count())
+            .as("预算用尽时不得再跑周期安全网（它会立刻再强制一个租户，把预算白设）").isZero();
+
+        // 下一轮：TENANT_A 已应用（版本号未变 ⇒ 不占预算），TENANT_B 补上 ⇒ 证明「推迟不是丢」
+        linkManager.reconcileSleepMs = 0L;
+        budgeted.reconcile(Set.of(TENANT_A, TENANT_B));
+        assertThat(linkManager.reconciled).as("推迟的租户在下一轮被补上（不丢数据）")
+            .containsExactly(TENANT_A, TENANT_B);
+    }
+
+    @Test
+    @DisplayName("预算 <= 0 表示不限制：本轮全部候选都做（保留旧行为，便于按需关闭）")
+    void zeroBudgetMustDisableTheLimit() {
+        ConfigEpochReconciler unlimited = new ConfigEpochReconciler(client, NODE_ID, linkManager, meterRegistry,
+            clock, REFRESH_INTERVAL_MS, 0L);
+        linkManager.reconcileSleepMs = 40L;
+        when(client.batchEpoch(anyString())).thenReturn(
+            R.ok(batch(item(TENANT_A, 1L), item(TENANT_B, 1L))));
+
+        unlimited.reconcile(Set.of(TENANT_A, TENANT_B));
+
+        assertThat(linkManager.reconciled).containsExactly(TENANT_A, TENANT_B);
+        assertThat(meterRegistry.get("iot.access.config.reconcile.deferred").counter().count()).isZero();
     }
 }

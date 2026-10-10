@@ -62,6 +62,14 @@ class MetricsRegistryGateTest {
     private static final Pattern FULL_METRIC_LITERAL = Pattern.compile(
         "\"(iot\\.access(?:\\.[a-z0-9_]+){2,})\"");
 
+    /** 前缀常量声明：{@code static final String METRIC_PREFIX = "iot.access.xxx.";}。 */
+    private static final Pattern PREFIX_CONSTANT = Pattern.compile(
+        "String\\s+([A-Z][A-Z0-9_]*)\\s*=\\s*\"(iot\\.access\\.[a-z0-9._-]+\\.)\"");
+
+    /** 前缀拼接：{@code METRIC_PREFIX + "reconcile.deferred"}。 */
+    private static final Pattern PREFIX_CONCAT = Pattern.compile(
+        "([A-Z][A-Z0-9_]*)\\s*\\+\\s*\"([a-z][a-z0-9._-]*)\"");
+
     @Test
     @DisplayName("★ 清单里的每个指标名都必须能在其注册文件里找到（防文档写了代码删了）")
     void everyListedMetricMustExistInItsSourceFile() throws IOException {
@@ -93,9 +101,25 @@ class MetricsRegistryGateTest {
         Set<String> registered = new LinkedHashSet<>();
         try (Stream<Path> files = Files.walk(ACCESS_MAIN)) {
             for (Path file : files.filter(path -> path.toString().endsWith(".java")).toList()) {
-                Matcher matcher = FULL_METRIC_LITERAL.matcher(Files.readString(file, StandardCharsets.UTF_8));
-                while (matcher.find()) {
-                    registered.add(matcher.group(1));
+                String code = Files.readString(file, StandardCharsets.UTF_8);
+                // 风格一：完整字面量（meterRegistry.counter("iot.access.spec.empty")）
+                Matcher full = FULL_METRIC_LITERAL.matcher(code);
+                while (full.find()) {
+                    registered.add(full.group(1));
+                }
+                // 风格二：前缀常量 + 后缀片段（METRIC_PREFIX + "reconcile.deferred"）——仓内主流写法，
+                // 只看完整字面量会**漏掉新指标**（本门禁初版就漏过 reconcile.deferred）
+                Map<String, String> prefixes = new LinkedHashMap<>();
+                Matcher prefix = PREFIX_CONSTANT.matcher(code);
+                while (prefix.find()) {
+                    prefixes.put(prefix.group(1), prefix.group(2));
+                }
+                Matcher concat = PREFIX_CONCAT.matcher(code);
+                while (concat.find()) {
+                    String base = prefixes.get(concat.group(1));
+                    if (base != null) {
+                        registered.add(base + concat.group(2));
+                    }
                 }
             }
         }
