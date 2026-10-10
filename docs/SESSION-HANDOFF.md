@@ -1,7 +1,7 @@
 # SESSION-HANDOFF · ypbin-iot 断点交接（2026-10-10 更新）
 
 > 用途：新会话读本文 + `docs/TASK-BOARD.md` 即可无缝接续，无需翻历史对话。
-> 更新：2026-10-10（R8 技术债：立项 → R8-7 → R8-4 → R8-9 → R8-5+R8-6 → **R8-2 方案 A+E**；另含 site 依赖策略与配置参考页修复）。
+> 更新：2026-10-10（R8 技术债 8 条**全部收口**：立项 → R8-7 → R8-4 → R8-9 → R8-5+R8-6 → R8-2 方案 A+E → R8-8 方案 B；另含 site 依赖策略与配置参考页修复）。
 
 ## 0. 新会话第一句话（可直接粘）
 
@@ -69,6 +69,7 @@
 - ✅ **#18 R8-9 指标登记 + tick/对账耗时（2026-10-09，PR #194 → main `48afaa1b`）**：新增 `docs/METRICS.md`（`ypbin-access` **33 条**指标逐条登记：口径/建议关注/注册文件）；新增 **3 条 `Timer`** —— `iot.access.lease.tick.duration`、`iot.access.config.reconcile.duration`、`iot.access.spec.load.duration`（把 R8-2 的「单次最坏 6s」假设变成实测分布）；**双向门禁** `MetricsRegistryGateTest`（清单→代码按全名或后缀匹配、代码→清单要求完整字面量都登记，两侧带非空自检）。access **119/0/0/0**，**变异 3/3 转红**。
 - ✅ **#19 R8-5 对称清理 + R8-6 框架契约（2026-10-09，PR #195 → main `9a568c19`；框架仓 PR #21 → `584b394`）**：本仓 `fence()` 补 `planner.forget`（与下架路径逐条对称，access **119/0/0/0**，变异 1/1 转红）；**框架仓** `ypbin-iot-starter` 新增契约测试 `IotLifecycleTest#everyAddMustCloseOldSessionAndRebindNewInstance`（LIFE-13）——「规格变化只重发 ADD」与「REMOVE→ADD」两条路径都必须**先关旧会话、再产生新实例**，并写入 `CONTRACT.md` §四 行为承诺第 7 条 + `CHANGELOG.md`（框架侧 **148/0/0/0** 含 JaCoCo 覆盖率门禁，变异 2/2 转红）。**这条契约正是 R8-5/R8-6 残余风险的唯一支点**（本仓订阅对账用会话实例同一性判断是否重新订阅）。
 - 🔄 **#20/#21 R8-2（2026-10-09，PR #197 → `b284b30f`、PR #198 → `71484d37`）**：**方案 A 对账时间预算**（`ypbin.access.reconcile-budget-ms` 默认 15000 = TTL 一半；超预算的候选**推迟到下一 tick**、不丢；预算用尽时跳过周期安全网；新指标 `iot.access.config.reconcile.deferred`）+ **方案 E 拆调度线程池**（`spring.task.scheduling.pool.size: 2`，1s egress 上报不再排在 10s 长 tick 之后，含配置门禁 `AccessSchedulingConfigTest`）。access **122/0/0/0**，变异 1/1 + 1/1 转红。**R8-2 剩余 B/C/D**：B（有界并发）需处理并发安全；**C/D 以覆盖换成本，不建议做**。
+- ✅ **#22 R8-8（2026-10-10，PR #200 → `07bbf4bf`）**：用户拍板**可用性优先** —— 台账表写失败**不再回滚设备/点位业务写入**（`TenantLedgerService#bumpConfigEpoch` 捕获 ⇒ 返回 false + ERROR + 指标 `iot.ledger.bump.failure`），靠周期安全网兜底；**锁类失败（1205/1213）改为重新抛出**（InnoDB 死锁回滚整个事务，吞掉会「外层提交谎报成功、写入已丢」）；`bumpConfigEpochOfCurrentTenant` 补 `@Transactional` 修自调用语义。决策/兜底/边界见 `deploy/PROD-OPS-NOTES.md` **§11**。**R6 独立复核（2 个外委子代理）无阻断项**，据建议整改 8 处（含 IT 判别力、RENAME 崩溃自愈、收敛口径修正）。单测 **894/0/0/0**、真库 IT **6/0/0/0**、变异 3/3 转红。
 
 ## 3. 开放 API 第 1/2 批速览
 
@@ -114,8 +115,8 @@
    累计 ~1,716 轮无自发 FIRING）。**保留的运维动作（非待办）**：首次自然 FIRING 出现时人工确认一次投递与观感。
 4. **#8 二批**：触发条件仍未满足（`docs/MESSAGE-TRACE-PHASE2.md` §1）⇒ 维持只立项不实施；**#9** 已搁置。
 5. 若要在 dev 上做"故障注入式验收"或"更长观察窗口"，另立验收批（不要把它当成 #10 的默认尾巴）。
-6. **R8 技术债进度（2026-10-10）**：已立项 **#15**；已完成 **R8-7**（#16）、**R8-4**（#17）、**R8-9 A/B**（#18）、**R8-5 + R8-6**（#19 + 框架仓 #21）、**R8-2 方案 A + E**（#20/#21）。
-   **仅剩 R8-8**（bump 与业务写入同事务）：**需先拍板「台账故障时宁可少采（不一致）还是宁可写不进去（不可用）」**，之后才谈守卫与真库用例；R8-2 的 B/C/D 已按「不值得」登记（见 `docs/ACCESS-TECHDEBT-R8.md` §2.1）。
+6. **R8 技术债（2026-10-10）：8 条全部收口** —— #15 立项、#16 R8-7、#17 R8-4、#18 R8-9 A/B、#19 R8-5+R8-6（+ 框架仓 #21）、#20/#21 R8-2 A+E、#22 R8-8 B。**已按「不值得/有覆盖损失」登记不做的**：R8-2 的 B/C/D。
+   **后续可选方向**（需你选）：① 让 access/台账指标**看得见**（接 `PlatformHealthRule` 自告警，或做只读运维页）；② `TASK-BOARD` §3 的 P2 增强项（D 批）；③ `#8 二批`（触发条件未满足）；④ `ypbin-site#30`（vue-tsc 支持 TS 7 后解除 typescript 主版本 isolate）。
 7. 其他未开工方向（用户已提及、未选定）：**D**（`TASK-BOARD.md` §3 的 P2 增强项）；**访问控制技术债之外的**技术债批次。
 
 ## 6. 遗留风险（如实）
