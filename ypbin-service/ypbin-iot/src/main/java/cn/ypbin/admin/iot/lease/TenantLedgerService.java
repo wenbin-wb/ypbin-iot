@@ -17,11 +17,14 @@ import cn.ypbin.starter.core.exception.GlobalErrorCode;
 import cn.ypbin.starter.core.util.LogSanitizer;
 import cn.ypbin.starter.tenant.core.TenantContext;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.util.ArrayList;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -48,8 +51,19 @@ public class TenantLedgerService {
 
     private final TenantLedgerMapper ledgerMapper;
 
-    public TenantLedgerService(TenantLedgerMapper ledgerMapper) {
+    /**
+     * 台账版本号推进失败的次数（R8-8 方案 B：**失败不回滚业务写入**，但必须计数 + ERROR 以便告警）。
+     *
+     * <p>为什么必须可观测：失败时版本号不推进 ⇒ 接入侧收不到变更信号，只能等周期安全网
+     * （默认 5 分钟/租户轮转）收敛。这条指标增长就是「变更信号正在丢」的直接证据。</p>
+     */
+    private final Counter bumpFailureCounter;
+
+    public TenantLedgerService(TenantLedgerMapper ledgerMapper, MeterRegistry meterRegistry) {
         this.ledgerMapper = ledgerMapper;
+        this.bumpFailureCounter = Counter.builder("iot.ledger.bump.failure")
+            .description("台账版本号推进失败次数（失败不回滚业务写入，靠周期安全网兜底）")
+            .register(meterRegistry);
     }
 
     /**
@@ -142,15 +156,43 @@ public class TenantLedgerService {
      * 否则会把「可分配来源」从配置兜底静默切成台账。此时接入侧收不到信号，属**已登记的已知限制**
      * （见 docs/IOT-ROADMAP.md），调用方只需 DEBUG 记录，不得吞掉配置变更本身。</p>
      *
+     * <p>⚠️ 事务注解说明：本方法目前只被同类方法 {@link #bumpConfigEpochOfCurrentTenant()} **自调用**，
+     * 自调用不走代理 ⇒ 这里的 {@code @Transactional} 在当前调用链上**不生效**；事务语义由包装方法承担
+     * （见其 javadoc）。保留注解是为了「将来若有其它 Bean 直接调用本方法」时语义仍然正确。</p>
+     *
      * @param tenantId 租户 ID；为 {@code null} 时直接返回 false（无租户上下文，例如未开租户插件）
-     * @return 是否真的推进了版本号（台账无该租户/租户为 null 时返回 {@code false}）
+     * @return 是否真的推进了版本号（台账无该租户/租户为 null/写失败时返回 {@code false}）
+     * @throws PessimisticLockingFailureException 锁类失败（整事务已被 DB 回滚，必须上抛）
      */
     @Transactional(rollbackFor = Exception.class)
     public boolean bumpConfigEpoch(Long tenantId) {
         if (tenantId == null) {
             return false;
         }
-        int rows = ledgerMapper.bumpConfigEpoch(tenantId);
+        int rows;
+        try {
+            rows = ledgerMapper.bumpConfigEpoch(tenantId);
+        } catch (PessimisticLockingFailureException ex) {
+            // 锁类失败（1205 锁等待超时 / 1213 死锁）**必须重新抛出**：InnoDB 在死锁时回滚的是
+            // **整个事务**（不只是这一条语句）⇒ 若在这里吞掉并返回 false，外层的提交仍会「成功」，
+            // 结果是「接口报成功、写入其实已丢」（复核实测 MySQL 8.4.11 复现该语义）。
+            // 这与方案 B 不冲突：方案 B 要救的是「台账表不可写，但业务写入本身仍能成立」的情形。
+            bumpFailureCounter.increment();
+            log.error("[iot] 台账版本号推进遇到锁类失败（**整事务已被 DB 回滚，故重新抛出**）：tenantId={}",
+                LogSanitizer.sanitize(tenantId), ex);
+            throw ex;
+        } catch (RuntimeException ex) {
+            // R8-8 方案 B（用户 2026-10-09 拍板：**可用性优先**）：
+            // 台账表写失败（表锁/DDL 窗口/连接池耗尽）**不得**连带回滚设备/点位的业务写入——
+            // 版本号只是「信号」，不是事实源；而设备写入失败是用户可见故障。
+            // 代价与兜底：版本号未推进 ⇒ 接入侧要等周期安全网（默认 5 分钟/租户轮转）才收敛；
+            // 因此这里必须计数 + ERROR 带完整堆栈（禁静默降级），让「信号正在丢」可告警。
+            // ⚠️ 边界：若故障是连接级（事务本身已不可用），业务写入仍会失败——这不是 catch 能消除的。
+            bumpFailureCounter.increment();
+            log.error("[iot] 台账版本号推进失败（**不回滚业务写入**，接入侧由周期安全网兜底收敛）：tenantId={}",
+                LogSanitizer.sanitize(tenantId), ex);
+            return false;
+        }
         if (rows == 0) {
             log.debug("[iot] 台账无该租户，配置版本号未推进（接入侧不会收到本次变更信号）：tenantId={}",
                 LogSanitizer.sanitize(tenantId));
@@ -168,7 +210,12 @@ public class TenantLedgerService {
      *
      * @return 是否真的推进了版本号
      */
+    @Transactional(rollbackFor = Exception.class)
     public boolean bumpConfigEpochOfCurrentTenant() {
+        // 为什么本方法也要标 @Transactional：它内部是**自调用** bumpConfigEpoch（同一 Bean，不走代理），
+        // 因此 bumpConfigEpoch 上的 @Transactional 在当前调用链里并不生效。标在这里后：
+        //   · 被外层 @Transactional 调用时 ⇒ 加入同一事务（行为不变，业务回滚仍会连带回滚版本号）；
+        //   · 从非事务上下文调用时 ⇒ 自己开一个事务（不再退化成「每条语句各自自动提交」）。
         return bumpConfigEpoch(TenantContext.getTenantId().orElse(null));
     }
 

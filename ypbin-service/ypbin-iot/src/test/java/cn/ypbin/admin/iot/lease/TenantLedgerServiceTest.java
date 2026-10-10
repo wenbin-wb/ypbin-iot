@@ -21,7 +21,11 @@ import cn.ypbin.admin.iot.entity.TenantLedger;
 import cn.ypbin.admin.iot.mapper.TenantLedgerMapper;
 import cn.ypbin.admin.iot.model.resp.TenantLedgerResp;
 import cn.ypbin.starter.core.exception.BusinessException;
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.dao.DeadlockLoserDataAccessException;
+import org.springframework.transaction.annotation.Transactional;
 import cn.ypbin.starter.tenant.core.TenantContext;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.LocalDateTime;
 import java.util.List;
 import org.junit.jupiter.api.DisplayName;
@@ -42,7 +46,8 @@ class TenantLedgerServiceTest {
     private static final Long TENANT = 11L;
 
     private final TenantLedgerMapper ledgerMapper = mock(TenantLedgerMapper.class);
-    private final TenantLedgerService service = new TenantLedgerService(ledgerMapper);
+    private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+    private final TenantLedgerService service = new TenantLedgerService(ledgerMapper, meterRegistry);
 
     @Test
     @DisplayName("★ 配置版本号推进：台账有该租户才推进；无该租户/无租户上下文一律 no-op（不得 insert）")
@@ -115,5 +120,66 @@ class TenantLedgerServiceTest {
         row.setConfigEpoch(configEpoch);
         row.setUpdateTime(LocalDateTime.now());
         return row;
+    }
+
+    @Test
+    @DisplayName("★ R8-8 方案 B：台账写失败**不得**向上抛（否则会连带回滚设备/点位业务写入），但必须计数")
+    void bumpFailureMustNotPropagateButMustBeCounted() {
+        when(ledgerMapper.bumpConfigEpoch(any())).thenThrow(
+            new DataAccessResourceFailureException("ledger table unavailable"));
+
+        boolean bumped = service.bumpConfigEpoch(7L);
+
+        assertThat(bumped).as("失败按「未推进」返回 false，绝不向上抛（可用性优先）").isFalse();
+        assertThat(meterRegistry.get("iot.ledger.bump.failure").counter().count())
+            .as("失败必须计数（版本号不推进 ⇒ 接入侧只能等周期安全网，必须可告警）").isEqualTo(1.0d);
+    }
+
+    @Test
+    @DisplayName("★ R8-8 边界：锁类失败（死锁/锁等待超时）**必须重新抛出**——DB 已回滚整事务，吞掉会「报成功但写入已丢」")
+    void lockFailureMustBeRethrown() {
+        when(ledgerMapper.bumpConfigEpoch(any())).thenThrow(
+            new DeadlockLoserDataAccessException("deadlock", new java.sql.SQLException("1213")));
+
+        assertThatThrownBy(() -> service.bumpConfigEpoch(7L))
+            .as("锁类失败整事务已被 DB 回滚，必须上抛（否则外层提交会谎报成功）")
+            .isInstanceOf(DeadlockLoserDataAccessException.class);
+        assertThat(meterRegistry.get("iot.ledger.bump.failure").counter().count())
+            .as("上抛同样要计数（失败确实发生过）").isEqualTo(1.0d);
+    }
+
+    @Test
+    @DisplayName("R8-8：成功与 no-op 路径都不得误增失败计数（否则指标失去判别力）")
+    void successAndNoopMustNotCountFailure() {
+        when(ledgerMapper.bumpConfigEpoch(any())).thenReturn(1);
+        assertThat(service.bumpConfigEpoch(7L)).isTrue();
+        assertThat(meterRegistry.get("iot.ledger.bump.failure").counter().count()).isZero();
+
+        when(ledgerMapper.bumpConfigEpoch(any())).thenReturn(0);
+        assertThat(service.bumpConfigEpoch(8L)).as("台账无该租户 ⇒ no-op").isFalse();
+        assertThat(meterRegistry.get("iot.ledger.bump.failure").counter().count())
+            .as("no-op 不是失败，不得计数").isZero();
+    }
+
+    @Test
+    @DisplayName("R8-8：MyBatis 的 PersistenceException 形态同样被捕获（不穿透）")
+    void mybatisPersistenceExceptionMustBeSwallowed() {
+        when(ledgerMapper.bumpConfigEpoch(any())).thenThrow(
+            new org.apache.ibatis.exceptions.PersistenceException("mapper boom"));
+
+        assertThat(service.bumpConfigEpoch(7L)).isFalse();
+        assertThat(meterRegistry.get("iot.ledger.bump.failure").counter().count()).isEqualTo(1.0d);
+    }
+
+    @Test
+    @DisplayName("★ 声明门禁：bumpConfigEpochOfCurrentTenant 必须带 @Transactional（自调用路径的唯一事务来源）")
+    void bumpOfCurrentTenantMustDeclareTransactional() throws Exception {
+        // 为什么用反射钉住：该方法是**自调用** bumpConfigEpoch 的唯一入口，其 @Transactional 是
+        // 非事务上下文下唯一的开事务来源；删掉它不会有任何测试变红（复核实测 M2），故用声明门禁兜住。
+        // 更强的「代理级」验证需要 Spring 上下文 + DataSource，属未做项（见台账 §2.6）。
+        assertThat(TenantLedgerService.class.getMethod("bumpConfigEpochOfCurrentTenant")
+            .getAnnotation(Transactional.class))
+            .as("bumpConfigEpochOfCurrentTenant 必须带 @Transactional：非事务上下文调用时靠它开事务")
+            .isNotNull();
     }
 }

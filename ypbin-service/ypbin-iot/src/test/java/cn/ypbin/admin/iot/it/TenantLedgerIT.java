@@ -11,8 +11,11 @@ package cn.ypbin.admin.iot.it;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import cn.ypbin.admin.iot.entity.TenantNodeAssignment;
 import cn.ypbin.admin.iot.entity.TenantLedger;
+import cn.ypbin.admin.iot.lease.LeaseState;
 import cn.ypbin.admin.iot.lease.TenantLedgerService;
+import cn.ypbin.admin.iot.mapper.TenantNodeAssignmentMapper;
 import cn.ypbin.admin.iot.mapper.TenantLedgerMapper;
 import cn.ypbin.starter.test.condition.EnabledIfMySqlAvailable;
 import cn.ypbin.starter.test.container.MySqlIntegrationTestSupport;
@@ -23,10 +26,12 @@ import com.baomidou.mybatisplus.extension.plugins.MybatisPlusInterceptor;
 import com.baomidou.mybatisplus.spring.MybatisSqlSessionFactoryBean;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
@@ -61,10 +66,19 @@ class TenantLedgerIT {
 
     private static final Long TENANT = 920001L;
 
+    /** 「台账表不可写」的临时备份表名（用例结束必须还原）。 */
+    private static final String LEDGER_BACKUP_TABLE = "tenant_ledger_r88_backup";
+
     private static final Path REPO_ROOT = Path.of("..", "..").toAbsolutePath().normalize();
 
     private static HikariDataSource dataSource;
     private static TenantLedgerMapper ledgerMapper;
+
+    /** 方案 B 的失败计数需要真实 registry（断言「失败必须计数」）。 */
+    private static SimpleMeterRegistry meterRegistry;
+
+    /** 用于证明「同事务内的业务写入未被回滚」：往另一张表写一行。 */
+    private static TenantNodeAssignmentMapper assignmentMapper;
     private static TransactionTemplate transactionTemplate;
     private static TenantLedgerService ledgerService;
 
@@ -83,23 +97,34 @@ class TenantLedgerIT {
         configuration.setMapUnderscoreToCamelCase(true);
         configuration.addInterceptor(new MybatisPlusInterceptor());
         configuration.addMapper(TenantLedgerMapper.class);
+        configuration.addMapper(TenantNodeAssignmentMapper.class);
         TableInfoHelper.initTableInfo(new MapperBuilderAssistant(configuration, ""),
             TenantLedger.class);
+        TableInfoHelper.initTableInfo(new MapperBuilderAssistant(configuration, ""),
+            TenantNodeAssignment.class);
         MybatisSqlSessionFactoryBean factoryBean = new MybatisSqlSessionFactoryBean();
         factoryBean.setDataSource(dataSource);
         factoryBean.setConfiguration(configuration);
         SqlSessionFactory factory = factoryBean.getObject();
         ledgerMapper = new SqlSessionTemplate(factory).getMapper(TenantLedgerMapper.class);
+        assignmentMapper = new SqlSessionTemplate(factory).getMapper(TenantNodeAssignmentMapper.class);
         transactionTemplate = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
-        ledgerService = new TenantLedgerService(ledgerMapper);
+        meterRegistry = new SimpleMeterRegistry();
+        ledgerService = new TenantLedgerService(ledgerMapper, meterRegistry);
 
+        // 崩溃自愈：若上次运行在「改名窗口」内被杀，备份表会残留 ⇒ 其它共用库的 IT 会集体红且不会自愈
+        if (tableExists(LEDGER_BACKUP_TABLE)) {
+            renameTable(LEDGER_BACKUP_TABLE, "tenant_ledger");
+        }
         physicalDelete();
+        physicalDeleteAssignment();
     }
 
     @AfterAll
     static void tearDown() {
         if (dataSource != null) {
             physicalDelete();
+            physicalDeleteAssignment();
             dataSource.close();
         }
     }
@@ -223,5 +248,84 @@ class TenantLedgerIT {
         } catch (SQLException ex) {
             throw new IllegalStateException("执行 SQL 失败：" + sql, ex);
         }
+    }
+
+    @Test
+    @DisplayName("★ R8-8 方案 B（可用性优先）：台账写失败**不得**回滚同事务内的业务写入，但必须计数")
+    void ledgerBumpFailureMustNotRollbackBusinessWrite() throws SQLException {
+        // 先建台账行：否则 bump 会走「台账无该租户」的 no-op 路径，同样返回 false ⇒ 断言失去判别力
+        ledgerService.setAssignable(TENANT, true);
+        assertThat(ledgerMapper.selectIncludingDeleted(TENANT))
+            .as("前置：台账行必须已存在（区分「写失败」与「no-op」）").isNotNull();
+        double failuresBefore = meterRegistry.get("iot.ledger.bump.failure").counter().count();
+
+        // 真库构造「台账表不可写」：临时改名（比 mock 更能证明「异常真的发生了、事务仍可用」）
+        renameTable("tenant_ledger", LEDGER_BACKUP_TABLE);
+        try {
+            Boolean bumped = transactionTemplate.execute(status -> {
+                boolean result = ledgerService.bumpConfigEpoch(TENANT);
+                assertThat(result).as("台账写失败 ⇒ 返回 false 且**不抛**（否则会连带回滚业务写入）")
+                    .isFalse();
+                // 同事务内的「业务写入」：写另一张表，证明事务仍可用、且不会被回滚
+                assignmentMapper.insert(assignment());
+                return result;
+            });
+
+            assertThat(bumped).isFalse();
+            assertThat(assignmentMapper.selectCount(Wrappers.<TenantNodeAssignment>lambdaQuery()
+                .eq(TenantNodeAssignment::getTenantId, TENANT)))
+                .as("业务写入必须**提交**（方案 B：台账故障不回滚业务写入）").isEqualTo(1L);
+            assertThat(meterRegistry.get("iot.ledger.bump.failure").counter().count())
+                .as("失败必须计数（版本号不推进 ⇒ 只能等周期安全网，必须可告警）")
+                .isEqualTo(failuresBefore + 1.0d);
+        } finally {
+            renameTable(LEDGER_BACKUP_TABLE, "tenant_ledger");
+            physicalDeleteAssignment();
+        }
+    }
+
+    /** 表是否存在（崩溃自愈判据）。 */
+    private static boolean tableExists(String table) throws SQLException {
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement statement = connection.prepareStatement(
+                    "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()"
+                        + " AND table_name = ?")) {
+            statement.setString(1, table);
+            try (java.sql.ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next() && resultSet.getInt(1) > 0;
+            }
+        }
+    }
+
+    /** 临时改表名（真库构造「表不可用」）。 */
+    private static void renameTable(String from, String to) throws SQLException {
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement statement = connection.prepareStatement(
+                    "RENAME TABLE " + from + " TO " + to)) {
+            statement.executeUpdate();
+        }
+    }
+
+    /** 本用例写入的归属行（物理删除，保证可重复运行）。 */
+    private static void physicalDeleteAssignment() {
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement statement = connection.prepareStatement(
+                    "DELETE FROM tenant_node_assignment WHERE tenant_id = " + TENANT)) {
+            statement.executeUpdate();
+        } catch (SQLException ex) {
+            throw new IllegalStateException("清理归属行失败", ex);
+        }
+    }
+
+    private static TenantNodeAssignment assignment() {
+        TenantNodeAssignment assignment = new TenantNodeAssignment();
+        assignment.setId(9_200_001_000_001L);
+        assignment.setTenantId(TENANT);
+        assignment.setAccessNode("access-it-ledger-r88");
+        assignment.setEpoch(1L);
+        assignment.setState(LeaseState.ACTIVE.getCode());
+        assignment.setLeaseExpireAt(LocalDateTime.now().plusMinutes(5));
+        assignment.setStatus(1);
+        return assignment;
     }
 }
