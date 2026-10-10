@@ -15,6 +15,8 @@ import cn.ypbin.admin.iot.lease.LeaseAcquireReq;
 import cn.ypbin.admin.iot.lease.LeaseAcquireResp;
 import cn.ypbin.admin.iot.lease.LeaseAssignmentDto;
 import cn.ypbin.admin.iot.lease.LeaseEpochRules;
+import cn.ypbin.starter.core.exception.BusinessException;
+import cn.ypbin.starter.core.exception.GlobalErrorCode;
 import cn.ypbin.admin.iot.lease.LeaseProperties;
 import cn.ypbin.admin.iot.lease.LeaseReleaseReq;
 import cn.ypbin.admin.iot.lease.LeaseRenewReq;
@@ -114,11 +116,19 @@ public class InternalLeaseController {
      * 故这里直接拒空而不是回落成全量（禁静默降级）。**刻意不分页**，理由见
      * {@link LeaseEpochRules#validateAccessNode}。</p>
      *
-     * @param accessNode 节点标识（必填）
+     * @param accessNode 节点标识（必填；缺失或空白都算参数错误）
      * @return 该节点的版本号 + 读取时刻
      */
     @GetMapping("/epochs")
-    public R<TenantEpochBatchResp> batchEpoch(@RequestParam("accessNode") String accessNode) {
+    public R<TenantEpochBatchResp> batchEpoch(
+            @RequestParam(value = "accessNode", required = false) String accessNode) {
+        try {
+            // 缺参/空白参是**请求参数有误**，不是系统内部错误：显式转 BusinessException(BAD_REQUEST)，
+            // 否则会落到兜底 handler ⇒ code=500 + ERROR 全栈，语义与日志级别都不对（复核指出）
+            LeaseEpochRules.validateAccessNode(accessNode);
+        } catch (IllegalArgumentException ex) {
+            throw new BusinessException(GlobalErrorCode.BAD_REQUEST, ex.getMessage());
+        }
         return R.ok(leaseService.batchEpoch(accessNode));
     }
 }

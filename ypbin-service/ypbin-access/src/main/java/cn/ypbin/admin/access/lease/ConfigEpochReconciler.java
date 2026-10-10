@@ -22,7 +22,6 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -110,6 +109,9 @@ public class ConfigEpochReconciler {
      */
     public ConfigEpochReconciler(ILeaseClient leaseClient, String nodeId, TenantLinkManager linkManager,
             MeterRegistry meterRegistry, Clock clock, long refreshIntervalMs) {
+        // 与 service 侧共用同一校验口径：nodeId 为空/全空白时**构造期失败**（fail-fast），
+        // 不留到运行期每 10s 打一次必然失败的远端调用（启动自检也会拦，这里是第二道）
+        LeaseEpochRules.validateAccessNode(nodeId);
         this.leaseClient = leaseClient;
         this.nodeId = nodeId;
         this.linkManager = linkManager;

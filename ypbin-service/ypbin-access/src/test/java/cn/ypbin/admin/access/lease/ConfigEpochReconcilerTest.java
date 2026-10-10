@@ -20,7 +20,6 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import cn.ypbin.admin.access.link.TenantLinkManager;
-import cn.ypbin.admin.iot.lease.LeaseEpochRules;
 import cn.ypbin.admin.iot.lease.ILeaseClient;
 import cn.ypbin.admin.iot.lease.TenantEpochBatchResp;
 import cn.ypbin.admin.iot.lease.TenantEpochItem;

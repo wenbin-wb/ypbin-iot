@@ -44,7 +44,6 @@ import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -411,7 +410,9 @@ public class LeaseServiceImpl implements LeaseService {
         // 按节点过滤下沉到 SQL：此前是全表 assignment × ledger（O(节点数 × 全平台租户)）。
         // M0b-3 的语义不变：一次对账同时给出「归属 epoch」与「配置 epoch」，
         // 接入侧据此判断「要采什么」有没有变（不一致才拉全量设备规格）。
-        List<TenantEpochItem> items = mapper.selectEpochItemsByNode(accessNode.trim());
+        // 不 trim：写入侧（register/acquire/renew）存的是原值，读侧 trim 会造成不对称
+        // ⇒ node-id 带空格时查询恒空、epoch 信号静默失效（复核指出的路径）
+        List<TenantEpochItem> items = mapper.selectEpochItemsByNode(accessNode);
         TenantEpochBatchResp resp = new TenantEpochBatchResp();
         resp.setItems(items);
         resp.setReadAt(mapper.selectNow());

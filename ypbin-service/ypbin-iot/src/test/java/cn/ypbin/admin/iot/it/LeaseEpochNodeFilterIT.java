@@ -27,7 +27,6 @@ import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
@@ -51,6 +50,9 @@ import org.mybatis.spring.SqlSessionFactoryBean;
  * <p>覆盖：① 只返回本节点租户（别的节点的行不得出现、按 tenant_id 升序）；② 无归属的节点返回空集合；
  * ③ 已逻辑删除的**台账**行不得把 {@code config_epoch} 复活；④ 已逻辑删除的**归属**行不得出现。</p>
  *
+ * <p>⚠️ 强度边界：本类是 **mapper 级**真库用例，只证明 SQL 语义；HTTP 层的参数绑定与
+ * 「缺参/空白参被拒」由 {@code InternalLeaseControllerTest} 覆盖（两者互补，缺一不可）。</p>
+ *
  * @author wenbin
  * @since 2026-10-09
  */
@@ -62,21 +64,25 @@ class LeaseEpochNodeFilterIT {
 
     private static final String NODE_B = "access-it-page-b";
 
-    /** 租户区间固定在 9200xx，避免与其它 IT 的 91xxxx 区间互相清理。 */
+    /**
+     * 租户区间固定在 <b>929xxx</b>：其它 IT（TenantLedgerIT / EventLogIngestIT / OutageAvailabilityIT）
+     * 用的是 920001，本 IT 的 purge 会物理删除整个区间 ⇒ 必须错开，否则测试间会互相清数据
+     * （复核指出：原 9200xx 区间与它们重叠，只靠「默认串行执行」侥幸不冲突）。
+     */
     private static final List<Long> TENANTS_A =
-        List.of(920001L, 920002L, 920003L, 920004L, 920005L);
+        List.of(929001L, 929002L, 929003L, 929004L, 929005L);
 
-    private static final List<Long> TENANTS_B = List.of(920011L, 920012L);
+    private static final List<Long> TENANTS_B = List.of(929011L, 929012L);
 
-    /** 清理区间（物理删除，保证用例可重复运行）。 */
-    private static final long TENANT_RANGE_FROM = 920000L;
+    /** 清理区间（物理删除，保证用例可重复运行；与其它 IT 的区间不重叠）。 */
+    private static final long TENANT_RANGE_FROM = 929000L;
 
-    private static final long TENANT_RANGE_TO = 920999L;
+    private static final long TENANT_RANGE_TO = 929999L;
 
     private static final Path REPO_ROOT = Path.of("..", "..").toAbsolutePath().normalize();
 
     /** 主键发生器：与租户区间错开，避免唯一键撞车。 */
-    private static final AtomicLong ID_SEQ = new AtomicLong(9_200_000_000_001L);
+    private static final AtomicLong ID_SEQ = new AtomicLong(9_290_000_000_001L);
 
     private static HikariDataSource dataSource;
     private static SqlSessionTemplate sqlSessionTemplate;
@@ -138,7 +144,7 @@ class LeaseEpochNodeFilterIT {
         for (Long tenantId : TENANTS_B) {
             insertAssignment(NODE_B, tenantId, 5L, false);
         }
-        insertLedger(920001L, 7L, false);
+        insertLedger(929001L, 7L, false);
 
         List<TenantEpochItem> items = assignmentMapper.selectEpochItemsByNode(NODE_A);
 
@@ -155,7 +161,7 @@ class LeaseEpochNodeFilterIT {
     @Test
     @DisplayName("本节点没有任何归属时返回空集合（不得抛错、不得退化成全量）")
     void nodeWithoutAssignmentsReturnsEmpty() throws SQLException {
-        insertAssignment(NODE_B, 920011L, 1L, false);
+        insertAssignment(NODE_B, 929011L, 1L, false);
 
         assertThat(assignmentMapper.selectEpochItemsByNode(NODE_A))
             .as("NODE_A 没有任何归属行 ⇒ 空集合（若返回 NODE_B 的行，说明节点过滤失效）")
@@ -165,8 +171,8 @@ class LeaseEpochNodeFilterIT {
     @Test
     @DisplayName("★ 已逻辑删除的台账行不得复活 config_epoch（与 bump 不得复活软删行同口径）")
     void softDeletedLedgerMustNotReviveConfigEpoch() throws SQLException {
-        insertAssignment(NODE_A, 920001L, 1L, false);
-        insertLedger(920001L, 77L, true);
+        insertAssignment(NODE_A, 929001L, 1L, false);
+        insertLedger(929001L, 77L, true);
 
         List<TenantEpochItem> items = assignmentMapper.selectEpochItemsByNode(NODE_A);
 
@@ -179,13 +185,13 @@ class LeaseEpochNodeFilterIT {
     @Test
     @DisplayName("★ 已逻辑删除的归属行不得出现（手写 SQL 不会自动注入逻辑删除条件）")
     void softDeletedAssignmentMustNotAppear() throws SQLException {
-        insertAssignment(NODE_A, 920001L, 1L, false);
-        insertAssignment(NODE_A, 920002L, 1L, true);
+        insertAssignment(NODE_A, 929001L, 1L, false);
+        insertAssignment(NODE_A, 929002L, 1L, true);
 
         List<TenantEpochItem> items = assignmentMapper.selectEpochItemsByNode(NODE_A);
 
         assertThat(items).extracting(TenantEpochItem::getTenantId)
-            .as("软删的归属行（920002）不得被对账读到").containsExactly(920001L);
+            .as("软删的归属行（920002）不得被对账读到").containsExactly(929001L);
     }
 
     /** 物理插入一条归属（不走 MyBatis-Plus，便于直接构造软删/特定 epoch 的边界数据）。 */
@@ -219,10 +225,16 @@ class LeaseEpochNodeFilterIT {
         }
     }
 
-    /** 物理清空本 IT 的租户区间（逻辑删除会撞唯一键 uk_tenant_ledger，故必须物理删）。 */
+    /**
+     * 物理清空本 IT 的数据（逻辑删除会撞唯一键 {@code uk_tenant_ledger}，故必须物理删）。
+     *
+     * <p>按**节点名**与**租户区间**双重清理：容器是复用的（{@code ContainerSupport} 用 reuse），
+     * 只按区间清理时，历史版本用过的区间会留下同一节点名的行 ⇒ 用例变成顺序依赖
+     * （本 IT 初版就因此在「无归属节点应返回空集」上假红过）。</p>
+     */
     private static void purge() throws SQLException {
-        execute("DELETE FROM tenant_node_assignment WHERE tenant_id BETWEEN "
-            + TENANT_RANGE_FROM + " AND " + TENANT_RANGE_TO);
+        execute("DELETE FROM tenant_node_assignment WHERE access_node IN ('" + NODE_A + "', '" + NODE_B + "')"
+            + " OR tenant_id BETWEEN " + TENANT_RANGE_FROM + " AND " + TENANT_RANGE_TO);
         execute("DELETE FROM tenant_ledger WHERE tenant_id BETWEEN "
             + TENANT_RANGE_FROM + " AND " + TENANT_RANGE_TO);
     }
