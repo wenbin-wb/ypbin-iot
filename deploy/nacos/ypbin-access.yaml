@@ -68,6 +68,13 @@ ypbin:
 # management.endpoints.web.exposure.include 默认只有 health）⇒ 生产只能翻 WARN 日志、看不到计数趋势。
 # 指标清单（口径/建议关注/注册位置）见 docs/METRICS.md；R8-2 的 tick/对账耗时看
 # iot.access.lease.tick.duration 与 iot.access.config.reconcile.duration 的 max。
+
+# R8-2 对账时间预算：预算用尽后本轮剩余「需远端取数」的租户推迟到下一 tick（不丢）。
+# 默认 15000 = TTL(30s) 的一半：tick 还要留自检/续约/重领的余量。<= 0 关闭预算。
+# 观测：iot.access.config.reconcile.deferred 增长 ⇒ 预算被顶到；配合 reconcile.duration 的 max 决定是否调大。
+ypbin:
+  access:
+    reconcile-budget-ms: 15000
 # 上一轮新增的 iot.access.decode.failure 正是这个缺口：它只在 WARN 里可见。
 #
 # ⚠️ 安全边界（与 ypbin-iot.yaml 同一口径，改前务必读完）：

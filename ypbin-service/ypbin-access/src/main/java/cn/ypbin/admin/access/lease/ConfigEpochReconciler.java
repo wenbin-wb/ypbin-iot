@@ -77,6 +77,9 @@ public class ConfigEpochReconciler {
     /** 周期安全网间隔（毫秒）；{@code <= 0} 表示关闭。 */
     private final long refreshIntervalMs;
 
+    /** 单轮对账的时间预算（毫秒）；{@code <= 0} 表示不限制（R8-2）。 */
+    private final long reconcileBudgetMs;
+
     /** 已按之完成对账的配置版本号：tenantId → configEpoch。 */
     private final Map<Long, Long> appliedConfigEpochs = new ConcurrentHashMap<>();
 
@@ -99,6 +102,14 @@ public class ConfigEpochReconciler {
     private final Counter forcedCounter;
 
     /**
+     * 因**时间预算用尽**而被推迟到下一 tick 的租户次数（R8-2）。
+     *
+     * <p>它应该与 {@code iot.access.config.reconcile.duration} 一起看：duration 的 {@code max} 顶到预算
+     * 且本计数持续增长 ⇒ 说明「本轮确实做不完」，要么调大预算、要么按 R8-2 的其它选项（有界并发/收敛安全网）。</p>
+     */
+    private final Counter deferredCounter;
+
+    /**
      * 一次对账（拉 epoch + 逐租户按需重取设备清单）的**耗时**。
      *
      * <p>R8-2 的可观测性前置：本阶段是 tick 里唯一会串行打远端（每租户 6s 最坏）的部分，
@@ -115,9 +126,10 @@ public class ConfigEpochReconciler {
      * @param meterRegistry    指标注册表
      * @param clock            时间源（安全网判据；单测注入可推进的假时钟）
      * @param refreshIntervalMs 周期安全网间隔（毫秒，{@code <= 0} 关闭）
+     * @param reconcileBudgetMs 单轮对账时间预算（毫秒，{@code <= 0} 不限制）
      */
     public ConfigEpochReconciler(ILeaseClient leaseClient, String nodeId, TenantLinkManager linkManager,
-            MeterRegistry meterRegistry, Clock clock, long refreshIntervalMs) {
+            MeterRegistry meterRegistry, Clock clock, long refreshIntervalMs, long reconcileBudgetMs) {
         // 与 service 侧共用同一校验口径：nodeId 为空/全空白时**构造期失败**（fail-fast），
         // 不留到运行期每 10s 打一次必然失败的远端调用（启动自检也会拦，这里是第二道）
         LeaseEpochRules.validateAccessNode(nodeId);
@@ -126,12 +138,15 @@ public class ConfigEpochReconciler {
         this.linkManager = linkManager;
         this.clock = clock;
         this.refreshIntervalMs = refreshIntervalMs;
+        this.reconcileBudgetMs = reconcileBudgetMs;
         this.changedCounter = Counter.builder(METRIC_PREFIX + "changed")
             .description("配置版本号变化次数").register(meterRegistry);
         this.checkFailureCounter = Counter.builder(METRIC_PREFIX + "check.failure")
             .description("配置版本号对账请求失败次数").register(meterRegistry);
         this.notAppliedCounter = Counter.builder(METRIC_PREFIX + "reconcile.not_applied")
             .description("版本号已变化但未能完成对账的租户数（同一版本号只计一次）").register(meterRegistry);
+        this.deferredCounter = Counter.builder(METRIC_PREFIX + "reconcile.deferred")
+            .description("因时间预算用尽而推迟到下一 tick 的租户次数").register(meterRegistry);
         this.reconcileTimer = Timer.builder(METRIC_PREFIX + "reconcile.duration")
             .description("一次配置版本对账（拉 epoch + 逐租户按需重取清单）的耗时").register(meterRegistry);
         this.forcedCounter = Counter.builder(METRIC_PREFIX + "reconcile.forced")
@@ -149,18 +164,35 @@ public class ConfigEpochReconciler {
         }
         long startedAt = System.nanoTime();
         try {
-            doReconcile(heldTenants);
+            doReconcile(heldTenants, startedAt);
         } finally {
             reconcileTimer.record(Duration.ofNanos(System.nanoTime() - startedAt));
         }
     }
 
     /**
+     * 时间预算是否已用尽（R8-2）。
+     *
+     * <p>用 {@code System.nanoTime()} 而不是业务时钟：预算是**进程内的耗时上界**，
+     * 不该受可注入的业务 Clock（可能被假时钟/偏移校准影响）支配。</p>
+     *
+     * @param startedAt 本轮对账起点（{@code System.nanoTime()}）
+     * @return 已用尽返回 {@code true}
+     */
+    private boolean budgetExhausted(long startedAt) {
+        if (reconcileBudgetMs <= 0) {
+            return false;
+        }
+        return Duration.ofNanos(System.nanoTime() - startedAt).toMillis() >= reconcileBudgetMs;
+    }
+
+    /**
      * 对账主体（计时包装在 {@link #reconcile(Set)}）。
      *
      * @param heldTenants 本节点当前持有的租户
+     * @param startedAt   本轮对账起点（{@code System.nanoTime()}，用于时间预算判定）
      */
-    private void doReconcile(Set<Long> heldTenants) {
+    private void doReconcile(Set<Long> heldTenants, long startedAt) {
         R<TenantEpochBatchResp> resp;
         try {
             // 按节点过滤的一次批量调用（服务端已把过滤下沉到 SQL）；刻意不分页：分页会把一次批量
@@ -179,43 +211,45 @@ public class ConfigEpochReconciler {
             return;
         }
         Set<Long> attempted = new HashSet<>();
+        int deferred = 0;
         // getItems() 自带 null 防御（返回空列表），故版本偏差返回 items=null 不会打断整个 tick
         for (TenantEpochItem item : resp.getData().getItems()) {
-            if (reconcileItem(item, heldTenants)) {
-                attempted.add(item.getTenantId());
+            if (item == null || item.getTenantId() == null) {
+                continue;
             }
+            Long tenantId = item.getTenantId();
+            if (!heldTenants.contains(tenantId)) {
+                // 本节点不负责的租户：不取数、不记账（否则会把别的节点的租户也拉一遍）
+                continue;
+            }
+            long latest = item.getConfigEpoch() == null ? 0L : item.getConfigEpoch();
+            Long applied = appliedConfigEpochs.get(tenantId);
+            if (applied != null && applied == latest) {
+                // 版本号没变 ⇒ 不需要远端取数，不计预算
+                continue;
+            }
+            if (budgetExhausted(startedAt)) {
+                // 预算用尽：本租户（以及后面的候选）推迟到下一 tick——**不丢**，下一轮仍会重试，
+                // 安全网也在；否则把 tick 拖过 TTL 会触发下一轮批量自我 fence（R8-2）
+                deferred++;
+                continue;
+            }
+            if (applied != null) {
+                changedCounter.increment();
+                log.info("配置版本变化，触发设备清单对账：tenantId={} 已应用={} 最新={}",
+                    LogSanitizer.sanitize(tenantId), applied, latest);
+            }
+            attempt(tenantId, latest);
+            attempted.add(tenantId);
+        }
+        if (deferred > 0) {
+            deferredCounter.increment(deferred);
+            log.warn("对账时间预算用尽（{}ms），本轮推迟 {} 个租户到下一 tick（node={}）",
+                reconcileBudgetMs, deferred, LogSanitizer.sanitize(nodeId));
+            // 预算已用尽时**不再跑周期安全网**：它会立刻再强制一个租户（最坏 +6s），把预算白设
+            return;
         }
         forceNextStaleTenant(heldTenants, attempted);
-    }
-
-    /**
-     * 对单个租户的版本号条目做对账。
-     *
-     * @param item        业务侧返回的版本号条目
-     * @param heldTenants 本节点持有的租户
-     * @return 本轮是否对该租户尝试了对账
-     */
-    private boolean reconcileItem(TenantEpochItem item, Set<Long> heldTenants) {
-        if (item == null || item.getTenantId() == null) {
-            return false;
-        }
-        Long tenantId = item.getTenantId();
-        if (!heldTenants.contains(tenantId)) {
-            // 本节点不负责的租户：不取数、不记账（否则会把别的节点的租户也拉一遍）
-            return false;
-        }
-        long latest = item.getConfigEpoch() == null ? 0L : item.getConfigEpoch();
-        Long applied = appliedConfigEpochs.get(tenantId);
-        if (applied != null && applied == latest) {
-            return false;
-        }
-        if (applied != null) {
-            changedCounter.increment();
-            log.info("配置版本变化，触发设备清单对账：tenantId={} 已应用={} 最新={}",
-                LogSanitizer.sanitize(tenantId), applied, latest);
-        }
-        attempt(tenantId, latest);
-        return true;
     }
 
     /**

@@ -66,4 +66,19 @@ public class AccessProperties {
      * 设为 {@code <= 0} 可关闭（仅在确定信号链路可靠时这么做）。</p>
      */
     private long configRefreshIntervalMs = 300_000L;
+
+    /**
+     * 单轮对账的**时间预算**（毫秒）：预算用尽后，本轮剩余的「需要远端取数」的租户会被**推迟到下一 tick**
+     * （不丢：下一轮仍会重试，安全网也在）。
+     *
+     * <p>为什么需要（R8-2）：对账是 tick 里唯一会**串行**打远端的阶段，每个租户最坏 6s
+     * （connect 1s + read 5s，见 {@code DeviceSpecFeignConfiguration}）。一旦单 tick 超过租约 TTL（30s），
+     * 下一轮 {@code selfFenceExpiredLocally} 会**批量自我 fence 并重领**，形成抖动。</p>
+     *
+     * <p>默认 15s（= TTL 的一半）而不是「实测值」：这是**从约束推导**的上界——tick 还要留出自检/续约/
+     * 重领的余量，对账吃掉一半 TTL 已是可接受的最坏情形；真实分布由
+     * {@code iot.access.config.reconcile.duration} / {@code iot.access.spec.load.duration} 观测，
+     * 需要收紧时改这一个键即可。设为 {@code <= 0} 关闭预算（回到「本轮全部租户都做」）。</p>
+     */
+    private long reconcileBudgetMs = 15_000L;
 }

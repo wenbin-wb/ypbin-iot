@@ -82,7 +82,7 @@ class AccessLeaseManagerTest {
         meterRegistry = new SimpleMeterRegistry();
         // spy：既要它真实工作（按版本号触发对账），又要能断言停采路径确实调了 forget
         reconciler = spy(new ConfigEpochReconciler(client, NODE, linkManager, meterRegistry,
-            Clock.systemUTC(), 300_000L));
+            Clock.systemUTC(), 300_000L, 15_000L));
         manager = new AccessLeaseManager(client, linkManager, properties, meterRegistry, reconciler, clock);
         // 每个租约周期都会打一次 epoch 对账：默认给「没有任何条目」的成功信封，
         // 避免用例里出现 null 信封的错误日志（影响可读性，也会掩盖真问题）

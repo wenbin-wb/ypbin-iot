@@ -55,7 +55,7 @@ public class AccessLeaseConfiguration {
      * @param leaseClient   租约客户端（批量 epoch 接口）
      * @param linkManager   链路控制端口
      * @param meterRegistry 指标注册表
-     * @param properties    节点参数（节点标识、周期安全网间隔）
+     * @param properties    节点参数（节点标识、周期安全网间隔、对账时间预算）
      * @return 配置版本对账器
      */
     @Bean
@@ -64,7 +64,7 @@ public class AccessLeaseConfiguration {
             TenantLinkManager linkManager, MeterRegistry meterRegistry, AccessProperties properties) {
         // Clock 直接给系统时钟：它是周期安全网的时间基准，单测里注入可推进的假时钟
         return new ConfigEpochReconciler(leaseClient, properties.getNodeId(), linkManager, meterRegistry,
-            Clock.systemUTC(), properties.getConfigRefreshIntervalMs());
+            Clock.systemUTC(), properties.getConfigRefreshIntervalMs(), properties.getReconcileBudgetMs());
     }
 
     /**

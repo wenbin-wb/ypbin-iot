@@ -2,7 +2,7 @@
 
 > **用途**：把「指标已注册但没人知道该看什么」变成一张可执行的清单——每条指标都有 ①口径（何时变化）
 > ②建议关注/阈值 ③注册位置。R8-9 立项要求（`docs/ACCESS-TECHDEBT-R8.md` §2.7）。
-> **覆盖范围**：**`ypbin-access` 服务**的全部指标（`iot.access.*`，共 33 条）。
+> **覆盖范围**：**`ypbin-access` 服务**的全部指标（`iot.access.*`，共 **34** 条）。
 > iot 服务的告警/入站/时序指标（`iot.alert.*`、`iot.ingest.*`、`iot.timeseries.*`、`iot.platform_alert.*`）见
 > `docs/PLATFORM-ALERTING-DESIGN.md` 与 `deploy/PROD-OPS-NOTES.md`——本文件不重复登记，避免两处漂移。
 > **机器校验**：`MetricsRegistryGateTest` 断言本清单里的**每个指标名**都能在其注册文件里找到
@@ -45,6 +45,7 @@
 | `iot.access.config.check.failure` | Counter | 对账请求异常或返回非成功信封 | **增长即异常**（iot 不可达 / 契约不符） | ConfigEpochReconciler.java |
 | `iot.access.config.reconcile.not_applied` | Counter | 版本号已变化但**未能完成**对账（同一版本号只计一次） | **期望 0**；持续增长 = 取数一直失败（每轮会重试） | ConfigEpochReconciler.java |
 | `iot.access.config.reconcile.forced` | Counter | 周期安全网的强制对账（每 tick 至多 1 个租户） | 稳态下按「轮转周期」缓慢增长属预期；**加速增长 = 变更信号缺失** | ConfigEpochReconciler.java |
+| `iot.access.config.reconcile.deferred` | Counter | 因**时间预算用尽**（`ypbin.access.reconcile-budget-ms`，默认 15s）被推迟到下一 tick 的租户次数（R8-2） | **期望 0**；持续增长 ⇒ 与 `reconcile.duration` 的 `max` 一起看：本轮确实做不完（调大预算或按 R8-2 其它选项） | ConfigEpochReconciler.java |
 
 ### 2.3 设备规格取数
 
@@ -88,7 +89,8 @@
 ## 3. 与 R8 其它条目的关系
 
 - **R8-2**（对账拖长 tick）：本清单的 `iot.access.lease.tick.duration` + `iot.access.config.reconcile.duration`
-  + `iot.access.spec.load.duration` 是「先可观测、再改调度」的前置——没有实测分布就不该给对账加时间预算。
+  + `iot.access.spec.load.duration` 是「先可观测、再改调度」的前置；方案 A（时间预算）已实施，其效果由
+  `iot.access.config.reconcile.deferred` 直接观测（期望 0；增长即说明预算被顶到）。
 - **R8-9 B**（本清单的由来）：新增上述 3 条计时器；其余条目此前已注册但从未登记（即「可观测只是潜在」）。
 - **未做**：未接 Prometheus/Grafana（本仓无采集端）；若要真正"上大盘"，需先决定是否引入采集组件（单独提案）。
 
@@ -97,3 +99,4 @@
 | 日期 | 变更 |
 |---|---|
 | 2026-10-09 | 建立本清单：把 `ypbin-access` 的 **33 条**指标逐条登记（口径 / 建议关注 / 注册文件），并新增 3 条计时器（tick / 对账 / 单租户取数）；配套门禁 `MetricsRegistryGateTest` 防清单与代码漂移。 |
+| 2026-10-09（R8-2 实施批） | 登记新增的 `iot.access.config.reconcile.deferred`（对账时间预算推迟计数）⇒ 共 **34** 条；门禁反向检查同时补上「前缀常量 + 后缀片段」风格（此前只认完整字面量，**真的漏过这条新指标**——已由门禁自身抓出）。 |
