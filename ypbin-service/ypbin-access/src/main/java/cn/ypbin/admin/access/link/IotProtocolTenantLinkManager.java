@@ -15,6 +15,7 @@ import cn.ypbin.iot.core.spi.DeviceChange;
 import cn.ypbin.starter.core.util.LogSanitizer;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -100,6 +101,14 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
     /** 配置变更对账**已完成**的次数（含「确实没有设备」）。 */
     private final Counter reconcileAppliedCounter;
 
+    /**
+     * **单租户**设备规格取数（{@code source.loadByTenant}）的耗时。
+     *
+     * <p>R8-2 的模型里「一次调用最坏 6s（connect 1s + read 5s）」是算术假设，这个指标把它变成实测：
+     * N 个变更租户 × 实测单次耗时 = 本轮对账的远端时间，超过 TTL 的一个比例就该加时间预算。</p>
+     */
+    private final Timer specLoadTimer;
+
     /** 每个租户的空清单退避状态（有设备即移除）。 */
     private final Map<Long, Backoff> emptyBackoff = new ConcurrentHashMap<>();
 
@@ -140,6 +149,8 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
         this.specFailureCounter = meterRegistry.counter("iot.access.spec.failure");
         this.backoffSkippedCounter = meterRegistry.counter("iot.access.spec.backoff.skipped");
         this.reconcileAppliedCounter = meterRegistry.counter("iot.access.spec.reconcile.applied");
+        this.specLoadTimer = Timer.builder("iot.access.spec.load.duration")
+            .description("单租户设备规格取数耗时").register(meterRegistry);
         this.rebindCounter = meterRegistry.counter("iot.access.device.rebind");
         this.rebindDeferredCounter = meterRegistry.counter("iot.access.device.rebind.deferred");
     }
@@ -165,6 +176,7 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
             }
             devices = new LinkedHashMap<>();
             List<DeviceSpec> loaded;
+            long startedAt = System.nanoTime();
             try {
                 loaded = source.loadByTenant(tenantId);
             } catch (DeviceSpecLoadException ex) {
@@ -172,6 +184,8 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
                 // 与「确实没有设备」（返回空集合）分开计数与日志，否则 G3 的「失败不可观测」会一直存在。
                 onLoadFailure(tenantId, ex);
                 return;
+            } finally {
+                specLoadTimer.record(Duration.ofNanos(System.nanoTime() - startedAt));
             }
             for (DeviceSpec device : loaded) {
                 devices.put(device.deviceId(), device);

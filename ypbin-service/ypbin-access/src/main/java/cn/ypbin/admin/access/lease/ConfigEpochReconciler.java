@@ -18,6 +18,7 @@ import cn.ypbin.starter.core.model.R;
 import cn.ypbin.starter.core.util.LogSanitizer;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -98,6 +99,14 @@ public class ConfigEpochReconciler {
     private final Counter forcedCounter;
 
     /**
+     * 一次对账（拉 epoch + 逐租户按需重取设备清单）的**耗时**。
+     *
+     * <p>R8-2 的可观测性前置：本阶段是 tick 里唯一会串行打远端（每租户 6s 最坏）的部分，
+     * 它的耗时分布是「要不要给对账加时间预算/并发上限」的唯一依据。</p>
+     */
+    private final Timer reconcileTimer;
+
+    /**
      * 构造对账器。
      *
      * @param leaseClient      租约客户端（提供按节点过滤 + 分页的 epoch 对账接口）
@@ -123,6 +132,8 @@ public class ConfigEpochReconciler {
             .description("配置版本号对账请求失败次数").register(meterRegistry);
         this.notAppliedCounter = Counter.builder(METRIC_PREFIX + "reconcile.not_applied")
             .description("版本号已变化但未能完成对账的租户数（同一版本号只计一次）").register(meterRegistry);
+        this.reconcileTimer = Timer.builder(METRIC_PREFIX + "reconcile.duration")
+            .description("一次配置版本对账（拉 epoch + 逐租户按需重取清单）的耗时").register(meterRegistry);
         this.forcedCounter = Counter.builder(METRIC_PREFIX + "reconcile.forced")
             .description("周期安全网触发的强制对账次数").register(meterRegistry);
     }
@@ -136,6 +147,20 @@ public class ConfigEpochReconciler {
         if (heldTenants == null || heldTenants.isEmpty()) {
             return;
         }
+        long startedAt = System.nanoTime();
+        try {
+            doReconcile(heldTenants);
+        } finally {
+            reconcileTimer.record(Duration.ofNanos(System.nanoTime() - startedAt));
+        }
+    }
+
+    /**
+     * 对账主体（计时包装在 {@link #reconcile(Set)}）。
+     *
+     * @param heldTenants 本节点当前持有的租户
+     */
+    private void doReconcile(Set<Long> heldTenants) {
         R<TenantEpochBatchResp> resp;
         try {
             // 按节点过滤的一次批量调用（服务端已把过滤下沉到 SQL）；刻意不分页：分页会把一次批量

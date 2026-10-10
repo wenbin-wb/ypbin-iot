@@ -25,6 +25,7 @@ import cn.ypbin.starter.core.util.LogSanitizer;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.LocalDateTime;
@@ -86,6 +87,14 @@ public class AccessLeaseManager {
     private final Counter selfFencedCounter;
     private final Counter nodeFencedCounter;
     private final Counter acquiredCounter;
+
+    /**
+     * 一次调度 tick（自检 + 续约 + 到点重领 + 对账）的**总耗时**。
+     *
+     * <p>R8-2 的可观测性前置：tick 必须显著小于租约 TTL（默认 30s），否则下一轮会批量自我 fence。
+     * 只有先能读到这个分布，才谈得上给对账加时间预算或并发上限。</p>
+     */
+    private final Timer tickTimer;
 
     /**
      * 本地时钟相对**服务端（数据库）时钟**的偏移：{@code serverTime - localTime}。
@@ -168,6 +177,8 @@ public class AccessLeaseManager {
         this.selfFencedCounter = Counter.builder(METRIC_PREFIX + "self_fenced").register(meterRegistry);
         this.nodeFencedCounter = Counter.builder(METRIC_PREFIX + "node_fenced").register(meterRegistry);
         this.acquiredCounter = Counter.builder(METRIC_PREFIX + "acquired").register(meterRegistry);
+        this.tickTimer = Timer.builder(METRIC_PREFIX + "tick.duration")
+            .description("一次调度 tick（自检+续约+重领+对账）的总耗时").register(meterRegistry);
         this.skewDeferredCounter = Counter.builder(METRIC_PREFIX + "clock_skew.deferred")
             .description("时钟偏移跳变被暂缓（待连续两次确认）的次数").register(meterRegistry);
         // 偏移量上大盘：节点钟漂移是「数据看起来莫名变少/变多」的常见根因
@@ -197,15 +208,21 @@ public class AccessLeaseManager {
      * @param now 当前时刻
      */
     void renewAndSelfCheck(LocalDateTime now) {
-        selfFenceExpiredLocally(now);
-        if (holdings.isEmpty()) {
-            log.debug("本地没有持有租户，跳过续约");
-        } else {
-            renew(now);
+        // 计时用 System.nanoTime（单调时钟）：与业务判定用的可注入 clock 解耦，不受测试假时钟影响
+        long startedAt = System.nanoTime();
+        try {
+            selfFenceExpiredLocally(now);
+            if (holdings.isEmpty()) {
+                log.debug("本地没有持有租户，跳过续约");
+            } else {
+                renew(now);
+            }
+            refreshAssignmentsIfDue(now);
+            // 放在最后：本轮新领到的租户也要参与对账（否则要等下一个周期才知道配置变没变）
+            reconciler.reconcile(Set.copyOf(holdings.keySet()));
+        } finally {
+            tickTimer.record(Duration.ofNanos(System.nanoTime() - startedAt));
         }
-        refreshAssignmentsIfDue(now);
-        // 放在最后：本轮新领到的租户也要参与对账（否则要等下一个周期才知道配置变没变）
-        reconciler.reconcile(Set.copyOf(holdings.keySet()));
     }
 
     /**

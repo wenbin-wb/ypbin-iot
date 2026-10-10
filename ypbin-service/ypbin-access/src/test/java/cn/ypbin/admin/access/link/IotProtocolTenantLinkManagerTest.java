@@ -189,6 +189,9 @@ class IotProtocolTenantLinkManagerTest {
             .isEqualTo(2);
         assertThat(planner.forgotten).as("消失的设备必须清理订阅跟踪").containsExactly("d2");
         assertThat(planner.subscribedBatchSizes).as("对账后必须再发起一轮订阅").hasSize(2);
+        // R8-9 B：单租户取数耗时（R8-2 时间预算的输入）必须被记录
+        assertThat(meterRegistry.get("iot.access.spec.load.duration").timer().count())
+            .as("对账触发了一次 loadByTenant ⇒ 计时器至少记一次").isGreaterThanOrEqualTo(1L);
     }
 
     @Test

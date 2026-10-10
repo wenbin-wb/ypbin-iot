@@ -66,6 +66,8 @@ ypbin:
 # iot.access.config.* / iot.access.subscribe.* / iot.access.spec.* / iot.access.connection.* /
 # iot.access.decode.failure），但 `/actuator/metrics` 默认不暴露（Spring Boot 4.1.1 的
 # management.endpoints.web.exposure.include 默认只有 health）⇒ 生产只能翻 WARN 日志、看不到计数趋势。
+# 指标清单（口径/建议关注/注册位置）见 docs/METRICS.md；R8-2 的 tick/对账耗时看
+# iot.access.lease.tick.duration 与 iot.access.config.reconcile.duration 的 max。
 # 上一轮新增的 iot.access.decode.failure 正是这个缺口：它只在 WARN 里可见。
 #
 # ⚠️ 安全边界（与 ypbin-iot.yaml 同一口径，改前务必读完）：

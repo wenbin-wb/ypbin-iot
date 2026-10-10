@@ -95,6 +95,16 @@ class ConfigEpochReconcilerTest {
         reconciler.reconcile(Set.of(TENANT_A));
         assertThat(linkManager.reconciled).containsExactly(TENANT_A, TENANT_A);
         assertThat(meterRegistry.get("iot.access.config.changed").counter().count()).isEqualTo(1.0d);
+
+        // R8-9 B：对账阶段耗时（tick 里唯一串行打远端的部分）必须有记录
+        assertThat(meterRegistry.get("iot.access.config.reconcile.duration").timer().count())
+            .as("两次对账 ⇒ 计时器至少记两次").isGreaterThanOrEqualTo(2L);
+
+        // 早退路径（没有持有租户 ⇒ 不打远端）不应记录耗时：否则统计里会混入"0 次远端调用"的样本
+        long before = meterRegistry.get("iot.access.config.reconcile.duration").timer().count();
+        reconciler.reconcile(Set.of());
+        assertThat(meterRegistry.get("iot.access.config.reconcile.duration").timer().count())
+            .as("空持有集合直接早退，不应产生计时样本").isEqualTo(before);
     }
 
     @Test
