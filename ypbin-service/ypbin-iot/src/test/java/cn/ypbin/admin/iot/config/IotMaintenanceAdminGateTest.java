@@ -111,8 +111,168 @@ class IotMaintenanceAdminGateTest {
         "sys_role_menu", "AND rm.role_id <> 1",
         "sys_template_menu", "AND tm.template_id <> 1");
 
+    /** 一次性建库脚本。 */
+    private static final Path INSTALL_SQL = REPO_ROOT.resolve("deploy/sql/007-iot-data.sql");
+
+    /**
+     * 授权语句的扫描面：安装脚本 + <b>全部增量迁移</b>。
+     *
+     * <p>此前两条门禁只读安装脚本 ⇒ 把「平台级菜单授进租户模板」写进 migration 时门禁一声不响，
+     * 而 migration 里有十几条 {@code sys_template_menu} 授权语句，正是补授最可能落地的地方
+     * （R8-7 的覆盖面缺口之一）。</p>
+     */
+    private static final List<Path> GRANT_SQL_SOURCES = grantSqlSources();
+
+    /**
+     * 菜单属性（{@code id → platform_only}）的来源：授权脚本之外，还要读平台基座数据
+     * {@code 002-data.sql} —— 「有条件补授」的守卫子项（3004/3009 等）定义在那里，
+     * 不读它就无法判定守卫是否可达（判据见 {@link #selectGuardReachable}）。</p>
+     */
+    private static final List<Path> MENU_SQL_SOURCES = menuSqlSources();
+
+    /**
+     * 平台级（跨租户生效）菜单的<b>显式清单</b>：必须 {@code platform_only=1}，且绝不得出现在任何
+     * 可达的租户模板授权里。每一条都对应一个真实越权面——授给租户管理员，租户即可自助扩大采集范围。
+     *
+     * <p>为什么是清单而不是「按 id 前缀扫」：前缀规则看不见非 32xx/33xx 段的平台级菜单；
+     * 新增平台级菜单时必须同时登记到本表（维护责任见 {@code docs/ACCESS-TECHDEBT-R8.md} §2.5）。</p>
+     */
+    private static final Map<String, String> PLATFORM_LEVEL_MENUS = Map.of(
+        "3206", "IotTenantLedger（租户接入台账：决定「哪些租户可被采集」）",
+        "320014", "IotLedgerList（权限码 iot:ledger:list）",
+        "320015", "IotLedgerUpdate（权限码 iot:ledger:update）",
+        "3320", "PlatformOps（平台运维与监控目录）");
+
+    /**
+     * 「目标菜单无法静态判定」的授权语句豁免表（{@code 源文件名:语句摘要 → 理由}）。
+     *
+     * <p>解析器的能力边界必须显式（{@code docs/ACCESS-TECHDEBT-R8.md} §3）：形如
+     * {@code INSERT INTO sys_template_menu (...) SELECT tm.template_id, tm.menu_id ...} 的语句，
+     * 目标菜单来自被查询的行而非常量，静态判不了 ⇒ 门禁必须**报出来**要求人工裁定，
+     * 而不是静默放过。确需保留时在此登记；豁免项在脚本里已不存在时，门禁会转红（防陈旧豁免）。</p>
+     */
+    private static final Map<String, String> UNRESOLVED_GRANT_EXEMPTIONS = Map.of();
+
+    private static List<Path> grantSqlSources() {
+        List<Path> sources = new ArrayList<>();
+        sources.add(INSTALL_SQL);
+        Path migrationDir = REPO_ROOT.resolve("deploy/sql/migration");
+        try (var stream = Files.list(migrationDir)) {
+            stream.filter(path -> path.getFileName().toString().endsWith(".sql")).sorted().forEach(sources::add);
+        } catch (IOException ex) {
+            // 读不到迁移目录必须炸掉：否则本门禁静默退化成「只看安装脚本」（正是要修的那条缺口）
+            throw new IllegalStateException("读不到迁移脚本目录：" + migrationDir, ex);
+        }
+        return List.copyOf(sources);
+    }
+
+    private static List<Path> menuSqlSources() {
+        List<Path> sources = new ArrayList<>();
+        sources.add(REPO_ROOT.resolve("deploy/sql/002-data.sql"));
+        sources.addAll(GRANT_SQL_SOURCES);
+        return List.copyOf(sources);
+    }
+
     private static String sql() throws IOException {
-        return Files.readString(REPO_ROOT.resolve("deploy/sql/007-iot-data.sql"), StandardCharsets.UTF_8);
+        return code(INSTALL_SQL);
+    }
+
+    /** 读脚本并剥离 {@code --} 行注释（门禁文本匹配必须作用在剥注释后的脚本上，教训二十三）。 */
+    private static String code(Path source) throws IOException {
+        return Files.readString(source, StandardCharsets.UTF_8).replaceAll("--[^\\n]*", "");
+    }
+
+    /** 解析某脚本的菜单属性：{@code id → platform_only}。 */
+    private static Map<String, String> menuPlatformOnly(String code) {
+        Map<String, String> result = new LinkedHashMap<>();
+        Matcher matcher = MENU_INSERT.matcher(code);
+        while (matcher.find()) {
+            result.put(matcher.group(1), matcher.group(5));
+        }
+        return result;
+    }
+
+    /** 全脚本合并后的菜单属性（同一 id 多源定义时以扫描顺序后者为准；不一致由专项用例断言）。 */
+    private static Map<String, String> allMenusPlatformOnly() throws IOException {
+        Map<String, String> result = new LinkedHashMap<>();
+        for (Path source : MENU_SQL_SOURCES) {
+            result.putAll(menuPlatformOnly(code(source)));
+        }
+        return result;
+    }
+
+    /** 一条「有条件补授」：{@code INSERT IGNORE ... SELECT DISTINCT x.?, <常量目标> ... WHERE x.menu_id IN (子清单)}。 */
+    private record SelectGuard(String table, String target, Set<String> children) {
+    }
+
+    /** 收集某脚本里全部「有条件补授」语句。 */
+    private static List<SelectGuard> selectGuards(String code) {
+        List<SelectGuard> guards = new ArrayList<>();
+        Matcher matcher = ORPHAN_GUARD.matcher(code);
+        while (matcher.find()) {
+            guards.add(new SelectGuard(matcher.group(1), matcher.group(3), idSet(matcher.group(4))));
+        }
+        return guards;
+    }
+
+    /**
+     * 「有条件补授」是否<b>可达</b>（真的会把目标菜单授进租户模板）。
+     *
+     * <p>判据：子清单里只要存在一个「非平台级」子项（{@code platform_only != 1} 或未登记），
+     * 就说明已有租户模板持有该子项 ⇒ 语句的 {@code WHERE} 能命中 ⇒ 目标菜单会被补授给这些模板。
+     * 反之（子项全部平台级）该语句恒命中 0 行 ⇒ 只是<b>潜在</b>授权，今天不构成违规。</p>
+     *
+     * <p>这条判据是 R8-7 那条 latent gap 的可判定形式：子项一旦被改成 {@code platform_only=0}，
+     * 目标平台级菜单就会真的进租户模板，而旧门禁（只认 {@code id IN}）看不见这条语句。</p>
+     */
+    private static boolean selectGuardReachable(SelectGuard guard, Map<String, String> menuPlatformOnly) {
+        for (String child : guard.children()) {
+            if (!"1".equals(menuPlatformOnly.get(child))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** 某脚本里<b>可达</b>的租户模板授权菜单 id：形态 A（{@code id IN}）+ 可达的形态 B（SELECT 常量）。 */
+    private static Set<String> reachableTemplateGrantIds(String code, Map<String, String> menuPlatformOnly) {
+        Set<String> reachable = new LinkedHashSet<>(grantedMenuIds(code, "sys_template_menu"));
+        for (SelectGuard guard : selectGuards(code)) {
+            if ("sys_template_menu".equals(guard.table()) && selectGuardReachable(guard, menuPlatformOnly)) {
+                reachable.add(guard.target());
+            }
+        }
+        return reachable;
+    }
+
+    /**
+     * 目标菜单无法静态判定的授权语句（{@code 源文件名: 归一化后的完整语句}）。
+     *
+     * <p>键用<b>完整语句</b>而不是前缀：同一脚本里两条只有子清单不同的补授语句前缀完全相同，
+     * 用前缀会让豁免与识别互相串味。注意 {@link #ORPHAN_GUARD} 以 {@code ;} 收尾，
+     * 而这里按 {@code ;} 切分后语句已无分号，故匹配时补回。</p>
+     */
+    private static List<String> unresolvedGrantStatements(Path source, String code) {
+        Pattern insert = Pattern.compile(
+            "^INSERT\\s+(?:IGNORE\\s+)?INTO\\s+(?:sys_role_menu|sys_template_menu)\\b", Pattern.CASE_INSENSITIVE);
+        List<String> unresolved = new ArrayList<>();
+        for (String statement : code.split(";")) {
+            String trimmed = statement.trim();
+            if (trimmed.isEmpty() || !insert.matcher(trimmed).find()) {
+                continue;
+            }
+            if (ORPHAN_GUARD.matcher(trimmed + ";").find() || GRANT_IN.matcher(trimmed).find()) {
+                continue;
+            }
+            unresolved.add(source.getFileName() + ": " + trimmed.replaceAll("\\s+", " "));
+        }
+        return unresolved;
+    }
+
+    /** 归一化 id 清单为集合。 */
+    private static Set<String> idSet(String ids) {
+        return Arrays.stream(ids.split(",")).map(String::trim).filter(item -> !item.isEmpty())
+            .collect(Collectors.toCollection(LinkedHashSet::new));
     }
 
     @Test
@@ -201,36 +361,123 @@ class IotMaintenanceAdminGateTest {
     }
 
     @Test
-    @DisplayName("★ 反向门禁：platform_only=1 的平台级菜单**绝不得**进 sys_template_menu")
+    @DisplayName("★ 反向门禁：platform_only=1 的平台级菜单**绝不得**进 sys_template_menu（全脚本，含 migration）")
     void platformOnlyMenusMustNeverEnterTenantTemplate() throws IOException {
         // 为什么必须有反向检查：正向那条只证明「platform_only=0 的都进模板了」，
         // 证明不了「platform_only=1 的没进模板」。而 sys_template_menu 是租户侧配角色的白名单
         // （SysRoleServiceImpl#validateMenus）——一旦平台级菜单进了模板，租户管理员就能把
         // iot:ledger:list 授给租户用户，而该权限码对应的是「改别的租户是否被采集」⇒ 跨租户越权。
-        String code = sql().replaceAll("--[^\\n]*", "");
-        Map<String, String> menuPlatformOnly = new LinkedHashMap<>();
-        Matcher menuMatcher = MENU_INSERT.matcher(code);
-        while (menuMatcher.find()) {
-            menuPlatformOnly.put(menuMatcher.group(1), menuMatcher.group(5));
-        }
+        Map<String, String> menuPlatformOnly = allMenusPlatformOnly();
         assertThat(menuPlatformOnly).as("没扫到任何菜单 id ⇒ 本门禁空跑").isNotEmpty();
 
-        Set<String> templateGranted = grantedMenuIds(code, "sys_template_menu");
-        // 自检：模板授权集合必须非空，否则下面的断言可能恒真（教训二十七）
-        assertThat(templateGranted).as("sys_template_menu 一条授权都没扫到 ⇒ 本门禁无法咬人").isNotEmpty();
-
         List<String> offenders = new ArrayList<>();
-        for (Map.Entry<String, String> menu : menuPlatformOnly.entrySet()) {
-            String id = menu.getKey();
-            if ((id.startsWith("32") || id.startsWith("33")) && "1".equals(menu.getValue())
-                && templateGranted.contains(id)) {
-                offenders.add(id);
+        int grantedIds = 0;
+        for (Path source : GRANT_SQL_SOURCES) {
+            // 「可达的模板授权」= 形态 A（id IN 显式）∪ 可达的形态 B（SELECT 常量且守卫子项里含非平台级项）
+            Set<String> templateGranted = reachableTemplateGrantIds(code(source), menuPlatformOnly);
+            if (templateGranted.isEmpty()) {
+                continue;   // schema-only 迁移：本脚本不涉及模板授权
+            }
+            grantedIds += templateGranted.size();
+            for (String id : templateGranted) {
+                if ((id.startsWith("32") || id.startsWith("33")) && "1".equals(menuPlatformOnly.get(id))) {
+                    offenders.add(source.getFileName() + " → " + id);
+                }
             }
         }
+        // 自检：必须真的扫到过模板授权，否则下面的断言恒真（教训二十七）
+        assertThat(grantedIds).as("所有脚本加起来一条模板授权都没扫到 ⇒ 本门禁无法咬人").isGreaterThan(0);
+
         assertThat(offenders)
-            .as("这些 platform_only=1 的平台级菜单被授进了租户模板 ⇒ 租户管理员可把平台级权限授给租户用户：%s",
+            .as("这些 platform_only=1 的平台级菜单被（可达的）租户模板授权命中 ⇒ 租户管理员可把平台级权限授给租户用户：%s",
                 offenders)
             .isEmpty();
+    }
+
+    @Test
+    @DisplayName("★ 跨脚本门禁：平台级菜单显式清单 + SELECT 形态补授的可达性（补齐 R8-7 覆盖面）")
+    void platformLevelMenusMustStayPlatformOnlyAndOutOfTemplates() throws IOException {
+        // 本用例补的是三处覆盖面缺口（见 docs/ACCESS-TECHDEBT-R8.md §2.5）：
+        //   ① 只扫安装脚本 ⇒ 这里扫「安装脚本 + 全部 migration」；
+        //   ② 只认 32xx/33xx 前缀 ⇒ 这里用**显式清单**，覆盖非该前缀段的平台级菜单；
+        //   ③ 只认 `INSERT ... id IN (...)` 形态 ⇒ 这里把「SELECT + 常量目标」的补授也纳入，
+        //      并按**可达性**判定（子项全部平台级 ⇒ 恒命中 0 行 ⇒ 只是潜在授权；否则真的会授进模板）。
+        assertThat(GRANT_SQL_SOURCES).as("只扫到 %s 个脚本 ⇒ 迁移脚本未被读入，本门禁空跑", GRANT_SQL_SOURCES.size())
+            .hasSizeGreaterThan(1);
+        assertThat(PLATFORM_LEVEL_MENUS).as("平台级菜单清单为空 ⇒ 本门禁恒真").isNotEmpty();
+        assertThat(MENU_SQL_SOURCES.size()).as("菜单属性来源少于 2 个脚本 ⇒ 守卫子项的 platform_only 解析不了")
+            .isGreaterThan(1);
+
+        // ① 同一 id 在不同脚本里的 platform_only 必须一致：不一致本身就是缺陷（后写的脚本会覆盖前者的语义）
+        Map<String, Set<String>> valuesById = new LinkedHashMap<>();
+        for (Path source : MENU_SQL_SOURCES) {
+            menuPlatformOnly(code(source)).forEach((id, platformOnly) ->
+                valuesById.computeIfAbsent(id, ignored -> new LinkedHashSet<>()).add(platformOnly));
+        }
+        List<String> inconsistent = valuesById.entrySet().stream()
+            .filter(entry -> entry.getValue().size() > 1)
+            .map(entry -> entry.getKey() + " → " + entry.getValue())
+            .collect(Collectors.toList());
+        assertThat(inconsistent).as("同一菜单 id 在不同脚本里的 platform_only 取值不一致").isEmpty();
+
+        // ② 清单必须「真的存在且仍是 platform_only=1」：清单陈旧、或有人把平台级菜单改成 0，都要红
+        List<String> missing = new ArrayList<>();
+        List<String> downgraded = new ArrayList<>();
+        for (Map.Entry<String, String> platformMenu : PLATFORM_LEVEL_MENUS.entrySet()) {
+            Set<String> values = valuesById.get(platformMenu.getKey());
+            if (values == null || values.isEmpty()) {
+                missing.add(platformMenu.getKey() + "（" + platformMenu.getValue() + "）");
+            } else if (!"1".equals(values.iterator().next())) {
+                downgraded.add(platformMenu.getKey() + " → platform_only=" + values.iterator().next());
+            }
+        }
+        assertThat(missing).as("清单里的平台级菜单在任何脚本里都找不到定义 ⇒ 清单已陈旧，请同步维护").isEmpty();
+        assertThat(downgraded).as("平台级菜单的 platform_only 不是 1 ⇒ 它会进入租户模板白名单（跨租户越权面）").isEmpty();
+
+        // ③ 平台级菜单不得被任何脚本的**可达**授权命中（形态 A 显式 + 形态 B 可达）
+        Map<String, String> menuPlatformOnly = allMenusPlatformOnly();
+        List<String> offenders = new ArrayList<>();
+        int guards = 0;
+        for (Path source : GRANT_SQL_SOURCES) {
+            String code = code(source);
+            for (SelectGuard guard : selectGuards(code)) {
+                if (!"sys_template_menu".equals(guard.table())) {
+                    continue;
+                }
+                guards++;
+                if (selectGuardReachable(guard, menuPlatformOnly) && PLATFORM_LEVEL_MENUS.containsKey(guard.target())) {
+                    offenders.add(source.getFileName() + " → SELECT 形态补授目标 " + guard.target()
+                        + "（子项 " + guard.children() + " 中已有非平台级项 ⇒ 守卫可达）");
+                }
+            }
+            for (String id : grantedMenuIds(code, "sys_template_menu")) {
+                if (PLATFORM_LEVEL_MENUS.containsKey(id)) {
+                    offenders.add(source.getFileName() + " → id IN 形态显式授权 " + id);
+                }
+            }
+        }
+        // 自检：一条「有条件补授」都没扫到，说明解析器与脚本形态脱节（教训八）
+        assertThat(guards).as("一条 SELECT 形态补授都没扫到 ⇒ 解析器与脚本形态脱节，本门禁在这一点上咬不到").isGreaterThan(0);
+        assertThat(offenders).as("平台级菜单被可达的租户模板授权命中 ⇒ 租户管理员可自助扩大跨租户面：%s", offenders)
+            .isEmpty();
+
+        // ④ 解析器看不见的授权语句必须显式报出（能力边界显式化），确需保留则登记豁免
+        List<String> unresolved = new ArrayList<>();
+        for (Path source : GRANT_SQL_SOURCES) {
+            unresolved.addAll(unresolvedGrantStatements(source, code(source)));
+        }
+        List<String> unregistered = unresolved.stream()
+            .filter(item -> !UNRESOLVED_GRANT_EXEMPTIONS.containsKey(item))
+            .collect(Collectors.toList());
+        assertThat(unregistered).as(
+            "这些授权语句的目标菜单无法静态判定（解析器看不见）⇒ 要么改写成可判定形态，要么按原样登记到 UNRESOLVED_GRANT_EXEMPTIONS：%s",
+            unregistered).isEmpty();
+
+        // ⑤ 豁免表不得陈旧：登记了但脚本里已不存在同样要红（否则豁免会永久掩盖新问题）
+        List<String> stale = UNRESOLVED_GRANT_EXEMPTIONS.keySet().stream()
+            .filter(key -> !unresolved.contains(key))
+            .collect(Collectors.toList());
+        assertThat(stale).as("这些豁免项在脚本里已不存在 ⇒ 请从 UNRESOLVED_GRANT_EXEMPTIONS 移除").isEmpty();
     }
 
     /**
