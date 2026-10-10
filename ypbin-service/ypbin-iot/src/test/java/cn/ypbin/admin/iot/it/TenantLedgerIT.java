@@ -112,13 +112,19 @@ class TenantLedgerIT {
         meterRegistry = new SimpleMeterRegistry();
         ledgerService = new TenantLedgerService(ledgerMapper, meterRegistry);
 
+        // 崩溃自愈：若上次运行在「改名窗口」内被杀，备份表会残留 ⇒ 其它共用库的 IT 会集体红且不会自愈
+        if (tableExists(LEDGER_BACKUP_TABLE)) {
+            renameTable(LEDGER_BACKUP_TABLE, "tenant_ledger");
+        }
         physicalDelete();
+        physicalDeleteAssignment();
     }
 
     @AfterAll
     static void tearDown() {
         if (dataSource != null) {
             physicalDelete();
+            physicalDeleteAssignment();
             dataSource.close();
         }
     }
@@ -247,6 +253,12 @@ class TenantLedgerIT {
     @Test
     @DisplayName("★ R8-8 方案 B（可用性优先）：台账写失败**不得**回滚同事务内的业务写入，但必须计数")
     void ledgerBumpFailureMustNotRollbackBusinessWrite() throws SQLException {
+        // 先建台账行：否则 bump 会走「台账无该租户」的 no-op 路径，同样返回 false ⇒ 断言失去判别力
+        ledgerService.setAssignable(TENANT, true);
+        assertThat(ledgerMapper.selectIncludingDeleted(TENANT))
+            .as("前置：台账行必须已存在（区分「写失败」与「no-op」）").isNotNull();
+        double failuresBefore = meterRegistry.get("iot.ledger.bump.failure").counter().count();
+
         // 真库构造「台账表不可写」：临时改名（比 mock 更能证明「异常真的发生了、事务仍可用」）
         renameTable("tenant_ledger", LEDGER_BACKUP_TABLE);
         try {
@@ -264,10 +276,24 @@ class TenantLedgerIT {
                 .eq(TenantNodeAssignment::getTenantId, TENANT)))
                 .as("业务写入必须**提交**（方案 B：台账故障不回滚业务写入）").isEqualTo(1L);
             assertThat(meterRegistry.get("iot.ledger.bump.failure").counter().count())
-                .as("失败必须计数（版本号不推进 ⇒ 只能等周期安全网，必须可告警）").isEqualTo(1.0d);
+                .as("失败必须计数（版本号不推进 ⇒ 只能等周期安全网，必须可告警）")
+                .isEqualTo(failuresBefore + 1.0d);
         } finally {
             renameTable(LEDGER_BACKUP_TABLE, "tenant_ledger");
             physicalDeleteAssignment();
+        }
+    }
+
+    /** 表是否存在（崩溃自愈判据）。 */
+    private static boolean tableExists(String table) throws SQLException {
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement statement = connection.prepareStatement(
+                    "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()"
+                        + " AND table_name = ?")) {
+            statement.setString(1, table);
+            try (java.sql.ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next() && resultSet.getInt(1) > 0;
+            }
         }
     }
 
