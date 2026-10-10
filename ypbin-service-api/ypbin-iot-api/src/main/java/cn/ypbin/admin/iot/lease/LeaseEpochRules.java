@@ -25,50 +25,27 @@ public final class LeaseEpochRules {
     /** 首次分配时的台账版本号。 */
     public static final long INITIAL_EPOCH = 1L;
 
-    /** epoch 对账接口的**默认分页大小**（服务端默认值 = 客户端翻页步长，两处共用同一常量）。 */
-    public static final int EPOCH_PAGE_DEFAULT_LIMIT = 500;
-
     /**
-     * epoch 对账接口允许的**最大分页大小**。
+     * epoch 对账的节点入参校验（服务端与客户端共用同一口径，避免两处漂移）。
      *
-     * <p>上限的意义：该接口此前不按节点过滤、不分页，单次请求会把全平台的 assignment × ledger 读出来
-     * （O(节点数 × 全平台租户)）。收紧到「按节点 + 分页」后，必须同时挡住「用一个超大 limit 把退化行为
-     * 再打开」这条路（见 {@code docs/ACCESS-TECHDEBT-R8.md} §2.2）。</p>
-     */
-    public static final int EPOCH_PAGE_MAX_LIMIT = 1_000;
-
-    /**
-     * 客户端单轮对账**最多翻多少页**（硬上限，防服务端异常时无界翻页）。
+     * <p>{@code accessNode} **必须非空**：不按节点过滤就等于让每个节点拉全平台
+     * （即 R8-4 的退化行为），这属于契约违规而不是可选项——直接抛，不回落成全量（禁静默降级）。</p>
      *
-     * <p>{@code 1_000 页 × 1_000 行 = 100 万租户/节点}，远超任何现实规模 ⇒ 触顶按异常处理（计数 + 告警日志）。</p>
-     */
-    public static final int EPOCH_PAGE_MAX_PAGES = 1_000;
-
-    private LeaseEpochRules() {
-    }
-
-    /**
-     * 校验 epoch 对账的分页入参（服务端与客户端共用同一口径，避免两处漂移）。
-     *
-     * <p>{@code accessNode} **必须非空**：不按节点过滤就等于把「每节点拉全平台」的退化行为再打开，
-     * 这属于契约违规而不是可选项（禁静默降级：直接抛，不回落成全量）。</p>
+     * <p>为什么不加 {@code limit/offset} 分页（设计取舍，2026-10-09）：初版实现了翻页，但被架构门禁
+     * {@code SourceConventionTest#loopsMustNotCallDbOrRpc} 拦下——分页必然把「一次批量调用」变成
+     * 「每 500 行一次串行 RPC」，与目标相反（还会吃掉 tick 时间预算，见 R8-2）。而本接口的返回集
+     * 已经按节点收敛，其规模由节点容量（{@code ypbin.access.capacity}）天然约束，不需要分页兜底。</p>
      *
      * @param accessNode 节点标识
-     * @param limit      单页行数
-     * @param offset     偏移量
-     * @throws IllegalArgumentException 任一入参非法
+     * @throws IllegalArgumentException 为空或全空白
      */
-    public static void validateEpochPage(String accessNode, int limit, int offset) {
+    public static void validateAccessNode(String accessNode) {
         if (accessNode == null || accessNode.isBlank()) {
             throw new IllegalArgumentException("accessNode 不得为空：epoch 对账必须按节点过滤（否则退化成全平台扫描）");
         }
-        if (limit < 1 || limit > EPOCH_PAGE_MAX_LIMIT) {
-            throw new IllegalArgumentException(
-                "limit 必须在 1.." + EPOCH_PAGE_MAX_LIMIT + " 之间：limit=" + limit);
-        }
-        if (offset < 0) {
-            throw new IllegalArgumentException("offset 不得为负：offset=" + offset);
-        }
+    }
+
+    private LeaseEpochRules() {
     }
 
     /**

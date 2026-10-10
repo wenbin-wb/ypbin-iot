@@ -22,7 +22,7 @@
 | POST | `/renew` | 周期续约：`renewedLeases`（成功）+ `revokedTenantIds`（不再属于本节点）+ `nodeFenced`（节点级失效）+ **`serverTime`（数据库时钟）** |
 | POST | `/release` | 节点主动下线时释放租户（状态置为 `released`，可被重新分配） |
 | POST | `/assignment` | 查询单个租户的归属（从未分配返回 `data=null`） |
-| GET | `/epochs?accessNode={node}&limit={n}&offset={m}` | 批量对账：**按节点过滤 + 分页**取 epoch（**判据只用 epoch**，不用设备数）。`accessNode` **必填**（空/缺失一律拒绝——不带节点就等于让每个节点拉全平台，即 R8-4 的退化行为）；`limit` 1..1000（默认 500）、`offset` ≥0（默认 0）。返回该节点当页条目（按 `tenant_id` 升序）+ 数据库 `readAt`；调用方（access 的 `ConfigEpochReconciler`）逐页取到「不满一页」为止 |
+| GET | `/epochs?accessNode={node}` | 批量对账：**只返回该节点名下租户**的 epoch（**判据只用 epoch**，不用设备数）。`accessNode` **必填**（空/缺失一律拒绝——不带节点就等于让每个节点拉全平台，即 R8-4 的退化行为）。返回条目按 `tenant_id` 升序 + 数据库 `readAt`。**刻意不分页**：返回集已按节点收敛、规模由节点容量约束，分页会把「一次批量调用」变成每页一次串行 RPC，反而增加 tick 开销（详见 `LeaseEpochRules#validateAccessNode` 的 javadoc） |
 
 状态机：`ACTIVE --到期/释放--> PENDING_TAKEOVER | RELEASED`，`PENDING_TAKEOVER | RELEASED --接管/重新分配--> ACTIVE`。
 

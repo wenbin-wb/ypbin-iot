@@ -74,14 +74,13 @@ public interface LeaseService {
      * 批量对账：按**节点**取一页 epoch（判据只用 epoch）。
      *
      * <p>必须按节点过滤：接入侧每个节点每 10s 调一次，接口若不带节点就会退化成
-     * 「每节点拉全平台」（O(节点数 × 全平台租户)）。分页用于兜住「单节点持有租户过多」的极端。</p>
+     * 「每节点拉全平台」（O(节点数 × 全平台租户)）。**刻意不分页**（理由见
+     * {@link cn.ypbin.admin.iot.lease.LeaseEpochRules#validateAccessNode} 的 javadoc）。</p>
      *
      * @param accessNode 节点标识（必填，空则拒绝：不得回落成全量）
-     * @param limit      单页行数（1..{@link cn.ypbin.admin.iot.lease.LeaseEpochRules#EPOCH_PAGE_MAX_LIMIT}）
-     * @param offset     偏移量（≥0）
-     * @return 该节点当页的版本号 + 读取时刻
+     * @return 该节点的版本号 + 读取时刻
      */
-    TenantEpochBatchResp batchEpoch(String accessNode, int limit, int offset);
+    TenantEpochBatchResp batchEpoch(String accessNode);
 
     /**
      * 失效扫描：把已到期且仍为 ACTIVE 的租约置为待接管（单条原子 UPDATE）。

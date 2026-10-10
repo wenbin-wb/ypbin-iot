@@ -14,7 +14,7 @@
 | 条目 | 现状判定（2026-10-09 复核） | 触发前提（现实性） | 扩展前优先级 |
 |---|---|---|---|
 | **R8-2** 对账拖长 tick | **仍存在**：同 tick 内「续约 → 安全网 → 逐租户串行 `loadByTenant`」；启动自检只按**租约**客户端（4s）建模，**未**计入设备规格客户端（6s/租户）；且 access **只有 1 个调度线程**，1s 的 egress 上报与 10s 的续约 tick 互相排队 | 单节点需**持有 ≥4 个租户**且同一 tick ≥3 个租户变更 | P1（后果是抖动而非丢数） |
-| **R8-4** `/epochs` 不按节点过滤 | ✅ **已实施（2026-10-09）**：契约改为 `batchEpoch(accessNode, limit, offset)`，过滤下沉 SQL + 翻页（4 变异转红，见 §2.2）。原判：**仍存在**：端点无入参；`batchEpoch()` 全表两查（assignment + ledger），无节点过滤/分页；过滤只在**客户端**做 | **多节点**（单节点等价，无实质代价）；租户数多时单节点也开始放大 | P0（多节点硬前置，改动最小） |
+| **R8-4** `/epochs` 不按节点过滤 | ✅ **已实施（2026-10-09）**：契约改为 `batchEpoch(accessNode)`，过滤下沉 SQL（4 变异转红，见 §2.2；分页方案经架构门禁复核后放弃）。原判：**仍存在**：端点无入参；`batchEpoch()` 全表两查（assignment + ledger），无节点过滤/分页；过滤只在**客户端**做 | **多节点**（单节点等价，无实质代价）；租户数多时单节点也开始放大 | P0（多节点硬前置，改动最小） |
 | **R8-5** `fence()` 不清订阅跟踪 | **部分存在**：`fence()` 与 `removeAllDevices()` 不对称、且 fence 用例**零断言**；**但「重领后漏订阅 ⇒ 静默零数据」在框架 0.2.0 下不成立**（§2.3 有源码判定） | 引用残留：任何 fence 都会留下 | P2（残余 = 引用只增不减 + 契约无门禁） |
 | **R8-6** 规格变化只重发 ADD | **部分存在**：确实只发 ADD；**但框架 `bind()` 先 `detach()` 关旧会话再建新实例 ⇒ 会重新订阅新点位**，静默零数据不成立；跨模块依赖仅以**测试注释里的假设**形式存在 | 仅当框架改为复用会话实例时 | P2（与 R8-5 同源，一并做契约测试） |
 | **R8-7** 平台级不变量无门禁 | ✅ **已实施（2026-10-09）**：覆盖面缺口已补齐（扫 migration + `INSERT … SELECT` 可达性 + 显式清单；4 变异转红，见 §2.5）。原判：**部分存在（原表述已过期）**：**反向门禁 2026-09-26 已存在**（`IotMaintenanceAdminGateTest:204`，PR #48）+ 两条正向门禁；**残留 = 覆盖面缺口**：不扫 `migration/*.sql`、只认 `32xx/33xx`、只认 `id IN (...)` 形态——仓内已有一条**门禁看不见**的 `INSERT IGNORE … SELECT …, 3320`（3320 为 `platform_only=1`） | 无需触发；当前该语句命中 0 行，**安全性由数据巧合维持**而非门禁 | P1（纯门禁小改，零运行时代价） |
@@ -89,12 +89,13 @@
 
 ### 2.2 R8-4 `/internal/lease/epochs` 不按节点过滤（P0，多节点前必修）
 
-> **✅ 已实施（2026-10-09）**：验收标准里的方案 C（节点过滤 + 分页）已落地：
-> ① **契约**：`GET /epochs?accessNode={node}&limit={n}&offset={m}`；`accessNode` **必填**（空/缺失一律拒绝——不按节点过滤就等于把退化行为再打开），`limit` 1..1000（默认 500）、`offset` ≥0（默认 0）；分页常量与校验放在 api 模块 `LeaseEpochRules`，**服务端与客户端共用同一口径**。
-> ② **SQL**：新增 `TenantNodeAssignmentMapper#selectEpochItemsByNode`（`WHERE a.access_node = ?` 走 `idx_tenant_node_assignment_node`、`ORDER BY tenant_id` 保证分页稳定、两条 `is_deleted = 0` 手写补上），复杂度从 O(节点数 × 全平台租户) 降到 O(本节点持有租户)。
-> ③ **客户端**：`ConfigEpochReconciler` 持有 `nodeId` 并翻页（不满一页即停；翻页触顶按异常计数 + `log.error`，不静默截断），`AccessLeaseConfiguration` 传 `properties.getNodeId()`；`docs/LEASE.md` §一 契约同步。
-> **验证**：新增真库 IT `LeaseEpochPageIT` **4/0/0/0**（节点过滤 / 分页不漏不重＋越界空集 / 软删台账不复活 `config_epoch` / 软删归属不出现）、iot 模块 **879/0/0/0**、access 模块全绿；**变异 4/4 转红**：M1 去掉节点过滤（IT 节点过滤用例红）、M2 去掉台账 `is_deleted=0`（软删台账用例红）、M3 去掉归属 `is_deleted=0`（软删归属用例红）、M4 客户端只取首页（翻页用例红）。每处变异先确认落地、跑完 `git checkout --` 还原并复跑确认全绿。
-> **未做（本条剩余面）**：未做「游标分页」（当前 `LIMIT/OFFSET` 在超大偏移下有 O(offset) 扫描成本，本场景节点持有租户量级不足以触发）；生产多节点环境未实测（需 ≥2 节点 + ≥4 租户，登记于 §5）。
+> **✅ 已实施（2026-10-09）**：验收标准里的**方案 A（按节点过滤）**已落地：
+> ① **契约**：`GET /epochs?accessNode={node}`，`accessNode` **必填**（空/缺失一律拒绝——不按节点过滤就等于把退化行为再打开）；校验放在 api 模块 `LeaseEpochRules#validateAccessNode`，**服务端与客户端共用同一口径**。
+> ② **SQL**：新增 `TenantNodeAssignmentMapper#selectEpochItemsByNode`（`WHERE a.access_node = ?` 走 `idx_tenant_node_assignment_node`、`ORDER BY tenant_id` 保证响应稳定、两条 `is_deleted = 0` 手写补上），复杂度从 O(节点数 × 全平台租户) 降到 O(本节点持有租户)。
+> ③ **客户端**：`ConfigEpochReconciler` 持有 `nodeId` 并按其做**一次**批量调用；`AccessLeaseConfiguration` 传 `properties.getNodeId()`；`docs/LEASE.md` §一 契约同步。
+> **⚠️ 方案 C（分页）为什么被放弃（设计取舍，如实记录）**：初版已实现「节点过滤 + `limit/offset` 翻页」，被 **CI 架构门禁** `SourceConventionTest#loopsMustNotCallDbOrRpc` 拦下（循环体内的 RPC 判定为 N+1）。复核该判定**成立**：分页必然把「一次批量调用」变成「每 `limit` 行一次**串行** RPC」——对单节点持有量（远小于一页）反而更贵，且会吃掉 tick 时间预算（与 R8-2 相悖）。因此改为**只做节点过滤**：返回集已按节点收敛、规模由节点容量（`ypbin.access.capacity`）天然约束，不需要分页兜底；同时避免为一条可避免的循环 RPC 永久开一个门禁豁免。
+> **验证**：新增真库 IT `LeaseEpochNodeFilterIT` **4/0/0/0**（节点过滤+升序 / 无归属节点返回空集 / 软删台账不复活 `config_epoch` / 软删归属不出现）、iot 模块 **879/0/0/0**、access 模块 **117/0/0/0**；**变异 4/4 转红**：M1 去掉节点过滤（IT 节点过滤用例红）、M2 去掉台账 `is_deleted=0`（软删台账用例红）、M3 去掉归属 `is_deleted=0`（软删归属用例红）、M4 客户端不传本节点标识（单测 `reconcileMustQueryOnceWithNodeId` 红）。每处先确认落地、跑完 `git checkout --` 还原并复跑确认全绿。
+> **未做（本条剩余面）**：生产多节点环境未实测（需 ≥2 节点 + ≥4 租户，登记于 §5）。
 
 **缺陷**：每个 access 节点每 10s 拉**全平台** assignment × ledger；服务端无过滤、无分页，过滤只在客户端做 ⇒ 复杂度 O(节点数 × 全平台租户)。
 
@@ -334,4 +335,4 @@
 | 2026-10-09 | 建立本文件：R8-2/R8-4~R8-9 **逐条立项**（一手证据 + 触发前提 + 方案 + 验收标准 + 排期建议）。**只立项，未实施、未改代码、未新建门禁。** |
 | 2026-10-09（同日更正） | 经**独立审计**（外委子代理，只读、不同上下文）后更正 4 处：① **R8-7 判定改「部分存在」**——反向+正向门禁自 PR #48（2026-09-26）已存在，真实缺口是**覆盖面**（不扫 migration / 只认 32xx,33xx / 只认 `INSERT … id IN`，而 `007-iot-data.sql:226-228` 的 `INSERT … SELECT …, 3320` 形态在门禁视野外）；② R8-9 的「无指标暴露配置」更正为已闭合（#53/#75）；③ R8-2 补「access 只有 1 个调度线程、与 1s egress 上报互相排队」与 tick 内顺序证据；④ R8-8 补「`bumpConfigEpochOfCurrentTenant()` 自调用使 `bumpConfigEpoch` 的 `@Transactional` 失效」。上述更正均经本文件作者**逐条独立复核**（门禁显示名、SELECT 语句原文、3320 的 `platform_only`、调度配置缺失、fence 用例零断言、`TenantLedgerIT` 无用例）后才写入。 |
 | 2026-10-09（R8-7 实施） | **R8-7 门禁覆盖面已实施**（仅动门禁测试）：扫描面扩到 `deploy/sql/migration/*.sql`（+ `002-data.sql` 供解析守卫子项）；新增 `PLATFORM_LEVEL_MENUS` 显式清单与「SELECT 形态补授」的**可达性判据**；解析器看不见的目标形态改为显式报出（带豁免登记与陈旧豁免检查）。**变异 4/4 转红**（降级平台级菜单 / 降级守卫子项 / migration 注入 / 动态目标）；当前 main 门禁 5/0/0/0、iot 模块 878/0/0/0。 |
-| 2026-10-09（R8-4 实施） | **R8-4 节点过滤 + 分页已实施**：`/epochs` 契约改为 `(accessNode, limit, offset)`（节点必填、上下界校验，服务端/客户端共用 `LeaseEpochRules` 的常量与校验）；过滤下沉 SQL（走 `access_node` 索引）+ `ORDER BY tenant_id` 稳定分页 + 手写两条 `is_deleted=0`；客户端翻页并在触顶时报错计数。**真库 IT 4/0/0/0**、iot **879/0/0/0**、**变异 4/4 转红**；`docs/LEASE.md` §一 契约同步。 |
+| 2026-10-09（R8-4 实施） | **R8-4 按节点过滤已实施**：`/epochs` 契约改为 `batchEpoch(accessNode)`（节点必填，服务端/客户端共用 `LeaseEpochRules#validateAccessNode`）；过滤下沉 SQL（走 `access_node` 索引）+ `ORDER BY tenant_id` + 手写两条 `is_deleted=0`。**分页方案已放弃**——初版实现被 CI 架构门禁判为「循环内 RPC（N+1）」且判定成立（分页会把一次批量调用变成每页一次串行 RPC，反而增加 tick 开销），改为只做节点过滤。**真库 IT 4/0/0/0**、iot **879/0/0/0**、access **117/0/0/0**、**变异 4/4 转红**；`docs/LEASE.md` §一 契约同步。 |

@@ -405,13 +405,13 @@ public class LeaseServiceImpl implements LeaseService {
     }
 
     @Override
-    public TenantEpochBatchResp batchEpoch(String accessNode, int limit, int offset) {
+    public TenantEpochBatchResp batchEpoch(String accessNode) {
         // 入参校验走共享的纯函数（服务端与客户端同一口径；非法直接抛，不回落成全量）
-        LeaseEpochRules.validateEpochPage(accessNode, limit, offset);
-        // 按节点过滤 + 分页下沉到 SQL：此前是全表 assignment × ledger（O(节点数 × 全平台租户)）。
+        LeaseEpochRules.validateAccessNode(accessNode);
+        // 按节点过滤下沉到 SQL：此前是全表 assignment × ledger（O(节点数 × 全平台租户)）。
         // M0b-3 的语义不变：一次对账同时给出「归属 epoch」与「配置 epoch」，
         // 接入侧据此判断「要采什么」有没有变（不一致才拉全量设备规格）。
-        List<TenantEpochItem> items = mapper.selectEpochItemsByNode(accessNode.trim(), limit, offset);
+        List<TenantEpochItem> items = mapper.selectEpochItemsByNode(accessNode.trim());
         TenantEpochBatchResp resp = new TenantEpochBatchResp();
         resp.setItems(items);
         resp.setReadAt(mapper.selectNow());

@@ -88,25 +88,17 @@ class LeaseEpochRulesTest {
     }
 
     @Test
-    @DisplayName("★ epoch 分页入参：节点必填、limit 有界、offset 非负（非法一律抛，不回落全量）")
-    void epochPageArgumentsMustBeValidated() {
-        // 合法：边界值也要能过（1 / 上限 / offset=0）
-        LeaseEpochRules.validateEpochPage("access-1", 1, 0);
-        LeaseEpochRules.validateEpochPage("access-1", LeaseEpochRules.EPOCH_PAGE_MAX_LIMIT, 0);
-        LeaseEpochRules.validateEpochPage("access-1", LeaseEpochRules.EPOCH_PAGE_DEFAULT_LIMIT, 500);
+    @DisplayName("★ epoch 对账的节点入参：为空/全空白一律抛（不回落成全量扫描）")
+    void epochAccessNodeMustBeValidated() {
+        LeaseEpochRules.validateAccessNode("access-1");
+        LeaseEpochRules.validateAccessNode("  access-1  ");
 
-        assertThatThrownBy(() -> LeaseEpochRules.validateEpochPage(null, 500, 0))
+        assertThatThrownBy(() -> LeaseEpochRules.validateAccessNode(null))
             .as("节点为空 ⇒ 拒绝（不按节点过滤就等于拉全平台）")
             .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("accessNode");
-        assertThatThrownBy(() -> LeaseEpochRules.validateEpochPage("   ", 500, 0))
+        assertThatThrownBy(() -> LeaseEpochRules.validateAccessNode("   "))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("accessNode");
+        assertThatThrownBy(() -> LeaseEpochRules.validateAccessNode(""))
             .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> LeaseEpochRules.validateEpochPage("access-1", 0, 0))
-            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("limit");
-        assertThatThrownBy(() -> LeaseEpochRules.validateEpochPage("access-1",
-            LeaseEpochRules.EPOCH_PAGE_MAX_LIMIT + 1, 0))
-            .as("超过上限 ⇒ 拒绝（否则可用大 limit 把退化行为再打开）")
-            .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> LeaseEpochRules.validateEpochPage("access-1", 500, -1))
-            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("offset");
     }
 }

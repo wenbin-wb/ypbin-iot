@@ -11,7 +11,6 @@ package cn.ypbin.admin.access.lease;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
@@ -82,7 +81,7 @@ class ConfigEpochReconcilerTest {
     @Test
     @DisplayName("首次观测就对账一次；版本号不变则**不再**拉全量；变了才再拉")
     void epochChangeShouldTriggerReconcileOnlyWhenChanged() {
-        when(client.batchEpoch(anyString(), anyInt(), anyInt())).thenReturn(R.ok(batch(item(TENANT_A, 0L))));
+        when(client.batchEpoch(anyString())).thenReturn(R.ok(batch(item(TENANT_A, 0L))));
 
         reconciler.reconcile(Set.of(TENANT_A));
         assertThat(linkManager.reconciled).as("首次观测必须做一次全量对账（防「采集时刻早于版本号读取」竞态）")
@@ -93,7 +92,7 @@ class ConfigEpochReconcilerTest {
         assertThat(linkManager.reconciled).as("版本号相同不得再拉全量").hasSize(1);
         assertThat(meterRegistry.get("iot.access.config.changed").counter().count()).isZero();
 
-        when(client.batchEpoch(anyString(), anyInt(), anyInt())).thenReturn(R.ok(batch(item(TENANT_A, 1L))));
+        when(client.batchEpoch(anyString())).thenReturn(R.ok(batch(item(TENANT_A, 1L))));
         reconciler.reconcile(Set.of(TENANT_A));
         assertThat(linkManager.reconciled).containsExactly(TENANT_A, TENANT_A);
         assertThat(meterRegistry.get("iot.access.config.changed").counter().count()).isEqualTo(1.0d);
@@ -102,7 +101,7 @@ class ConfigEpochReconcilerTest {
     @Test
     @DisplayName("★ 对账未完成（返回 false）时**不得**推进版本号 ⇒ 下一轮必须重试；但同一版本号不得重复计数")
     void notAppliedMustNotAdvanceEpochSoNextRoundRetries() {
-        when(client.batchEpoch(anyString(), anyInt(), anyInt())).thenReturn(R.ok(batch(item(TENANT_A, 7L))));
+        when(client.batchEpoch(anyString())).thenReturn(R.ok(batch(item(TENANT_A, 7L))));
         linkManager.result = false;
 
         reconciler.reconcile(Set.of(TENANT_A));
@@ -130,7 +129,7 @@ class ConfigEpochReconcilerTest {
     @Test
     @DisplayName("只对「本节点持有的租户」对账：别人的租户不取数、不记账")
     void tenantsNotHeldMustNotBeReconciled() {
-        when(client.batchEpoch(anyString(), anyInt(), anyInt())).thenReturn(R.ok(batch(item(TENANT_A, 0L), item(TENANT_B, 0L))));
+        when(client.batchEpoch(anyString())).thenReturn(R.ok(batch(item(TENANT_A, 0L), item(TENANT_B, 0L))));
 
         reconciler.reconcile(Set.of(TENANT_A));
 
@@ -143,14 +142,14 @@ class ConfigEpochReconcilerTest {
     void emptyHeldTenantsMustNotCallRemote() {
         reconciler.reconcile(Set.of());
 
-        verify(client, times(0)).batchEpoch(anyString(), anyInt(), anyInt());
+        verify(client, times(0)).batchEpoch(anyString());
     }
 
     @Test
     @DisplayName("对账请求失败（异常/非成功信封）：计数、不推进任何版本号、下一轮重试")
     void checkFailureMustNotAdvanceAnyEpoch() {
         // 必须用 doThrow：`when(mock.method())` 会在**打桩时**就执行该方法并立刻抛出，测试自己就炸了
-        doThrow(new IllegalStateException("iot 不可达")).when(client).batchEpoch(anyString(), anyInt(), anyInt());
+        doThrow(new IllegalStateException("iot 不可达")).when(client).batchEpoch(anyString());
         reconciler.reconcile(Set.of(TENANT_A));
         assertThat(reconciler.trackedTenantCount()).isZero();
         assertThat(meterRegistry.get("iot.access.config.check.failure").counter().count()).isEqualTo(1.0d);
@@ -158,12 +157,12 @@ class ConfigEpochReconcilerTest {
             .as("对账请求本身失败时不跑安全网（请求每 tick 就会重试，跑安全网只会翻倍压力）").isZero();
 
         // 该 mock 此时已被打成「抛异常」：`when(...)` 会立刻触发它 ⇒ 后续打桩也必须用 doReturn
-        doReturn(R.fail(500, "boom")).when(client).batchEpoch(anyString(), anyInt(), anyInt());
+        doReturn(R.fail(500, "boom")).when(client).batchEpoch(anyString());
         reconciler.reconcile(Set.of(TENANT_A));
         assertThat(meterRegistry.get("iot.access.config.check.failure").counter().count()).isEqualTo(2.0d);
         assertThat(linkManager.reconciled).isEmpty();
 
-        doReturn(R.ok(batch(item(TENANT_A, 3L)))).when(client).batchEpoch(anyString(), anyInt(), anyInt());
+        doReturn(R.ok(batch(item(TENANT_A, 3L)))).when(client).batchEpoch(anyString());
         reconciler.reconcile(Set.of(TENANT_A));
         assertThat(linkManager.reconciled).containsExactly(TENANT_A);
         assertThat(reconciler.trackedTenantCount()).isEqualTo(1);
@@ -173,7 +172,7 @@ class ConfigEpochReconcilerTest {
     @DisplayName("★ 信号链路整体缺失（版本号恒不变）时必须靠**有界**周期安全网兜底收敛")
     void missingSignalMustConvergeThroughBoundedSafetyNet() {
         // 台账没有该租户 ⇒ configEpoch 恒为 0，永远不「变化」
-        when(client.batchEpoch(anyString(), anyInt(), anyInt())).thenReturn(R.ok(batch(item(TENANT_A, 0L), item(TENANT_B, 0L))));
+        when(client.batchEpoch(anyString())).thenReturn(R.ok(batch(item(TENANT_A, 0L), item(TENANT_B, 0L))));
 
         reconciler.reconcile(Set.of(TENANT_A, TENANT_B));
         int afterFirstSight = linkManager.reconciled.size();
@@ -201,7 +200,7 @@ class ConfigEpochReconcilerTest {
     @Test
     @DisplayName("★ 安全网轮转覆盖：3 个租户在 3 个 tick 内全部被强制过（每 tick 只强制 1 个）")
     void safetyNetMustRotateAcrossAllStaleTenants() {
-        when(client.batchEpoch(anyString(), anyInt(), anyInt())).thenReturn(R.ok(
+        when(client.batchEpoch(anyString())).thenReturn(R.ok(
             batch(item(TENANT_A, 0L), item(TENANT_B, 0L), item(TENANT_C, 0L))));
 
         reconciler.reconcile(Set.of(TENANT_A, TENANT_B, TENANT_C));
@@ -222,7 +221,7 @@ class ConfigEpochReconcilerTest {
     @DisplayName("★ 安全网按「距上次尝试的时长」触发：**信号正常、版本号长期不变**的租户同样会被周期强制对账")
     void healthyTenantMustAlsoBeCoveredBySafetyNet() {
         // 版本号恒为 5（健康、无变更），reconcile 恒成功
-        when(client.batchEpoch(anyString(), anyInt(), anyInt())).thenReturn(R.ok(batch(item(TENANT_A, 5L))));
+        when(client.batchEpoch(anyString())).thenReturn(R.ok(batch(item(TENANT_A, 5L))));
         reconciler.reconcile(Set.of(TENANT_A));
         assertThat(linkManager.reconciled).hasSize(1);
 
@@ -243,7 +242,7 @@ class ConfigEpochReconcilerTest {
     void safetyNetMustBeSwitchable() {
         ConfigEpochReconciler disabled = new ConfigEpochReconciler(client, NODE_ID, linkManager, meterRegistry,
             clock, 0L);
-        when(client.batchEpoch(anyString(), anyInt(), anyInt())).thenReturn(R.ok(batch(item(TENANT_A, 0L))));
+        when(client.batchEpoch(anyString())).thenReturn(R.ok(batch(item(TENANT_A, 0L))));
 
         disabled.reconcile(Set.of(TENANT_A));
         clock.advance(Duration.ofDays(1));
@@ -256,7 +255,7 @@ class ConfigEpochReconcilerTest {
     @Test
     @DisplayName("forget 之后即使版本号没变也必须重新对账（fence 重领期间上游可能改过配置）")
     void forgetShouldForceReconcileAgain() {
-        when(client.batchEpoch(anyString(), anyInt(), anyInt())).thenReturn(R.ok(batch(item(TENANT_A, 5L))));
+        when(client.batchEpoch(anyString())).thenReturn(R.ok(batch(item(TENANT_A, 5L))));
         reconciler.reconcile(Set.of(TENANT_A));
         reconciler.reconcile(Set.of(TENANT_A));
         assertThat(linkManager.reconciled).hasSize(1);
@@ -275,18 +274,18 @@ class ConfigEpochReconcilerTest {
         noTenant.setConfigEpoch(9L);
         TenantEpochItem noEpoch = new TenantEpochItem();
         noEpoch.setTenantId(TENANT_A);
-        when(client.batchEpoch(anyString(), anyInt(), anyInt())).thenReturn(R.ok(batch(noTenant, noEpoch)));
+        when(client.batchEpoch(anyString())).thenReturn(R.ok(batch(noTenant, noEpoch)));
 
         reconciler.reconcile(Set.of(TENANT_A));
 
         assertThat(linkManager.reconciled).containsExactly(TENANT_A);
         assertThat(reconciler.trackedTenantCount()).isEqualTo(1);
-        verify(client, times(1)).batchEpoch(anyString(), anyInt(), anyInt());
+        verify(client, times(1)).batchEpoch(anyString());
 
         // items 为 null（版本偏差/半成品响应）：getItems() 自带防御，不得 NPE，且安全网仍能兜底
         TenantEpochBatchResp nullItems = new TenantEpochBatchResp();
         nullItems.setItems(null);
-        when(client.batchEpoch(anyString(), anyInt(), anyInt())).thenReturn(R.ok(nullItems));
+        when(client.batchEpoch(anyString())).thenReturn(R.ok(nullItems));
         clock.advance(Duration.ofMillis(REFRESH_INTERVAL_MS + 1_000));
         assertThatCode(() -> reconciler.reconcile(Set.of(TENANT_A))).doesNotThrowAnyException();
         assertThat(meterRegistry.get("iot.access.config.reconcile.forced").counter().count())
@@ -372,34 +371,12 @@ class ConfigEpochReconcilerTest {
     }
 
     @Test
-    @DisplayName("★ 分页：首页满页则继续翻页（offset 递增），第二页被处理；节点标识必须随请求下推")
-    void reconcileMustPageThroughAllRows() {
-        List<TenantEpochItem> firstPage = new ArrayList<>();
-        for (int index = 0; index < LeaseEpochRules.EPOCH_PAGE_DEFAULT_LIMIT; index++) {
-            // 首页塞满「本节点不持有」的租户：只证明翻页发生，不扰乱 holdings
-            firstPage.add(item(10_000L + index, 0L));
-        }
-        when(client.batchEpoch(anyString(), anyInt(), anyInt()))
-            .thenReturn(R.ok(batch(firstPage.toArray(TenantEpochItem[]::new))))
-            .thenReturn(R.ok(batch(item(TENANT_A, 0L))));
+    @DisplayName("★ 必须按节点过滤：一次批量调用并带上本节点标识（不得多打一次远端）")
+    void reconcileMustQueryOnceWithNodeId() {
+        when(client.batchEpoch(anyString())).thenReturn(R.ok(batch(item(TENANT_A, 0L))));
 
         reconciler.reconcile(Set.of(TENANT_A));
 
-        verify(client).batchEpoch(NODE_ID, LeaseEpochRules.EPOCH_PAGE_DEFAULT_LIMIT, 0);
-        verify(client).batchEpoch(NODE_ID, LeaseEpochRules.EPOCH_PAGE_DEFAULT_LIMIT,
-            LeaseEpochRules.EPOCH_PAGE_DEFAULT_LIMIT);
-        assertThat(linkManager.reconciled).as("第二页里的持有租户必须被对账（否则分页会漏行）")
-            .contains(TENANT_A);
-    }
-
-    @Test
-    @DisplayName("★ 不满一页即停：只打一次远端（不得无谓多翻一页）")
-    void reconcileMustStopAfterShortPage() {
-        when(client.batchEpoch(anyString(), anyInt(), anyInt()))
-            .thenReturn(R.ok(batch(item(TENANT_A, 0L))));
-
-        reconciler.reconcile(Set.of(TENANT_A));
-
-        verify(client, times(1)).batchEpoch(NODE_ID, LeaseEpochRules.EPOCH_PAGE_DEFAULT_LIMIT, 0);
+        verify(client, times(1)).batchEpoch(NODE_ID);
     }
 }

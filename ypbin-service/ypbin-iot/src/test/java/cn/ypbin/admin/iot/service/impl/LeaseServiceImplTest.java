@@ -12,7 +12,6 @@ package cn.ypbin.admin.iot.service.impl;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.lenient;
@@ -529,39 +528,32 @@ class LeaseServiceImplTest {
     }
 
     @Test
-    @DisplayName("批量对账：按节点 + 分页查（节点与分页入参必须原样下推到 SQL），并带上读取时刻")
-    void batchEpochShouldQueryByNodeAndPage() {
+    @DisplayName("批量对账：只按节点查（节点必须原样下推到 SQL），并带上读取时刻")
+    void batchEpochShouldQueryByNode() {
         TenantEpochItem item = new TenantEpochItem();
         item.setTenantId(11L);
         item.setEpoch(1L);
         item.setConfigEpoch(3L);
-        when(mapper.selectEpochItemsByNode(eq(NODE), eq(200), eq(400))).thenReturn(List.of(item));
+        when(mapper.selectEpochItemsByNode(NODE)).thenReturn(List.of(item));
 
-        TenantEpochBatchResp resp = service.batchEpoch(NODE, 200, 400);
+        TenantEpochBatchResp resp = service.batchEpoch(NODE);
 
         assertThat(resp.getItems()).extracting("tenantId").containsExactly(11L);
         assertThat(resp.getItems()).extracting("configEpoch").containsExactly(3L);
         assertThat(resp.getReadAt()).isNotNull();
         // 关键：不得再走「全表 selectList」那条退化路径（R8-4 要修的就是它）
         verify(mapper, never()).selectList(any());
-        verify(mapper).selectEpochItemsByNode(NODE, 200, 400);
+        verify(mapper).selectEpochItemsByNode(NODE);
     }
 
     @Test
-    @DisplayName("★ 批量对账入参校验：节点为空/limit 越界/offset 为负一律拒绝（不回落成全量）")
-    void batchEpochShouldRejectInvalidPageArguments() {
-        assertThatThrownBy(() -> service.batchEpoch(null, 500, 0))
+    @DisplayName("★ 批量对账入参校验：节点为空/全空白一律拒绝（不回落成全量扫描）")
+    void batchEpochShouldRejectInvalidNode() {
+        assertThatThrownBy(() -> service.batchEpoch(null))
             .as("节点为空必须拒绝：否则退化成每节点拉全平台").isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> service.batchEpoch("  ", 500, 0))
-            .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> service.batchEpoch(NODE, 0, 0))
-            .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> service.batchEpoch(NODE, LeaseEpochRules.EPOCH_PAGE_MAX_LIMIT + 1, 0))
-            .as("超过上限必须拒绝：否则可以用一个大 limit 把退化行为再打开")
-            .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> service.batchEpoch(NODE, 500, -1))
-            .isInstanceOf(IllegalArgumentException.class);
-        verify(mapper, never()).selectEpochItemsByNode(any(), anyInt(), anyInt());
+        assertThatThrownBy(() -> service.batchEpoch("  "))
+            .as("全空白同样必须拒绝（不得 trim 后当成合法值）").isInstanceOf(IllegalArgumentException.class);
+        verify(mapper, never()).selectEpochItemsByNode(any());
     }
 
     /**

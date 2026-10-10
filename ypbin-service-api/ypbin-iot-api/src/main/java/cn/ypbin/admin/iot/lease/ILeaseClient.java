@@ -76,14 +76,11 @@ public interface ILeaseClient {
     R<LeaseAssignmentDto> queryAssignment(@RequestBody AssignmentQueryReq req);
 
     /**
-     * 批量对账（按节点过滤 + 分页的 epoch）。
+     * 批量对账（**按节点过滤**的 epoch；刻意不分页，理由见 {@link LeaseEpochRules#validateAccessNode}）。
      *
      * @param accessNode 节点标识（必填：服务端拒空，不回落全量）
-     * @param limit      单页行数（{@link LeaseEpochRules#EPOCH_PAGE_DEFAULT_LIMIT} 起，最大 {@link LeaseEpochRules#EPOCH_PAGE_MAX_LIMIT}）
-     * @param offset     偏移量（≥0）
-     * @return 该节点当页的版本号 + 读取时刻
+     * @return 该节点的版本号 + 读取时刻
      */
     @GetMapping("/epochs")
-    R<TenantEpochBatchResp> batchEpoch(@RequestParam("accessNode") String accessNode,
-        @RequestParam("limit") int limit, @RequestParam("offset") int offset);
+    R<TenantEpochBatchResp> batchEpoch(@RequestParam("accessNode") String accessNode);
 }

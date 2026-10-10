@@ -45,17 +45,17 @@ import org.mybatis.spring.SqlSessionFactoryBean;
  * epoch 对账接口的**按节点过滤 + 分页**真实库验收（R8-4）。
  *
  * <p>为什么必须真库：这条技术债的判据正是 SQL 本身（{@code WHERE a.access_node = ?}、
- * {@code ORDER BY tenant_id}、{@code LIMIT/OFFSET}、以及两条 {@code is_deleted = 0}）。
+ * {@code ORDER BY tenant_id}、以及两条 {@code is_deleted = 0}）。
  * 用 mock 只能证明「调了这个方法」，证明不了「过滤真的生效、分页真的不漏不重」。</p>
  *
- * <p>覆盖：① 只返回本节点租户（别的节点的行不得出现）；② 分页有序、不漏不重、越界返回空；
+ * <p>覆盖：① 只返回本节点租户（别的节点的行不得出现、按 tenant_id 升序）；② 无归属的节点返回空集合；
  * ③ 已逻辑删除的**台账**行不得把 {@code config_epoch} 复活；④ 已逻辑删除的**归属**行不得出现。</p>
  *
  * @author wenbin
  * @since 2026-10-09
  */
 @EnabledIfMySqlAvailable
-class LeaseEpochPageIT {
+class LeaseEpochNodeFilterIT {
 
     /** 两个节点：A 持有 5 个租户（用于分页），B 持有 2 个（用于证明过滤）。 */
     private static final String NODE_A = "access-it-page-a";
@@ -140,7 +140,7 @@ class LeaseEpochPageIT {
         }
         insertLedger(920001L, 7L, false);
 
-        List<TenantEpochItem> items = assignmentMapper.selectEpochItemsByNode(NODE_A, 100, 0);
+        List<TenantEpochItem> items = assignmentMapper.selectEpochItemsByNode(NODE_A);
 
         assertThat(items).as("只应返回本节点持有（is_deleted=0）的 5 个租户，且升序")
             .extracting(TenantEpochItem::getTenantId).containsExactlyElementsOf(TENANTS_A);
@@ -153,24 +153,13 @@ class LeaseEpochPageIT {
     }
 
     @Test
-    @DisplayName("★ 分页有序且不漏不重：2+2+1 三页拼起来等于全集，越界返回空集合")
-    void epochsMustPageInStableOrder() throws SQLException {
-        for (Long tenantId : TENANTS_A) {
-            insertAssignment(NODE_A, tenantId, 1L, false);
-        }
+    @DisplayName("本节点没有任何归属时返回空集合（不得抛错、不得退化成全量）")
+    void nodeWithoutAssignmentsReturnsEmpty() throws SQLException {
+        insertAssignment(NODE_B, 920011L, 1L, false);
 
-        List<Long> collected = new ArrayList<>();
-        for (int offset = 0; offset <= 4; offset += 2) {
-            collected.addAll(assignmentMapper.selectEpochItemsByNode(NODE_A, 2, offset).stream()
-                .map(TenantEpochItem::getTenantId).toList());
-        }
-
-        assertThat(collected).as("三页拼接必须等于全集（有序分页不得漏行/重复）")
-            .containsExactlyElementsOf(TENANTS_A);
-        assertThat(assignmentMapper.selectEpochItemsByNode(NODE_A, 2, 5))
-            .as("offset 越界 ⇒ 空集合（不得回绕或报错）").isEmpty();
-        assertThat(assignmentMapper.selectEpochItemsByNode(NODE_A, 2, 0))
-            .as("limit=2 只返回两行").hasSize(2);
+        assertThat(assignmentMapper.selectEpochItemsByNode(NODE_A))
+            .as("NODE_A 没有任何归属行 ⇒ 空集合（若返回 NODE_B 的行，说明节点过滤失效）")
+            .isEmpty();
     }
 
     @Test
@@ -179,7 +168,7 @@ class LeaseEpochPageIT {
         insertAssignment(NODE_A, 920001L, 1L, false);
         insertLedger(920001L, 77L, true);
 
-        List<TenantEpochItem> items = assignmentMapper.selectEpochItemsByNode(NODE_A, 100, 0);
+        List<TenantEpochItem> items = assignmentMapper.selectEpochItemsByNode(NODE_A);
 
         assertThat(items).hasSize(1);
         assertThat(items.get(0).getConfigEpoch())
@@ -193,7 +182,7 @@ class LeaseEpochPageIT {
         insertAssignment(NODE_A, 920001L, 1L, false);
         insertAssignment(NODE_A, 920002L, 1L, true);
 
-        List<TenantEpochItem> items = assignmentMapper.selectEpochItemsByNode(NODE_A, 100, 0);
+        List<TenantEpochItem> items = assignmentMapper.selectEpochItemsByNode(NODE_A);
 
         assertThat(items).extracting(TenantEpochItem::getTenantId)
             .as("软删的归属行（920002）不得被对账读到").containsExactly(920001L);

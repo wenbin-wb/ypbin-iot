@@ -108,22 +108,17 @@ public class InternalLeaseController {
     }
 
     /**
-     * 批量对账（按节点过滤 + 分页的 epoch）。
+     * 批量对账（**按节点过滤**的 epoch；不分页）。
      *
      * <p>{@code accessNode} 必填：不带节点就等于让每个节点拉全平台（R8-4 的退化行为），
-     * 故这里直接拒空而不是回落成全量（禁静默降级）。分页上限见
-     * {@link LeaseEpochRules#EPOCH_PAGE_MAX_LIMIT}。</p>
+     * 故这里直接拒空而不是回落成全量（禁静默降级）。**刻意不分页**，理由见
+     * {@link LeaseEpochRules#validateAccessNode}。</p>
      *
      * @param accessNode 节点标识（必填）
-     * @param limit      单页行数（默认 500，最大 1000）
-     * @param offset     偏移量（默认 0）
-     * @return 该节点当页的版本号 + 读取时刻
+     * @return 该节点的版本号 + 读取时刻
      */
     @GetMapping("/epochs")
-    public R<TenantEpochBatchResp> batchEpoch(
-            @RequestParam("accessNode") String accessNode,
-            @RequestParam(value = "limit", defaultValue = "500") int limit,
-            @RequestParam(value = "offset", defaultValue = "0") int offset) {
-        return R.ok(leaseService.batchEpoch(accessNode, limit, offset));
+    public R<TenantEpochBatchResp> batchEpoch(@RequestParam("accessNode") String accessNode) {
+        return R.ok(leaseService.batchEpoch(accessNode));
     }
 }

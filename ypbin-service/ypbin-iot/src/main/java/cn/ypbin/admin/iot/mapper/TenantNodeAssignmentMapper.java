@@ -27,7 +27,7 @@ import org.apache.ibatis.annotations.Select;
 public interface TenantNodeAssignmentMapper extends BaseMapper<TenantNodeAssignment> {
 
     /**
-     * 按**节点**取一页 epoch 对账行（含台账 {@code config_epoch}）。
+     * 按**节点**取一页 epoch 对账行（含台账 {@code config_epoch}；**不分页**，见下）。
      *
      * <p>为什么必须按节点过滤：接入侧每个节点每 10s 调一次对账，此前接口没有任何入参 ⇒ 每个节点
      * 都拉「全平台 assignment × ledger」（O(节点数 × 全平台租户)）。节点只需要自己名下租户的版本号
@@ -40,9 +40,11 @@ public interface TenantNodeAssignmentMapper extends BaseMapper<TenantNodeAssignm
      *
      * <p>排序固定 {@code a.tenant_id}：分页必须有序，否则 LIMIT/OFFSET 会漏行或重复。</p>
      *
+     * <p>**刻意不分页**：本接口返回集已按节点收敛，规模由节点容量天然约束；分页会把「一次批量调用」
+     * 变成每页一次串行 RPC（架构门禁 {@code SourceConventionTest#loopsMustNotCallDbOrRpc} 也拦这种
+     * 循环内 RPC），与目标相反。{@code ORDER BY tenant_id} 保留，保证响应稳定可比对。</p>
+     *
      * @param accessNode 节点标识（必填，调用方已校验非空）
-     * @param limit      单页行数
-     * @param offset     偏移量
      * @return 该节点的版本号条目（查无返回空集合）
      */
     @Select("""
@@ -54,10 +56,8 @@ public interface TenantNodeAssignmentMapper extends BaseMapper<TenantNodeAssignm
         WHERE a.access_node = #{accessNode}
           AND a.is_deleted = 0
         ORDER BY a.tenant_id
-        LIMIT #{limit} OFFSET #{offset}
         """)
-    List<TenantEpochItem> selectEpochItemsByNode(@Param("accessNode") String accessNode,
-        @Param("limit") int limit, @Param("offset") int offset);
+    List<TenantEpochItem> selectEpochItemsByNode(@Param("accessNode") String accessNode);
 
     /**
      * 取**数据库时钟**（M0b-4：租约的时间基准统一到 DB，避免多节点时钟漂移）。
