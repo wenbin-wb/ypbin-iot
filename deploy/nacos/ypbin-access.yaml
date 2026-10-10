@@ -14,6 +14,16 @@ spring:
   cloud:
     nacos:
       server-addr: ${NACOS_ADDR:localhost:8848}
+  # R8-2 方案 E：调度线程池**必须 ≥ 2**。access 有且只有两个 @Scheduled：
+  #   ① 租约 tick（10s，内含最多 reconcile-budget-ms 的串行远端调用）
+  #   ② egress 读数微批上报（1s，把队列里的读数 POST 出去）
+  # 默认池大小是 **1** ⇒ 一次长 tick 会把 1s 的上报整段排在其后（读数延迟入队时间被拉长）。
+  # 两个任务不共享可变状态（上报队列是 ArrayBlockingQueue，生产者本就是协议线程 ⇒ 本就并发；
+  # tick 只动链路/订阅状态），故拆池安全。改小到 1 会让上报重新排队，勿动。
+  task:
+    scheduling:
+      pool:
+        size: 2
 
 ypbin:
   # 出站内部凭证：与 iot 的 /internal/lease/** 守卫共用同一个值（未配置 ⇒ 服务端 fail-closed 拒绝）
