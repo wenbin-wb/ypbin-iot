@@ -24,6 +24,7 @@ import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -155,8 +156,13 @@ public class TenantLedgerService {
      * 否则会把「可分配来源」从配置兜底静默切成台账。此时接入侧收不到信号，属**已登记的已知限制**
      * （见 docs/IOT-ROADMAP.md），调用方只需 DEBUG 记录，不得吞掉配置变更本身。</p>
      *
+     * <p>⚠️ 事务注解说明：本方法目前只被同类方法 {@link #bumpConfigEpochOfCurrentTenant()} **自调用**，
+     * 自调用不走代理 ⇒ 这里的 {@code @Transactional} 在当前调用链上**不生效**；事务语义由包装方法承担
+     * （见其 javadoc）。保留注解是为了「将来若有其它 Bean 直接调用本方法」时语义仍然正确。</p>
+     *
      * @param tenantId 租户 ID；为 {@code null} 时直接返回 false（无租户上下文，例如未开租户插件）
-     * @return 是否真的推进了版本号（台账无该租户/租户为 null 时返回 {@code false}）
+     * @return 是否真的推进了版本号（台账无该租户/租户为 null/写失败时返回 {@code false}）
+     * @throws PessimisticLockingFailureException 锁类失败（整事务已被 DB 回滚，必须上抛）
      */
     @Transactional(rollbackFor = Exception.class)
     public boolean bumpConfigEpoch(Long tenantId) {
@@ -166,6 +172,15 @@ public class TenantLedgerService {
         int rows;
         try {
             rows = ledgerMapper.bumpConfigEpoch(tenantId);
+        } catch (PessimisticLockingFailureException ex) {
+            // 锁类失败（1205 锁等待超时 / 1213 死锁）**必须重新抛出**：InnoDB 在死锁时回滚的是
+            // **整个事务**（不只是这一条语句）⇒ 若在这里吞掉并返回 false，外层的提交仍会「成功」，
+            // 结果是「接口报成功、写入其实已丢」（复核实测 MySQL 8.4.11 复现该语义）。
+            // 这与方案 B 不冲突：方案 B 要救的是「台账表不可写，但业务写入本身仍能成立」的情形。
+            bumpFailureCounter.increment();
+            log.error("[iot] 台账版本号推进遇到锁类失败（**整事务已被 DB 回滚，故重新抛出**）：tenantId={}",
+                LogSanitizer.sanitize(tenantId), ex);
+            throw ex;
         } catch (RuntimeException ex) {
             // R8-8 方案 B（用户 2026-10-09 拍板：**可用性优先**）：
             // 台账表写失败（表锁/DDL 窗口/连接池耗尽）**不得**连带回滚设备/点位的业务写入——
