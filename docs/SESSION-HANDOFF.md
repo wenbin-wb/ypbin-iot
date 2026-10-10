@@ -1,7 +1,7 @@
 # SESSION-HANDOFF · ypbin-iot 断点交接（2026-10-10 更新）
 
 > 用途：新会话读本文 + `docs/TASK-BOARD.md` 即可无缝接续，无需翻历史对话。
-> 更新：2026-10-10（R8 技术债：逐条立项 → R8-7 门禁覆盖面 → R8-4 节点过滤；另含 site 依赖策略与配置参考页修复；上一版 2026-10-09）。
+> 更新：2026-10-10（R8 技术债：立项 → R8-7 门禁覆盖面 → R8-4 节点过滤 → R8-9 指标登记/耗时 → R8-5+R8-6 对称清理与框架契约；另含 site 依赖策略与配置参考页修复）。
 
 ## 0. 新会话第一句话（可直接粘）
 
@@ -66,6 +66,8 @@
 - ✅ **#16 R8-7 门禁覆盖面补齐（2026-10-09，PR #191 → main `55e3de3f`）**：扩展 `IotMaintenanceAdminGateTest`——扫描面加 `deploy/sql/migration/*.sql`（菜单属性另读 `002-data.sql`）、新增平台级菜单**显式清单**（`3206`/`320014`/`320015`/`3320`）、把「`INSERT … SELECT` 常量目标」的补授按**可达性**判定（子项全平台级 ⇒ 恒命中 0 行 = 潜在授权；任一子项非平台级 ⇒ 违规）、解析器看不见的目标形态**显式报出**（豁免陈旧也红）。门禁 5/0/0/0、iot 878/0/0/0、**变异 4/4 转红**。
 - ✅ **#17 R8-4 epoch 对账按节点过滤（2026-10-09，PR #192 → main `773c6508`）**：`GET /internal/lease/epochs` 从「无入参全量」改为 `?accessNode=`（必填，空/空白 ⇒ `code=400`），过滤下沉 SQL（`WHERE a.access_node = ?` 走 `idx_tenant_node_assignment_node`、`ORDER BY tenant_id`、手写两条 `is_deleted = 0`）；客户端 `ConfigEpochReconciler` 构造期校验 nodeId 并按其做一次批量调用。**分页方案被 CI 架构门禁拦下后主动放弃**（分页把一次批量调用变成每页一次串行 RPC，反而增加 tick 开销）——见 `docs/ACCESS-TECHDEBT-R8.md` §2.2。真库 IT `LeaseEpochNodeFilterIT` 4/0/0/0、HTTP 层 `InternalLeaseControllerTest` 4/0/0/0、iot 883/0/0/0、**变异 4/4 转红**、架构门禁 20/0/0/0；**L2 独立复核无阻断项**（复核独立复现了「分页版红、收敛版绿」），据其建议整改 5 处（错误码语义/客户端 fail-fast/去读侧 trim/清死导入/IT 区间与双重 purge）。
 - ✅ **顺手批（2026-10-09/10，其它仓）**：`ypbin-site#29` 关闭（根因：`typescript@7.0.2` 的 `exports` 不再导出 `./lib/tsc`，而 `vue-tsc` latest 3.3.12 仍按该子路径加载 ⇒ 上游无解）→ PR **#31** 并回 4 个兼容升级 + `dependabot.yml` 改为「组只收 minor/patch + typescript 主版本 ignore」（跟踪 issue **#30**）；**#34** 重生成站点配置参考页（373 → **397** 项，修 #28 只更元数据未重生成页面的漂移）；`ypbin-iot-ui#62` / `ypbin-admin-ui#68` 同款 dependabot 预防（两仓 catalog 也是 `typescript ^6.0.3` + `vue-tsc ^3.3.8`，Dependabot 确实会改 catalog 条目 ⇒ 风险同型）。
+- ✅ **#18 R8-9 指标登记 + tick/对账耗时（2026-10-09，PR #194 → main `48afaa1b`）**：新增 `docs/METRICS.md`（`ypbin-access` **33 条**指标逐条登记：口径/建议关注/注册文件）；新增 **3 条 `Timer`** —— `iot.access.lease.tick.duration`、`iot.access.config.reconcile.duration`、`iot.access.spec.load.duration`（把 R8-2 的「单次最坏 6s」假设变成实测分布）；**双向门禁** `MetricsRegistryGateTest`（清单→代码按全名或后缀匹配、代码→清单要求完整字面量都登记，两侧带非空自检）。access **119/0/0/0**，**变异 3/3 转红**。
+- ✅ **#19 R8-5 对称清理 + R8-6 框架契约（2026-10-09，PR #195 → main `9a568c19`；框架仓 PR #21 → `584b394`）**：本仓 `fence()` 补 `planner.forget`（与下架路径逐条对称，access **119/0/0/0**，变异 1/1 转红）；**框架仓** `ypbin-iot-starter` 新增契约测试 `IotLifecycleTest#everyAddMustCloseOldSessionAndRebindNewInstance`（LIFE-13）——「规格变化只重发 ADD」与「REMOVE→ADD」两条路径都必须**先关旧会话、再产生新实例**，并写入 `CONTRACT.md` §四 行为承诺第 7 条 + `CHANGELOG.md`（框架侧 **148/0/0/0** 含 JaCoCo 覆盖率门禁，变异 2/2 转红）。**这条契约正是 R8-5/R8-6 残余风险的唯一支点**（本仓订阅对账用会话实例同一性判断是否重新订阅）。
 
 ## 3. 开放 API 第 1/2 批速览
 
@@ -111,9 +113,9 @@
    累计 ~1,716 轮无自发 FIRING）。**保留的运维动作（非待办）**：首次自然 FIRING 出现时人工确认一次投递与观感。
 4. **#8 二批**：触发条件仍未满足（`docs/MESSAGE-TRACE-PHASE2.md` §1）⇒ 维持只立项不实施；**#9** 已搁置。
 5. 若要在 dev 上做"故障注入式验收"或"更长观察窗口"，另立验收批（不要把它当成 #10 的默认尾巴）。
-6. **R8 技术债进度（2026-10-10）**：已立项 **#15**；已完成 **R8-7**（#16，门禁覆盖面）与 **R8-4**（#17，epoch 节点过滤，多节点硬前置）。
-   **剩余按建议顺序**：**R8-9 A**（指标登记，纯文档/小改）→ **R8-5 + R8-6**（对称清理 + 框架契约测试）→ **R8-2**（tick 时间预算，依赖 R8-9 B 的耗时指标）→ **R8-8**（需先拍板「一致性 vs 可用性」）。
-   细节与验收标准见 `docs/ACCESS-TECHDEBT-R8.md` §4。
+6. **R8 技术债进度（2026-10-10）**：已立项 **#15**；已完成 **R8-7**（#16）、**R8-4**（#17）、**R8-9 A/B**（#18）、**R8-5 + R8-6**（#19 + 框架仓 #21）。
+   **剩余两项**：**R8-2**（对账拖长 tick）—— 三条耗时指标（#18）已就位，但**按立项要求需先用实测分布重建时间预算模型**（不得沿用未复核的 36s 算式），且需在「时间预算 / 有界并发 / 收敛安全网 / 拆调度线程池」之间选型；**R8-8**（bump 与业务写入同事务）—— 需先拍板「台账故障时宁可少采（不一致）还是宁可写不进去（不可用）」。
+   细节与验收标准见 `docs/ACCESS-TECHDEBT-R8.md` §2.1/§2.6 与 §4。
 7. 其他未开工方向（用户已提及、未选定）：**D**（`TASK-BOARD.md` §3 的 P2 增强项）；**访问控制技术债之外的**技术债批次。
 
 ## 6. 遗留风险（如实）
