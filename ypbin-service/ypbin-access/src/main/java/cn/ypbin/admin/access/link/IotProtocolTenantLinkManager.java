@@ -483,6 +483,10 @@ public class IotProtocolTenantLinkManager implements TenantLinkManager {
         }
         for (DeviceSpec device : devices.values()) {
             rebindBackoff.remove(device.deviceId());
+            // R8-5：与 removeAllDevices 对称——停采也必须清订阅跟踪，否则 subscribedSessions
+            // 里被 fence 的设备条目只增不减（设备不再回来就永久残留）。此前只清 rebindBackoff，
+            // 漏了 planner.forget，靠「框架每次 ADD 都换新会话实例」间接掩盖（现已有契约测试钉住）。
+            planner.forget(device.deviceId());
             registry.emit(new DeviceChange(ChangeType.REMOVE, device,
                 registry.nextRevision(device.deviceId())));
         }

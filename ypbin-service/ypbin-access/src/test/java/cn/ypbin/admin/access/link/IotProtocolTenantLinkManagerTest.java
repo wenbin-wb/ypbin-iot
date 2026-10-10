@@ -392,6 +392,9 @@ class IotProtocolTenantLinkManagerTest {
         linkManager.startCollecting(TENANT_A);
 
         assertThat(source.loadCallCount(TENANT_A)).as("fence 后重取必须立即生效").isEqualTo(2);
+        // 边界（R8-5）：本用例里该租户**从未成功推送过设备**（空清单不入 collected）⇒ fence 直接早退，
+        // 没有订阅跟踪可清。真正"有设备时 fence 必须清跟踪"的断言在 fenceShouldEmitRemoveAndBeIdempotent。
+        assertThat(planner.forgotten).as("无已推送设备 ⇒ 不应误清（也无从清起）").isEmpty();
         assertThat(framework.actions).containsExactly("ADD:d1");
     }
 
@@ -403,6 +406,7 @@ class IotProtocolTenantLinkManagerTest {
 
         linkManager.fence(TENANT_A, "租约丢失");
         linkManager.fence(TENANT_A, "再次调用");
+        assertThat(planner.forgotten).as("每次 fence 都要清订阅跟踪（幂等：重复调用不报错）").contains("d1");
 
         assertThat(framework.actions).containsExactly("ADD:d1", "REMOVE:d1");
         assertThat(linkManager.isCollecting(TENANT_A)).isFalse();
