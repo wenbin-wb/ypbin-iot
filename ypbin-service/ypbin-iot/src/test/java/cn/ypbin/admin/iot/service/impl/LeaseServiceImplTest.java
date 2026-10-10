@@ -38,6 +38,7 @@ import cn.ypbin.admin.iot.lease.LeaseRenewItem;
 import cn.ypbin.admin.iot.lease.LeaseRenewReq;
 import cn.ypbin.admin.iot.lease.LeaseRenewResp;
 import cn.ypbin.admin.iot.lease.LeaseState;
+import cn.ypbin.admin.iot.lease.TenantEpochItem;
 import cn.ypbin.admin.iot.lease.TenantEpochBatchResp;
 import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
 import cn.ypbin.admin.iot.mapper.TenantNodeAssignmentMapper;
@@ -527,17 +528,32 @@ class LeaseServiceImplTest {
     }
 
     @Test
-    @DisplayName("批量对账：返回所有租户的 epoch 与读取时刻（判据只用 epoch）")
-    void batchEpochShouldReturnAllTenants() {
-        when(mapper.selectList(any())).thenReturn(List.of(
-            assignment(11L, NODE, 1L, LeaseState.ACTIVE),
-            assignment(22L, "access-2", 9L, LeaseState.PENDING_TAKEOVER)));
+    @DisplayName("批量对账：只按节点查（节点必须原样下推到 SQL），并带上读取时刻")
+    void batchEpochShouldQueryByNode() {
+        TenantEpochItem item = new TenantEpochItem();
+        item.setTenantId(11L);
+        item.setEpoch(1L);
+        item.setConfigEpoch(3L);
+        when(mapper.selectEpochItemsByNode(NODE)).thenReturn(List.of(item));
 
-        TenantEpochBatchResp resp = service.batchEpoch();
+        TenantEpochBatchResp resp = service.batchEpoch(NODE);
 
-        assertThat(resp.getItems()).extracting("tenantId").containsExactly(11L, 22L);
-        assertThat(resp.getItems()).extracting("epoch").containsExactly(1L, 9L);
+        assertThat(resp.getItems()).extracting("tenantId").containsExactly(11L);
+        assertThat(resp.getItems()).extracting("configEpoch").containsExactly(3L);
         assertThat(resp.getReadAt()).isNotNull();
+        // 关键：不得再走「全表 selectList」那条退化路径（R8-4 要修的就是它）
+        verify(mapper, never()).selectList(any());
+        verify(mapper).selectEpochItemsByNode(NODE);
+    }
+
+    @Test
+    @DisplayName("★ 批量对账入参校验：节点为空/全空白一律拒绝（不回落成全量扫描）")
+    void batchEpochShouldRejectInvalidNode() {
+        assertThatThrownBy(() -> service.batchEpoch(null))
+            .as("节点为空必须拒绝：否则退化成每节点拉全平台").isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> service.batchEpoch("  "))
+            .as("全空白同样必须拒绝（不得 trim 后当成合法值）").isInstanceOf(IllegalArgumentException.class);
+        verify(mapper, never()).selectEpochItemsByNode(any());
     }
 
     /**

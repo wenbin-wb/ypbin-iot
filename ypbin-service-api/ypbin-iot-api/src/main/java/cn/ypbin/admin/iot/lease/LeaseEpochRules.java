@@ -25,6 +25,26 @@ public final class LeaseEpochRules {
     /** 首次分配时的台账版本号。 */
     public static final long INITIAL_EPOCH = 1L;
 
+    /**
+     * epoch 对账的节点入参校验（服务端与客户端共用同一口径，避免两处漂移）。
+     *
+     * <p>{@code accessNode} **必须非空**：不按节点过滤就等于让每个节点拉全平台
+     * （即 R8-4 的退化行为），这属于契约违规而不是可选项——直接抛，不回落成全量（禁静默降级）。</p>
+     *
+     * <p>为什么不加 {@code limit/offset} 分页（设计取舍，2026-10-09）：初版实现了翻页，但被架构门禁
+     * {@code SourceConventionTest#loopsMustNotCallDbOrRpc} 拦下——分页必然把「一次批量调用」变成
+     * 「每 500 行一次串行 RPC」，与目标相反（还会吃掉 tick 时间预算，见 R8-2）。而本接口的返回集
+     * 已经按节点收敛，其规模由节点容量（{@code ypbin.access.capacity}）天然约束，不需要分页兜底。</p>
+     *
+     * @param accessNode 节点标识
+     * @throws IllegalArgumentException 为空或全空白
+     */
+    public static void validateAccessNode(String accessNode) {
+        if (accessNode == null || accessNode.isBlank()) {
+            throw new IllegalArgumentException("accessNode 不得为空：epoch 对账必须按节点过滤（否则退化成全平台扫描）");
+        }
+    }
+
     private LeaseEpochRules() {
     }
 

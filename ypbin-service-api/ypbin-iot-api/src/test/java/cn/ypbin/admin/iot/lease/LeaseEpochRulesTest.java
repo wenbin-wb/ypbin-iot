@@ -86,4 +86,19 @@ class LeaseEpochRulesTest {
         assertThat(LeaseEpochRules.isLeaseExpired(now, now)).isTrue();
         assertThat(LeaseEpochRules.isLeaseExpired(now.plusNanos(1), now)).isFalse();
     }
+
+    @Test
+    @DisplayName("★ epoch 对账的节点入参：为空/全空白一律抛（不回落成全量扫描）")
+    void epochAccessNodeMustBeValidated() {
+        LeaseEpochRules.validateAccessNode("access-1");
+        LeaseEpochRules.validateAccessNode("  access-1  ");
+
+        assertThatThrownBy(() -> LeaseEpochRules.validateAccessNode(null))
+            .as("节点为空 ⇒ 拒绝（不按节点过滤就等于拉全平台）")
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("accessNode");
+        assertThatThrownBy(() -> LeaseEpochRules.validateAccessNode("   "))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("accessNode");
+        assertThatThrownBy(() -> LeaseEpochRules.validateAccessNode(""))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
 }

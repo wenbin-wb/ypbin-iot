@@ -22,7 +22,7 @@
 | POST | `/renew` | 周期续约：`renewedLeases`（成功）+ `revokedTenantIds`（不再属于本节点）+ `nodeFenced`（节点级失效）+ **`serverTime`（数据库时钟）** |
 | POST | `/release` | 节点主动下线时释放租户（状态置为 `released`，可被重新分配） |
 | POST | `/assignment` | 查询单个租户的归属（从未分配返回 `data=null`） |
-| GET | `/epochs` | 批量对账：一次拉取所有租户的 epoch（**判据只用 epoch**，不用设备数） |
+| GET | `/epochs?accessNode={node}` | 批量对账：**只返回该节点名下租户**的 epoch（**判据只用 epoch**，不用设备数）。`accessNode` **必填**（空/缺失一律拒绝——不带节点就等于让每个节点拉全平台，即 R8-4 的退化行为）。返回条目按 `tenant_id` 升序 + 数据库 `readAt`。**刻意不分页**：返回集已按节点收敛、规模由节点容量约束，分页会把「一次批量调用」变成每页一次串行 RPC，反而增加 tick 开销（详见 `LeaseEpochRules#validateAccessNode` 的 javadoc） |
 
 状态机：`ACTIVE --到期/释放--> PENDING_TAKEOVER | RELEASED`，`PENDING_TAKEOVER | RELEASED --接管/重新分配--> ACTIVE`。
 
@@ -79,7 +79,9 @@
 3e. **容量只约束「新增」，不回收已持有**：把注册请求里的 `maxTenants` 调小（或后续改成节点表字段）不会让节点主动释放已持有的租户。
 3f. **扫描周期与 ttl 无自检关系**：接管最坏延迟 ≈ `ttl + scan-interval`（默认 45s），
    靠「active 且已过期」的兜底分支缩短；这条关系未做成启动自检。
-3g. **`batchEpoch` 是全表读**（无分页/上限）：自用规模无碍，租户数上来要加上限或分页。
+3g. **`batchEpoch` 现已按节点过滤**（R8-4，2026-10-09）：契约要求 `accessNode` 必填，服务端只返回该节点名下租户
+   （走 `access_node` 索引），不再是全表读。**刻意不做分页**：返回集已按节点收敛、规模受节点实际持有量约束，
+   而分页会把「一次批量调用」变成每页一次串行 RPC（反而增加 tick 开销，且被架构门禁判为循环内 RPC）。
 4. **access 侧的 Feign 客户端**（`ILeaseClient`）随**增量 3** 一起落地——先有服务端契约，再有调用方。
 5. 失效扫描与续约的**指标**已埋（`iot.lease.takeover|expired|revoked`）；接入侧时钟偏移告警阈值已定为 **5 秒**（`AccessLeaseManager.SKEW_WARN_SECONDS`，判据对称）。
 

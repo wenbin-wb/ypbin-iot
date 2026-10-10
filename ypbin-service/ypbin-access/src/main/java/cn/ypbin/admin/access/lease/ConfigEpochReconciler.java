@@ -11,6 +11,7 @@ package cn.ypbin.admin.access.lease;
 
 import cn.ypbin.admin.access.link.TenantLinkManager;
 import cn.ypbin.admin.iot.lease.ILeaseClient;
+import cn.ypbin.admin.iot.lease.LeaseEpochRules;
 import cn.ypbin.admin.iot.lease.TenantEpochBatchResp;
 import cn.ypbin.admin.iot.lease.TenantEpochItem;
 import cn.ypbin.starter.core.model.R;
@@ -65,6 +66,10 @@ public class ConfigEpochReconciler {
     static final String METRIC_PREFIX = "iot.access.config.";
 
     private final ILeaseClient leaseClient;
+
+    /** 本节点标识：epoch 对账必须按节点过滤（服务端拒空，不带就等于拉全平台）。 */
+    private final String nodeId;
+
     private final TenantLinkManager linkManager;
     private final Clock clock;
 
@@ -95,15 +100,20 @@ public class ConfigEpochReconciler {
     /**
      * 构造对账器。
      *
-     * @param leaseClient      租约客户端（提供批量 epoch 对账接口）
+     * @param leaseClient      租约客户端（提供按节点过滤 + 分页的 epoch 对账接口）
+     * @param nodeId           本节点标识（epoch 对账的过滤键；必填，空由服务端拒绝）
      * @param linkManager      链路控制端口（提供按最新配置对账设备清单的能力）
      * @param meterRegistry    指标注册表
      * @param clock            时间源（安全网判据；单测注入可推进的假时钟）
      * @param refreshIntervalMs 周期安全网间隔（毫秒，{@code <= 0} 关闭）
      */
-    public ConfigEpochReconciler(ILeaseClient leaseClient, TenantLinkManager linkManager,
+    public ConfigEpochReconciler(ILeaseClient leaseClient, String nodeId, TenantLinkManager linkManager,
             MeterRegistry meterRegistry, Clock clock, long refreshIntervalMs) {
+        // 与 service 侧共用同一校验口径：nodeId 为空/全空白时**构造期失败**（fail-fast），
+        // 不留到运行期每 10s 打一次必然失败的远端调用（启动自检也会拦，这里是第二道）
+        LeaseEpochRules.validateAccessNode(nodeId);
         this.leaseClient = leaseClient;
+        this.nodeId = nodeId;
         this.linkManager = linkManager;
         this.clock = clock;
         this.refreshIntervalMs = refreshIntervalMs;
@@ -128,17 +138,19 @@ public class ConfigEpochReconciler {
         }
         R<TenantEpochBatchResp> resp;
         try {
-            resp = leaseClient.batchEpoch();
+            // 按节点过滤的一次批量调用（服务端已把过滤下沉到 SQL）；刻意不分页：分页会把一次批量
+            // 调用变成每页一次串行 RPC，反而增加 tick 开销（见 LeaseEpochRules#validateAccessNode）
+            resp = leaseClient.batchEpoch(nodeId);
         } catch (RuntimeException ex) {
             checkFailureCounter.increment();
-            log.error("配置版本对账失败（不推进任何版本号，下一轮重试）：node 持有租户数={}",
-                heldTenants.size(), ex);
+            log.error("配置版本对账失败（不推进任何版本号，下一轮重试）：node={} 持有租户数={}",
+                LogSanitizer.sanitize(nodeId), heldTenants.size(), ex);
             return;
         }
         if (resp == null || !resp.isSuccess() || resp.getData() == null) {
             checkFailureCounter.increment();
-            log.error("配置版本对账返回非成功信封（下一轮重试）：code={}",
-                resp == null ? "null" : resp.getCode());
+            log.error("配置版本对账返回非成功信封（下一轮重试）：node={} code={}",
+                LogSanitizer.sanitize(nodeId), resp == null ? "null" : resp.getCode());
             return;
         }
         Set<Long> attempted = new HashSet<>();

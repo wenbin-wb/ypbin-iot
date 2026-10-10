@@ -431,8 +431,10 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:19000/          # 200
 curl -s -X POST http://127.0.0.1:19000/api/auth/login -H 'Content-Type: application/json' \
   -d '{"username":"__no_such_user__","password":"__wrong__"}'             # 期望 code 409（不是 403/401）
 # ④ 内部凭证链路：新值 200、旧值必须 401
-curl -s -H "X-Internal-Token: $NEW_I" http://127.0.0.1:18084/internal/lease/epochs   # code 200
-curl -s -H "X-Internal-Token: $OLD_I" http://127.0.0.1:18084/internal/lease/epochs   # code 401
+# ⚠️ R8-4 起 /internal/lease/epochs 的 accessNode **必填**（不按节点过滤会退化成全平台扫描）：
+#    不带参数会得到 code 400（请求参数有误），别把它误判成「内部凭证轮换失败」
+curl -s -H "X-Internal-Token: $NEW_I" "http://127.0.0.1:18084/internal/lease/epochs?accessNode=token-check"  # code 200
+curl -s -H "X-Internal-Token: $OLD_I" "http://127.0.0.1:18084/internal/lease/epochs?accessNode=token-check"  # code 401
 curl -s -H "X-Internal-Token: $NEW_I" http://127.0.0.1:18082/internal/user-count      # code 200
 curl -s -H "X-Internal-Token: $OLD_I" http://127.0.0.1:18082/internal/user-count      # code 401
 # ⑤ 下游信任链：直连 18084 带身份头

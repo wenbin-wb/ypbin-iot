@@ -14,6 +14,7 @@ import cn.ypbin.starter.core.model.R;
 import org.springframework.cloud.openfeign.FeignClient;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RequestBody;
 
 /**
@@ -75,10 +76,11 @@ public interface ILeaseClient {
     R<LeaseAssignmentDto> queryAssignment(@RequestBody AssignmentQueryReq req);
 
     /**
-     * 批量对账（各租户 epoch）。
+     * 批量对账（**按节点过滤**的 epoch；刻意不分页，理由见 {@link LeaseEpochRules#validateAccessNode}）。
      *
-     * @return 各租户版本号 + 读取时刻
+     * @param accessNode 节点标识（必填：服务端拒空，不回落全量）
+     * @return 该节点的版本号 + 读取时刻
      */
     @GetMapping("/epochs")
-    R<TenantEpochBatchResp> batchEpoch();
+    R<TenantEpochBatchResp> batchEpoch(@RequestParam("accessNode") String accessNode);
 }
