@@ -146,6 +146,9 @@ class AccessLeaseManagerTest {
         verify(client, times(2)).renew(captor.capture());
         assertThat(captor.getAllValues().get(1).getLeases()).extracting(LeaseRenewItem::getEpoch)
             .containsExactly(3L);
+        // R8-9 B：tick 总耗时必须有记录（R8-2 的时间预算判据就靠它；不记就等于改了调度也看不见效果）
+        assertThat(meterRegistry.get("iot.access.lease.tick.duration").timer().count())
+            .as("每跑一轮 renewAndSelfCheck 必须记录一次耗时").isGreaterThanOrEqualTo(1L);
     }
 
     @Test
