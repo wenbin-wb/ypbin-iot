@@ -12,6 +12,7 @@ package cn.ypbin.admin.iot.service.impl;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.lenient;
@@ -38,6 +39,7 @@ import cn.ypbin.admin.iot.lease.LeaseRenewItem;
 import cn.ypbin.admin.iot.lease.LeaseRenewReq;
 import cn.ypbin.admin.iot.lease.LeaseRenewResp;
 import cn.ypbin.admin.iot.lease.LeaseState;
+import cn.ypbin.admin.iot.lease.TenantEpochItem;
 import cn.ypbin.admin.iot.lease.TenantEpochBatchResp;
 import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
 import cn.ypbin.admin.iot.mapper.TenantNodeAssignmentMapper;
@@ -527,17 +529,39 @@ class LeaseServiceImplTest {
     }
 
     @Test
-    @DisplayName("批量对账：返回所有租户的 epoch 与读取时刻（判据只用 epoch）")
-    void batchEpochShouldReturnAllTenants() {
-        when(mapper.selectList(any())).thenReturn(List.of(
-            assignment(11L, NODE, 1L, LeaseState.ACTIVE),
-            assignment(22L, "access-2", 9L, LeaseState.PENDING_TAKEOVER)));
+    @DisplayName("批量对账：按节点 + 分页查（节点与分页入参必须原样下推到 SQL），并带上读取时刻")
+    void batchEpochShouldQueryByNodeAndPage() {
+        TenantEpochItem item = new TenantEpochItem();
+        item.setTenantId(11L);
+        item.setEpoch(1L);
+        item.setConfigEpoch(3L);
+        when(mapper.selectEpochItemsByNode(eq(NODE), eq(200), eq(400))).thenReturn(List.of(item));
 
-        TenantEpochBatchResp resp = service.batchEpoch();
+        TenantEpochBatchResp resp = service.batchEpoch(NODE, 200, 400);
 
-        assertThat(resp.getItems()).extracting("tenantId").containsExactly(11L, 22L);
-        assertThat(resp.getItems()).extracting("epoch").containsExactly(1L, 9L);
+        assertThat(resp.getItems()).extracting("tenantId").containsExactly(11L);
+        assertThat(resp.getItems()).extracting("configEpoch").containsExactly(3L);
         assertThat(resp.getReadAt()).isNotNull();
+        // 关键：不得再走「全表 selectList」那条退化路径（R8-4 要修的就是它）
+        verify(mapper, never()).selectList(any());
+        verify(mapper).selectEpochItemsByNode(NODE, 200, 400);
+    }
+
+    @Test
+    @DisplayName("★ 批量对账入参校验：节点为空/limit 越界/offset 为负一律拒绝（不回落成全量）")
+    void batchEpochShouldRejectInvalidPageArguments() {
+        assertThatThrownBy(() -> service.batchEpoch(null, 500, 0))
+            .as("节点为空必须拒绝：否则退化成每节点拉全平台").isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> service.batchEpoch("  ", 500, 0))
+            .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> service.batchEpoch(NODE, 0, 0))
+            .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> service.batchEpoch(NODE, LeaseEpochRules.EPOCH_PAGE_MAX_LIMIT + 1, 0))
+            .as("超过上限必须拒绝：否则可以用一个大 limit 把退化行为再打开")
+            .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> service.batchEpoch(NODE, 500, -1))
+            .isInstanceOf(IllegalArgumentException.class);
+        verify(mapper, never()).selectEpochItemsByNode(any(), anyInt(), anyInt());
     }
 
     /**

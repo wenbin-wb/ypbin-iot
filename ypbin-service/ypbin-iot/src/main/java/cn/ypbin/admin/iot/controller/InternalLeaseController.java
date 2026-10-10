@@ -14,6 +14,7 @@ import cn.ypbin.admin.iot.lease.AssignmentQueryReq;
 import cn.ypbin.admin.iot.lease.LeaseAcquireReq;
 import cn.ypbin.admin.iot.lease.LeaseAcquireResp;
 import cn.ypbin.admin.iot.lease.LeaseAssignmentDto;
+import cn.ypbin.admin.iot.lease.LeaseEpochRules;
 import cn.ypbin.admin.iot.lease.LeaseProperties;
 import cn.ypbin.admin.iot.lease.LeaseReleaseReq;
 import cn.ypbin.admin.iot.lease.LeaseRenewReq;
@@ -26,6 +27,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -106,12 +108,22 @@ public class InternalLeaseController {
     }
 
     /**
-     * 批量对账（各租户 epoch）。
+     * 批量对账（按节点过滤 + 分页的 epoch）。
      *
-     * @return 各租户版本号 + 读取时刻
+     * <p>{@code accessNode} 必填：不带节点就等于让每个节点拉全平台（R8-4 的退化行为），
+     * 故这里直接拒空而不是回落成全量（禁静默降级）。分页上限见
+     * {@link LeaseEpochRules#EPOCH_PAGE_MAX_LIMIT}。</p>
+     *
+     * @param accessNode 节点标识（必填）
+     * @param limit      单页行数（默认 500，最大 1000）
+     * @param offset     偏移量（默认 0）
+     * @return 该节点当页的版本号 + 读取时刻
      */
     @GetMapping("/epochs")
-    public R<TenantEpochBatchResp> batchEpoch() {
-        return R.ok(leaseService.batchEpoch());
+    public R<TenantEpochBatchResp> batchEpoch(
+            @RequestParam("accessNode") String accessNode,
+            @RequestParam(value = "limit", defaultValue = "500") int limit,
+            @RequestParam(value = "offset", defaultValue = "0") int offset) {
+        return R.ok(leaseService.batchEpoch(accessNode, limit, offset));
     }
 }

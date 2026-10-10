@@ -405,25 +405,13 @@ public class LeaseServiceImpl implements LeaseService {
     }
 
     @Override
-    public TenantEpochBatchResp batchEpoch() {
-        List<TenantNodeAssignment> all = mapper.selectList(Wrappers.<TenantNodeAssignment>lambdaQuery()
-            .select(TenantNodeAssignment::getTenantId, TenantNodeAssignment::getEpoch));
-        // M0b-3：一次批量对账同时给出「归属 epoch」与「配置 epoch」——接入侧据此判断
-        // 「要采什么」有没有变（不一致才拉全量设备规格），避免每轮都打远端。
-        Map<Long, Long> configEpochs = new HashMap<>();
-        for (TenantLedger ledger : ledgerMapper.selectList(Wrappers.<TenantLedger>lambdaQuery()
-            .select(TenantLedger::getTenantId, TenantLedger::getConfigEpoch))) {
-            configEpochs.put(ledger.getTenantId(),
-                ledger.getConfigEpoch() == null ? 0L : ledger.getConfigEpoch());
-        }
-        List<TenantEpochItem> items = new ArrayList<>();
-        for (TenantNodeAssignment assignment : all) {
-            TenantEpochItem item = new TenantEpochItem();
-            item.setTenantId(assignment.getTenantId());
-            item.setEpoch(assignment.getEpoch());
-            item.setConfigEpoch(configEpochs.getOrDefault(assignment.getTenantId(), 0L));
-            items.add(item);
-        }
+    public TenantEpochBatchResp batchEpoch(String accessNode, int limit, int offset) {
+        // 入参校验走共享的纯函数（服务端与客户端同一口径；非法直接抛，不回落成全量）
+        LeaseEpochRules.validateEpochPage(accessNode, limit, offset);
+        // 按节点过滤 + 分页下沉到 SQL：此前是全表 assignment × ledger（O(节点数 × 全平台租户)）。
+        // M0b-3 的语义不变：一次对账同时给出「归属 epoch」与「配置 epoch」，
+        // 接入侧据此判断「要采什么」有没有变（不一致才拉全量设备规格）。
+        List<TenantEpochItem> items = mapper.selectEpochItemsByNode(accessNode.trim(), limit, offset);
         TenantEpochBatchResp resp = new TenantEpochBatchResp();
         resp.setItems(items);
         resp.setReadAt(mapper.selectNow());

@@ -12,6 +12,8 @@ package cn.ypbin.admin.access.lease;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
@@ -80,12 +82,12 @@ class AccessLeaseManagerTest {
         properties.setAcquireIntervalMs(Long.MAX_VALUE);
         meterRegistry = new SimpleMeterRegistry();
         // spy：既要它真实工作（按版本号触发对账），又要能断言停采路径确实调了 forget
-        reconciler = spy(new ConfigEpochReconciler(client, linkManager, meterRegistry,
+        reconciler = spy(new ConfigEpochReconciler(client, NODE, linkManager, meterRegistry,
             Clock.systemUTC(), 300_000L));
         manager = new AccessLeaseManager(client, linkManager, properties, meterRegistry, reconciler, clock);
         // 每个租约周期都会打一次 epoch 对账：默认给「没有任何条目」的成功信封，
         // 避免用例里出现 null 信封的错误日志（影响可读性，也会掩盖真问题）
-        when(client.batchEpoch()).thenReturn(R.ok(epochBatch()));
+        when(client.batchEpoch(anyString(), anyInt(), anyInt())).thenReturn(R.ok(epochBatch()));
     }
 
     @Test
@@ -277,7 +279,7 @@ class AccessLeaseManagerTest {
     @Test
     @DisplayName("★ 配置版本变化必须触达链路管理器（P4 接线）；版本不变则不再触发")
     void configEpochChangeShouldReachLinkManager() {
-        when(client.batchEpoch()).thenReturn(R.ok(epochBatch(epochItem(TENANT_A, 1L))));
+        when(client.batchEpoch(anyString(), anyInt(), anyInt())).thenReturn(R.ok(epochBatch(epochItem(TENANT_A, 1L))));
         startWith(TENANT_A);
 
         manager.renewAndSelfCheck();
@@ -289,7 +291,7 @@ class AccessLeaseManagerTest {
         assertThat(meterRegistry.get("iot.access.config.changed").counter().count())
             .as("版本号没变不得重复对账").isZero();
 
-        when(client.batchEpoch()).thenReturn(R.ok(epochBatch(epochItem(TENANT_A, 2L))));
+        when(client.batchEpoch(anyString(), anyInt(), anyInt())).thenReturn(R.ok(epochBatch(epochItem(TENANT_A, 2L))));
         manager.renewAndSelfCheck();
         verify(linkManager, times(2)).reconcile(TENANT_A);
         assertThat(meterRegistry.get("iot.access.config.changed").counter().count()).isEqualTo(1.0d);
@@ -298,7 +300,7 @@ class AccessLeaseManagerTest {
     @Test
     @DisplayName("★ 租户被回收时必须忘掉配置版本号：重新领取后要重新对账（fence 期间上游可能改过配置）")
     void revokedTenantMustForgetConfigEpoch() {
-        when(client.batchEpoch()).thenReturn(R.ok(epochBatch(epochItem(TENANT_A, 1L))));
+        when(client.batchEpoch(anyString(), anyInt(), anyInt())).thenReturn(R.ok(epochBatch(epochItem(TENANT_A, 1L))));
         startWith(TENANT_A);
         manager.renewAndSelfCheck();
         assertThat(reconciler.trackedTenantCount()).isEqualTo(1);
@@ -326,7 +328,7 @@ class AccessLeaseManagerTest {
         verify(client, times(0)).register(any());
         verify(client, times(0)).acquire(any());
         verify(client, times(0)).renew(any());
-        verify(client, times(0)).batchEpoch();
+        verify(client, times(0)).batchEpoch(anyString(), anyInt(), anyInt());
     }
 
     private void startWith(Long... tenantIds) {

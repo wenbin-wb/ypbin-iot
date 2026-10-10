@@ -11,6 +11,7 @@ package cn.ypbin.admin.access.lease;
 
 import cn.ypbin.admin.access.link.TenantLinkManager;
 import cn.ypbin.admin.iot.lease.ILeaseClient;
+import cn.ypbin.admin.iot.lease.LeaseEpochRules;
 import cn.ypbin.admin.iot.lease.TenantEpochBatchResp;
 import cn.ypbin.admin.iot.lease.TenantEpochItem;
 import cn.ypbin.starter.core.model.R;
@@ -21,6 +22,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -65,6 +67,10 @@ public class ConfigEpochReconciler {
     static final String METRIC_PREFIX = "iot.access.config.";
 
     private final ILeaseClient leaseClient;
+
+    /** 本节点标识：epoch 对账必须按节点过滤（服务端拒空，不带就等于拉全平台）。 */
+    private final String nodeId;
+
     private final TenantLinkManager linkManager;
     private final Clock clock;
 
@@ -95,15 +101,17 @@ public class ConfigEpochReconciler {
     /**
      * 构造对账器。
      *
-     * @param leaseClient      租约客户端（提供批量 epoch 对账接口）
+     * @param leaseClient      租约客户端（提供按节点过滤 + 分页的 epoch 对账接口）
+     * @param nodeId           本节点标识（epoch 对账的过滤键；必填，空由服务端拒绝）
      * @param linkManager      链路控制端口（提供按最新配置对账设备清单的能力）
      * @param meterRegistry    指标注册表
      * @param clock            时间源（安全网判据；单测注入可推进的假时钟）
      * @param refreshIntervalMs 周期安全网间隔（毫秒，{@code <= 0} 关闭）
      */
-    public ConfigEpochReconciler(ILeaseClient leaseClient, TenantLinkManager linkManager,
+    public ConfigEpochReconciler(ILeaseClient leaseClient, String nodeId, TenantLinkManager linkManager,
             MeterRegistry meterRegistry, Clock clock, long refreshIntervalMs) {
         this.leaseClient = leaseClient;
+        this.nodeId = nodeId;
         this.linkManager = linkManager;
         this.clock = clock;
         this.refreshIntervalMs = refreshIntervalMs;
@@ -126,26 +134,41 @@ public class ConfigEpochReconciler {
         if (heldTenants == null || heldTenants.isEmpty()) {
             return;
         }
-        R<TenantEpochBatchResp> resp;
-        try {
-            resp = leaseClient.batchEpoch();
-        } catch (RuntimeException ex) {
-            checkFailureCounter.increment();
-            log.error("配置版本对账失败（不推进任何版本号，下一轮重试）：node 持有租户数={}",
-                heldTenants.size(), ex);
-            return;
-        }
-        if (resp == null || !resp.isSuccess() || resp.getData() == null) {
-            checkFailureCounter.increment();
-            log.error("配置版本对账返回非成功信封（下一轮重试）：code={}",
-                resp == null ? "null" : resp.getCode());
-            return;
-        }
         Set<Long> attempted = new HashSet<>();
-        // getItems() 自带 null 防御（返回空列表），故版本偏差返回 items=null 不会打断整个 tick
-        for (TenantEpochItem item : resp.getData().getItems()) {
-            if (reconcileItem(item, heldTenants)) {
-                attempted.add(item.getTenantId());
+        int offset = 0;
+        for (int page = 0; page < LeaseEpochRules.EPOCH_PAGE_MAX_PAGES; page++) {
+            R<TenantEpochBatchResp> resp;
+            try {
+                resp = leaseClient.batchEpoch(nodeId, LeaseEpochRules.EPOCH_PAGE_DEFAULT_LIMIT, offset);
+            } catch (RuntimeException ex) {
+                checkFailureCounter.increment();
+                log.error("配置版本对账失败（不推进任何版本号，下一轮重试）：node={} 持有租户数={} offset={}",
+                    LogSanitizer.sanitize(nodeId), heldTenants.size(), offset, ex);
+                return;
+            }
+            if (resp == null || !resp.isSuccess() || resp.getData() == null) {
+                checkFailureCounter.increment();
+                log.error("配置版本对账返回非成功信封（下一轮重试）：node={} offset={} code={}",
+                    LogSanitizer.sanitize(nodeId), offset, resp == null ? "null" : resp.getCode());
+                return;
+            }
+            // getItems() 自带 null 防御（返回空列表），故版本偏差返回 items=null 不会打断整个 tick
+            List<TenantEpochItem> items = resp.getData().getItems();
+            for (TenantEpochItem item : items) {
+                if (reconcileItem(item, heldTenants)) {
+                    attempted.add(item.getTenantId());
+                }
+            }
+            if (items.size() < LeaseEpochRules.EPOCH_PAGE_DEFAULT_LIMIT) {
+                // 不满一页 ⇒ 已是最后一页（服务端按 tenant_id 稳定排序）
+                break;
+            }
+            offset += items.size();
+            if (page == LeaseEpochRules.EPOCH_PAGE_MAX_PAGES - 1) {
+                // 触顶按异常处理：不静默截断（否则「持有租户过多」会表现为「部分租户永远不被对账」）
+                checkFailureCounter.increment();
+                log.error("epoch 对账翻页触顶，本轮停止翻页（按异常计）：node={} 页数={} offset={}",
+                    LogSanitizer.sanitize(nodeId), page + 1, offset);
             }
         }
         forceNextStaleTenant(heldTenants, attempted);
