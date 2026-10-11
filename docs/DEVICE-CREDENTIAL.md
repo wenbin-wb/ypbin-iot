@@ -225,7 +225,7 @@ docker exec -i ypbin-mysql sh -c 'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" ypb
 
 ---
 
-## 8. 独立复核（R6 L3，2026-09-27）
+## 8. 独立复核（L3 独立复核，2026-09-27）
 
 **判定：PASS**（复核者只读自跑；变异在被复核代码的 `/tmp` 副本里做，跑完删除）。
 独立实证（复核者自跑，非本文件作者转述）：

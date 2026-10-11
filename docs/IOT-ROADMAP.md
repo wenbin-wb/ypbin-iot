@@ -259,7 +259,7 @@ ERROR The build could not read 1 project
 
 **已修（第二轮复核发现，与 B1 同类且更早一步）**：`startCollecting` 原会把 `loadByTenant()` 的空结果也缓存进 `collected`，而取数瞬时失败返回的就是空集合 ⇒ **启动期一次取数失败即把该租户永久钉死为零设备**。现改为「空清单不缓存、下轮重取」，并把「本节点负责该租户」的状态（`collecting`）与设备清单缓存**分开**，保证 fencing 与观测语义不变；已补可咬回归用例 `emptyDeviceListMustNotBePinned`。
 
-**跨仓待反馈（第三次外委复核发现，R8）**：starter 的 `TenantAutoConfiguration` 里
+**跨仓待反馈（第三次外委复核发现，主动提示）**：starter 的 `TenantAutoConfiguration` 里
 `tenantThreadLocalAccessor()` 的方法级 `@ConditionalOnClass(io.micrometer.context.ThreadLocalAccessor)`
 **挡不住**——Spring 注册 bean 方法时会走 `ReflectionUtils.getDeclaredMethods → Class.getDeclaredMethods`，
 解析缺失父类（`TenantThreadLocalAccessor`）即抛错，方法级条件根本来不及生效。
@@ -479,7 +479,7 @@ ERROR The build could not read 1 project
 | **A1** | ~~access 侧上报接线~~ **已落地**（`HttpAccessReadingSink`）：有界队列 → 微批 → `/internal/readings`，含丢弃/失败/非法计数与超时；EMQX 传输**待实施**（Q4 已代决 = 设计文档 D0.6：内置库认证 + REST，username 稳定只换口令） | 已收口；仍有限制见 A9/A10 |
 | **A9** | **上报失败不重试**（本批丢弃） | 刻意为之：重试会占住 flush 线程并放大远端压力；代价是读数丢失会让断档缺口被算长一些 ⇒ 以 `iot.access.egress.failed`/`dropped` 暴露。彻底解决要等 **EMQX/MQ 的持久化通道（Q4 已代决 = D0.6，通道本身尚未实施）** 与「断档判定对丢失不敏感」的补偿口径 |
 | **A10** | ~~**扫描无租约/归属联动**~~（= A6 的另一面）✅ **已落地**（2026-09-23） | 同 A6：租约释放/过期→开交接窗口、接管成功→关窗，真库 IT 覆盖（起点=失效时刻、接管后 `end_ts` 非空） |
-| **A12** | 指标**未接大盘/告警** | `iot.access.egress.*`（accepted/dropped/sent/failed/invalid/pending）与可用率侧无 Prometheus 抓取/告警/大盘定义，仅文档提及名字（复核 R8 未核实项） |
+| **A12** | 指标**未接大盘/告警** | `iot.access.egress.*`（accepted/dropped/sent/failed/invalid/pending）与可用率侧无 Prometheus 抓取/告警/大盘定义，仅文档提及名字（独立复核列为未核实项） |
 | **A15** | `poll_interval_ms` 可被**过期但为正**的旧快照回退 | 该列是**配置**不是时间戳（1s→10s 是合法变更），故刻意不做单调；代价是另一副本的旧周期写回后阈值 `K×周期` 偏大 ⇒ 检测略滞后、可用率略偏高。若要收口需引入「配置版本号」判新旧（与 `config_epoch` 同类机制） |
 | **A16** | `outageCount` 口径含「裁剪后重叠 0 秒」的行 | 聚合用 `COUNT(*)`（满足窗口重叠条件的行都计），而旧的 Java 求和会跳过重叠 ≤0 的行 ⇒ 次数可能比旧实现大（只影响展示的次数，不影响秒数与可用率）。已在 Mapper Javadoc 写明 |
 | **A13** | 多副本相关用例的成本面 | 谓词与饥饿两条用例是**真库 IT**（CI 才跑）；本地由源码级门禁 `AvailabilityMapperContractTest` 兜底（它只断言 SQL 文本，不执行 SQL） |
@@ -807,7 +807,7 @@ SF-4 / SF-5 为 2026-09-25 新增的未关闭项（生产部署实测暴露，st
 > `matchIfMissing = false` ⇒ 它**不装配** `IdentityHeaderFilter`，**不是身份头消费侧**（它的缺口是配置面少了
 > `ypbin.cloud.feign.*`，已另开 PR #38 对齐）；② 生产上真正在线的消费侧是 `ypbin-system` / `ypbin-iot`
 > （`ypbin-auth` 已被 SF-4 的临时处置覆盖为 `identity.enabled=false`；`ypbin-ai` / `ypbin-access` 容器未运行）。
-> ③ 本条已过**独立子代理复核**（R6）：核心主张逐条复现一致，复核指出的 4 处证据性表述已整改——
+> ③ 本条已过**独立子代理复核**（独立复核）：核心主张逐条复现一致，复核指出的 4 处证据性表述已整改——
 > `18080` 归属（是**网关**不是 admin-ui）、compose 绑定**并非"一律"**（redis/iotdb/gateway 为例外）、
 > "其余一律回环"改为**端口白名单内**口径并补测全量 `ss`、消费侧口径（access 剔除）；
 > "64 位 token 长度"由"未核实"升级为**已核实**（`install.sh` 的 `rand_hex 32` ⇒ 64 个十六进制字符 + live `.env` 只读测量 = 64）。
@@ -874,7 +874,7 @@ SQL 文本门禁 + `executeIgnore` 源码门禁都钉住了这两条约束（`Av
 - **仍未验证（如实声明）**：TTL 越界语义、`start-cli.sh -e` 的 SQL 错退出码、完整 compose 栈的 healthy/unhealthy 迁移、
   `quality=null` 是否会导致整块不落库、前端浏览器渲染。
 
-**纪律不变**：每步按 R6 外委复核后合并；不改继承来的 `ci.yml`（新增 workflow 文件，见四点十八 UP-1）；
+**纪律不变**：每步经外委独立复核后合并；不改继承来的 `ci.yml`（新增 workflow 文件，见四点十八 UP-1）；
 **IoTDB 容器 IT 本机可跑**（Docker + `apache/iotdb:2.0.11-standalone` 已实测），真库结论以**本机真跑 + CI** 双证据为准，
 覆盖不到的部分照上面的「仍未验证」逐条如实标注。
 
