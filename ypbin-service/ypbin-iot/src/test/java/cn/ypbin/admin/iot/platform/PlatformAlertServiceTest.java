@@ -27,6 +27,7 @@ import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Clock;
+import java.time.Instant;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.lang.reflect.Field;
 import java.util.Map;
@@ -256,7 +257,7 @@ class PlatformAlertServiceTest {
     @DisplayName("★ access 上报后：心跳转 HEALTHY，tick 过慢按阈值 FIRING/HEALTHY")
     void afterAccessReportHeartbeatMustBeHealthyAndTickSlowFollowsThreshold() {
         accessStore.store(new AccessMetricsSnapshotResp(0L, 30_000L, 100L, 10L,
-            0L, 0L, 0L, 0L, java.time.Instant.now()));
+            0L, 0L, 0L, 0L, Instant.now()));
 
         Map<PlatformHealthRule, PlatformHealthVerdict> verdicts = service.evaluateOnce();
 

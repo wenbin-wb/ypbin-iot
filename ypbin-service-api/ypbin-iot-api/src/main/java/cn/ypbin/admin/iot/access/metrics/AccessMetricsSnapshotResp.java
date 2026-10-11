@@ -9,6 +9,8 @@
  */
 package cn.ypbin.admin.iot.access.metrics;
 
+import java.time.Instant;
+
 /**
  * 接入节点（access）关键指标的**只读快照**，由 access 侧主动推送给 iot。
  *
@@ -40,5 +42,5 @@ public record AccessMetricsSnapshotResp(
     Long nodeFencedCount,
     Long renewFailureCount,
     Long egressPendingCount,
-    java.time.Instant reportedAt) {
+    Instant reportedAt) {
 }

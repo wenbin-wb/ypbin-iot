@@ -18,6 +18,8 @@ import static org.mockito.Mockito.verify;
 import cn.ypbin.admin.iot.access.metrics.AccessMetricsSnapshotResp;
 import cn.ypbin.admin.iot.access.metrics.IAccessMetricsClient;
 import io.micrometer.core.instrument.Counter;
+import java.time.Duration;
+import org.mockito.ArgumentCaptor;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.Timer;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -53,12 +55,12 @@ class AccessMetricsReporterTest {
     void snapshotMustReadRealMeters() {
         Counter.builder("iot.access.config.reconcile.deferred").register(meterRegistry).increment(3);
         Timer.builder("iot.access.lease.tick.duration").register(meterRegistry)
-            .record(java.time.Duration.ofMillis(2_100));
+            .record(Duration.ofMillis(2_100));
         Gauge.builder("iot.access.egress.pending", () -> 7).register(meterRegistry);
 
         reporter.report();
 
-        var captor = org.mockito.ArgumentCaptor.forClass(AccessMetricsSnapshotResp.class);
+        var captor = ArgumentCaptor.forClass(AccessMetricsSnapshotResp.class);
         verify(client).report(captor.capture());
         AccessMetricsSnapshotResp sent = captor.getValue();
         assertThat(sent.reconcileDeferredCount()).isEqualTo(3L);
@@ -75,7 +77,7 @@ class AccessMetricsReporterTest {
     void missingMetersMustBeNull() {
         reporter.report();
 
-        var captor = org.mockito.ArgumentCaptor.forClass(AccessMetricsSnapshotResp.class);
+        var captor = ArgumentCaptor.forClass(AccessMetricsSnapshotResp.class);
         verify(client).report(captor.capture());
         assertThat(captor.getValue().reconcileDeferredCount()).isNull();
         assertThat(captor.getValue().tickDurationMaxMs()).isNull();
