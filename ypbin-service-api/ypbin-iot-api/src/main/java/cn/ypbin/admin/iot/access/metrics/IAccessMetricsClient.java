@@ -9,6 +9,7 @@
  */
 package cn.ypbin.admin.iot.access.metrics;
 
+import cn.ypbin.admin.iot.lease.config.LeaseFeignConfiguration;
 import org.springframework.cloud.openfeign.FeignClient;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -25,7 +26,7 @@ import org.springframework.web.bind.annotation.RequestBody;
  * @since 2026-10-10
  */
 @FeignClient(name = "ypbin-iot", contextId = "accessMetricsClient", path = "/internal/metrics",
-    configuration = cn.ypbin.admin.iot.lease.config.LeaseFeignConfiguration.class)
+    configuration = LeaseFeignConfiguration.class)
 public interface IAccessMetricsClient {
 
     /**

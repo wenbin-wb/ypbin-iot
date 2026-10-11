@@ -3,6 +3,8 @@ package cn.ypbin.admin.iot.platform;
 import cn.ypbin.admin.system.api.feign.ISystemClient;
 import cn.ypbin.admin.system.model.req.InboxMessageSendReq;
 import cn.ypbin.admin.system.model.req.MailSendReq;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
@@ -23,13 +25,38 @@ public class PlatformAlertNotifier {
 
     private static final Logger log = LoggerFactory.getLogger(PlatformAlertNotifier.class);
 
+    /**
+     * 通知尝试总数（**含被开关/收件人拦下的**）——部署验收实测发现：
+     * 全部异常路径只有日志、没有指标，「到底有没有尝试发」在线上不可观测。
+     */
+    static final String METRIC_SEND = "iot.platform_alert.notify.send";
+
+    /** 投递成功次数（按站内信/邮件分别计）。 */
+    static final String METRIC_SUCCEEDED = "iot.platform_alert.notify.succeeded";
+
+    /** 投递失败次数（异常 + 对端返回失败）。 */
+    static final String METRIC_FAILED = "iot.platform_alert.notify.failed";
+
     private final ObjectProvider<ISystemClient> systemClientProvider;
     private final PlatformAlertProperties properties;
 
+    private final Counter sendCounter;
+    private final Counter succeededCounter;
+    private final Counter failedCounter;
+
     public PlatformAlertNotifier(ObjectProvider<ISystemClient> systemClientProvider,
-                                 PlatformAlertProperties properties) {
+                                 PlatformAlertProperties properties, MeterRegistry meterRegistry) {
         this.systemClientProvider = systemClientProvider;
         this.properties = properties;
+        this.sendCounter = Counter.builder(METRIC_SEND)
+            .description("平台告警通知尝试次数（含被开关/空收件人拦下的）")
+            .register(meterRegistry);
+        this.succeededCounter = Counter.builder(METRIC_SUCCEEDED)
+            .description("平台告警投递成功次数")
+            .register(meterRegistry);
+        this.failedCounter = Counter.builder(METRIC_FAILED)
+            .description("平台告警投递失败次数（异常 + 对端返回失败）")
+            .register(meterRegistry);
     }
 
     /** FIRING 通知。 */
@@ -43,6 +70,7 @@ public class PlatformAlertNotifier {
     }
 
     private void send(PlatformHealthRule rule, String kind, String content) {
+        sendCounter.increment();
         if (!properties.isNotifyEnabled()) {
             log.debug("[iot] 平台告警通知开关关闭，跳过：rule={}, kind={}", rule.getCode(), kind);
             return;
@@ -70,6 +98,7 @@ public class PlatformAlertNotifier {
             try {
                 sendInbox(systemClient, req, rule);
             } catch (RuntimeException ex) {
+                failedCounter.increment();
                 log.error("[iot] 平台告警站内信投递异常：userId={}, rule={}", userId,
                     rule.getCode(), ex);
             }
@@ -82,28 +111,35 @@ public class PlatformAlertNotifier {
             try {
                 sendMail(systemClient, req, rule);
             } catch (RuntimeException ex) {
+                failedCounter.increment();
                 log.error("[iot] 平台告警邮件投递异常：to={}, rule={}", email,
                     rule.getCode(), ex);
             }
         }
     }
 
-    private static void sendInbox(ISystemClient client, InboxMessageSendReq req,
-                                  PlatformHealthRule rule) {
+    private void sendInbox(ISystemClient client, InboxMessageSendReq req,
+                           PlatformHealthRule rule) {
         var result = client.sendInboxMessage(req);
         if (result == null || !result.isSuccess()) {
             log.warn("[iot] 平台告警站内信发送失败：rule={}, respMsg={}", rule.getCode(),
                 result == null ? "null" : result.getMessage());
+            failedCounter.increment();
+            return;
         }
+        succeededCounter.increment();
     }
 
-    private static void sendMail(ISystemClient client, MailSendReq req,
-                                 PlatformHealthRule rule) {
+    private void sendMail(ISystemClient client, MailSendReq req,
+                          PlatformHealthRule rule) {
         var result = client.sendMail(req);
         if (result == null || !result.isSuccess()) {
             log.warn("[iot] 平台告警邮件发送失败：rule={}, respMsg={}", rule.getCode(),
                 result == null ? "null" : result.getMessage());
+            failedCounter.increment();
+            return;
         }
+        succeededCounter.increment();
     }
 
     private static String buildFiringText(PlatformHealthRule rule, String summary, String snapshot) {

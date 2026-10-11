@@ -13,6 +13,7 @@ import cn.ypbin.admin.system.api.feign.ISystemClient;
 import cn.ypbin.admin.system.model.req.InboxMessageSendReq;
 import cn.ypbin.admin.system.model.req.MailSendReq;
 import cn.ypbin.starter.core.model.R;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -36,13 +37,16 @@ class PlatformAlertNotifierTest {
     private PlatformAlertProperties properties;
     private PlatformAlertNotifier notifier;
 
+    private SimpleMeterRegistry registry;
+
     @BeforeEach
     void setUp() {
         provider = mock(ObjectProvider.class);
         client = mock(ISystemClient.class);
         properties = new PlatformAlertProperties();
         when(provider.getIfAvailable()).thenReturn(client);
-        notifier = new PlatformAlertNotifier(provider, properties);
+        registry = new SimpleMeterRegistry();
+        notifier = new PlatformAlertNotifier(provider, properties, registry);
     }
 
     @Test
@@ -133,5 +137,23 @@ class PlatformAlertNotifierTest {
         notifier.notifyResolved(PlatformHealthRule.EVALUATOR_STALLED, "r");
 
         verify(client, times(2)).sendInboxMessage(any(InboxMessageSendReq.class));
+    }
+
+    @Test
+    @DisplayName("★ 部署验收实测：三个计数器把「到底有没有尝试发」变成可观测")
+    void countersMustMakeNotificationAttemptsObservable() {
+        PlatformAlertProperties props = new PlatformAlertProperties();
+        props.setNotifyEnabled(true);
+        props.setRecipientExtraEmails(java.util.List.of("ops@example.invalid"));
+        PlatformAlertNotifier local = new PlatformAlertNotifier(provider, props, registry);
+
+        local.notifyFiring(PlatformHealthRule.TICK_SLOW, "测试摘要", "{}");
+
+        assertThat(registry.get(PlatformAlertNotifier.METRIC_SEND).counter().count())
+            .as("每次尝试（FIRING/RESOLVED 各一次）都必须计数").isEqualTo(1.0d);
+        assertThat(registry.get(PlatformAlertNotifier.METRIC_FAILED).counter().count())
+            .as("对端失败 ⇒ failed 计数").isEqualTo(1.0d);
+        assertThat(registry.get(PlatformAlertNotifier.METRIC_SUCCEEDED).counter().count())
+            .isZero();
     }
 }
