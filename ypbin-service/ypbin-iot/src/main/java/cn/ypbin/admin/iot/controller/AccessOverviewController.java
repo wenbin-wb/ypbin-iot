@@ -17,6 +17,7 @@ import cn.ypbin.admin.iot.mapper.TenantNodeAssignmentMapper;
 import cn.ypbin.admin.iot.platform.AccessMetricsReportStore;
 import cn.ypbin.starter.core.model.R;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -66,7 +67,9 @@ public class AccessOverviewController {
                     .eq(TenantNodeAssignment::getAccessNode, row.getAccessNode())
                     .eq(TenantNodeAssignment::getState, STATE_ACTIVE)),
                 row.getLastHeartbeatAt(),
-                earliestLeaseExpireAt(row.getAccessNode())))
+                earliestLeaseExpireAt(row.getAccessNode()),
+                leaseAlive(earliestLeaseExpireAt(row.getAccessNode())),
+                leaseRemainingSec(earliestLeaseExpireAt(row.getAccessNode()))))
             .toList();
 
         Map<String, Object> metrics = new LinkedHashMap<>();
@@ -84,6 +87,33 @@ public class AccessOverviewController {
             metrics.put("egressPendingCount", latest.egressPendingCount());
         }
         return R.ok(Map.of("nodes", nodes, "metrics", metrics));
+    }
+
+    /**
+     * 租约是否仍有效（依据「最早到期时刻 vs 当前时刻」）。
+     *
+     * <p>为什么不能看 {@code access_node.last_heartbeat_at}：那个字段**只在注册/复活时写**，
+     * 续约（20s 一次）不碰它 ⇒ 长期显示一个很早的时间，看着像"节点失联几小时"（实测踩到）。
+     * 真正的存活性信号是租约到期时刻：只要还在续约，它就一直往后滚。</p>
+     *
+     * @param leaseExpireMin 最早租约到期时刻（可能为 {@code null} = 无租约）
+     * @return {@code true} = 有效；{@code false} = 已过期；{@code null} = 无租约
+     */
+    private Boolean leaseAlive(LocalDateTime leaseExpireMin) {
+        return leaseExpireMin == null ? null : !LocalDateTime.now().isAfter(leaseExpireMin);
+    }
+
+    /**
+     * 距最早租约到期的秒数（负 = 已过期）。
+     *
+     * @param leaseExpireMin 最早租约到期时刻（可能为 {@code null}）
+     * @return 秒数；无租约返回 {@code null}
+     */
+    private Long leaseRemainingSec(LocalDateTime leaseExpireMin) {
+        if (leaseExpireMin == null) {
+            return null;
+        }
+        return Duration.between(LocalDateTime.now(), leaseExpireMin).toSeconds();
     }
 
     /**
