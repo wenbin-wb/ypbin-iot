@@ -51,7 +51,7 @@ class AccessOverviewControllerTest {
     void setUp() {
         accessNodeMapper = mock(AccessNodeMapper.class);
         assignmentMapper = mock(TenantNodeAssignmentMapper.class);
-        reportStore = new AccessMetricsReportStore(new SimpleMeterRegistry(), Clock.systemUTC());
+        reportStore = new AccessMetricsReportStore(new SimpleMeterRegistry());
         // MockMvc 下没有 MyBatis-Spring 上下文：LambdaQueryWrapper 的列缓存需手动初始化，否则运行期抛 MPE
         com.baomidou.mybatisplus.core.MybatisConfiguration configuration =
             new com.baomidou.mybatisplus.core.MybatisConfiguration();

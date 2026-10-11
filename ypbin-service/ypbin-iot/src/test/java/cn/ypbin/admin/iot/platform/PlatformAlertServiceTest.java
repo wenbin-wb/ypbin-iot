@@ -70,7 +70,7 @@ class PlatformAlertServiceTest {
         registry = new SimpleMeterRegistry();
         alertMapper = mock(IotPlatformAlertMapper.class);
         notifier = mock(PlatformAlertNotifier.class);
-        accessStore = new AccessMetricsReportStore(registry, Clock.systemUTC());
+        accessStore = new AccessMetricsReportStore(registry);
         service = new PlatformAlertService(registry, alertMapper, notifier, accessStore);
     }
 

@@ -92,6 +92,15 @@
 |---|---|---|---|---|
 | `iot.access.metrics.report.failure` | Counter | 指标快照推送给 iot **失败**次数（默认每 15s 推一次） | **期望 0**；增长 ⇒ 推送链路断 ⇒ 平台侧相关规则判「不可判定」 | AccessMetricsReporter.java |
 
+### 2.8 平台告警自身的可观测性（`iot.platform_alert.*`，产出在 iot 服务）
+
+| 指标 | 类型 | 口径（何时变化） | 建议关注 / 阈值 | 注册文件 |
+|---|---|---|---|---|
+| `iot.platform_alert.access.report.lag` | Gauge | 距最近一次 access 上报的毫秒数；`-1` = 从未收到 | ≥ 45s ⇒ 上报中断（`PLATFORM_INSTANCE_UNREACHABLE`） | AccessMetricsReportStore.java |
+| `iot.platform_alert.notify.send` | Counter | 通知尝试次数（**含被开关/空收件人拦下**） | 想看"到底有没有尝试发"就看他：开了 FIRING 却不涨 ⇒ 通知链断 | PlatformAlertNotifier.java |
+| `iot.platform_alert.notify.succeeded` | Counter | 投递成功次数（站内信 + 邮件分别计） | 应与 `send` 相等；不等 ⇒ 有失败 | PlatformAlertNotifier.java |
+| `iot.platform_alert.notify.failed` | Counter | 投递失败次数（异常 + 对端返回失败） | **期望 0**；增长 ⇒ 看 `last_error`/系统邮件配置 | PlatformAlertNotifier.java |
+
 
 ## 3. 与 R8 其它条目的关系
 

@@ -700,3 +700,60 @@ epoch 查询是 `LEFT JOIN tenant_ledger`，所以**表不存在 / DDL 窗口 / 
   （这是有意为之：失败确实发生过，值得留痕）；
 - **锁类失败**（1205/1213）不适用本节的「可用性优先」：DB 已回滚整个事务，上抛是唯一诚实的做法（见 §11.2 表）；
 - 该指标**尚未**纳入平台自告警规则（`PlatformHealthRule` 无台账规则）⇒ 目前只能靠人工看指标/日志。
+
+---
+
+## 12. 「平台自告警接入 access 域指标」的部署与排障（2026-10-11 实测）
+
+**本轮的键与链路**：access `AccessMetricsReporter` 每 15s 把自身 registry 快照推给 iot
+`POST /internal/metrics/access-report`；iot 侧 `AccessMetricsReportStore` 存最近一份（**内存，不落库**）；
+`PlatformAlertService` 每轮评估 8 条规则（原有 4 条 + 新增 4 条）。
+
+**新增 4 条规则与阈值**（`PlatformHealthRule`，判定仍是「快照 + 纯函数 + 基线」）：
+
+| 规则 | 判据 | 阈值 |
+|---|---|---|
+| `PLATFORM_LEDGER_BUMP_FAILING` | `iot.ledger.bump.failure` 增长 | 生产期望恒 0 ⇒ 增长即告警 |
+| `PLATFORM_RECONCILE_DEFERRED` | 对账被预算推迟次数增长（access 上报） | 同上；R8-2 是否要上 B/C/D 的判据 |
+| `PLATFORM_TICK_SLOW` | access 上报的 tick 最大耗时 | ≥ 15s = 租约 TTL(30s) 的一半 |
+| `PLATFORM_INSTANCE_UNREACHABLE` | access 上报心跳 | ≥ 45s = 3 × 上报间隔 |
+
+### 12.1 🔴 排障三条（本次部署实测踩到，都不是"重发一次就好"）
+
+1. **改 `ypbin.access.reconcile-budget-ms` 必须重建 access 容器**（`docker compose up -d --no-deps --force-recreate ypbin-access`）。
+   `AccessProperties` **不是 `@RefreshScope`** ⇒ Nacos 里改了只触发一次
+   `Refresh keys changed: [ypbin.access.reconcile-budget-ms]`，**bean 字段不变**。
+   症状：deferred 恒 0、`PLATFORM_RECONCILE_DEFERRED` 永不 FIRING，
+   而配置回读完全正常（Nacos 里确实写进去了）⇒ 极易误判成"规则坏了"。
+   验证命令（access 容器内）：`iot.access.config.reconcile.deferred` 两次采样应在涨。
+   > 是否加 `@RefreshScope` 属**行为变更**（每次都重建代理 bean，影响点未知），本轮只登记不改。
+
+2. **`set-nacos-flag.py` 对 `ypbin.access` 块内的键会失败**（报"未找到 '  access:' 段"）：
+   块内那条「可观测」说明注释是**顶格**写的，工具按"缩进 4 空格才算块内"解析 ⇒ 提前认为离开块。
+   已在 `deploy/nacos/ypbin-access.yaml` 里把该注释修为 4 空格；**此后若再加块内键，
+   注释必须同样缩进**。
+
+3. **平台告警的通知不进 `iot_alert_notification` 表**（`PlatformAlertNotifier` 直接调 system 的
+   站内信/邮件，不复用设备告警待发队列）⇒ 想确认"通知到底有没有尝试发"，
+   只能看指标：`iot.platform_alert.notify.send`（含被开关/空收件人拦下的）、
+   `.notify.succeeded`、`.notify.failed`（2026-10-11 为补这条可观测性而加，此前只有日志）。
+
+### 12.2 快速验收命令（dev，一条链路跑通）
+
+```bash
+# 1) 看链路活着：iot 侧心跳 gauge ≈ 15000ms（一个上报周期）
+curl -s http://127.0.0.1:18084/actuator/metrics/iot.platform_alert.access.report.lag | head -c 200
+# 2) 造一次推迟：把 live 的 reconcile-budget-ms 改成 1 → **必须重建 access 容器**
+docker compose -f /opt/ypbin/ypbin-iot/deploy/docker-compose.yml \
+  up -d --no-deps --force-recreate ypbin-access
+# 3) 验证推迟在涨（access 侧）
+curl -s http://127.0.0.1:18086/actuator/metrics/iot.access.config.reconcile.deferred | head -c 200
+# 4) 看规则开单与恢复（DB）
+docker exec ypbin-mysql mysql -uroot -p -N -e \
+  "use ypbin_admin; select rule_code,state,observed_rounds,left(summary,60) from iot_platform_alert order by id desc limit 4"
+# 5) 还原（把 live 改回 15000，再重建 access 容器）⇒ 规则转 RESOLVED
+```
+
+本次实测结果：注入后 `deferred` 0 → 25 → 28 持续增长；`PLATFORM_RECONCILE_DEFERRED`
+`FIRING(WARNING, observed_rounds=20, observed=84)`；还原并重建容器后转
+`RESOLVED("配置对账推迟未增长（累计 0）")`，日志有「平台健康恢复正常，告警收口」。

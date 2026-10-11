@@ -42,8 +42,12 @@ public class AccessMetricsReportStore {
     /** 本 store 的创建时刻（用以回答「等了多久还没收到第一条上报」）。 */
     private final Instant createdAt;
 
-    public AccessMetricsReportStore(MeterRegistry meterRegistry, Clock clock) {
-        this.clock = clock;
+    /**
+     * 本 store 的时间源用 {@link Clock#systemUTC()}，**不从 Spring 注入**：
+     * iot 服务的上下文里没有 `Clock` bean（注入会直接启动失败）；心跳判定只需要单调的墙钟。
+     */
+    public AccessMetricsReportStore(MeterRegistry meterRegistry) {
+        this.clock = Clock.systemUTC();
         this.createdAt = clock.instant();
         Gauge.builder(METRIC_REPORT_LAG, this, store -> store.lagMs())
             .description("距最近一次 access 指标上报的毫秒数（-1 = 从未收到）")

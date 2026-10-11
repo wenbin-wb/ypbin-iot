@@ -104,14 +104,19 @@ def _edit_one_line(content: str, block: str, flag: str, want: str) -> tuple[str,
         line = lines[index]
         if line.strip() and not line.startswith("    "):  # 离开该块
             break
-        if re.fullmatch(r"    %s:\s*(true|false)\s*" % flag, line):
+        if re.fullmatch(r"    %s:\s*(\S.*?)\s*" % re.escape(flag), line):
             target = index
             break
     if target is None:
         raise SystemExit("未在 '%s' 段内找到布尔 flag '%s'" % (block, flag))
     new_lines = list(lines)
-    new_lines[target] = re.sub(r"(    %s:\s*)(true|false)" % flag,
-                              lambda match: match.group(1) + want, lines[target])
+    old_line = lines[target]
+    new_lines.append(None)  # 占位，避免下面 append 混淆语义
+    new_lines.pop()
+    # 只替换「键名 + 冒号 + 原值」，保留缩进与注释；值不做转义以外的任何处理
+    new_lines[target] = re.sub(r"(?m)^(\s*%s\s*:\s*)(\S.*?)\s*$" % re.escape(flag),
+                              lambda match: match.group(1) + want, old_line, count=1)
+    assert new_lines[target] != old_line or want in old_line, "替换后内容未变化（检查 flag 名/原值）"
     new_content = "\n".join(new_lines)
     changed = [(i + 1, lines[i], new_lines[i]) for i in range(len(lines)) if lines[i] != new_lines[i]]
     return new_content, changed
@@ -121,7 +126,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="改 Nacos live 配置里某个块下的布尔 flag")
     parser.add_argument("block", help="2 空格缩进的块名，如 alert / platform-alert / tenant")
     parser.add_argument("flag", help="块内的布尔键名，如 enabled / notify-enabled")
-    parser.add_argument("value", choices=["true", "false"])
+    parser.add_argument(
+        "value",
+        help="目标值。布尔用 true/false；也支持压测用的数值/其它标量（值经行内替换，不进 argv 之外的位置）",
+    )
     parser.add_argument("--data-id", default="ypbin-iot.yaml")
     parser.add_argument("--group", default="DEFAULT_GROUP")
     parser.add_argument("--namespace", default="public")
