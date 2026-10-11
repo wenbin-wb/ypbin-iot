@@ -249,9 +249,9 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
      * 该设备是否为「单点位流」协议（当前仅 TCP 透传）。
      *
      * <p>为什么不靠 {@code ProtocolCapability} 判断：框架能力枚举里 TCP 与 MQTT 都用
-     * {@code SUBSCRIBE_STREAM}，<b>没有</b>「单点位/多地址」这一档（见
-     * {@code docs/UPSTREAM-FEEDBACK-2026-09-27.md} §UP-4）。在框架补齐能力枚举/元数据之前，
-     * 只能按协议码判断；协议码是协议的唯一身份（{@code ProtocolCode}），所以这里不会误判。</p>
+     * {@code SUBSCRIBE_STREAM}，<b>没有</b>「单点位/多地址」这一档（框架 issue #15）。在框架补齐
+     * 能力枚举/元数据之前，只能按协议码判断；协议码是协议的唯一身份（{@code ProtocolCode}），
+     * 所以这里不会误判。</p>
      *
      * @param device 设备规格
      * @return TCP 透传返回 {@code true}
