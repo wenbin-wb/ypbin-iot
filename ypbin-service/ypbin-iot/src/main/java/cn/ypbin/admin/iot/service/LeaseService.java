@@ -9,7 +9,9 @@
  */
 package cn.ypbin.admin.iot.service;
 
+import cn.ypbin.admin.iot.lease.LeaseAssignmentResp;
 import cn.ypbin.admin.iot.lease.AccessNodeRegisterReq;
+import java.util.List;
 import cn.ypbin.admin.iot.lease.AssignmentQueryReq;
 import cn.ypbin.admin.iot.lease.LeaseAcquireReq;
 import cn.ypbin.admin.iot.lease.LeaseAcquireResp;
@@ -69,6 +71,13 @@ public interface LeaseService {
      * @return 归属；从未分配返回 {@code null}
      */
     LeaseAssignmentDto queryAssignment(AssignmentQueryReq req);
+
+    /**
+     * 租约归属全量（平台运维页用：现由哪个 access 节点在采哪个租户）。
+     *
+     * @return 归属行（按租户升序；未分配的租户不会出现）
+     */
+    List<LeaseAssignmentResp> listAssignments();
 
     /**
      * 批量对账：按**节点**取一页 epoch（判据只用 epoch）。
