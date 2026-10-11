@@ -80,6 +80,29 @@
      b) 变异脚本两次把注释写在行尾吞掉 `;` ⇒ **api 模块根本没装上新 jar**、变异"看起来生效"实则打的是旧类（教训：变异后要确认进了被测 classpath；单模块运行不会重建 api 模块，需先 install）。
   ④ 验证：iot 912/0/0/0、access 125/0/0/0、MetricsRegistryGate 2/0/0（新指标已登记 METRICS.md 共 35 条）、架构门禁 20/0/0（本轮两次 R10：内联 FQCN）、UI typecheck + lefthook 全绿。
   ⚠️ **未部署/未在 dev 实测渲染**（发布动作另行安排）。
+- ✅ **部署到 dev（2026-10-11，PR #205 → `ebb5b9e0`）**：全链路实测。部署中发现并修掉 **4 个本地 CI 抓不到的问题**：
+  ① access 未开 Feign 扫描（basePackages 漏包）⇒ **access 启动即失败、容器反复重启**；
+  ② iot 侧注入了不存在的 `Clock` bean ⇒ **APPLICATION FAILED TO START**；
+  ③ Nacos `ypbin-access.yaml` 块内注释顶格 ⇒ 块提前中断，追加的 `reconcile-budget-ms` 落进
+     `management.access` ⇒ **预算静默不生效**（live 回读看着完全正常）；
+  ④ `ypbin:` 顶层块开了两次 ⇒ **YAML 语法不报错但语义上后者覆盖前者**，前半段配置被静默丢弃。
+  **修法**：①②改代码；③修注释缩进 + 新增 `tools/check-nacos-yaml-unique-keys.sh`（本仓 7 份 nacos yaml 全过）；
+  ④同③门禁。
+  ⚠️ **本地 CI 全绿、单测 913/0/0 却抓不到这 4 个** ⇒ 根因：本地不装 Spring 上下文、不做配置解析。
+  这是我这套验证体系的真实盲区，已在汇报中明确登记。
+- ✅ **平台告警通知可观测性（PR #205）**：实测告警 FIRING/RESOLVED 时 `iot_alert_notification` 表 0 行，
+  一度误判"通知没发"——实际**平台告警通知不走那张表**（设计点名）且发成功了。
+  真正的缺口是"有没有尝试发、为什么没发"**无任何指标** ⇒ 新增
+  `iot.platform_alert.notify.send/.succeeded/.failed` 三个计数器（dev 实测 send=2/succeeded=2/failed=0）。
+- ✅ **前端部署（2026-10-11）**：`pnpm build:antd` → tar 上传 → 备份旧产物 → 替换 `iot-ui-dist` →
+  recreate nginx 容器。**注意：光替换文件不够**，bind mount 下 inode 不刷新，**必须 recreate 容器**（实测）。
+  验收：首页/新 chunk/SPA 深链均 200；经网关 `/iot/access-overview` 返回 `{"code":401,"未提供登录凭计"}`
+  ⇒ 路由通 + 端点存在 + Sa-Token 鉴权生效。
+
+**dev 部署实录（可复用）**：本机构建 → md5 核对 → scp → 备份 → `FROM 旧镜像 + COPY jar` 重建 → recreate。
+**不能在该机 `compose build`**（无出网；且服务器检出停在 `ad80e3f` 有本地改动，会把陈旧源码打进镜像）。
+回滚资产：镜像 tag `ypbin/ypbin-iot:pre-counters-20261011` / `pre-visibility-20261011`，
+UI 产物 `backup/iot-ui-dist/dist-20261011-075443`。
 
 ## 3. 开放 API 第 1/2 批速览
 
