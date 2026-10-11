@@ -36,6 +36,18 @@ public final class PlatformMetrics {
     /** 入站读数因孤儿映射被丢弃的计数。 */
     public static final String METRIC_INGEST_ORPHAN = "iot.ingest.propertyid.orphan";
 
+    /** 台账版本号推进失败次数（R8-8 方案 B：失败不回滚业务写入，但必须可观测）。 */
+    public static final String METRIC_LEDGER_BUMP_FAILED = "iot.ledger.bump.failure";
+
+    /** access 上报：因对账时间预算用尽被推迟的租户次数（源 `iot.access.config.reconcile.deferred`）。 */
+    public static final String METRIC_RECONCILE_DEFERRED = "iot.access.config.reconcile.deferred";
+
+    /** access 上报：tick 最大耗时（源 `iot.access.lease.tick.duration` 的 max）。 */
+    public static final String METRIC_TICK_DURATION_MAX = "iot.access.lease.tick.duration.max";
+
+    /** iot 侧自算：距最近一次 access 指标上报的毫秒数（`-1` = 从未收到）。 */
+    public static final String METRIC_REPORT_LAG = "iot.platform_alert.access.report.lag";
+
     private PlatformMetrics() {
     }
 }

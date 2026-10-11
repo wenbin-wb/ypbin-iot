@@ -61,7 +61,7 @@ public class TenantLedgerService {
 
     public TenantLedgerService(TenantLedgerMapper ledgerMapper, MeterRegistry meterRegistry) {
         this.ledgerMapper = ledgerMapper;
-        this.bumpFailureCounter = Counter.builder("iot.ledger.bump.failure")
+        this.bumpFailureCounter = Counter.builder(TenantLedgerMetrics.METRIC_BUMP_FAILURE)
             .description("台账版本号推进失败次数（失败不回滚业务写入，靠周期安全网兜底）")
             .register(meterRegistry);
     }

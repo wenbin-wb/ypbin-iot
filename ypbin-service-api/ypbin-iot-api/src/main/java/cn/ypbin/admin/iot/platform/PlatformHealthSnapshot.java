@@ -30,6 +30,10 @@ import java.util.Map;
  * @param notifyFailedCount    通知投递失败累计数
  * @param ingestUnmappedCount  入站因点位未映射被丢弃的累计数
  * @param ingestOrphanCount    入站因孤儿映射被丢弃的累计数
+ * @param ledgerBumpFailureCount 台账版本号推进失败累计数（R8-8）
+ * @param reconcileDeferredCount 接入侧因时间预算用尽被推迟的租户次数（R8-2，access 上报）
+ * @param tickDurationMaxMs     接入侧最近一轮 tick 的最大耗时（毫秒，access 上报）
+ * @param reportLagMs           距最近一次 access 指标上报的毫秒数（`-1` = 从未收到；`null` = 未取到）
  * @author wenbin
  * @since 2026-09-30
  */
@@ -38,7 +42,11 @@ public record PlatformHealthSnapshot(
     Long roundFailedCount,
     Long notifyFailedCount,
     Long ingestUnmappedCount,
-    Long ingestOrphanCount) {
+    Long ingestOrphanCount,
+    Long ledgerBumpFailureCount,
+    Long reconcileDeferredCount,
+    Long tickDurationMaxMs,
+    Long reportLagMs) {
 
     /**
      * 从"指标名 → 值"的映射构建快照（供调度侧把 `MeterRegistry` 读成快照）。
@@ -55,7 +63,13 @@ public record PlatformHealthSnapshot(
             source.get(PlatformMetrics.METRIC_ROUND_FAILED),
             source.get(PlatformMetrics.METRIC_NOTIFY_FAILED),
             source.get(PlatformMetrics.METRIC_INGEST_UNMAPPED),
-            source.get(PlatformMetrics.METRIC_INGEST_ORPHAN));
+            source.get(PlatformMetrics.METRIC_INGEST_ORPHAN),
+            source.get(PlatformMetrics.METRIC_LEDGER_BUMP_FAILED),
+            // 以下三项来自 access 上报（见 AccessMetricsSnapshotResp），由调度侧先并入 meters
+            source.get(PlatformMetrics.METRIC_RECONCILE_DEFERRED),
+            source.get(PlatformMetrics.METRIC_TICK_DURATION_MAX),
+            // reportLag 由调度侧按「本机时钟 - 上报时刻」计算后并入
+            source.get(PlatformMetrics.METRIC_REPORT_LAG));
     }
 
     /**

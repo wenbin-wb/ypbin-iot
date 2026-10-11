@@ -2,7 +2,7 @@
 
 > **用途**：把「指标已注册但没人知道该看什么」变成一张可执行的清单——每条指标都有 ①口径（何时变化）
 > ②建议关注/阈值 ③注册位置。R8-9 立项要求（`docs/ACCESS-TECHDEBT-R8.md` §2.7）。
-> **覆盖范围**：**`ypbin-access` 服务**的全部指标（`iot.access.*`，共 **34** 条）。
+> **覆盖范围**：**`ypbin-access` 服务**的全部指标（`iot.access.*`，共 **35** 条）。
 > iot 服务的告警/入站/时序指标（`iot.alert.*`、`iot.ingest.*`、`iot.timeseries.*`、`iot.platform_alert.*`）见
 > `docs/PLATFORM-ALERTING-DESIGN.md` 与 `deploy/PROD-OPS-NOTES.md`——本文件不重复登记，避免两处漂移。
 > **机器校验**：`MetricsRegistryGateTest` 断言本清单里的**每个指标名**都能在其注册文件里找到
@@ -86,8 +86,16 @@
 |---|---|---|---|---|
 | `iot.access.decode.failure` | Counter（按 `reason` 标签） | 值解码失败（标签取值集合有界） | **期望 0**；出现即按 `reason` 定位点位类型/字节序 | DecodeFailureMetrics.java |
 
+### 2.7 指标上报链路（access → iot 平台自告警）
+
+| 指标 | 类型 | 口径（何时变化） | 建议关注 / 阈值 | 注册文件 |
+|---|---|---|---|---|
+| `iot.access.metrics.report.failure` | Counter | 指标快照推送给 iot **失败**次数（默认每 15s 推一次） | **期望 0**；增长 ⇒ 推送链路断 ⇒ 平台侧相关规则判「不可判定」 | AccessMetricsReporter.java |
+
+
 ## 3. 与 R8 其它条目的关系
 
+- **平台自告警（2026-10-10）**：本清单的 `iot.access.config.reconcile.deferred`、`iot.access.lease.tick.duration`（max）、 `iot.access.metrics.report.failure` 由 access 每 15s 推送给 iot，进入 4 条平台自告警规则（`PLATFORM_RECONCILE_DEFERRED`/`PLATFORM_TICK_SLOW`/`PLATFORM_INSTANCE_UNREACHABLE`/`PLATFORM_LEDGER_BUMP_FAILING`） ⇒ 平台告警页 + 邮件/站内信可见；iot 侧心跳 `iot.platform_alert.access.report.lag`。
 - **R8-2**（对账拖长 tick）：本清单的 `iot.access.lease.tick.duration` + `iot.access.config.reconcile.duration`
   + `iot.access.spec.load.duration` 是「先可观测、再改调度」的前置；方案 A（时间预算）已实施，其效果由
   `iot.access.config.reconcile.deferred` 直接观测（期望 0；增长即说明预算被顶到）。

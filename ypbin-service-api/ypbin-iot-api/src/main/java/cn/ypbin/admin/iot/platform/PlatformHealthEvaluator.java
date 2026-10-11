@@ -46,7 +46,8 @@ public final class PlatformHealthEvaluator {
             throw new IllegalArgumentException("rule 不能为空");
         }
         PlatformHealthSnapshot snap = snapshot == null
-            ? new PlatformHealthSnapshot(null, null, null, null, null) : snapshot;
+            ? new PlatformHealthSnapshot(null, null, null, null, null, null, null, null, null)
+            : snapshot;
         PlatformHealthBaseline base = baseline == null ? PlatformHealthBaseline.none() : baseline;
         return switch (rule) {
             case EVALUATOR_STALLED -> evaluateStalled(snap);
@@ -56,6 +57,12 @@ public final class PlatformHealthEvaluator {
                 base.notifyFailedCount(), "通知投递");
             case INGEST_DROPPING -> evaluateCounterGrowth(rule, snap.ingestDroppedTotal(),
                 base.ingestDroppedTotal(), "入站丢弃");
+            case LEDGER_BUMP_FAILING -> evaluateCounterGrowth(rule, snap.ledgerBumpFailureCount(),
+                base.ledgerBumpFailureCount(), "台账版本号推进失败");
+            case RECONCILE_DEFERRED -> evaluateCounterGrowth(rule, snap.reconcileDeferredCount(),
+                base.reconcileDeferredCount(), "配置对账推迟");
+            case TICK_SLOW -> evaluateTickSlow(snap);
+            case INSTANCE_UNREACHABLE -> evaluateReportStalled(snap);
         };
     }
 
@@ -91,6 +98,60 @@ public final class PlatformHealthEvaluator {
         }
         return new PlatformHealthVerdict(rule, PlatformHealthState.HEALTHY, lag,
             "告警评估器正常（滞后 " + lag + " ms）");
+    }
+
+    /**
+     * tick 过慢判定（阈值型）。
+     *
+     * <p>判定对象是 access 上报的**最大** tick 耗时；取不到 ⇒ `UNKNOWN`（不知道就说不知道）。</p>
+     *
+     * @param snap 快照
+     * @return 判定
+     */
+    private static PlatformHealthVerdict evaluateTickSlow(PlatformHealthSnapshot snap) {
+        PlatformHealthRule rule = PlatformHealthRule.TICK_SLOW;
+        Long maxMs = snap.tickDurationMaxMs();
+        if (maxMs == null) {
+            return new PlatformHealthVerdict(rule, PlatformHealthState.UNKNOWN, null,
+                "取不到接入侧 tick 耗时指标（access 未上报）⇒ 无法判断");
+        }
+        if (maxMs >= PlatformHealthRule.TICK_SLOW_THRESHOLD_MS) {
+            return new PlatformHealthVerdict(rule, PlatformHealthState.FIRING, maxMs,
+                "接入侧 tick 最大耗时 " + maxMs + " ms（阈值 "
+                    + PlatformHealthRule.TICK_SLOW_THRESHOLD_MS + " ms = 租约 TTL 的一半）");
+        }
+        return new PlatformHealthVerdict(rule, PlatformHealthState.HEALTHY, maxMs,
+            "接入侧 tick 最大耗时 " + maxMs + " ms（阈值 "
+                + PlatformHealthRule.TICK_SLOW_THRESHOLD_MS + " ms）");
+    }
+
+    /**
+     * 上报中断判定（心跳型）。
+     *
+     * <p>`-1` = 从未收到过上报（access 可能从未启动/从未连通）⇒ 直接 FIRING，
+     * 与 {@link #evaluateStalled} 对 `lag = -1` 的处理同口径（不能按数值比大小）。</p>
+     *
+     * @param snap 快照
+     * @return 判定
+     */
+    private static PlatformHealthVerdict evaluateReportStalled(PlatformHealthSnapshot snap) {
+        PlatformHealthRule rule = PlatformHealthRule.INSTANCE_UNREACHABLE;
+        Long lag = snap.reportLagMs();
+        if (lag == null) {
+            return new PlatformHealthVerdict(rule, PlatformHealthState.UNKNOWN, null,
+                "取不到上报心跳指标 ⇒ 无法判断接入节点是否在推送指标");
+        }
+        if (lag < 0) {
+            return new PlatformHealthVerdict(rule, PlatformHealthState.FIRING, lag,
+                "接入节点**从未推送过指标**（可能从未启动或从未连通）");
+        }
+        if (lag >= PlatformHealthRule.REPORT_STALLED_THRESHOLD_MS) {
+            return new PlatformHealthVerdict(rule, PlatformHealthState.FIRING, lag,
+                "接入节点指标上报已中断 " + lag + " ms（阈值 "
+                    + PlatformHealthRule.REPORT_STALLED_THRESHOLD_MS + " ms = 3 × 上报间隔）");
+        }
+        return new PlatformHealthVerdict(rule, PlatformHealthState.HEALTHY, lag,
+            "接入节点上报正常（心跳 " + lag + " ms）");
     }
 
     /**

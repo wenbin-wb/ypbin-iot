@@ -9,6 +9,7 @@
  */
 package cn.ypbin.admin.iot.platform;
 
+import cn.ypbin.admin.iot.access.metrics.AccessMetricsSnapshotResp;
 import cn.ypbin.admin.iot.entity.IotPlatformAlert;
 import cn.ypbin.admin.iot.mapper.IotPlatformAlertMapper;
 import cn.ypbin.starter.tenant.core.TenantContext;
@@ -57,6 +58,9 @@ public class PlatformAlertService {
     private final IotPlatformAlertMapper alertMapper;
     private final PlatformAlertNotifier notifier;
 
+    /** access 指标上报的最近快照与心跳（access 域规则的数据源；access 挂了 ⇒ 判不可判定）。 */
+    private final AccessMetricsReportStore accessMetricsReportStore;
+
     /** 上一轮基线（进程内）。**刻意不用 DB**：平台自告警不应依赖 DB 才能判断
      * （见设计 §6 R2 "监控者先坏"）；进程重启后基线丢失，判定退化为首次运行分支。 */
     private volatile PlatformHealthBaseline baseline = PlatformHealthBaseline.none();
@@ -71,7 +75,9 @@ public class PlatformAlertService {
     private final Counter unknownCounter;
 
     public PlatformAlertService(MeterRegistry meterRegistry, IotPlatformAlertMapper alertMapper,
-                                 PlatformAlertNotifier notifier) {
+                                 PlatformAlertNotifier notifier,
+                                 AccessMetricsReportStore accessMetricsReportStore) {
+        this.accessMetricsReportStore = accessMetricsReportStore;
         this.meterRegistry = meterRegistry;
         this.alertMapper = alertMapper;
         this.notifier = notifier;
@@ -234,6 +240,11 @@ public class PlatformAlertService {
         Map<String, Long> meters = new LinkedHashMap<>();
         meters.put(PlatformMetrics.METRIC_EVALUATE_LAG, readGauge(PlatformMetrics.METRIC_EVALUATE_LAG));
         meters.put(PlatformMetrics.METRIC_ROUND_FAILED, readCounter(PlatformMetrics.METRIC_ROUND_FAILED));
+        // 台账版本号推进失败（R8-8，本地产出）
+        meters.put(PlatformMetrics.METRIC_LEDGER_BUMP_FAILED,
+            readCounter(PlatformMetrics.METRIC_LEDGER_BUMP_FAILED));
+        // access 域（推迟次数 / tick 最大耗时 / 上报心跳）
+        mergeAccessMeters(meters);
         meters.put(PlatformMetrics.METRIC_NOTIFY_FAILED,
             readCounter(PlatformMetrics.METRIC_NOTIFY_FAILED));
         meters.put(PlatformMetrics.METRIC_INGEST_UNMAPPED,
@@ -264,6 +275,29 @@ public class PlatformAlertService {
      * @param name 指标名
      * @return 值；取不到返回 `null`
      */
+    /**
+     * 把 access 上报值并入快照来源表（R8-2 / R8-8 / 心跳三条规则的数据源）。
+     *
+     * <p>`latest == null`（从未收到）时：`reconcileDeferred`/`tickDurationMax` 留 `null`（未知），
+     * 心跳置 **-1**（从未收到 ⇒ 直接 FIRING，见 {@code PlatformHealthEvaluator#evaluateReportStalled}）。</p>
+     */
+    private void mergeAccessMeters(Map<String, Long> meters) {
+        AccessMetricsSnapshotResp latest = accessMetricsReportStore.latest();
+        if (latest == null) {
+            meters.put(PlatformMetrics.METRIC_RECONCILE_DEFERRED, null);
+            meters.put(PlatformMetrics.METRIC_TICK_DURATION_MAX, null);
+            // 还没收到过：**等满一个阈值**再判「中断」，否则 iot 每次重启都会误报一条 CRITICAL
+            // （启动后第一条上报最迟一个间隔就到）；等待期间判 UNKNOWN，不写库、不告警
+            long waitedMs = accessMetricsReportStore.waitedMs();
+            meters.put(PlatformMetrics.METRIC_REPORT_LAG,
+                waitedMs >= PlatformHealthRule.REPORT_STALLED_THRESHOLD_MS ? -1L : null);
+            return;
+        }
+        meters.put(PlatformMetrics.METRIC_RECONCILE_DEFERRED, latest.reconcileDeferredCount());
+        meters.put(PlatformMetrics.METRIC_TICK_DURATION_MAX, latest.tickDurationMaxMs());
+        meters.put(PlatformMetrics.METRIC_REPORT_LAG, accessMetricsReportStore.lagMs());
+    }
+
     private Long readCounter(String name) {
         Meter meter = findMeter(name);
         if (!(meter instanceof Counter counter)) {
