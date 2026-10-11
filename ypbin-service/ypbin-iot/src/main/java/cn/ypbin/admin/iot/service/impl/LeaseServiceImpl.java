@@ -12,6 +12,7 @@ package cn.ypbin.admin.iot.service.impl;
 import cn.ypbin.admin.iot.availability.MaintenanceSource;
 import cn.ypbin.admin.iot.entity.MaintenanceWindow;
 import cn.ypbin.admin.iot.entity.TenantNodeAssignment;
+import cn.ypbin.admin.iot.lease.LeaseAssignmentResp;
 import cn.ypbin.admin.iot.lease.AccessNodeRegisterReq;
 import cn.ypbin.admin.iot.lease.AccessNodeRegistry;
 import cn.ypbin.admin.iot.lease.AssignmentQueryReq;
@@ -47,6 +48,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.stream.Collectors;
 import java.util.Map;
 import java.util.Set;
 import org.slf4j.Logger;
@@ -401,6 +403,19 @@ public class LeaseServiceImpl implements LeaseService {
         TenantNodeAssignment assignment = mapper.selectOne(Wrappers.<TenantNodeAssignment>lambdaQuery()
             .eq(TenantNodeAssignment::getTenantId, req.getTenantId()));
         return toDto(assignment);
+    }
+
+    @Override
+    public List<LeaseAssignmentResp> listAssignments() {
+        return mapper.selectList(Wrappers.<TenantNodeAssignment>lambdaQuery()
+                .orderByAsc(TenantNodeAssignment::getTenantId)).stream()
+            .map(this::toAssignmentResp)
+            .collect(Collectors.toList());
+    }
+
+    private LeaseAssignmentResp toAssignmentResp(TenantNodeAssignment row) {
+        return new LeaseAssignmentResp(row.getTenantId(), row.getAccessNode(), row.getState(),
+            row.getEpoch(), row.getLeaseExpireAt(), row.getUpdateTime());
     }
 
     @Override
