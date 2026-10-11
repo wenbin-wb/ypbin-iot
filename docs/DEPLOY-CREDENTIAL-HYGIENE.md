@@ -166,7 +166,7 @@ volumes:
 | 容器 `Config.Env` 里的各口令（mysql/redis/iotdb/nacos） | `docker inspect` 可读 | 用户裁定接受（§4）；收紧 docker 权限或对外暴露时轮换 |
 | `install.sh` 把 `AI_MODEL_SECRET_KEY` 打印到 stdout | 安装时提示运维抄写，属**有意**披露 | 只登记（改变它会破坏既有运维流程）；`已生成 .env（MySQL 密码：…）` 那句本轮已改为不打印值 |
 | `/opt/ypbin/rollback-20260925-013857.sh`（服务器上，非仓库） | 内含 1 处写死的明文 Nacos 口令 | 遗留脚本，只登记（见 `docs/ACCESS-ENABLE.md` §11）；本轮新写的回滚脚本一律从 `deploy/.env` 取 |
-| `deploy/install.sh` 整体 | fork 自 admin 仓，路径大量指向 `$ROOT/ypbin-admin/deploy`（见 `docs/IOT-ROADMAP.md` 已知项） | 只登记：本仓实际部署走 compose（见 `docs/DEPLOY-BACKEND.md`） |
+| `deploy/install.sh` 整体 | fork 自 admin 仓，路径大量指向 `$ROOT/ypbin-admin/deploy`（fork 继承的已知项） | 只登记：本仓实际部署走 compose（见 `docs/DEPLOY-BACKEND.md`） |
 | `tools/rotate-*.py` 的 `dump*`（开 auth 前） | 匿名读 8848 client API ⇒ 开 auth 后 **403 ⇒ JSONDecodeError，工具不可用** | **已修**（PR #64：dump 带 accessToken + 登录提前）；这是「改服务端鉴权」的连带面，见 `NACOS-AUTH.md` §8.5 |
 | Nacos 容器 `NACOS_AUTH_TOKEN` | 镜像 `bin/docker-startup.sh` 只把 `NACOS_AUTH_ENABLE`/`_ADMIN_ENABLE`/`_CONSOLE_ENABLE` 映射成 `-D…`，**token/identity 不走 `-D`** ⇒ 只在 env，不进 argv（复核结论） | 无需改 |
 | curl 的 `-H "accessToken: <JWT>"` | 短时（默认 18000s）会话 token 进 argv | 只登记：本轮范围是**长期口令/密钥**；如需消除，可改用 `curl -K`（header 配置文件） |

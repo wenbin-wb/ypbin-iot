@@ -5,7 +5,7 @@
 
 ## 0. 前置
 
-- 后端已按 [`docs/IOT-ROADMAP.md`](IOT-ROADMAP.md) / `deploy/install.sh` 起好：`ypbin-gateway`（18080）、
+- 后端已按 `deploy/install.sh` 起好：`ypbin-gateway`（18080）、
   `ypbin-auth`、`ypbin-system`、`ypbin-iot`（18084）、`ypbin-access`（18086）与 MySQL/Nacos/Redis；
 - 数据库里已执行 `deploy/sql/006-iot-schema.sql` + `007-iot-data.sql`（或走 `install.sh`）；
   菜单与权限码由 `007-iot-data.sql` 写入，并已授给平台管理员角色与租户模板；

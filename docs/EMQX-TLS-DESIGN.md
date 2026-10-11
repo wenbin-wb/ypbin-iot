@@ -407,10 +407,10 @@ cd /opt/emqx && docker compose up -d emqx
   只会制造新的不一致（诚信优先，R1/R4）。**用户已裁定保持开启**（§1.3 末段）；
   §7 的回滚步骤**仅在将来确需停用 TLS 时**使用。
 - **仓内对应物**：`deploy/emqx/gen-certs.sh`、`deploy/emqx/emqx-tls-selfcheck.sh`、
-  `deploy/emqx/emqx-tls-rollback.sh`（三脚本**已随仓**），
-  以及 `docs/EMQX-DEPLOY.md` §3.2（TLS 拓扑与生产替换步骤的既有登记位置）。
-  ⚠️ **待办**：`docs/EMQX-DEPLOY.md:88` 仍写"`8883`/`8083`/`8084` **监听器已显式 `enable=false`**"，
-  **与实机不符（8883 已启用）** —— 该行属部署文档，**本轮按变更最小化未改** ✗，**登记为待更正项**。
+  `deploy/emqx/emqx-tls-rollback.sh`（三脚本**已随仓**）；部署与暴露面登记见
+  `docs/EMQX-DEPLOY.md` §3（端口与暴露面，含 §3.1 开发测试期暴露面登记）。
+  ✅ **已更正**：`docs/EMQX-DEPLOY.md` 原「8883/8083/8084 监听器已显式 `enable=false`」的旧表述
+  已按实机更新（8883 于 2026-09-30 启用、绑 `0.0.0.0`），见该文档 §3.1 的更正说明。
 
 ---
 
@@ -438,8 +438,7 @@ cd /opt/emqx && docker compose up -d emqx
 
 ## 附录：相关文档索引
 
-- `docs/EMQX-DEPLOY.md` —— 部署与暴露面登记（§3.1 开发测试期暴露面、§3.2 TLS 拓扑与生产替换步骤、§9 回滚）
+- `docs/EMQX-DEPLOY.md` —— 部署与暴露面登记（§3.1 开发测试期暴露面、§9 回滚）
 - `docs/EMQX-INGRESS-DESIGN.md` —— 入站/下行设计（§5.2 ACL、§8 部署方案）
 - `docs/DEVICE-CREDENTIAL.md` —— 设备凭据签发/轮换口径（C2：明文只出现一次）
-- `docs/TASK-BOARD.md` —— #9 TLS/收回 1883 的进度登记
 - `deploy/emqx/` —— compose、`emqx.conf`、`.env.example`、三脚本与 `.gitignore`

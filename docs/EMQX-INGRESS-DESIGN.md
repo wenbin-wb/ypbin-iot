@@ -17,7 +17,7 @@
 | **C2** | **下行主推：`ypbin-iot` → `POST /api/v5/publish`（API Key Basic 认证，`qos=1`、`retain=false`）→ 设备。** 定向靠**主题**；官方**没有**「按 clientid 定向发布」的端点（`clientid` 字段已 `deprecated`）。 | 已核实 |
 | **C3** | 🔴 **红线：EMQX 5.8 的授权默认是 `allow`，不是 deny-by-default。** `authorization.no_match` 默认 `allow` ⇒ **不显式设 `no_match = deny` 就等于「ACL 没配对时全放行」**。上线前硬条件。 | 已核实（官方原文） |
 | **C4** | 🔴 **生产机内存余量不足以「默认配置」直接上 EMQX**：实测 **8 vCPU / 7939MB / swap=0 / available ≈ 904MB**，已有容器占 ~6.2GiB。**官方未给出最低内存/CPU 要求** ⇒ 不给官方数字，给**分阶段 + 可回滚**方案（§8.3）。 | 实测 + 否定性核实 |
-| **C5** | 🔴 **幂等缺口（P0，单列 §6.4）**：`RedisLatestValueWriter.writeAll` 是**盲 `putAll`**、只做**批内** ts 取新 ⇒ **跨批乱序重放会把「最新值」回退**。**这不是新发现** —— 该限制**早已登记**在 `RedisLatestValueWriter.java:28-31` 类 Javadoc 与 `docs/IOT-ROADMAP.md` 四点十七；但它**在既有 HTTP 上报下是低频、在 EMQX 入站后变成高频**（QoS1 重发 + `query_mode=async` + 每消息一批），因此必须在入站上线**之前**处置。 | 仓内代码级证据（文件:行号）+ 独立复核确认可真实触发 |
+| **C5** | 🔴 **幂等缺口（P0，单列 §6.4）**：`RedisLatestValueWriter.writeAll` 是**盲 `putAll`**、只做**批内** ts 取新 ⇒ **跨批乱序重放会把「最新值」回退**。**这不是新发现** —— 该限制**早已登记**在 `RedisLatestValueWriter.java:28-31` 类 Javadoc（该限制原文：跨批乱序会覆盖较新值）；但它**在既有 HTTP 上报下是低频、在 EMQX 入站后变成高频**（QoS1 重发 + `query_mode=async` + 每消息一批），因此必须在入站上线**之前**处置。 | 仓内代码级证据（文件:行号）+ 独立复核确认可真实触发 |
 | **C6** | **Topic 规范要改掉既有 `$iot/...` 约定**（设计文档 §4.2/§4.3/§6.1/§7）：`$` 开头的主题名是 MQTT 保留给服务端的命名空间，EMQX 自己的系统主题就是 `$SYS/`。改用 `ypbin/v1/{tenantId}/{deviceId}/up` 与 `.../down/...`，**运行时字段（requestId 等）放 payload 不放主题**。 | 已核实（EMQX 保留命名空间原文）；`$` 的 OASIS 条款原文本轮**未逐字取回** |
 | **C7** | **凭据：明文一次性交付、永不回显。** 平台只在「签发/轮换」那一刻返回一次明文，之后只返回元数据（EMQX 内置库只存 hash）。`credential_ref` 存**非密引用**，不存明文。G10 需新增 4 个端点（§5.3）。 | 设计决策 + 官方存储语义 |
 | **C8** | **主机侧无防火墙**（`ufw inactive`、`iptables INPUT policy ACCEPT`）⇒ 任何 `0.0.0.0` 发布的端口都直接暴露；EMQX 的 **18083 必须回环**（官方安全清单原文），**1883/8883 视接入面决定**（§8.2）。 | 实测 + 官方原文 |
@@ -31,7 +31,7 @@
 
 - 本文：`ypbin-iot/docs/EMQX-INGRESS-DESIGN.md`（新增）。
 - **本轮不做**：不写业务代码、不改生产、不合并 PR；SQL 与配置均为**草案**（只写方案不执行）。
-- **既有缺口的现状（核对 main 后更正）**：**G2（影子 `reported`）已在 main 落地**（PR #46，且已接入本设计复用的 `ingest` 链路，见 §7.3）；仍在另立批次的是 **§6.4 最新值乱序防护**（P0-A-1，**另有并行批次正在处置；截至本提交其改动尚未进入 main**）与 **G4 点位映射挂产品**（P2-1）。
+- **既有缺口的现状（核对 main 后更正）**：**G2（影子 `reported`）已在 main 落地**（PR #46，且已接入本设计复用的 `ingest` 链路，见 §7.3）；**§6.4 最新值乱序防护已于 2026-09-26 落地（PR #51）**；仍在另立批次的是 **G4 点位映射挂产品**（P2-1）。
 
 ---
 
@@ -42,7 +42,7 @@
 
 | 编号 | 决策 | 理由（用户口径） | 落地影响（本文档/它文） |
 |---|---|---|---|
-| **D1 · 入站路径** | **采用主推**：EMQX Rule Engine + HTTP Server 动作 → 薄适配端点。**否掉备选 B**（原样复用 `/internal/readings`）。备选 A（access 自建 MQTT 消费者）**降为备选、不实施**。 | 「**平台宕机不丢数据**比吞吐优势更值」：主推路径的重试与缓冲在 broker 侧（`max_retries=2`/`request_ttl=45s`/`max_buffer_bytes`）；备选 A 在平台宕机时只能靠 broker 持久会话兜，风险更高；备选 B 会因 200 语义错配**静默丢报文**，直接否掉。 | ① §6.1 为主推；§6.3 与 §9 P1-1 标注「按 D1 不实施」；② **覆盖 `docs/IOT-ROADMAP.md` 的旧倾向**（该文相应行已标注「已被取代」）；③ §4.2 的取舍结论即该节评审结论（已拍板）。 |
+| **D1 · 入站路径** | **采用主推**：EMQX Rule Engine + HTTP Server 动作 → 薄适配端点。**否掉备选 B**（原样复用 `/internal/readings`）。备选 A（access 自建 MQTT 消费者）**降为备选、不实施**。 | 「**平台宕机不丢数据**比吞吐优势更值」：主推路径的重试与缓冲在 broker 侧（`max_retries=2`/`request_ttl=45s`/`max_buffer_bytes`）；备选 A 在平台宕机时只能靠 broker 持久会话兜，风险更高；备选 B 会因 200 语义错配**静默丢报文**，直接否掉。 | ① §6.1 为主推；§6.3 与 §9 P1-1 标注「按 D1 不实施」；② **覆盖仓内早前的旧倾向**（「EMQX 5.x + iot 侧共享订阅消费者」，该倾向已作废）；③ §4.2 的取舍结论即该节评审结论（已拍板）。 |
 | **D2 · 破例范围** | **批准为入站适配端点破例**：**仅** `/internal/mqtt/**` 这类**机器对机器**的入站适配端点可返回**真 HTTP 状态码**（非法报文 4xx、可重试 5xx），**不适用**「全局 HTTP 200 + `R.code`」惯例。 | 对端是 EMQX 的连接器，**只看状态码**（官方源码：`emqx_bridge_http_connector.erl:963-986`）；不破例 ⇒ 非法报文被判成功、不重试、不计入 `dropped.*` ⇒ **双端都绿但数据不存在**。 | ① §6.5 的「方案 A」由**建议**升为**已批准**；② 必须满足 5 条附带要求（见下）；③ 该例外登记在 `docs/IOT-PLATFORM-DESIGN.md` §13 内部端点表（便于门禁识别）。 |
 | **D3 · 资源策略** | **采用保守路线**：**拿到 §8.3 阶段② 的 OOM/存活实测数据之前，不把 EMQX 与其入站链路一起上生产**。要推进就按**降级形态**：EMQX 只做**认证/ACL + 下行/在线调试**，入站继续走既有 HTTP 通道。 | 生产机 available≈904MB、swap=0、磁盘已用 92%；**官方未给出最低内存要求** ⇒ 不能把余量当够用。 | ① §9 的 P0 **重排为两组**（P0-A 不依赖 EMQX / P0-B 等实测），见下；② §8.3 阶段③ 给出**代价与建议顺序**；③ 降级形态成为**默认首发形态**。 |
 
@@ -62,7 +62,7 @@
 
 | 序 | 项 | 为什么放这里 |
 |---|---|---|
-| **P0-A-1** | 🔴 **最新值乱序防护**（跨批 ts 比较；含「新 ts 先到、旧 ts 后到」用例 + 变异验证） | 与 EMQX 无关：既有 HTTP 通道已存在该风险；EMQX 入站只会放大它（§6.4）。**注：另有并行批次正在处置（截至本提交其改动未进 main）** |
+| **P0-A-1** | ✅ **最新值乱序防护（已落地 PR #51，2026-09-26）**（跨批 ts 比较；Lua CAS 逐 field 写入） | 与 EMQX 无关：既有 HTTP 通道已存在该风险；EMQX 入站只会放大它（§6.4）。**注：已按本表口径实现（服务端 Lua CAS + `iot.ingest.latest.regressed` 指标）** |
 | **P0-A-2** | 🔴 **`propertyId` 白名单 + 长度校验**（物模型属性 × 该设备点位映射） | 入站输入不可信铁律；HTTP 通道与 MQTT 通道共用 |
 | **P0-A-3** | **凭据 4 端点 + `iot_device` 加 3 列**（签发/查看元数据/吊销/接入信息 + 级联删除） | 纯平台侧；下行与降级形态都要用（G10） |
 | **P0-A-4** | **命令实例表 + 状态机 + 超时扫描 + 回执端点 + 权限码/菜单** | 纯平台侧；**降级形态的核心交付**（下行/在线调试可用） |
@@ -289,7 +289,7 @@ flowchart TB
 
 > ✅ **本节的取舍已由用户决策 D1 拍板（2026-09-26，见 §1.1）**：取主推、备选 A 不实施。
 >
-> 保留决策依据（主动提示）：这条与 `docs/IOT-ROADMAP.md:743` 的**旧倾向**（*EMQX 5.x … + iot 侧共享订阅消费者*）**不一致**（该行已标注「已被取代」）。改判理由只有一条实测事实：**本机 available ≈ 904MB、swap=0**，而平台自建消费者在平台重启窗口内的消息只能靠 broker 的持久会话兜（默认队列 1000 条、Durable Sessions 默认关闭且是企业版）。Rule Engine 路径把这段窗口的**缓冲责任留在 broker 内存**，对「设备一断电就长时间离网」的现场更稳。**该取舍请随本 PR 一并评审**，若结论相反，把 §6.3 升为 P0 即可，§4–§5、§7–§9 的其余设计不受影响。
+> 保留决策依据（主动提示）：这条与仓内早前的**旧倾向**（*EMQX 5.x … + iot 侧共享订阅消费者*，已作废）**不一致**。改判理由只有一条实测事实：**本机 available ≈ 904MB、swap=0**，而平台自建消费者在平台重启窗口内的消息只能靠 broker 的持久会话兜（默认队列 1000 条、Durable Sessions 默认关闭且是企业版）。Rule Engine 路径把这段窗口的**缓冲责任留在 broker 内存**，对「设备一断电就长时间离网」的现场更稳。**该取舍请随本 PR 一并评审**，若结论相反，把 §6.3 升为 P0 即可，§4–§5、§7–§9 的其余设计不受影响。
 
 ---
 
@@ -538,7 +538,7 @@ WHERE
 
 ### 6.4 🔴 单列 P0：最新值「跨批乱序回退」幂等缺口
 
-> **定性（经独立复核改正）**：这**不是本文档的新发现**。该限制**早已由作者登记在案**：`RedisLatestValueWriter.java:28-31` 的类 Javadoc 原文写着「**跨批次**的乱序（更早的批次晚到）目前**会覆盖**已存的较新值——这里没有做「读改写比较」…该限制已登记在 ROADMAP **四点十七**」，`docs/IOT-ROADMAP.md` 四点十七亦登记同一条。
+> **定性（经独立复核改正）**：这**不是本文档的新发现**。该限制**早已由作者登记在案**：`RedisLatestValueWriter.java:28-31` 的类 Javadoc 原文写着「**跨批次**的乱序（更早的批次晚到）目前**会覆盖**已存的较新值——这里没有做「读改写比较」…该限制已登记在 ROADMAP **四点十七**」（**此为 Javadoc 当时的引文；ROADMAP 已退役**），仓内点位映射/最新值设计亦登记同一条（见 `docs/VALUE-DECODE-DESIGN.md` 与 `RedisLatestValueWriter` 类注释）。
 > **本文档新增的价值只有一条**：在既有 **HTTP 上报**形态下，同一设备的读数天然按批（200 条/1s）聚在一起，跨批乱序是**低频**；而 §6.1 的 P0 入站形态是**「一条 MQTT 消息 = 一个批次 = 一次 HTTP」**，叠加 QoS1 重发与 `query_mode=async`（`inflight_window` 默认 100，官方明言该值不为 1 时**不保证同一客户端严格有序**），跨批乱序从低频变为**常态**。因此它必须从「已登记待处置」升级为**入站上线的前置条件**。这一升级判断经独立复核确认为**真实可触发、非理论**。
 
 **现象**
@@ -568,7 +568,7 @@ WHERE
 | **B. HGET + 比较 + HSET** | 读旧值 → 比 ts → 再写 | 改动最小、可读；**非原子**：并发写同一 field 仍有极小概率回退（同 key 的并发写在本仓是「同一设备同一批/相邻批」，概率低但非零）。适合作为**过渡**（P0 立刻止血） |
 | **C. 入站侧水位丢弃** | 在 `ingest` 入队前按 `(deviceId, propertyId)` 维护 ts 水位，低于水位的直接丢 | 不引入 Redis 原子操作；但水位是**进程内状态**（多副本/重启失效），且会**误丢**「设备时钟回拨」后的合法数据。**不推荐单独使用** |
 
-**推荐路径**：P0 先上 **B**（止血）+ 加指标 `iot.ingest.latest.regressed`（每次「旧 ts 后到」计数）；P1 换 **A**（原子化）。无论选哪个，**`LatestValueQueryService` 的注释与 `RedisLatestValueWriterTest` 的断言必须同步改成「跨批不回退」**，否则注释会说谎。
+**实际落地（2026-09-26，PR #51）**：直接上了 **A（写侧 Lua CAS，逐 field 比较后写入）**——比原推荐的两步走更彻底；新增指标 `iot.ingest.latest.regressed`（每次「旧 ts 后到」计数）与 `future_rejected`。`LatestValueQueryService` 注释与 `RedisLatestValueWriterTest` 断言已同步改为「跨批不回退」。
 
 **验收口径（可复现）**
 
@@ -711,14 +711,14 @@ stateDiagram-v2
 | `POST` | `/iot/devices/{deviceId}/commands/{requestId}/resend` | `iot:debug:send` | 手动重发（同一 `requestId`，`retry_count+1`） |
 | `POST` | `/internal/command-replies` | `X-Internal-Token`（既有守卫） | 设备回执入口（由 EMQX 规则回流，`up/reply`） |
 
-> ⚠️ `iot:debug:*` 是 `docs/IOT-UX-PROPOSAL.md:529` 已建议的权限码（*需新增（如 `iot:debug:send`）*），此处沿用，避免另造一套命名。
+> ⚠️ `iot:debug:*` 沿用仓内早前已建议的命名（*需新增，如 `iot:debug:send`*），避免另造一套。
 >
 > ✅ **已实施（段 B，2026-10-02）**：四个端点与 `iot_command_instance`（含 `topic` 列，便于无关联审计）
 > 均已落地；payload / 校验 / 回执口径见 **§7.6**（评审确认补齐）。
 
 ### 7.5 前端「在线调试」页交互
 
-沿用已评审的 IA（`docs/PLATFORM-IA-PROPOSAL.md:441`：`在线调试 /iot/debug`，属「④ 数据与调试」）与设备详情第 5 个页签（`docs/IOT-UX-PROPOSAL.md:762`）。
+沿用已评审的 IA（`在线调试 /iot/debug`，属「④ 数据与调试」）与设备详情第 5 个页签。
 
 > ⚠️ **前端在另一个仓**：本仓 `ypbin-iot` 是**纯后端** fork，**没有 `apps/` 目录**。下列路径均在 **`ypbin-iot-ui`** 仓内（已核实其存在）：
 > `ypbin-iot-ui/apps/web-antd/src/views/iot/devices/modules/detail.vue`（旁边的页签组件如 `detail-points.vue`/`series.vue`/`availability.vue`）。
@@ -749,7 +749,7 @@ stateDiagram-v2
 2. **参数骨架**：按 `input_params`/`dataType` 生成 JSON 骨架，只做**展示层**建议；服务端**必须**按物模型再校验一次（不信任前端）。
 3. **实时性**：P0 用**轮询**（2s，仅在有非终态实例时轮询；全部终态则停）；P1 再上 SSE/WS。理由：本机资源紧张，SSE 需要长连接与推送通道，不值得在 P0 引入。
 4. **报文查看**：展示下行 / 上行原始 JSON（**脱敏**：不得包含凭据；`X-Internal-Token` 永不出现）。
-5. **占位纪律**：`docs/IOT-UX-PROPOSAL.md:1166` 的 R4「**不得做成假按钮**」继续保持：后端未上线前该页签**不出现**。
+5. **占位纪律**：R4「**不得做成假按钮**」继续保持：后端未上线前该页签**不出现**。
 
 ---
 
@@ -994,9 +994,9 @@ ypbin:
 | P0-3 | **凭据签发/查看/吊销/接入信息 4 端点 + `iot_device` 3 列** | [后端][数据] | `POST /iot/devices/{id}/credential` 返回 200 且**响应含一次性明文**、库中 `credential_ref='emqx:password_based:built_in_database:{t}.{d}'`、`credential_version=1`；`GET` 返回 200 且**响应绝不含明文**（断言 JSON 里无 password 字段）；`DELETE` 后设备原凭据连接失败；重复 `DELETE` 返回 200（幂等）。行数：`SELECT count(*) FROM iot_device WHERE credential_ref IS NOT NULL` = 已签发设备数 |
 | P0-4 | **ACL/REST 客户端**（签发用户、发布消息；显式 connect/read 超时；错误码映射） | [后端] | 单测覆盖：EMQX 返回 4xx/5xx/超时 → 平台抛出**可区分**错误（`EMQX_ERROR`），**不静默降级**；`202` 映射为 `NO_SUBSCRIBER` |
 | P0-5 | **入站：规则 + HTTP 动作 → `POST /internal/mqtt/readings`**（薄适配控制器 + 中间件配置）+ `up/property` 契约 | [中间件][后端] | 端到端：用测试设备发 1 条 `up/property` → `GET /iot/devices/{id}/latest` 返回该点位（HTTP 200）；`SELECT count(*) FROM device_liveness WHERE device_id=?` = 1；IoTDB `reading` 表新增 1 行 |
-| P0-6 | 🔴 **最新值乱序防护（§6.4）** —— **单列、独立批次**（仓内已登记边界，入站后变高频） | [后端] | §6.4「验收口径」1/2/3 全过；**变异验证**：注掉 ts 比较后新用例必须转红 |
+| P0-6 | ✅ **最新值乱序防护（§6.4）—— 已落地（PR #51，2026-09-26）** | [后端] | 服务端 Lua CAS 逐 field 比较写入；`iot.ingest.latest.regressed` 指标已注册；变异验证已完成 |
 | P0-6b | 🔴 **入站失败语义：非法报文必须让 EMQX 看见非 2xx（§6.5 / H10）** | [后端] | 缺 `quality` 的上行 → 平台 **400**；平台最新值/时序/活性**零写入**（前后 `count(*)` 相等）；EMQX 侧重试/丢弃计数增长 |
-| P0-6c | 🔴 **`propertyId` 白名单校验（物模型属性 × 该设备点位映射）** | [后端] | 上报未映射 `propertyId` → 被拒且计数；`HGETALL iot:latest:{t}:{d}` 的 field 集合 ⊆ 该设备映射点位集合 |
+| P0-6c | ✅ **`propertyId` 白名单校验 —— 已落地（PR #51/#52，2026-09-26）** | [后端] | `PropertyIdRules` + `PointMappingIndex`；指标 `iot.ingest.propertyid.rejected/unmapped/orphan` |
 | P0-2b | **磁盘阈值纳入验收**（§8.3 阈值表加 `/` < 95%） | [中间件] | 压测前后 `df -h /` 记录，使用率 < 95% |
 | P0-7 | **命令实例表 + 下发/查询/重发端点 + 超时扫描 + 回执端点**（§7.1–7.4） | [后端][数据] | 下发返回 `requestId` 且库中 1 行 `status_code='pending'→'sent'`；模拟设备回执（`POST /internal/command-replies`）后该行 `succeeded`；**重复回执**（同 requestId 再发一次）不改变状态且不新增行；对离线设备下发得 `failed/NO_SUBSCRIBER`（publish 返回 202）；超时用例：不回执 → 扫描后 `timeout` |
 | P0-8 | **权限码与菜单**：`iot:credential:issue/get/revoke`、`iot:debug:send/get` | [数据] | `SELECT count(*) FROM sys_menu WHERE auth_code LIKE 'iot:credential:%' OR auth_code LIKE 'iot:debug:%'` = 5；`sys_role_menu` 给角色 1、`sys_template_menu` 给模板 1 各 5 行；`migration` 与 `007` 语句逐字等价（跑 `tools/check-iot-sql-equivalence.sh` 退出码 0） |
@@ -1139,10 +1139,10 @@ CREATE TABLE iot_command_instance
 --    UNIQUE KEY 带 tenant_id ⇒ 所有按 request_id 的更新都必须同时带 tenant_id（§7.1 第 2 条）。
 
 -- ============ 3) 权限码与菜单（P0-8；按 007 + migration 双写）============
--- 沿用既有 id 段：3200 设备菜单下挂按钮；**3240 段**是 IA 方案的「④ 数据与调试」分组（见
--- docs/PLATFORM-IA-PROPOSAL.md：3210=① 接入配置 / 3240=④ 数据与调试），该分组菜单尚未落地，
--- 故本批先挂 3200 与 3204（IoT 平台 catalog），待 IA 模块化迁移落地后再调 pid —— 这一点必须与
--- docs/PLATFORM-IA-PROPOSAL.md §3240 的实施批次对齐，避免两批同时改 pid 造成菜单漂移。
+-- 沿用既有 id 段：3200 设备菜单下挂按钮；**3240 段**是 IA 方案的「④ 数据与调试」分组
+-- （3210=① 接入配置 / 3240=④ 数据与调试），该分组菜单尚未落地，
+-- 故本批先挂 3200 与 3204（IoT 平台 catalog），待 IA 模块化迁移落地后再调 pid —— 须与
+-- 3240 分组的实施批次对齐，避免两批同时改 pid 造成菜单漂移。
 INSERT INTO sys_menu (id, pid, name, type, platform_only, auth_code, title, sort, create_time, status, is_deleted)
 VALUES (320019, 3200, 'IotCredentialGet',    'button', 0, 'iot:credential:get',    'page.iot.credential.get',    19, NOW(), 1, 0),
        (320020, 3200, 'IotCredentialIssue',  'button', 0, 'iot:credential:issue',  'page.iot.credential.issue',  20, NOW(), 1, 0),
@@ -1206,7 +1206,7 @@ curl -s -H "Authorization: <前端登录态>" \
 | 同上 §4.3 | 订阅 `$events/client_connected\|disconnected` | `up/state` retained（P0）/ `$events`（P1，若采用则**不得**改前缀，那是 EMQX 自有主题） | 需区分「EMQX 自有事件主题」与「应用主题」 |
 | 同上 §6.1 | MQTT pub `$iot/dev/{t}/{d}/cmd/**` | `ypbin/v1/{t}/{d}/down/service/{identifier}` | 统一命名 + identifier 来自物模型 |
 | 同上 §7 | `$iot/svc/config/{t}/device-changed` | `ypbin/v1/{t}/svc/config/device-changed`（P2 一并对齐） | 同上 |
-| `docs/IOT-ROADMAP.md:743` | 「iot 侧共享订阅消费者」 | 主推 Rule Engine 入站、备选 access 自建消费者（§4.2） | ✅ **已执行**：该行已标注「已被取代（2026-09-26 决策 D1）」；决策见 §1.1 |
+| 仓内旧倾向 | 「iot 侧共享订阅消费者」（已作废） | 主推 Rule Engine 入站、备选 access 自建消费者（§4.2） | ✅ **已执行**：旧倾向已标注「已被取代（2026-09-26 决策 D1）」；决策见 §1.1 |
 | `docs/IOT-PLATFORM-DESIGN.md` §4.2 ⚠️ | D0.6 要求「必须核实持久化配置并在部署文档写明」 | 已在 §8.1/§8.6 落：持久化 = 挂 `/opt/emqx/data` 与 `/opt/emqx/log`（官方要求）；单节点无集群复制问题；集群化前须重核 U11 | 关闭 D0.6 的实施前置 |
 
 ---

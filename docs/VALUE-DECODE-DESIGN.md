@@ -4,8 +4,8 @@
 > 一手材料（全部本机可复现）：starter 源码（tag `v0.1.0`）、本仓源码、生产容器里的 fat jar 清单、
 > 生产 IoTDB / MySQL 真值。
 > 最后更新：**2026-09-27**。
-> 关联条目：[`STARTER-FEEDBACK.md`](STARTER-FEEDBACK.md) **SF-6**（反哺 starter）、
-> [`IOT-ROADMAP.md`](IOT-ROADMAP.md) 四点二十一（落地记录）、[`ACCESS-ENABLE.md`](ACCESS-ENABLE.md) §6.3（现场证据）。
+> 关联文档：[`ACCESS-ENABLE.md`](ACCESS-ENABLE.md) §6.3（现场证据）。框架侧反哺（原 SF-6）已由
+> starter v0.2.0 的 `ypbin.iot.protocol.tcp.payload-format` 承接，替换路径见 §5。
 
 ---
 
@@ -121,8 +121,9 @@
 
 ## 5. 反哺与替换路径（**必读**）
 
-1. **反哺**：`STARTER-FEEDBACK.md` **SF-6**（现象/证据/影响/期望能力/验收标准/会被替换掉的临时实现），并在
-   starter 仓开同名 issue（链接见该条）。
+1. **反哺（已闭环）**：缺口（TCP 无 `payload-format`、core 无宿主可插解码 SPI）已作为反哺条目提给 starter，
+   **starter v0.2.0（PR #19）已修**：新增 `ypbin.iot.protocol.tcp.payload-format`（`text`/`number`/`binary`），
+   本仓过渡层因此已达删除条件。
 2. **期望的框架能力**（二选一即可）：
    - **A（推荐）** 给 TCP 模块加 `ypbin.iot.protocol.tcp.payload-format`（`text`/`number`/`binary`，与 MQTT 同名同语义，
      `text` 用**严格 UTF-8**、非法即 BAD），并给 `PointValue` 一个「按点位声明取帧内字段」的宿主钩子

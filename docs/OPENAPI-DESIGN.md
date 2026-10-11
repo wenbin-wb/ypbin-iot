@@ -3,15 +3,15 @@
 > ⚠️ **本方案为设计稿、未实现；待用户拍板后实施。**
 >
 > **实施状态（2026-10-01 更新）**：本文为设计基线（写于实现前）。第 1/2 批已按本文实施：
-> Key 体系、网关 OpenApiKeyAuthFilter、限流/配额（进度见 `docs/TASK-BOARD.md`）。
+> Key 体系、网关 OpenApiKeyAuthFilter、限流/配额（**进度：已全部落地**，见 §1.2 端点盘点与 §8 不做清单）。
 > 下文「不存在任何开放 API 实现」等是**基线写作时的快照**，不再反映现状；
 `ypbin-iot` 无 `openapi` 包、无 API Key 表、无限流组件（`deploy/sql/006-iot-schema.sql` 全表清单无 `iot_api_key`；`docs/IOT-PLATFORM-DESIGN.md:763` 仅把它列为**计划**表）。
 > 文档落盘不等于功能可用；第 10 节列出全部「需要用户拍板」事项，未拍板项不得开工。
 
 | 项 | 值 |
 |---|---|
-| 里程碑 | M-5 开放 API（起步）（`docs/TASK-BOARD.md:44`） |
-| 现状 | 立项时整块未开始；**现已完成**（第 1 批 Key 体系 + 门面 + whoami + 限流/配额，见 `docs/TASK-BOARD.md` #11） |
+| 里程碑 | M-5 开放 API（起步） |
+| 现状 | 立项时整块未开始；**现已完成**（第 1 批 Key 体系 + 门面 + whoami + 限流/配额 + O-1…O-7） |
 | 对标 | 阿里云 IoT 云端 API+多语言 SDK；华为应用侧 API；ThingsBoard REST 全开放（同上行，一手已核） |
 | 上游口径 | `docs/IOT-PLATFORM-DESIGN.md` §9（`:705-714`）+ §10（`:716-729`）+ §13（`:766-800`） |
 | 本稿立场 | **以上游口径为准**；与现状冲突处以本文第 2.6 节如实登记，不擅自改上游 |
@@ -162,7 +162,7 @@
 > **通用机制**（保留虚拟 ID 段、scopes 白名单过滤、与 `IdentityHeaderFilter`/`StpPermissionAdapter` 的衔接）
 > 本质是 **`ypbin-starter` 的通用能力**（任何下游服务做开放 API 都需要）。本批为**过渡实现**（合入以打通 F-1 前置）；
 > 反哺责任：**已在 `wenbin-wb/ypbin-starter` 提 PR #60**（`VirtualPrincipalScopes`，以本实现为蓝本抽成通用组件），本仓随后切换为
-> 「依赖 starter 通用实现 + 仅保留业务白名单」。tracker：看板 #11「待反哺 starter」标注。
+> 「依赖 starter 通用实现 + 仅保留业务白名单」。反哺 tracker 见 starter 仓同名 PR/issue。
 
 ### 2.4 限流与配额（具名常量，按 Key 维度）
 
@@ -429,7 +429,7 @@
 | `METRIC_QUOTA_EXCEEDED` | `iot.openapi.quota_exceeded` | Counter | 配额耗尽数 |
 | `METRIC_AUTH_FAILED` | `iot.openapi.auth.failed` | Counter | 鉴权失败（可按原因分 tag，**对外不区分**） |
 
-**派生指标**：失败率 = `failed/requests`、限流命中率 = `rate_limited/requests`；可直接接入 M-4 的平台自告警阈值（`docs/TASK-BOARD.md:49` 的 #10「平台自告警 + 指标大盘」已有现成指标基建）。
+**派生指标**：失败率 = `failed/requests`、限流命中率 = `rate_limited/requests`；可直接接入 M-4 的平台自告警阈值（平台自告警 + 指标大盘已有现成指标基建，见 `docs/PLATFORM-ALERTING-DESIGN.md` 与 `docs/METRICS.md`）。
 
 > **⚠️ 标签基数风险**：**禁止**把 `accessKeyId` 全量做成 tag（Key 数量增长会打爆 Prometheus 基数）。建议 tag 只保留 `endpoint`/`code`，**Key 维度只进日志**。
 
@@ -473,12 +473,12 @@
 |---|---|
 | **多语言 SDK 生成**（Java/Python/JS…） | 对标阿里有 SDK，但 SDK 生成需引入 codegen 工具链 + 多语言构建/发布/版本同步，**成本远超首期收益**；先用「可下载的 OpenAPI 规范 + curl 示例」替代（规范已由 4.1 生成）。**待规范稳定后再单独立项** |
 | **OAuth2 / OIDC 授权码流程** | 面向「第三方系统对系统集成」，API Key 足够；OAuth2 引入授权服务器、同意页、token 刷新与 scope 协商，**复杂度与收益不匹配**；且与现有 Sa-Token 体系是两套模型 |
-| **Webhook 回调（平台主动推送给第三方）** | **仓内已明确列为刻意不做**：`docs/TASK-BOARD.md` §4「Webhook 通知（**唯一 SSRF 面**）」⇒ 不做，**不重复立项** |
+| **Webhook 回调（平台主动推送给第三方）** | **仓内已明确列为刻意不做**：「Webhook 通知（**唯一 SSRF 面**）」⇒ 不做，**不重复立项** |
 | **GraphQL** | 与既有 REST + `R` 契约并行的第二套查询模型，**双份维护**；需求方（第三方查数据）用 REST 已满足 |
 | **开放 API 的写操作扩展**（改物模型/台账/规则/影子的写） | 破坏面大且非核心集成诉求（见 1.3）；**首期只留 `POST commands` 一个写能力** |
 | **每租户自定义限流策略的可视化配置** | 首期用「按 Key 的固定字段 + 具名默认常量」即可；动态策略需新的配置面与审批流 |
 | **API 市场 / 自助注册开通** | 需自助开通流程、审核、计费联动 ⇒ 与 §4「刻意不做」的计费/套餐冲突；首期由管理员在控制台签发 |
-| **计费 / 用量账单** | 仓内已列为刻意不做（`docs/TASK-BOARD.md` §4：计费/套餐/账单） |
+| **计费 / 用量账单** | 仓内已列为刻意不做（计费/套餐/账单） |
 | **批量/聚合型开放接口**（一次查多设备） | 需新契约与新限流口径；首期以单设备为主，避免「一个请求打全租户」的放大攻击面 |
 | **独立部署的开放 API 服务/模块** | 上游开放问题 Q6「开放 API 是否拆独立模块」**尚未定**（`docs/IOT-PLATFORM-DESIGN.md:15.2`）。**首期按「iot 内独立 openapi 包」**（上游 `:707` 的首选表述），**不拆模块** |
 
@@ -510,18 +510,34 @@
 
 ---
 
-## 11. 未核实项 / 已知风险（如实登记）
+## 11. 未核实项 / 已知风险（已核验：见下）
+
+> **核验结论（2026-10，源自前置核验报告，该报告已并入本节）**：本节初稿列出的 U-1 / U-2 / U-6 三个高危项已完成**静态一手核验 + F-1/F-2 生产实跑**；下方表格按核验结果更新。
+> **核验边界**：核验为只读一手源码/ jar 源码判定，未改任何文件；F-1/F-2 为生产实跑记录（只读 GET + 一处签名头）。**兑现进度**：开放 API 后续已整体落地（Key 体系/门面/whoami/限流配额/文档，O-1…O-7 全部），见 §6/§8 与本文档的实施状态——**本设计稿的"未开始/未核实"表述已随实现过期，以代码与 `docs/METRICS.md` 为准**。
+
+### 11.1 已核验结论（U-1 / U-2 / U-6）
+
+| 核验项 | 判定 | 一句话结论 |
+|---|---|---|
+| **U-1** O-1…O-7 端点可开放性 | **有条件通过**（6 项可开放，1 项需改） | O-1…O-6 六个只读端点**静态核验为真无副作用**、租户隔离由插件承担且 fail-closed；**O-7 命令下发判定「有条件开放」——须先在 4 个条件全部落地后才可开放**（跨租户写入路径、EMQX 调用在事务内、无幂等/无限流、重发放大）。 |
+| **U-2** 虚拟主体 → scopes | **原方案 (a) 不通过；推荐方案 B2 可行** | `IotPermissionProvider` 仅认 `userId → SysCache`，故原方案「改 `IotPermissionProvider` 或新增 `X-Api-Scopes`」**不是必需**（按原字面实现还会破坏超管语义）。**采用方案 B2**：网关复用既有 `X-Roles` 注入 scopes + iot 侧按虚拟 ID 段回落；`@SaCheckPermission`/`SysCache`/超管语义零改动。 |
+| **U-6** `ypbin-starter-api-doc` 可用性 | **通过（带 2 个必修条件）** | 坐标在 BOM 内、iot 为 Spring MVC 与 starter 的 `webmvc-ui` 变体**匹配**；**必修①** `excludeApiDoc` 默认放行会让文档免登录；**必修②** `disable-in-prod` 只在 `prod` profile 生效——必须显式配置，否则生产可能裸奔。 |
+
+### 11.2 F-1 / F-2 实跑结果（生产，只读）
+
+- **F-2 ✅ 通过**：`@SaCheckPermission` 在生产链路**确实执行**——虚拟主体（无权限）调 `/devices`、`/products`、`/devices/1/commands` **均 403**；真实用户**均 200**（对照，证明不是一律拒绝）；缺签名仍 403。
+- **F-1 ❌ 不通过（当时）**：**scopes → 权限的映射机制当时根本不存在**——虚拟主体带 `X-Roles` 或 `X-Api-Scopes` 仍 403；**决定性对照**：真实用户带**乱码** `X-Roles` 仍 200 ⇒ 权限只来自库内用户，`X-Roles` 完全被忽略。⇒ 按"F-1/F-2 不过就停"的要求，**该批未开放任何端点**。
+- **后续闭环**：F-1 的阻断项已按 §11.1 的 **B2 方案**实现（`OpenApiPrincipal` 虚拟 ID 段 + `IotPermissionProvider` 分流，scopes 只对虚拟主体生效、默认空权限 fail-closed），开放 API 第 1 批已整体落地。
+
+### 11.3 其余未核实项 / 已知风险（保持登记）
 
 | # | 未核实项 | 影响 | 建议核实方式 |
 |---|---|---|---|
-| U-1 | **O-1…O-7 各端点的实际"可开放性"** —— 本文按 controller 签名与权限码**静态判定**，**未逐一实调**确认无隐藏副作用（如 GET 触发远程调用/写库/审计写） | 若某 GET 有副作用，开放后可能被第三方高频触发 | 实施前逐端点走查 Service 实现 + 在有数据的测试库实调一次 |
-| U-2 | **网关注入身份头 → iot 权限解析的衔接**（2.3 的 `X-Api-Scopes` 方案）**未做可行性验证**；`IotPermissionProvider` 当前只认 `userId` → `SysCache`（`IotPermissionProvider.java:37-42`） | 若不成立，作用域隔离**无法实现**，O-4/O-7 等按作用域裁剪将失效 | 起一个最小原型：注入 scopes 头 → 断言 `@SaCheckPermission` 按 scopes 判定 |
 | U-3 | **`SignChecker`（Servlet）与网关（WebFlux）的组件不兼容** | 决定 3.1 链路里"签名在哪一层校验" | 实施设计时定案；两案（网关移植 / iot 侧验签）择一 |
 | U-4 | **`X-Forwarded-For` 可信性**（IP 白名单取真实客户端 IP 的前提）**未核实** | 若直接信 XFF，白名单可被伪造绕过 | 核实网关前置代理拓扑；必要时只用远端 IP |
-| U-5 | **`GATEWAY_SIGN_TOKEN` 在开放 API 场景的作用域**：API Key 请求转签后用的是**同一把**网关签名密钥。密钥泄露后即可伪造任意租户身份（含开放 API 主体） | 与既有 SF-6b 风险同源但**面被放大**（多了"第三方 Key → 租户身份"这条路径） | 评估是否为开放 API 引入**独立签名密钥**（需网关侧支持双密钥） |
-| U-6 | **`ypbin-starter-api-doc` 在 iot 服务的实际行为**（未实跑：iot 当前未依赖它，无法验证 `/v3/api-docs` 与 swagger-ui 是否在 iot 上正常暴露） | 4.1 的"注解生成"结论强度受限 | 加依赖后实跑 `/v3/api-docs` 与 `/swagger-ui/index.html` 确认 |
-| U-7 | **保留虚拟用户 ID 段**的具体取值（须避开 Sa-Token 哨兵 `-3/-4/-5`，见 `IdentityStpLogic` 类注释） | 取值不当可能与真实用户/哨兵冲突 ⇒ **提权** | 实施前定段并加断言测试 |
-| U-8 | **生产机 `ypbin-prod`** 本次**未登录、未做任何操作**（任务要求只读参考，且不做部署）；本文所有"生产现状"结论均来自仓内文件 | 生产实际配置可能与仓内 Nacos 样例有漂移 | 若需生产口径，另行只读核实 |
+| U-5 | **`GATEWAY_SIGN_TOKEN` 在开放 API 场景的作用域**：API Key 请求转签后用**同一把**网关签名密钥，泄露即可伪造任意租户身份 | 与既有 SF-6b 风险同源但**面被放大** | 评估是否为开放 API 引入**独立签名密钥**（需网关侧双密钥） |
+| U-7 | **保留虚拟用户 ID 段**的具体取值（须避开 Sa-Token 哨兵 `-3/-4/-5`，见 `IdentityStpLogic` 类注释） | 取值不当可能与真实用户/哨兵冲突 ⇒ **提权** | 实施前定段并加断言测试（已实现 `OpenApiPrincipalVirtualIdConsistencyTest` 守护） |
+| U-8 | **生产机 `ypbin-prod`** 核验时**未登录、未做任何操作**；所有"生产现状"结论均来自仓内文件 | 生产实际配置可能与仓内 Nacos 样例有漂移 | 若需生产口径，另行只读核实 |
 
 ---
 
@@ -529,7 +545,7 @@
 
 | 结论 | 证据位置 |
 |---|---|
-| 开放 API 整块未开始（立项时） | `docs/TASK-BOARD.md` #11 |
+| 开放 API 整块未开始（立项时） | 本文档 §1.2（端点盘点）与 §8（不做清单） |
 | API Key 口径（哈希/轮换/限流） | `docs/IOT-PLATFORM-DESIGN.md:712,727,763,778` |
 | `/openapi/**` 前缀（上游） | `docs/IOT-PLATFORM-DESIGN.md:778` |
 | 真状态码唯一例外（`/internal/mqtt/**`） | `docs/IOT-PLATFORM-DESIGN.md:781,786` |

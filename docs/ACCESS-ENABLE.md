@@ -158,8 +158,8 @@ UPDATE iot_device SET endpoint = 'tcp://172.20.0.1:19002' WHERE id = 9300012;
   **（2026-09-27 已修）** access 侧新增解码层 `cn.ypbin.admin.access.decode`（过渡实现）：TCP 文本帧按
   `KEY=VALUE` 解析、键由点位映射 `raw_address` 声明，再按物模型 `data_type` 规范化为数值/布尔/文本；
   解不出来就**丢弃 + 计数 + WARN**（`iot.access.decode.failure{reason=…}`），不再产生 `[B@…`。
-  完整口径、扩展点与**替换路径**见 [`VALUE-DECODE-DESIGN.md`](VALUE-DECODE-DESIGN.md)，
-  框架侧缺口见 [`STARTER-FEEDBACK.md`](STARTER-FEEDBACK.md) **UP-3**（issue #13）。
+  完整口径、扩展点与**替换路径**见 [`VALUE-DECODE-DESIGN.md`](VALUE-DECODE-DESIGN.md) §5（含框架侧缺口与反哺结果：
+  starter v0.2.0 已加 `ypbin.iot.protocol.tcp.payload-format`，本过渡层已达删除条件）。
   演示设备 9300012 的 `raw_address` 已由 `holding:0` 修正为帧键 `TEMP`
   （`deploy/sql/fixes/2026-09-27-iot-demo-tcp-frame-key.sql`，回滚物 `deploy/sql/rollback/2026-09-27-iot-demo-tcp-frame-key-rollback.sql`；
   放 `fixes/` 而非 `migration/`：后者受 SQL 等价门禁约束，本条是运行时数据的订正而非安装脚本的一部分）。
@@ -371,8 +371,8 @@ core 也没有宿主可插的解码 SPI ⇒ 属**框架侧能力缺口**（已�
 TCP 文本帧按 `KEY=VALUE` 解析、键由点位映射 `raw_address` 声明，再按物模型 `data_type` 规范化为
 数值/布尔/文本；**解不出来就丢弃 + 计数 + WARN**（`iot.access.decode.failure{reason=…}`，脱敏不 dump 载荷），
 出口另有一道「值仍是 `byte[]` 就丢弃」的兜底闸门。演示设备点位 `raw_address` 由 `holding:0` 修正为帧键 `TEMP`。
-**完整口径 / 扩展点 / 未做项 / 替换路径**：见 [`VALUE-DECODE-DESIGN.md`](VALUE-DECODE-DESIGN.md)；
-框架侧需求：见 [`STARTER-FEEDBACK.md`](STARTER-FEEDBACK.md) **UP-3**（starter issue #13）。
+**完整口径 / 扩展点 / 未做项 / 替换路径**：见 [`VALUE-DECODE-DESIGN.md`](VALUE-DECODE-DESIGN.md) §5
+（框架侧需求已由 starter v0.2.0 的 `ypbin.iot.protocol.tcp.payload-format` 承接）。
 
 **当前状态**：生产实测 `iot.reading` 该设备新行 `temperature` 落 `value_double`，
 `GET /iot/devices/9300012/series?propertyId=temperature` 返回**数值点** ⇒ 曲线可画
@@ -623,7 +623,7 @@ grep -n -F "$NEW" config.yaml | grep -c ':#'       # 真值不得落进注释行
 | ~~Nacos 控制台**默认口令**~~ | **2026-09-26 已修**：口令改为 `openssl rand -hex 16`（只落 `deploy/.env`）、`NACOS_AUTH_IDENTITY_VALUE` 一并轮换、服务端 auth 开启（`NACOS_AUTH_ENABLE=true`），各服务补 `SPRING_CLOUD_NACOS_USERNAME/PASSWORD` | 已由 [`NACOS-AUTH.md`](NACOS-AUTH.md) 承接（含回滚与判据） |
 | `/opt/ypbin/rollback-20260925-013857.sh` 内**明文写死该口令** | `password=<值>` 仍有 **1** 处 | 遗留脚本，**仅登记**；本轮已把**新写的 6 个脚本**全部改为从 `deploy/.env` 取（`password=<值>` 均为 **0** 处，已 `bash -n` / `py_compile` 自检） |
 | IoTDB 时序静默不落库 | 已补**成功侧可观测**（另开 PR），根因待下一次真实采集判定 | 见 §6.1 |
-| 连接超时不可配 / 同步建链占用续约线程 | 未修（演示数据侧已用快速失败绕开） | `STARTER-FEEDBACK.md` **UP-2**（框架侧）+ 本仓 ROADMAP（access 侧） |
+| 连接超时不可配 / 同步建链占用续约线程 | **上游已修**（starter PR #19 / v0.2.0：`connect-timeout` 变活键、`bind` 超时跟随配置）；本仓已消费 0.2.0 | 见 §6.6；starter v0.2.0 变更记录 |
 | 服务器 `/tmp` 残留 | `iotdb-2.0.11.tar.gz`(354M)、`ypbin-iot-{r20,merged}.jar` + `tm-read.jar`(3×132M)、`node.tar.xz`(30M) ≈ **805MB**，**非本轮产物**，未删 | 待用户确认后清理 |
 
 ### 10.3 「搜到名字」不等于「路径可用」——弱证据陷阱（本轮实测）

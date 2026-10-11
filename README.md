@@ -25,7 +25,7 @@
 在上面**新增**了一整套 IoT 业务能力。设备从「建产品 → 定义物模型 → 绑设备 → 映射点位 →
 采集入库 → 查询/告警/指令」是完整闭环，而不是一堆孤立页面。
 
-**它不是什么**（避免误解，口径见 [刻意不做](docs/TASK-BOARD.md)）：不是通用组态/SCADA，
+**它不是什么**：不是通用组态/SCADA，
 不自研 Broker 与时序库（用 EMQX 与 IoTDB），不做计费/SLA/工单，不做可视化规则编排
 （远期待定）、不做 Webhook 通知（唯一 SSRF 面，刻意不做）。
 
@@ -159,18 +159,16 @@ bash <(curl -fsSL https://raw.githubusercontent.com/wenbin-wb/ypbin-iot/main/dep
 
 ### ⏳ 未做（如实登记，勿当已完成）
 
-- **明文 1883 的生产收紧**：开发测试期已按用户决策开放并完成外部端到端验证；
-  **TLS 8883、限来源、限流未做**（生产发布门禁）。
+- **明文 1883 的生产收紧**：**8883（MQTT over TLS）已于 2026-09-30 启用**（自签证书、与 1883 并存）；
+  **换正式 CA 证书、收回 1883、限来源、限流仍未做**（生产发布门禁）。
 - **EMQX 集群**：当前单节点 standalone。
-- CSV 批量注册 + 批次管理、消息跟踪「定位建议」、开放 API（API Key/OpenAPI）、
-  平台自告警指标大盘、前端死能力接线（设备标签/影子写入等后端已就绪但前端 0 引用）。
-- 单租户部署与「台账无该租户」时的变更信号细节、多实例部署下的告警评估分布式锁
-  （未确认项与代价见 [`docs/IOT-ROADMAP.md`](docs/IOT-ROADMAP.md) 与
-  [`docs/ALERTING-DESIGN.md`](docs/ALERTING-DESIGN.md)）。
+- 单租户部署与「台账无该租户」时的变更信号细节、多实例部署下的告警评估分布式锁；
+  上行「断点不可见」的结构化补齐（消息跟踪二批，条件触发，见
+  [`docs/MESSAGE-TRACE-DESIGN.md`](docs/MESSAGE-TRACE-DESIGN.md) 附录）；
+  Prometheus/Grafana 大盘（属独立决策，见 [`docs/METRICS.md`](docs/METRICS.md)）。
 
-完整路线与优先级见 [`docs/IOT-ROADMAP.md`](docs/IOT-ROADMAP.md) 与看板
-[`docs/TASK-BOARD.md`](docs/TASK-BOARD.md)；平台完整设计总纲见
-[`docs/IOT-PLATFORM-DESIGN.md`](docs/IOT-PLATFORM-DESIGN.md)。
+完整设计总纲见 [`docs/IOT-PLATFORM-DESIGN.md`](docs/IOT-PLATFORM-DESIGN.md)，
+分阶段落地纪律与验收判据见 [`docs/ACCESS-ENABLE.md`](docs/ACCESS-ENABLE.md)。
 
 ## 📁 目录结构
 
@@ -228,8 +226,6 @@ ypbin-iot/
 | 文档 | 内容 |
 |---|---|
 | [`docs/IOT-PLATFORM-DESIGN.md`](docs/IOT-PLATFORM-DESIGN.md) | 平台完整设计总纲（物模型对齐 IoTDA，里程碑 M-1~M-7） |
-| [`docs/IOT-ROADMAP.md`](docs/IOT-ROADMAP.md) | 增量路线、每个增量的完成证据与「仍未闭环」清单 |
-| [`docs/TASK-BOARD.md`](docs/TASK-BOARD.md) | 跨会话进度看板（唯一台账）+ 用户拍板决策 |
 | [`docs/DEMO-DATA.md`](docs/DEMO-DATA.md) | 演示数据与设备 |
 | [`docs/DEVICE-CREDENTIAL.md`](docs/DEVICE-CREDENTIAL.md) | 设备凭据实现口径 |
 | [`docs/EMQX-INGRESS-DESIGN.md`](docs/EMQX-INGRESS-DESIGN.md) | MQTT 入站 / 下行设计（含契约留白） |
