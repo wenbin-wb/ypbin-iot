@@ -12,12 +12,15 @@ package cn.ypbin.admin.access.link;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import org.mockito.ArgumentCaptor;
 
 import cn.ypbin.admin.access.decode.TextFrameValueDecoder;
 import cn.ypbin.iot.core.model.DeviceSpec;
+import cn.ypbin.iot.core.model.PointAddress;
 import cn.ypbin.iot.core.model.SubscribeRequest;
 import cn.ypbin.iot.core.model.SubscriptionHandle;
 import cn.ypbin.iot.core.protocol.DeviceSession;
@@ -28,10 +31,12 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -277,6 +282,195 @@ class AccessSubscriptionPlannerTest {
         verify(session, times(0)).subscribe(any(SubscribeRequest.class), any());
     }
 
+    @Test
+    @DisplayName("★ UP-4：4 点位 TCP 设备必须发起 4 次**单地址**订阅（否则 starter 0.2.0 fail-fast ⇒ 整机零采集）")
+    void tcpDeviceWithMultiplePointsMustSubscribePerAddress() throws Exception {
+        DeviceSession session = mock(DeviceSession.class);
+        when(session.subscribe(any(SubscribeRequest.class), any()))
+            .thenReturn(CompletableFuture.completedFuture(null));
+        AtomicReference<Map<String, DeviceSession>> bound =
+            new AtomicReference<>(Map.of("d1", session));
+        AccessSubscriptionPlanner planner = planner(bound);
+
+        // 一次 subscribe 轮次：应为 4 个点位各发起 1 次单地址订阅
+        assertThat(planner.subscribe(List.of(tcpDevice4Points("d1"))))
+            .as("本设备本轮发起了订阅").isEqualTo(1);
+
+        ArgumentCaptor<SubscribeRequest> requests = ArgumentCaptor.forClass(SubscribeRequest.class);
+        verify(session, times(4)).subscribe(requests.capture(), any());
+        List<List<String>> addressLists = requests.getAllValues().stream()
+            .map(r -> r.addresses().stream().map(PointAddress::raw).toList())
+            .toList();
+        // 咬人点①：绝不能有 >1 地址的请求（那正是 fail-fast 的触发条件）
+        assertThat(addressLists)
+            .as("每个 SubscribeRequest 必须只含 1 个地址，绝不把全部点位塞进一次订阅")
+            .allSatisfy(list -> assertThat(list).hasSize(1));
+        // 咬人点②：4 个点位各自的地址都被覆盖到，不重不漏
+        assertThat(addressLists.stream().map(list -> list.get(0)))
+            .containsExactlyInAnyOrder("TEMP", "HUMI", "SN", "BAT");
+        // 4 次订阅共享同一个 listener（同一帧按各自 raw_address 取键）
+        ArgumentCaptor<cn.ypbin.iot.core.model.DataListener> listeners =
+            ArgumentCaptor.forClass(cn.ypbin.iot.core.model.DataListener.class);
+        verify(session, times(4)).subscribe(any(SubscribeRequest.class), listeners.capture());
+        assertThat(listeners.getAllValues().stream().distinct())
+            .as("TCP 逐点位订阅应共享同一 listener（pointByAddress 含全部点位）").hasSize(1);
+
+        // 完成回调后记为「设备已订阅」：下一轮不得重复订阅
+        assertThat(planner.trackedSessionCount()).as("全部地址成功后记一次设备级跟踪").isEqualTo(1);
+        assertThat(planner.subscribe(List.of(tcpDevice4Points("d1"))))
+            .as("已订阅设备不得重复发起").isZero();
+        verify(session, times(4)).subscribe(any(SubscribeRequest.class), any());
+        assertThat(planner.tcpStartedAddressSubscriptionCount())
+            .as("累计单地址订阅数应为 4（无重复）").isEqualTo(4);
+    }
+
+    @Test
+    @DisplayName("★ UP-4：TCP 单点位设备仍只发 1 次单地址订阅（不得退化）")
+    void tcpDeviceWithSinglePointMustSubscribeOnce() {
+        DeviceSession session = mock(DeviceSession.class);
+        when(session.subscribe(any(SubscribeRequest.class), any()))
+            .thenReturn(CompletableFuture.completedFuture(null));
+        AtomicReference<Map<String, DeviceSession>> bound =
+            new AtomicReference<>(Map.of("d1", session));
+        AccessSubscriptionPlanner planner = planner(bound);
+
+        assertThat(planner.subscribe(List.of(tcpDevice("d1",
+            "[{\"propertyId\":\"1\",\"identifier\":\"temperature\","
+                + "\"address\":\"TEMP\",\"dataType\":\"decimal\"}]")))).isEqualTo(1);
+        verify(session, times(1)).subscribe(any(SubscribeRequest.class), any());
+        assertThat(planner.trackedSessionCount()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("★ UP-4：TCP 部分地址失败 ⇒ 只重试失败地址，已成功地址绝不重复挂监听（防重复读数）")
+    void tcpPartialFailureMustRetryOnlyFailedAddresses() {
+        DeviceSession session = mock(DeviceSession.class);
+        List<SubscribeRequest> seen = new CopyOnWriteArrayList<>();
+        CompletableFuture<SubscriptionHandle> boom = new CompletableFuture<>();
+        boom.completeExceptionally(new IllegalStateException(TcpFailFast.MULTI_BODY));
+        when(session.subscribe(any(SubscribeRequest.class), any())).thenAnswer(inv -> {
+            SubscribeRequest request = inv.getArgument(0);
+            seen.add(request);
+            // 模拟 starter 0.2.0：>1 地址 fail-fast；单地址成功
+            if (request.addresses().size() > 1) {
+                return boom;
+            }
+            return CompletableFuture.completedFuture(null);
+        });
+        AtomicReference<Map<String, DeviceSession>> bound =
+            new AtomicReference<>(Map.of("d1", session));
+        SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+        AccessSubscriptionPlanner planner = planner(bound, meterRegistry);
+
+        // 第一轮：4 个地址各自单订阅 ⇒ 全部成功 ⇒ 设备级跟踪
+        assertThat(planner.subscribe(List.of(tcpDevice4Points("d1")))).isEqualTo(1);
+        assertThat(seen).hasSize(4);
+        assertThat(planner.trackedSessionCount()).isEqualTo(1);
+        assertThat(meterRegistry.get("iot.access.subscribe.failure").counter().count()).isZero();
+
+        // 第二轮：不得再发起任何订阅（已全部成功）
+        assertThat(planner.subscribe(List.of(tcpDevice4Points("d1")))).isZero();
+        assertThat(seen).as("已成功地址不得被重复订阅").hasSize(4);
+    }
+
+    @Test
+    @DisplayName("★ UP-4：TCP 全部地址失败 ⇒ 每次失败各计一次、退避后整体重试、且不写设备级跟踪（S5）")
+    void tcpAllFailuresMustCountAndBackoff() {
+        DeviceSession session = mock(DeviceSession.class);
+        List<SubscribeRequest> seen = new CopyOnWriteArrayList<>();
+        CompletableFuture<SubscriptionHandle> boom = new CompletableFuture<>();
+        boom.completeExceptionally(new IllegalStateException("拒绝订阅"));
+        when(session.subscribe(any(SubscribeRequest.class), any())).thenAnswer(inv -> {
+            seen.add(inv.getArgument(0));
+            return boom;
+        });
+        AtomicReference<Map<String, DeviceSession>> bound =
+            new AtomicReference<>(Map.of("d1", session));
+        SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+        AccessSubscriptionPlanner planner = planner(bound, meterRegistry);
+
+        assertThat(planner.subscribe(List.of(tcpDevice4Points("d1")))).isEqualTo(1);
+        assertThat(seen).as("4 个点位各 1 次单地址订阅").hasSize(4);
+        assertThat(meterRegistry.get("iot.access.subscribe.failure").counter().count())
+            .as("每次失败的订阅各计一次失败").isEqualTo(4.0d);
+        assertThat(planner.trackedSessionCount())
+            .as("全部失败不得写设备级跟踪（S5：写了就永不重试）").isZero();
+
+        // 退避窗口内不得重发
+        assertThat(planner.subscribe(List.of(tcpDevice4Points("d1")))).isZero();
+        assertThat(seen).hasSize(4);
+
+        // 退避到期 ⇒ 必须重试（自愈不能被退避破坏）
+        clock.advance(AccessSubscriptionPlanner.SUBSCRIBE_BACKOFF_BASE.plusSeconds(1));
+        assertThat(planner.subscribe(List.of(tcpDevice4Points("d1")))).isEqualTo(1);
+        assertThat(seen).as("退避到期后 4 个地址都要重试").hasSize(8);
+    }
+
+    @Test
+    @DisplayName("★ UP-4：TCP 会话实例变化 ⇒ 作废旧地址状态并逐点位重订阅")
+    void tcpResubscribeOnSessionChange() {
+        DeviceSession first = mock(DeviceSession.class);
+        when(first.subscribe(any(SubscribeRequest.class), any()))
+            .thenReturn(CompletableFuture.completedFuture(null));
+        AtomicReference<Map<String, DeviceSession>> bound =
+            new AtomicReference<>(Map.of("d1", first));
+        AccessSubscriptionPlanner planner = planner(bound);
+
+        planner.subscribe(List.of(tcpDevice4Points("d1")));
+        verify(first, times(4)).subscribe(any(SubscribeRequest.class), any());
+
+        DeviceSession reconnected = mock(DeviceSession.class);
+        when(reconnected.subscribe(any(SubscribeRequest.class), any()))
+            .thenReturn(CompletableFuture.completedFuture(null));
+        bound.set(Map.of("d1", reconnected));
+
+        assertThat(planner.subscribe(List.of(tcpDevice4Points("d1"))))
+            .as("换会话后必须对新会话逐点位重订阅").isEqualTo(1);
+        verify(reconnected, times(4)).subscribe(any(SubscribeRequest.class), any());
+        assertThat(planner.tcpStartedAddressSubscriptionCount()).isEqualTo(8);
+    }
+
+    @Test
+    @DisplayName("★ UP-4：非 TCP（Modbus）>1 点位仍走「一次多地址」——不得被 TCP 分支误伤")
+    void nonTcpMultiPointStillUsesSingleMultiAddressRequest() {
+        DeviceSession session = mock(DeviceSession.class);
+        when(session.subscribe(any(SubscribeRequest.class), any()))
+            .thenReturn(CompletableFuture.completedFuture(null));
+        AtomicReference<Map<String, DeviceSession>> bound =
+            new AtomicReference<>(Map.of("d1", session));
+        AccessSubscriptionPlanner planner = planner(bound);
+
+        String points = "[{\"propertyId\":\"1\",\"identifier\":\"a\",\"address\":\"holding:1\"},"
+            + "{\"propertyId\":\"2\",\"identifier\":\"b\",\"address\":\"holding:2\"}]";
+        assertThat(planner.subscribe(List.of(device("d1", points)))).isEqualTo(1);
+        ArgumentCaptor<SubscribeRequest> requests = ArgumentCaptor.forClass(SubscribeRequest.class);
+        verify(session, times(1)).subscribe(requests.capture(), any());
+        assertThat(requests.getValue().addresses()).as("Modbus 一次订阅覆盖全部地址")
+            .hasSize(2);
+    }
+
+    @Test
+    @DisplayName("★ UP-4：forget 必须清掉 TCP 逐点位状态（设备复现不得被旧成功集挡住）")
+    void forgetMustClearTcpPerAddressState() {
+        DeviceSession session = mock(DeviceSession.class);
+        when(session.subscribe(any(SubscribeRequest.class), any()))
+            .thenReturn(CompletableFuture.completedFuture(null));
+        AtomicReference<Map<String, DeviceSession>> bound =
+            new AtomicReference<>(Map.of("d1", session));
+        AccessSubscriptionPlanner planner = planner(bound);
+
+        planner.subscribe(List.of(tcpDevice4Points("d1")));
+        planner.forget("d1");
+
+        DeviceSession healthy = mock(DeviceSession.class);
+        when(healthy.subscribe(any(SubscribeRequest.class), any()))
+            .thenReturn(CompletableFuture.completedFuture(null));
+        bound.set(Map.of("d1", healthy));
+        assertThat(planner.subscribe(List.of(tcpDevice4Points("d1"))))
+            .as("forget 后必须能重新逐点位订阅").isEqualTo(1);
+        verify(healthy, times(4)).subscribe(any(SubscribeRequest.class), any());
+    }
+
     private AccessSubscriptionPlanner planner(AtomicReference<Map<String, DeviceSession>> bound) {
         return planner(bound, new SimpleMeterRegistry());
     }
@@ -298,6 +492,10 @@ class AccessSubscriptionPlannerTest {
         return spec(deviceId, "[{\"propertyId\":\"900\",\"address\":\"holding:1\"}]");
     }
 
+    private static DeviceSpec device(String deviceId, String pointsJson) {
+        return spec(deviceId, pointsJson);
+    }
+
     private static DeviceSpec deviceWithoutPoints(String deviceId) {
         return spec(deviceId, "[]");
     }
@@ -305,6 +503,33 @@ class AccessSubscriptionPlannerTest {
     private static DeviceSpec spec(String deviceId, String pointsJson) {
         return new DeviceSpec(deviceId, deviceId, ProtocolCode.of("modbus"), "t11-d" + deviceId, "",
             Duration.ofSeconds(5), Map.of(HttpDeviceSpecSource.PROPERTY_POINTS, pointsJson));
+    }
+
+    /** TCP 设备：4 点位（对齐生产演示设备 9300012 的 4 点位形态）。 */
+    private static DeviceSpec tcpDevice4Points(String deviceId) {
+        return tcpDevice(deviceId,
+            "[{\"propertyId\":\"1\",\"identifier\":\"temperature\",\"address\":\"TEMP\","
+                + "\"dataType\":\"decimal\"},"
+                + "{\"propertyId\":\"2\",\"identifier\":\"humidity\",\"address\":\"HUMI\","
+                + "\"dataType\":\"decimal\"},"
+                + "{\"propertyId\":\"3\",\"identifier\":\"serialNo\",\"address\":\"SN\","
+                + "\"dataType\":\"string\"},"
+                + "{\"propertyId\":\"4\",\"identifier\":\"demoBoundary\",\"address\":\"BAT\","
+                + "\"dataType\":\"int\"}]");
+    }
+
+    private static DeviceSpec tcpDevice(String deviceId, String pointsJson) {
+        return new DeviceSpec(deviceId, deviceId, ProtocolCode.of("tcp"), "t-d" + deviceId, "",
+            Duration.ofSeconds(5), Map.of(HttpDeviceSpecSource.PROPERTY_POINTS, pointsJson));
+    }
+
+    /** starter 0.2.0 TCP fail-fast 的错误语义（仅用于测试桩文案，不依赖 starter 内部常量）。 */
+    private static final class TcpFailFast {
+
+        private static final String MULTI_BODY = "单点位流：一次订阅仅支持 1 个地址";
+
+        private TcpFailFast() {
+        }
     }
 
     /** 可推进时钟（仅用于退避窗口）。 */
