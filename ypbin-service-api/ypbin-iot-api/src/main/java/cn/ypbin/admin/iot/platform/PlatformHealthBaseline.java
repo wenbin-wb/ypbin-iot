@@ -20,13 +20,17 @@ package cn.ypbin.admin.iot.platform;
  * @param roundFailedCount    上轮评估轮次失败数
  * @param notifyFailedCount   上轮通知投递失败数
  * @param ingestDroppedTotal  上轮入站丢弃合计
+ * @param ledgerBumpFailureCount 上轮台账版本号推进失败数
+ * @param reconcileDeferredCount 上轮对账被推迟的租户次数
  * @author wenbin
  * @since 2026-09-30
  */
 public record PlatformHealthBaseline(
     Long roundFailedCount,
     Long notifyFailedCount,
-    Long ingestDroppedTotal) {
+    Long ingestDroppedTotal,
+    Long ledgerBumpFailureCount,
+    Long reconcileDeferredCount) {
 
     /**
      * 无基线（首次运行）。
@@ -34,7 +38,7 @@ public record PlatformHealthBaseline(
      * @return 全 `null` 的基线
      */
     public static PlatformHealthBaseline none() {
-        return new PlatformHealthBaseline(null, null, null);
+        return new PlatformHealthBaseline(null, null, null, null, null);
     }
 
     /**
@@ -48,6 +52,7 @@ public record PlatformHealthBaseline(
             return none();
         }
         return new PlatformHealthBaseline(snapshot.roundFailedCount(),
-            snapshot.notifyFailedCount(), snapshot.ingestDroppedTotal());
+            snapshot.notifyFailedCount(), snapshot.ingestDroppedTotal(),
+            snapshot.ledgerBumpFailureCount(), snapshot.reconcileDeferredCount());
     }
 }

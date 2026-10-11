@@ -26,9 +26,11 @@ import org.springframework.dao.DeadlockLoserDataAccessException;
 import org.springframework.transaction.annotation.Transactional;
 import cn.ypbin.starter.tenant.core.TenantContext;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.sql.SQLException;
 import java.time.LocalDateTime;
 import java.util.List;
 import org.junit.jupiter.api.DisplayName;
+import org.apache.ibatis.exceptions.PersistenceException;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -139,7 +141,7 @@ class TenantLedgerServiceTest {
     @DisplayName("★ R8-8 边界：锁类失败（死锁/锁等待超时）**必须重新抛出**——DB 已回滚整事务，吞掉会「报成功但写入已丢」")
     void lockFailureMustBeRethrown() {
         when(ledgerMapper.bumpConfigEpoch(any())).thenThrow(
-            new DeadlockLoserDataAccessException("deadlock", new java.sql.SQLException("1213")));
+            new DeadlockLoserDataAccessException("deadlock", new SQLException("1213")));
 
         assertThatThrownBy(() -> service.bumpConfigEpoch(7L))
             .as("锁类失败整事务已被 DB 回滚，必须上抛（否则外层提交会谎报成功）")
@@ -165,7 +167,7 @@ class TenantLedgerServiceTest {
     @DisplayName("R8-8：MyBatis 的 PersistenceException 形态同样被捕获（不穿透）")
     void mybatisPersistenceExceptionMustBeSwallowed() {
         when(ledgerMapper.bumpConfigEpoch(any())).thenThrow(
-            new org.apache.ibatis.exceptions.PersistenceException("mapper boom"));
+            new PersistenceException("mapper boom"));
 
         assertThat(service.bumpConfigEpoch(7L)).isFalse();
         assertThat(meterRegistry.get("iot.ledger.bump.failure").counter().count()).isEqualTo(1.0d);

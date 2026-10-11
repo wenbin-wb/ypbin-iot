@@ -39,7 +39,23 @@ class PlatformHealthEvaluatorTest {
 
     private static PlatformHealthSnapshot snap(Long lag, Long roundFailed, Long notifyFailed,
                                                Long unmapped, Long orphan) {
-        return new PlatformHealthSnapshot(lag, roundFailed, notifyFailed, unmapped, orphan);
+        // 新增 4 个字段默认不填（null = 没取到）⇒ 既有用例不受影响，也不会把未知读成健康
+        return new PlatformHealthSnapshot(lag, roundFailed, notifyFailed, unmapped, orphan,
+            null, null, null, null);
+    }
+
+    /** 全参构造：access 域（台账失败/对账推迟/tick 耗时/上报心跳）三个新字段显式给值。 */
+    private static PlatformHealthSnapshot snap(Long lag, Long roundFailed, Long notifyFailed,
+                                               Long unmapped, Long orphan,
+                                               Long ledgerBumpFailure, Long reconcileDeferred,
+                                               Long tickDurationMax) {
+        return new PlatformHealthSnapshot(lag, roundFailed, notifyFailed, unmapped, orphan,
+            ledgerBumpFailure, reconcileDeferred, tickDurationMax, null);
+    }
+
+    /** 全参构造（含上报心跳）：心跳相关用例用。 */
+    private static PlatformHealthSnapshot snapWithReportLag(Long reportLag) {
+        return new PlatformHealthSnapshot(0L, 0L, 0L, 0L, 0L, null, null, null, reportLag);
     }
 
     // ===================== EVALUATOR_STALLED =====================
@@ -120,7 +136,7 @@ class PlatformHealthEvaluatorTest {
     @Test
     @DisplayName("计数较上轮增长 ⇒ 触发；未增长 ⇒ 健康")
     void counterGrowthMustFire() {
-        PlatformHealthBaseline base = new PlatformHealthBaseline(0L, 0L, 0L);
+        PlatformHealthBaseline base = new PlatformHealthBaseline(0L, 0L, 0L, null, null);
 
         assertThat(PlatformHealthEvaluator.evaluate(PlatformHealthRule.EVALUATOR_ROUND_FAILED,
             snap(0L, 3L, 0L, 0L, 0L), base).state())
@@ -159,7 +175,7 @@ class PlatformHealthEvaluatorTest {
     void missingCounterMustBeUnknown() {
         PlatformHealthVerdict verdict = PlatformHealthEvaluator.evaluate(
             PlatformHealthRule.NOTIFY_FAILING, snap(0L, 0L, null, 0L, 0L),
-            new PlatformHealthBaseline(0L, 0L, 0L));
+            new PlatformHealthBaseline(0L, 0L, 0L, null, null));
 
         assertThat(verdict.state())
             .as("把『取不到』当作 0 会在采集坏掉时静默报平安")
@@ -171,12 +187,12 @@ class PlatformHealthEvaluatorTest {
     void ingestDropRequiresBothCounters() {
         // 两项都在：合计 5，较基线 0 增长 ⇒ 触发
         assertThat(PlatformHealthEvaluator.evaluate(PlatformHealthRule.INGEST_DROPPING,
-            snap(0L, 0L, 0L, 3L, 2L), new PlatformHealthBaseline(0L, 0L, 0L)).state())
+            snap(0L, 0L, 0L, 3L, 2L), new PlatformHealthBaseline(0L, 0L, 0L, null, null)).state())
             .isEqualTo(PlatformHealthState.FIRING);
 
         // 缺一项：无法判断"合计的增长"是真丢数据还是刚开始采集另一项 ⇒ UNKNOWN
         assertThat(PlatformHealthEvaluator.evaluate(PlatformHealthRule.INGEST_DROPPING,
-            snap(0L, 0L, 0L, 3L, null), new PlatformHealthBaseline(0L, 0L, 0L)).state())
+            snap(0L, 0L, 0L, 3L, null), new PlatformHealthBaseline(0L, 0L, 0L, null, null)).state())
             .as("只比一项会给出错误归因：合计增长可能只是另一项开始被采集")
             .isEqualTo(PlatformHealthState.UNKNOWN);
     }
@@ -187,7 +203,7 @@ class PlatformHealthEvaluatorTest {
         // 重启后 current(0) < previous(5)：不是"增长"，应健康（否则重启后会误报一轮）
         PlatformHealthVerdict verdict = PlatformHealthEvaluator.evaluate(
             PlatformHealthRule.NOTIFY_FAILING, snap(0L, 0L, 0L, 0L, 0L),
-            new PlatformHealthBaseline(0L, 5L, 0L));
+            new PlatformHealthBaseline(0L, 5L, 0L, null, null));
 
         assertThat(verdict.state()).isEqualTo(PlatformHealthState.HEALTHY);
     }
@@ -281,5 +297,90 @@ class PlatformHealthEvaluatorTest {
             .isEqualTo(PlatformHealthRule.EVALUATOR_STALLED);
         assertThat(PlatformHealthRule.ofCode("nope")).isNull();
         assertThat(PlatformHealthRule.ofCode(null)).isNull();
+    }
+
+    // ===================== LEDGER_BUMP_FAILING / RECONCILE_DEFERRED（增长即告警） =====================
+
+    @Test
+    @DisplayName("★ 台账版本号推进失败：基线缺失且当前 > 0 ⇒ FIRING；= 0 ⇒ UNKNOWN；增长 ⇒ FIRING；未增长 ⇒ HEALTHY")
+    void ledgerBumpFailureMustFollowCounterGrowth() {
+        PlatformHealthRule rule = PlatformHealthRule.LEDGER_BUMP_FAILING;
+        var firstPositive = PlatformHealthEvaluator.evaluate(rule, snap(0L, 0L, 0L, 0L, 0L, 3L, null, null),
+            PlatformHealthBaseline.none());
+        assertThat(firstPositive.state()).isEqualTo(PlatformHealthState.FIRING);
+
+        var firstZero = PlatformHealthEvaluator.evaluate(rule, snap(0L, 0L, 0L, 0L, 0L, 0L, null, null),
+            PlatformHealthBaseline.none());
+        assertThat(firstZero.state()).isEqualTo(PlatformHealthState.UNKNOWN);
+
+        var grew = PlatformHealthEvaluator.evaluate(rule, snap(0L, 0L, 0L, 0L, 0L, 3L, null, null),
+            new PlatformHealthBaseline(0L, 0L, 0L, 0L, null));
+        assertThat(grew.state()).isEqualTo(PlatformHealthState.FIRING);
+        assertThat(grew.observed()).isEqualTo(3L);
+
+        var flat = PlatformHealthEvaluator.evaluate(rule, snap(0L, 0L, 0L, 0L, 0L, 0L, null, null),
+            new PlatformHealthBaseline(0L, 0L, 0L, 0L, null));
+        assertThat(flat.state()).isEqualTo(PlatformHealthState.HEALTHY);
+
+        assertThat(PlatformHealthEvaluator.evaluate(rule, snap(0L, 0L, 0L, 0L, 0L, null, null, null),
+            new PlatformHealthBaseline(0L, 0L, 0L, 0L, null)).state())
+            .as("指标取不到 ⇒ UNKNOWN，不能判健康").isEqualTo(PlatformHealthState.UNKNOWN);
+    }
+
+    @Test
+    @DisplayName("★ 对账被推迟：与上面同口径（增长即告警；首次非零即 FIRING）")
+    void reconcileDeferredMustFollowCounterGrowth() {
+        PlatformHealthRule rule = PlatformHealthRule.RECONCILE_DEFERRED;
+        assertThat(PlatformHealthEvaluator.evaluate(rule, snap(0L, 0L, 0L, 0L, 0L, null, 2L, null),
+            PlatformHealthBaseline.none()).state()).isEqualTo(PlatformHealthState.FIRING);
+        assertThat(PlatformHealthEvaluator.evaluate(rule, snap(0L, 0L, 0L, 0L, 0L, null, 2L, null),
+            new PlatformHealthBaseline(0L, 0L, 0L, null, 2L)).state())
+            .as("未增长 ⇒ HEALTHY").isEqualTo(PlatformHealthState.HEALTHY);
+        assertThat(PlatformHealthEvaluator.evaluate(rule, snap(0L, 0L, 0L, 0L, 0L, null, null, null),
+            new PlatformHealthBaseline(0L, 0L, 0L, null, 2L)).state())
+            .as("取不到 ⇒ UNKNOWN").isEqualTo(PlatformHealthState.UNKNOWN);
+    }
+
+    // ===================== TICK_SLOW（阈值型） =====================
+
+    @Test
+    @DisplayName("★ tick 过慢：阈值 15s（= TTL 一半）；取不到 ⇒ UNKNOWN；恰好等于阈值 ⇒ FIRING")
+    void tickSlowMustUseThreshold() {
+        PlatformHealthRule rule = PlatformHealthRule.TICK_SLOW;
+        long threshold = PlatformHealthRule.TICK_SLOW_THRESHOLD_MS;
+
+        assertThat(PlatformHealthEvaluator.evaluate(rule, snap(0L, 0L, 0L, 0L, 0L, null, null, threshold),
+            PlatformHealthBaseline.none()).state())
+            .as("恰好等于阈值即触发（超过就会越过租约 TTL）").isEqualTo(PlatformHealthState.FIRING);
+        assertThat(PlatformHealthEvaluator.evaluate(rule, snap(0L, 0L, 0L, 0L, 0L, null, null, threshold - 1),
+            PlatformHealthBaseline.none()).state())
+            .as("低于阈值 ⇒ HEALTHY").isEqualTo(PlatformHealthState.HEALTHY);
+        assertThat(PlatformHealthEvaluator.evaluate(rule, snap(0L, 0L, 0L, 0L, 0L, null, null, null),
+            PlatformHealthBaseline.none()).state())
+            .as("未上报 ⇒ UNKNOWN").isEqualTo(PlatformHealthState.UNKNOWN);
+    }
+
+    // ===================== INSTANCE_UNREACHABLE（心跳型） =====================
+
+    @Test
+    @DisplayName("★ 上报中断：-1（从未收到）⇒ FIRING；≥45s ⇒ FIRING；低于阈值 ⇒ HEALTHY；null ⇒ UNKNOWN")
+    void reportStalledMustUseHeartbeat() {
+        PlatformHealthRule rule = PlatformHealthRule.INSTANCE_UNREACHABLE;
+        long threshold = PlatformHealthRule.REPORT_STALLED_THRESHOLD_MS;
+
+        assertThat(PlatformHealthEvaluator.evaluate(rule, snapWithReportLag(-1L),
+            PlatformHealthBaseline.none()).state())
+            .as("-1 = 从未收到（不能按数值比大小，否则会被读成健康）")
+            .isEqualTo(PlatformHealthState.FIRING);
+        assertThat(PlatformHealthEvaluator.evaluate(rule, snapWithReportLag(threshold),
+            PlatformHealthBaseline.none()).state())
+            .as("恰好达到阈值即中断").isEqualTo(PlatformHealthState.FIRING);
+        assertThat(PlatformHealthEvaluator.evaluate(rule, snapWithReportLag(threshold - 1),
+            PlatformHealthBaseline.none()).state())
+            .isEqualTo(PlatformHealthState.HEALTHY);
+        assertThat(PlatformHealthEvaluator.evaluate(rule,
+                new PlatformHealthSnapshot(0L, 0L, 0L, 0L, 0L, null, null, null, null),
+            PlatformHealthBaseline.none()).state())
+            .as("心跳取不到 ⇒ UNKNOWN").isEqualTo(PlatformHealthState.UNKNOWN);
     }
 }

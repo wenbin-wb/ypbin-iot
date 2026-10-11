@@ -12,6 +12,7 @@ package cn.ypbin.admin.iot.platform;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import cn.ypbin.admin.iot.alert.AlertMetrics;
+import cn.ypbin.admin.iot.lease.TenantLedgerMetrics;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
@@ -60,6 +61,9 @@ class PlatformMetricsNameTest {
             mismatches);
         // 入站丢弃两项：产出在增量模块，这里只钉住"与产出侧常量同值"的断言由各自门禁负责；
         // 本用例至少保证**判定器侧不是随手拼的字符串**（有 description 可读性要求）
+        // 台账写失败（R8-8）：产出侧在 TenantLedgerMetrics（单一来源）
+        assertSame(TenantLedgerMetrics.METRIC_BUMP_FAILURE,
+            PlatformMetrics.METRIC_LEDGER_BUMP_FAILED, mismatches);
         assertThat(PlatformMetrics.METRIC_INGEST_UNMAPPED)
             .startsWith("iot.ingest.propertyid.");
         assertThat(PlatformMetrics.METRIC_INGEST_ORPHAN)
@@ -92,10 +96,24 @@ class PlatformMetricsNameTest {
             PlatformMetrics.METRIC_ROUND_FAILED,
             PlatformMetrics.METRIC_NOTIFY_FAILED,
             PlatformMetrics.METRIC_INGEST_UNMAPPED,
-            PlatformMetrics.METRIC_INGEST_ORPHAN}) {
+            PlatformMetrics.METRIC_INGEST_ORPHAN,
+            PlatformMetrics.METRIC_LEDGER_BUMP_FAILED,
+            PlatformMetrics.METRIC_RECONCILE_DEFERRED,
+            PlatformMetrics.METRIC_TICK_DURATION_MAX,
+            PlatformMetrics.METRIC_REPORT_LAG}) {
             assertThat(name).isNotBlank().startsWith("iot.");
         }
         // 反射读取产出侧常量，顺带证明它确实存在（防"常量被改名后本门禁空转"）
         assertThat(constantOf(AlertMetrics.class, "METRIC_LAG")).isNotBlank();
+    }
+
+    @Test
+    @DisplayName("🔴 新规则的阈值必须被字面钉住（改常量抓不到 ⇒ 阈值形同虚设）")
+    void thresholdsMustBePinnedByLiteral() {
+        assertThat(PlatformHealthRule.TICK_SLOW_THRESHOLD_MS)
+            .as("tick 过慢阈值必须 = 租约 TTL(30s) 的一半；改大等于让规则失效")
+            .isEqualTo(15_000L);
+        assertThat(PlatformHealthRule.REPORT_STALLED_THRESHOLD_MS)
+            .as("上报中断阈值必须 = 3 × 上报间隔(15s)，与评估器停摆同口径").isEqualTo(45_000L);
     }
 }

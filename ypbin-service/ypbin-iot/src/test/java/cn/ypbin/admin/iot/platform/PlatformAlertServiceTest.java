@@ -20,11 +20,14 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import cn.ypbin.admin.iot.access.metrics.AccessMetricsSnapshotResp;
 import cn.ypbin.admin.iot.entity.IotPlatformAlert;
 import cn.ypbin.admin.iot.mapper.IotPlatformAlertMapper;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
+import java.time.Clock;
+import java.time.Instant;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.lang.reflect.Field;
 import java.util.Map;
@@ -60,12 +63,15 @@ class PlatformAlertServiceTest {
 
     private PlatformAlertService service;
 
+    private AccessMetricsReportStore accessStore;
+
     @BeforeEach
     void setUp() {
         registry = new SimpleMeterRegistry();
         alertMapper = mock(IotPlatformAlertMapper.class);
         notifier = mock(PlatformAlertNotifier.class);
-        service = new PlatformAlertService(registry, alertMapper, notifier);
+        accessStore = new AccessMetricsReportStore(registry, Clock.systemUTC());
+        service = new PlatformAlertService(registry, alertMapper, notifier, accessStore);
     }
 
     /** 注册一个"评估器停摆"的 gauge（lag 很大）。 */
@@ -232,5 +238,34 @@ class PlatformAlertServiceTest {
                 .as("字段 %s 是布尔开关 ⇒ 服务层也判通知开关，会与 PlatformAlertNotifier 形成双重判断", field.getName())
                 .isFalse();
         }
+    }
+
+    @Test
+    @DisplayName("★ 刚启动还没收到上报：三条 access 域规则均 UNKNOWN（不因重启误报 CRITICAL）")
+    void freshlyStartedMustStayUnknownForAccessDomain() {
+        Map<PlatformHealthRule, PlatformHealthVerdict> verdicts = service.evaluateOnce();
+
+        assertThat(verdicts.get(PlatformHealthRule.INSTANCE_UNREACHABLE).state())
+            .as("等满中断阈值之前判 UNKNOWN（否则每次 iot 重启都会误报一条平台告警）")
+            .isEqualTo(PlatformHealthState.UNKNOWN);
+        assertThat(verdicts.get(PlatformHealthRule.RECONCILE_DEFERRED).state())
+            .as("拿不到上报 ⇒ UNKNOWN（不知道就说不知道，不判健康）").isEqualTo(PlatformHealthState.UNKNOWN);
+        assertThat(verdicts.get(PlatformHealthRule.TICK_SLOW).state()).isEqualTo(PlatformHealthState.UNKNOWN);
+    }
+
+    @Test
+    @DisplayName("★ access 上报后：心跳转 HEALTHY，tick 过慢按阈值 FIRING/HEALTHY")
+    void afterAccessReportHeartbeatMustBeHealthyAndTickSlowFollowsThreshold() {
+        accessStore.store(new AccessMetricsSnapshotResp(0L, 30_000L, 100L, 10L,
+            0L, 0L, 0L, 0L, Instant.now()));
+
+        Map<PlatformHealthRule, PlatformHealthVerdict> verdicts = service.evaluateOnce();
+
+        assertThat(verdicts.get(PlatformHealthRule.INSTANCE_UNREACHABLE).state())
+            .isEqualTo(PlatformHealthState.HEALTHY);
+        assertThat(verdicts.get(PlatformHealthRule.TICK_SLOW).state())
+            .as("tick 最大耗时 30s ≥ 阈值 15s ⇒ FIRING").isEqualTo(PlatformHealthState.FIRING);
+        assertThat(verdicts.get(PlatformHealthRule.TICK_SLOW).observed())
+            .isEqualTo(30_000L);
     }
 }

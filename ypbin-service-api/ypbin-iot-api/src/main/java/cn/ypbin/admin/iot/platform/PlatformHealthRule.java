@@ -59,10 +59,48 @@ public enum PlatformHealthRule {
      * <p>两者**实测恒 0**；增长说明设备上报的数据被平台丢弃（点位未映射/孤儿映射），
      * 是"数据静默丢失"这类最难被用户发现的故障。</p>
      */
-    INGEST_DROPPING("PLATFORM_INGEST_DROPPING", "入站读数被丢弃", PlatformSeverity.WARNING);
+    INGEST_DROPPING("PLATFORM_INGEST_DROPPING", "入站读数被丢弃", PlatformSeverity.WARNING),
+
+    /**
+     * 台账版本号推进失败：`iot.ledger.bump.failure` 增长（R8-8 方案 B）。
+     *
+     * <p>该指标在生产**期望恒 0**；增长 ⇒ 台账表写失败 ⇒ 设备/点位的配置变更**不会**被接入侧收到，
+     * 只能等周期安全网收敛（见 `deploy/PROD-OPS-NOTES.md` §11）。它就是「变更信号正在丢」的直接证据。</p>
+     */
+    LEDGER_BUMP_FAILING("PLATFORM_LEDGER_BUMP_FAILING", "台账版本号推进失败", PlatformSeverity.WARNING),
+
+    /**
+     * 配置对账被时间预算推迟：`iot.access.config.reconcile.deferred` 增长（R8-2 方案 A，access 上报）。
+     *
+     * <p>增长 ⇒ 单轮对账**做不完**（tick 被顶到预算）⇒ 配置变更的生效延迟从「一个 tick」变成「多个 tick」。
+     * 这是 R8-2 是否要上 B/C/D 的**判据**，比人肉看 actuator 及时得多。</p>
+     */
+    RECONCILE_DEFERRED("PLATFORM_RECONCILE_DEFERRED", "配置对账被时间预算推迟", PlatformSeverity.WARNING),
+
+    /**
+     * 采集 tick 过慢：access 上报的 `tick.duration` 最大值 ≥ {@link #TICK_SLOW_THRESHOLD_MS}。
+     *
+     * <p>阈值取 **15s = 租约 TTL(30s) 的一半**：tick 超过 TTL 会触发下一轮批量自我停采/重领（R8-2）。
+     * 用「最大值」而不是「平均值」是因为故障形态是偶发长尾。</p>
+     */
+    TICK_SLOW("PLATFORM_TICK_SLOW", "采集调度 tick 过慢", PlatformSeverity.WARNING),
+
+    /**
+     * 接入节点指标上报中断：距最近一次上报 ≥ {@link #REPORT_STALLED_THRESHOLD_MS}（或从未收到）。
+     *
+     * <p>access 是**独立服务**——它挂了/被重启/网络断了，平台侧此前**毫无感知**（只剩采集数据静默断流）。
+     * 这条就是「access 活着吗」的心跳。阈值取 **45s = 3 × 上报间隔(15s)**，与评估器停摆同口径（避免偶发抖动误报）。</p>
+     */
+    INSTANCE_UNREACHABLE("PLATFORM_INSTANCE_UNREACHABLE", "接入节点指标上报中断", PlatformSeverity.CRITICAL);
 
     /** 评估器停摆阈值（毫秒）。`45_000 = 3 × 评估周期 15_000`，依据见 {@link #EVALUATOR_STALLED}。 */
     public static final long STALLED_LAG_THRESHOLD_MS = 45_000L;
+
+    /** tick 过慢阈值（毫秒）。`15_000 = 租约 TTL(30s) 的一半`，依据见 {@link #TICK_SLOW}。 */
+    public static final long TICK_SLOW_THRESHOLD_MS = 15_000L;
+
+    /** access 指标上报中断阈值（毫秒）。`45_000 = 3 × 上报间隔 15_000`，依据见 {@link #INSTANCE_UNREACHABLE}。 */
+    public static final long REPORT_STALLED_THRESHOLD_MS = 45_000L;
 
     private final String code;
 
