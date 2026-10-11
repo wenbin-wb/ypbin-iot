@@ -462,7 +462,7 @@ starter 提供**管理端点权限收口**能力，建议形态：
 ## UP-6（中｜凭据卫生）`deploy/install.sh` 的占位符替换是**全局 `sed`**，会把**注释里**的占位符替换成真实凭据
 
 > 状态：✅ **已修复**（admin PR #77，2026-09-28 合入）。上游 issue：**#74**（已关闭，[链接](https://github.com/wenbin-wb/ypbin-admin/issues/74)）。
-> **重要订正（R4）**：在**上游 `ypbin-admin` 当前 `main`** 里，`deploy/nacos/*.yaml`
+> **重要订正（客观独立）**：在**上游 `ypbin-admin` 当前 `main`** 里，`deploy/nacos/*.yaml`
 > **目前没有任何注释行含 `${...}` 占位符**（已 grep 复核）⇒ 这是**潜在**缺陷，不是已发生的事实；
 > 它在我们 fork 的 `ypbin-iot.yaml` 上**已经真实发生过**（注释里写了 `${GATEWAY_SIGN_TOKEN}`，
 > 被替换成真实值并 POST 进 Nacos 活配置）⇒ 上游采用同一修法可**预防**同类事故。
@@ -724,7 +724,7 @@ curl -sS --http1.1 https://raw.githubusercontent.com/xuxueli/xxl-job/3.4.2/doc/d
 > 同时订正 `throw-exception-if-no-handler-found`「已默认开启」的错误表述——实际由 Framework 默认抛
 > `NoResourceFoundException` + 模块注入 `spring.web.resources.add-mappings=false` 兜底）。
 > 上游 issue：**#55**（2026-09-27 开，[链接](https://github.com/wenbin-wb/ypbin-starter/issues/55)）。
-> **归属订正（R4）**：本条**不属于 `ypbin-admin`**——`R` 与全局异常处理器都在 **`ypbin-starter`**
+> **归属订正（客观独立）**：本条**不属于 `ypbin-admin`**——`R` 与全局异常处理器都在 **`ypbin-starter`**
 > （`ypbin-starter-core` 的 `R`、`ypbin-starter-web` 的 `GlobalExceptionHandler`、
 > `ypbin-starter-cloud-gateway` 的 `GatewayExceptionHandler`），故 issue 开在 **starter**。
 

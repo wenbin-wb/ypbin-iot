@@ -149,7 +149,9 @@ class TextFrameValueDecoderTest {
     void nonBytePayloadMustPassThrough() {
         assertThat(decoder.decode(42, "holding:1", TYPE_INT).value()).isEqualTo(42);
         assertThat(decoder.decode("ON", "some/topic", TYPE_STRING).value()).isEqualTo("ON");
-        // ⚠️ 断言必须能咬人（R6 复核点名）：`ok(null)` 与 `failed(...)` 的 value() 都是 null，
+        // ⚠️ 断言必须能咬人（独立复核曾指出这里容易被写成恒真）：`ok(null)` 与
+        // `failed(...)` 的 value() 都是 null，若只断 value() 则两种契约都能通 ⇒ 必须同时断言契约本身。
+        // 原文（保留上下文）：
         //    只断 value() 等于 null 是恒真的；这里断「成功且值为 null」两件事。
         DecodeOutcome nullOutcome = decoder.decode(null, "holding:1", TYPE_INT);
         assertThat(nullOutcome.success()).as("null 载荷是「原样透传」而不是解码失败").isTrue();

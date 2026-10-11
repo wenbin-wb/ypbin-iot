@@ -40,7 +40,8 @@ class IotSeamConventionTest {
      * 已知的可替换端口（新增端口时同步扩展本清单，并保留「至少扫到一个」的自检）。
      *
      * <p>2026-09-27 增补 {@code ValueDecoder}（读数解码钩子，见 `docs/VALUE-DECODE-DESIGN.md`）：
-     * 它是 R6 复核点名的遗漏——当时文档声称「该接缝由本门禁守着」，但清单里没有它 ⇒ 主张大于事实。</p>
+     * 它是独立复核曾指出的遗漏——当时文档声称「该接缝由本门禁守着」，但清单里并没有它
+ * ⇒ 文档主张大于事实。故此处补上门禁条目，并要求「文档点名 ⇔ 清单存在」双向一致。</p>
      */
     private static final List<String> REPLACEABLE_PORTS = List.of("TenantLinkManager", "ValueDecoder");
 

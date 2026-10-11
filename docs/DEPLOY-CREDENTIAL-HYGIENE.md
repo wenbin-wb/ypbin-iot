@@ -271,7 +271,7 @@ docker inspect -f '{{.State.Health.Status}}' ypbin-mysql ypbin-redis   # 期望 
 |---|---|---|
 | **H1** | 采样 `docker events` **一律只输出计数或键名**：`grep -c` / `wc -l` / 布尔。**禁止打印 `Action` 字符串**，禁止 `--format '{{json .}}'` 落盘后整段回读。含明文的临时事件流**用完即删**（`umask 077`、600、700 目录） | 本轮事故：`Action` 字段**本身就内嵌 exec 命令行**（`exec_create: mysqladmin ping -h localhost -p<口令>`）。我按行替换了 JSON 正文里的口令值，却仍把 `Action` 直接打印 ⇒ 明文口令进了会话输出。脱敏只覆盖"我以为的字段"是不够的 |
 | **H2** | 清理**只允许限定在本轮自己产生的路径内**；**跨轮次产物只能「登记 + 请示」，不得顺手删** | 本轮越界：清理 dry-run 备份时我一并删掉了 `/opt/ypbin/{secret-rotation,token-rotation}-*`（早前轮次的轮换回滚物）。用户裁定**结果可接受**（里面是已作废的旧值，销毁本身正确、也不该回滚到已泄露的值），但**流程属越界** ⇒ 立此规矩 |
-| **H3** | 凭据类断言**必须与外部真值比对**，**禁止自比自**（`assert got == token` 在 `token` 被覆盖时恒真）；同名变量**跨用途必须显式区分命名** | 本轮缺陷：`fix-access-trusted-source.py` 里 `token` 一名两用（`GATEWAY_SIGN_TOKEN` 被 `login()` 的 JWT 覆盖）⇒ `build_block(token)` 会把 **JWT 写进 `ypbin-access.yaml`**，且断言自比自 + 打印假绿。由 R6 复核者桩化实证抓出；修复见 `tools/test_rotate_nacos_password.py::CredentialSeparationTest`（hermetic、修前必红） |
+| **H3** | 凭据类断言**必须与外部真值比对**，**禁止自比自**（`assert got == token` 在 `token` 被覆盖时恒真）；同名变量**跨用途必须显式区分命名** | 本轮缺陷：`fix-access-trusted-source.py` 里 `token` 一名两用（`GATEWAY_SIGN_TOKEN` 被 `login()` 的 JWT 覆盖）⇒ `build_block(token)` 会把 **JWT 写进 `ypbin-access.yaml`**，且断言自比自 + 打印假绿。由独立复核者桩化实证抓出；修复见 `tools/test_rotate_nacos_password.py::CredentialSeparationTest`（hermetic、修前必红） |
 
 ### 10.2 三条自查教训（都是本轮用血换来的）
 

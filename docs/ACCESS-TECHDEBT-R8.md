@@ -1,7 +1,7 @@
 # 访问层技术债 R8 系列立项台账（R8-2 / R8-4 ~ R8-9）
 
 > **建立日期**：2026-10-09（初稿同日经独立子代理审计后更正，见 §0.1）
-> **依据**：`docs/IOT-ROADMAP.md:405-418`（R8/G8 行）+ `docs/PLATFORM-GAP-REPORT-2026-09-28.md:99,286`（对账/一致性面 + 决策点 6）
+> **依据**：`docs/IOT-ROADMAP.md:405-418`（R8/G8 行）+ 立项时的差距审计（对账/一致性面 + 决策点 6）
 > **本文性质**：**只立项、不排期、不实施**。目的是把「扩展前再做」的糊状表述换成**逐条可验收**的条目：
 > 每条都有 ①一手证据（文件:行号）②现状判定 ③触发前提 ④方案选项 ⑤可复现验收标准 ⑥依赖/工作量 ⑦风险与回滚。
 > **排期口径**：仍遵守用户 2026-09-28 的拍板（`TASK-BOARD.md:19`）——**多租户/多节点扩展前再做，现阶段不做**；
@@ -108,7 +108,7 @@
 > ② **SQL**：新增 `TenantNodeAssignmentMapper#selectEpochItemsByNode`（`WHERE a.access_node = ?` 走 `idx_tenant_node_assignment_node`、`ORDER BY tenant_id` 保证响应稳定、两条 `is_deleted = 0` 手写补上），复杂度从 O(节点数 × 全平台租户) 降到 O(本节点持有租户)。
 > ③ **客户端**：`ConfigEpochReconciler` 持有 `nodeId` 并按其做**一次**批量调用；`AccessLeaseConfiguration` 传 `properties.getNodeId()`；`docs/LEASE.md` §一 契约同步。
 > **⚠️ 方案 C（分页）为什么被放弃（设计取舍，如实记录）**：初版已实现「节点过滤 + `limit/offset` 翻页」，被 **CI 架构门禁** `SourceConventionTest#loopsMustNotCallDbOrRpc` 拦下（循环体内的 RPC 判定为 N+1）。复核该判定**成立**：分页必然把「一次批量调用」变成「每 `limit` 行一次**串行** RPC」——对单节点持有量（远小于一页）反而更贵，且会吃掉 tick 时间预算（与 R8-2 相悖）。因此改为**只做节点过滤**：返回集已按节点收敛、规模由节点容量（`ypbin.access.capacity`）天然约束，不需要分页兜底；同时避免为一条可避免的循环 RPC 永久开一个门禁豁免。
-> **R6 独立复核（外委子代理，对抗式只读）结论**：无阻断项（它在 5611e0c0 上独立复现了架构门禁判红、在收敛后的 963c170f 上独立跑出 `SourceConventionTest` 20/0/0/0）。据其非阻断建议本批已修 5 处：① 缺参/空白参从「兜底 code=500 + ERROR 全栈」改为 `BusinessException(BAD_REQUEST)`（code=400 + WARN），并补 HTTP 层用例 `InternalLeaseControllerTest`（4/0/0/0，钉住缺参/空白/原值透传）；② 客户端 `ConfigEpochReconciler` 构造期调同一 `validateAccessNode`（让「服务端与客户端共用口径」名副其实 + fail-fast）；③ 去掉读侧 `trim()`（与写侧存原值对称，消除「node-id 带空格 ⇒ 查询恒空、信号静默失效」路径）；④ 清理 3 处死导入；⑤ IT 租户区间从与其它 IT 重叠的 9200xx 迁到 **929xxx**，`purge()` 改为「节点名 + 区间」双重清理（容器 reuse ⇒ 只按区间清理会留历史残留，本 IT 初版因此假红过一次）。
+> **独立复核（外委子代理，对抗式只读）结论**：无阻断项（它在 5611e0c0 上独立复现了架构门禁判红、在收敛后的 963c170f 上独立跑出 `SourceConventionTest` 20/0/0/0）。据其非阻断建议本批已修 5 处：① 缺参/空白参从「兜底 code=500 + ERROR 全栈」改为 `BusinessException(BAD_REQUEST)`（code=400 + WARN），并补 HTTP 层用例 `InternalLeaseControllerTest`（4/0/0/0，钉住缺参/空白/原值透传）；② 客户端 `ConfigEpochReconciler` 构造期调同一 `validateAccessNode`（让「服务端与客户端共用口径」名副其实 + fail-fast）；③ 去掉读侧 `trim()`（与写侧存原值对称，消除「node-id 带空格 ⇒ 查询恒空、信号静默失效」路径）；④ 清理 3 处死导入；⑤ IT 租户区间从与其它 IT 重叠的 9200xx 迁到 **929xxx**，`purge()` 改为「节点名 + 区间」双重清理（容器 reuse ⇒ 只按区间清理会留历史残留，本 IT 初版因此假红过一次）。
 > **验证**：新增真库 IT `LeaseEpochNodeFilterIT` **4/0/0/0**（节点过滤+升序 / 无归属节点返回空集 / 软删台账不复活 `config_epoch` / 软删归属不出现）、iot 模块 **883/0/0/0**（含新 MockMvc 4 条）、access 模块 **117/0/0/0**；**变异 4/4 转红**：M1 去掉节点过滤（IT 节点过滤用例红）、M2 去掉台账 `is_deleted=0`（软删台账用例红）、M3 去掉归属 `is_deleted=0`（软删归属用例红）、M4 客户端不传本节点标识（单测 `reconcileMustQueryOnceWithNodeId` 红）。每处先确认落地、跑完 `git checkout --` 还原并复跑确认全绿。
 > **未做（本条剩余面）**：生产多节点环境未实测（需 ≥2 节点 + ≥4 租户，登记于 §5）。
 
@@ -267,7 +267,7 @@
 > ③ **自调用修复**：`bumpConfigEpochOfCurrentTenant()` 补 `@Transactional(rollbackFor = Exception.class)`——它内部是**自调用** `bumpConfigEpoch`（同一 Bean 不走代理），标在包装方法上后「外层有事务 ⇒ 加入同一事务；非事务上下文 ⇒ 自己开一个」，语义不再依赖调用方。
 > **验证**：`TenantLedgerServiceTest` **6/0/0/0**（新增「失败不抛 + 必须计数」）；**真库 IT** `TenantLedgerIT` **6/0/0/0**（临时 `RENAME TABLE tenant_ledger` 构造真实失败 ⇒ 同事务内写另一张表的「业务写入」必须**提交**、计数 = 1、表名在 finally 还原）；iot 全模块 **890/0/0/0**；**变异 2/2 转红**（去掉 try/catch ⇒ 单测 Errors=1、真库 IT Errors=1）。
 > **边界（如实登记）**：① 连接级故障下事务本身可能已不可用 ⇒ 业务写入仍会失败（catch 消除不了）；② **锁类失败**（`1205` 锁等待超时 / `1213` 死锁）**重新抛出**——InnoDB 死锁回滚的是**整个事务**，吞掉会「外层提交谎报成功、写入已丢」（复核实测 MySQL 8.4.11 语义）；③ 指标自增不随事务回滚（有意留痕）。
-> **R6 独立复核（外委子代理 ×2：深度只读+变异复核 / 限时只读复核）**：**无阻断项**。据其建议已整改：锁类失败改为上抛（+单测）、补「成功/no-op 计数为 0」「MyBatis `PersistenceException` 形态」断言、补 `@Transactional` **声明门禁**（该注解此前零覆盖：删掉它没有任何测试会红）、真库 IT 改为**先建台账行**（原断言在 no-op 路径也成立 ⇒ 无判别力）、计数改**差值**、RENAME **崩溃自愈** + `@AfterAll` 清归属行、修正本节与 §11 的收敛口径。复核另指出（**未做**）：`@Transactional` 的「代理级」验证需 Spring 上下文 + DataSource（本批用声明门禁兜住）；ERROR 日志未节流（台账长期不可写时可能刷日志，计数仍是告警信号）；该指标未纳入 `PlatformHealthRule`。
+> **独立复核（外委子代理 ×2：深度只读+变异复核 / 限时只读复核）**：**无阻断项**。据其建议已整改：锁类失败改为上抛（+单测）、补「成功/no-op 计数为 0」「MyBatis `PersistenceException` 形态」断言、补 `@Transactional` **声明门禁**（该注解此前零覆盖：删掉它没有任何测试会红）、真库 IT 改为**先建台账行**（原断言在 no-op 路径也成立 ⇒ 无判别力）、计数改**差值**、RENAME **崩溃自愈** + `@AfterAll` 清归属行、修正本节与 §11 的收敛口径。复核另指出（**未做**）：`@Transactional` 的「代理级」验证需 Spring 上下文 + DataSource（本批用声明门禁兜住）；ERROR 日志未节流（台账长期不可写时可能刷日志，计数仍是告警信号）；该指标未纳入 `PlatformHealthRule`。
 > **未做**：未把该指标接进平台自告警规则（`PlatformHealthRule` 需新增规则，属另一项）；方案 A（保持一致性优先）已由用户否决，不再实施。
 
 

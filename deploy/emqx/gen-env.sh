@@ -71,7 +71,7 @@ mkdir -p "$APIKEY_DIR"
 printf '%s:%s\n' "$API_KEY" "$API_SECRET" >"$APIKEY_FILE"
 # ⚠️ **不要**对 chown 加 `|| true`：属主不对 ⇒ 容器内（uid 1000）读不到 ⇒ EMQX 只在启动日志里
 #    打印 `failed_to_open_the_bootstrap_file, reason: Permission denied`（**不致死不报错**），
-#    结果是 API Key 静默失效。这里失败就**显式报错退出**（R6：禁静默降级）。
+#    结果是 API Key 静默失效。这里失败就**显式报错退出**（不允许静默降级）。
 if ! chown "$EMQX_UID:$EMQX_UID" "$APIKEY_DIR" "$APIKEY_FILE"; then
   echo "chown 到容器 uid ($EMQX_UID) 失败 ⇒ API Key 预置文件容器内读不到，必须人工修正后再起容器" >&2
   exit 1
