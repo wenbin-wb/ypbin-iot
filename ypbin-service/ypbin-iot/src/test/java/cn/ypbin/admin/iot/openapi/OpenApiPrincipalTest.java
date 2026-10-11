@@ -18,7 +18,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
- * 虚拟主体约定用例（看板 #11 / 方案 B2）。
+ * 虚拟主体约定用例（方案 B2）。
  *
  * <p>重点锁死三条**安全判据**（做错了会直接导致越权，且不会报错）：</p>
  * <ol>

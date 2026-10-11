@@ -13,7 +13,7 @@ import cn.ypbin.admin.iot.model.query.DeviceTraceQuery;
 import cn.ypbin.admin.iot.model.resp.DeviceTraceResp;
 
 /**
- * 设备「消息跟踪」服务（看板 #8，设计 `docs/MESSAGE-TRACE-DESIGN.md`）——**只读聚合**。
+ * 设备「消息跟踪」服务（设计 `docs/MESSAGE-TRACE-DESIGN.md`）——**只读聚合**。
  *
  * <p><b>本能力一期不写任何数据</b>：时间线完全由既有的三张链路表
  * （`iot_command_instance` / `iot_mqtt_ingest_receipt` / `iot_event_log` / `outage_event`）

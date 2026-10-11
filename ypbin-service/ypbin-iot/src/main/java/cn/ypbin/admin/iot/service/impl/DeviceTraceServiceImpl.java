@@ -44,7 +44,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 /**
- * 设备消息跟踪实现（看板 #8，设计 `docs/MESSAGE-TRACE-DESIGN.md`）——**只读聚合**。
+ * 设备消息跟踪实现（设计 `docs/MESSAGE-TRACE-DESIGN.md`）——**只读聚合**。
  *
  * <p><b>本类严格照设计的四条硬约束实现</b>：</p>
  * <ol>

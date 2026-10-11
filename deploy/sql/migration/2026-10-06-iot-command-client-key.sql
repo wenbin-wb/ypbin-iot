@@ -1,5 +1,5 @@
 -- =============================================================
--- 命令实例客户端幂等键：iot_command_instance.client_request_id（看板 #11 O-7 C2）
+-- 命令实例客户端幂等键：iot_command_instance.client_request_id（开放 API O-7 C2）
 -- 与 deploy/sql/007-iot-data.sql 末尾的同名语句**逐字等价**（tools/check-iot-sql-equivalence.sh 校验）。
 -- 文件名按日期排序在最后，与"追加到 007 末尾"的位置对应。
 -- 回滚见 deploy/sql/rollback/2026-10-06-iot-command-client-key-rollback.sql

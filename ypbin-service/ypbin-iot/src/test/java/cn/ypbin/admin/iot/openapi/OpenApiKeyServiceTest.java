@@ -23,7 +23,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/** 开放 API Key 服务用例（看板 #11 第 1 批）。 */
+/** 开放 API Key 服务用例（第 1 批）。 */
 class OpenApiKeyServiceTest {
 
     private static final String TEST_PEPPER = "test-pepper-not-a-real-secret";

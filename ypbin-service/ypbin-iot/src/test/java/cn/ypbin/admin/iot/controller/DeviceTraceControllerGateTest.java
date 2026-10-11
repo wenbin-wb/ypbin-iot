@@ -21,7 +21,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 
 /**
- * 消息跟踪端点的**权限与路径门禁**（看板 #8，设计 `docs/MESSAGE-TRACE-DESIGN.md` §5.1）。
+ * 消息跟踪端点的**权限与路径门禁**（设计 `docs/MESSAGE-TRACE-DESIGN.md` §5.1）。
  *
  * <p>为什么单独测这个：权限码选错是本能力**最容易做错、且做错了看不出来**的地方。
  * 设计 §5.1 明确规定——本端点返回的条目含下行命令标识、归因码与"设备回执"入口，

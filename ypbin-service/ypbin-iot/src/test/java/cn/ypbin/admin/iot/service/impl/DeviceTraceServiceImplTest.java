@@ -41,7 +41,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
- * 设备消息跟踪实现用例（看板 #8，设计 `docs/MESSAGE-TRACE-DESIGN.md` §7）。
+ * 设备消息跟踪实现用例（设计 `docs/MESSAGE-TRACE-DESIGN.md` §7）。
  *
  * <p><b>本用例的重点不是"能不能查出来"，而是锁死设计里那几条"容易做错且做错了看不出来"
  * 的硬约束</b>：</p>

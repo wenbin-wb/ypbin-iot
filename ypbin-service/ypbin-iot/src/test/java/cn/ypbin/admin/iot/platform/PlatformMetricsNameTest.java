@@ -20,7 +20,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
- * 平台健康判定的**指标名一致性门禁**（看板 #10，设计 §1.4）。
+ * 平台健康判定的**指标名一致性门禁**（设计 §1.4）。
  *
  * <p><b>为什么需要它</b>：判定器按**指标名**从 `MeterRegistry` 取值。名字若与产出侧
  * 不一致（改了产出侧常量、或这边拼错一个字符），取值会返回 `null`，

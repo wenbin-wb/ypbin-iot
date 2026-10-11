@@ -16,7 +16,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * 开放 API 自检（看板 #11 门面，设计 §6.4 whoami）。
+ * 开放 API 自检（门面，设计 §6.4 whoami）。
  *
  * <p>无 {@code @SaCheckPermission}：任何 scope 组合的 Key 都应能自检（否则只配了
  * {@code iot:series:get} 的 Key 连"我是谁"都问不了）。鉴权不靠注解，靠

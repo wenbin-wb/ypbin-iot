@@ -37,7 +37,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 /**
- * 平台自告警服务用例（看板 #10，设计 §8）。
+ * 平台自告警服务用例（设计 §8）。
  *
  * <p>重点锁死"做错了也看不出来"的几条：</p>
  * <ol>

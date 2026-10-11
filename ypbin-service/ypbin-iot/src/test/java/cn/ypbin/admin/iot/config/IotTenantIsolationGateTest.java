@@ -61,17 +61,17 @@ class IotTenantIsolationGateTest {
         // 告警与阈值（2026-10-03 追加）：四张表都是租户表；漏登记会让「跨租户读别人告警」
         // 这条最危险的路径**不受本门禁覆盖**（设计 §3.5-N4 明确要求补进本清单）
         "iot_alert_rule", "iot_alert_rule_point", "iot_alert_instance", "iot_alert_notification",
-        // 设备批量导入（2026-09-30 追加，看板 #7）：批次与明细都是租户表。
+        // 设备批量导入（CSV，2026-09-30 追加）：批次与明细都是租户表。
         // 漏登记的后果尤其严重——明细里存的是**原始行内容**（可能含业务备注），
         // 跨租户读到就等于把别人上传的设备清单整份拿走
         "iot_device_import_batch", "iot_device_import_row",
-        // 命令实例与 MQTT 入站回执（2026-09-30 追加，看板 #8 设计复核时发现的**既有门禁缺口**）。
+        // 命令实例与 MQTT 入站回执（2026-09-30 追加，消息跟踪设计复核时发现的**既有门禁缺口**）。
         // 两者实体均 extends TenantBaseEntity，却一直未登记进本清单 ⇒ 本清单式门禁**不覆盖**它们。
         // 漏登记的后果：iot_command_instance.payload/reply_payload 是**命令与回执报文体**
         // （用户自由输入、服务端不过滤内容），跨租户读到等于拿到别人设备的命令内容与回执。
         // 注：007-iot-data.sql 的 DDL 注释早已点名要求登记，此处补上。
         "iot_command_instance", "iot_mqtt_ingest_receipt",
-        // 平台自告警（2026-09-30 追加，看板 #10）：建表**同批**登记，不重犯 #8 复核发现的
+        // 平台自告警（2026-09-30 追加）：建表**同批**登记，不重犯消息跟踪复核发现的
         // "实体是租户表却没登记"缺口。平台告警含 metric_snapshot（指标快照）与 summary，
         // 跨租户读到会暴露别的租户的平台运行状态。
         "iot_platform_alert");

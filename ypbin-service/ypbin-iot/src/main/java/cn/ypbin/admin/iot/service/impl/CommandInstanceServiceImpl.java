@@ -179,7 +179,7 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
     }
 
     @Override
-    // ⚠️ 刻意无 @Transactional（看板 #11 O-7 C1）：insert（PENDING，即时提交）→ publish（事务外）
+    // ⚠️ 刻意无 @Transactional（开放 API O-7 C1）：insert（PENDING，即时提交）→ publish（事务外）
     // → update 各自单语句自动提交；一次慢 EMQX（最坏 5s）不再占住数据库事务。
     // 崩溃窗口（insert 后 publish 前进程挂掉）由 CommandTimeoutScanner（15s 一轮）收敛为超时。
     // 代价（用户已接受）：publish 失败会留 FAILED 行（以前是回滚无痕）—— residual 更可审计。
@@ -254,7 +254,7 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
     }
 
     /**
-     * 客户端幂等键归一化（看板 #11 O-7 C2）。
+     * 客户端幂等键归一化（开放 API O-7 C2）。
      *
      * @param raw 原始值（可空）
      * @return trim 后的键；空输入返回 {@code null}（= 每次调用都是独立命令）

@@ -19,7 +19,8 @@ import lombok.Setter;
  * <p>字段与 {@code iot_point_mapping} 对齐，另带属性标识 {@code identifier}。
  * <b>{@code identifier} 才是上报坐标（规范坐标）</b>：2026-09-26 坐标统一后，采集侧上报的是它而不是
  * {@code propertyId}（主键字符串形态）；{@code propertyId} 保留作定位与日志用。
- * 理由与统一前的读侧后果见 {@code docs/IOT-ROADMAP.md} 四点十七补充段。</p>
+ * 统一前 access 侧上报的是主键字符串，导致同一个 {@code iot:latest} 哈希里出现两种 field，
+ * 读侧按标识查询拿不到 access 来源的数据。</p>
  *
  * @author wenbin
  * @since 2026-09-21

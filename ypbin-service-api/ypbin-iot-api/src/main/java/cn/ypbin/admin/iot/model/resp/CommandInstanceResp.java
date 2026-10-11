@@ -38,7 +38,7 @@ public class CommandInstanceResp {
     /** 请求 ID（幂等键）。 */
     private String requestId;
 
-    /** 客户端幂等键（看板 #11 O-7 C2；创建时提供则回显）。 */
+    /** 客户端幂等键（开放 API O-7 C2；创建时提供则回显）。 */
     private String clientRequestId;
 
     /** 下行主题。 */

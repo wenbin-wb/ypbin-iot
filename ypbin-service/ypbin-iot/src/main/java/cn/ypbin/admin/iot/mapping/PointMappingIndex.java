@@ -37,8 +37,8 @@ import org.springframework.stereotype.Component;
  * 空入参（{@code deviceIds} 为空）与「映射为空」都**先判空短路**：不做 {@code IN ()}、
  * 不发第二次查询、不抛异常。</p>
  *
- * <p><b>规范坐标 = 属性标识（{@code iot_property.identifier}）</b>（2026-09-26 统一，见
- * {@code docs/IOT-ROADMAP.md} 四点十七补充段）。历史遗留形态是**属性主键字符串**
+ * <p><b>规范坐标 = 属性标识（{@code iot_property.identifier}）</b>（2026-09-26 统一）。
+ * 历史遗留形态是**属性主键字符串**
  * （{@code access} 采集链路在统一之前上报的就是它）。本索引因此同时产出三件事：</p>
  * <ol>
  *   <li><b>形态 → 规范标识</b>（{@link DeviceCoordinates#canonicalByForm()}）：入站把任意被接受的
@@ -68,8 +68,7 @@ import org.springframework.stereotype.Component;
  *       本索引无法把它们分开；能做且必须做的是**不静默**：记入本集合 + WARN + 计数
  *       {@value #METRIC_COORDINATE_COLLISION}。**读侧则把两者的历史形态都查出来**
  *       （{@link DeviceCoordinates#legacyFormsByCanonical()} 是集合），至少不让存量数据凭空消失。
- *       彻底解法（拒绝同设备同名标识的映射）属产品/校验策略，登记在
- *       {@code docs/IOT-ROADMAP.md} 四点十七，本轮不做。</li>
+ *       彻底解法（拒绝同设备同名标识的映射）属产品/校验策略，**登记为待办，本轮不做**。</li>
  * </ul>
  *
  * <p><b>租户</b>：{@code iot_point_mapping} / {@code iot_property} 都是租户表。入站上报路径**没有租户

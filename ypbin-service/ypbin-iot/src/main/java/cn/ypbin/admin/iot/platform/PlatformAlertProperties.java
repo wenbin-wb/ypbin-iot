@@ -16,7 +16,7 @@ import lombok.Setter;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 /**
- * 平台自告警配置（看板 #10）。
+ * 平台自告警配置。
  *
  * <p><b>为什么 `enabled` 默认 false</b>：一期定位是"观察期只落库"（设计 §2.1），
  * 且它是一条**新的后台任务**——不加开关就默认跑，等于把未经验证的阈值直接接进生产。

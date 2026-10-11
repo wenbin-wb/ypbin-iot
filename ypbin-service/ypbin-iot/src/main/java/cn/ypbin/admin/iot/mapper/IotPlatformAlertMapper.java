@@ -17,7 +17,7 @@ import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Update;
 
 /**
- * 平台自告警实例 Mapper（看板 #10）。
+ * 平台自告警实例 Mapper。
  *
  * <p><b>去重靠库级唯一键，不靠"先查再插"</b>：`uk_platform_alert_active(tenant_id, active_dedup_key)`。
  * "先查有没有活动告警、没有就插入"在多副本并发下会双插（两个副本同时查到"没有"）；

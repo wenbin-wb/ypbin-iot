@@ -3,7 +3,7 @@
 # gen-certs.sh —— 为 EMQX 8883（MQTT over TLS）生成**自签 CA + 服务端证书**（幂等）
 # =============================================================================
 # 在**中间件机**上运行（产物落 /opt/emqx/certs，宿主侧 700/600，只读挂载进容器）。
-# 设计依据：docs/EMQX-DEPLOY.md §3.2（TLS 拓扑 / 证书方案 / 生产替换步骤）。
+# 设计依据：docs/EMQX-TLS-DESIGN.md §2（方案与取舍）/§3（证书策略）/§4（迁移计划）。
 #
 # 🔴🔴 **自签证书仅限开发测试期使用，不得用于生产**：
 #   · 客户端默认**不信任**该 CA ⇒ 真设备必须显式导入 ca.crt（或 --insecure 关校验，
@@ -11,7 +11,7 @@
 #   · 自签 CA 的私钥就在本机 ⇒ 一旦泄露可签发任意"合法"证书；
 #   · 无吊销（CRL/OCSP）、无自动轮换、有效期需人工看守。
 #   ⇒ **生产必须换正式 CA（如 Let's Encrypt / 云厂商 DV 证书）签发的服务端证书**，
-#     替换步骤见 docs/EMQX-DEPLOY.md §3.2「从自签换成正式 CA 证书」。本脚本产出的文件
+#     替换步骤见 docs/EMQX-TLS-DESIGN.md §3.1（自签 vs 正式 CA）/§3.3（有效期与轮换）。本脚本产出的文件
 #     与正式证书**同名同路径**，替换时只换文件、不改 EMQX 配置。
 #
 # 幂等语义（**重要，别读错**）：
@@ -142,6 +142,6 @@ echo "  CA 证书指纹(SHA256)   ：$(openssl x509 -in "$CA_CERT" -noout -finge
 echo "  有效期至             ：$(openssl x509 -in "$CERT" -noout -enddate 2>/dev/null | cut -d= -f2)"
 echo "  SAN                  ：$(openssl x509 -in "$CERT" -noout -ext subjectAltName 2>/dev/null | tail -1 | sed 's/^ *//')"
 echo
-echo "  ⚠️ 自签仅开发测试期可用；生产必须换正式 CA 证书（docs/EMQX-DEPLOY.md §3.2）。"
+echo "  ⚠️ 自签仅开发测试期可用；生产必须换正式 CA 证书（docs/EMQX-TLS-DESIGN.md §3.1）。"
 echo "  ⚠️ 客户端要连 8883 必须导入：$CA_CERT（否则会因不受信任而失败）。"
 exit "$fail"

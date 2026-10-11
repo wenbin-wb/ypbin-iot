@@ -23,7 +23,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
- * 开放 API 作用域的**端到端"咬合"测试**（看板 #11）。
+ * 开放 API 作用域的**端到端"咬合"测试**。
  *
  * <p><b>为什么必须有它</b>（独立复核 2026-09-30 的"最重要建议"）：
  * 只测 {@code scopesToPermissions} 丢弃 pattern，<b>并不能证明 Sa-Token 端不会命中</b> ——

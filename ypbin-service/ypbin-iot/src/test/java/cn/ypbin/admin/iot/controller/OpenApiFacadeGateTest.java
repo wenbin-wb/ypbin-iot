@@ -19,7 +19,7 @@ import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 
 /**
- * 开放 API 门面门禁（看板 #11 门面 + O-7）。
+ * 开放 API 门面门禁（门面 + O-7）。
  *
  * <p>锁四条：① 门面路径全部在 {@code /open-api/v1} 之下（网关只把该前缀交给 Key 鉴权）；
  * ② 除 whoami 外每个读方法都有精确的作用域权限码（防"顺手改宽"）；

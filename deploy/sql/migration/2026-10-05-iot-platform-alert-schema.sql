@@ -1,4 +1,4 @@
--- 迁移：平台自告警实例表（看板 #10）
+-- 迁移：平台自告警实例表（平台自告警）
 -- 与 deploy/sql/007-iot-data.sql 的**平台自告警段**语句等价
 -- （由 tools/check-iot-sql-equivalence.sh 校验）。
 -- ⚠️ 排序约束：本文件名必须排在 2026-10-04-iot-device-import-menu.sql 之后。
@@ -30,9 +30,9 @@ CREATE TABLE iot_platform_alert
     UNIQUE KEY uk_platform_alert_active (tenant_id, active_dedup_key),
     KEY idx_platform_alert_state (tenant_id, state, start_ts),
     KEY idx_platform_alert_rule (tenant_id, rule_code, start_ts)
-) COMMENT 'IoT 平台自告警实例（看板 #10；与设备告警物理分离，uk_platform_alert_active 是去重的库级保证）';
+) COMMENT 'IoT 平台自告警实例（与设备告警物理分离，uk_platform_alert_active 是去重的库级保证）';
 
--- 平台告警菜单（看板 #10 二批；与 007-iot-data.sql 等价，顺序与 DDL 一致）
+-- 平台告警菜单（二批；与 007-iot-data.sql 等价，顺序与 DDL 一致）
 -- 复用 iot:alert:list 权限码；挂既有「IoT 平台」目录（pid=3204）；
 -- component 对应前端 views/iot/platformAlert/index.vue（vben 动态菜单约定）。
 INSERT INTO sys_menu (id, pid, name, type, platform_only, path, component, auth_code, title, icon, sort, create_time, status, is_deleted)
@@ -42,7 +42,7 @@ SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (3208);
 INSERT INTO sys_template_menu (template_id, menu_id)
 SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (3208);
 
--- 开放 API Key 表（看板 #11 第 1 批；与 007-iot-data.sql 的尾部段等价）
+-- 开放 API Key 表（第 1 批；与 007-iot-data.sql 的尾部段等价）
 CREATE TABLE IF NOT EXISTS iot_open_api_key (
   id BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键',
   tenant_id BIGINT NOT NULL COMMENT '租户 ID',
@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS iot_open_api_key (
   KEY idx_tenant_status (tenant_id, status)
 ) COMMENT='IoT 开放 API Key（只存哈希，明文仅创建时返回一次）';
 
--- 开放 API Key 管理菜单（看板 #11 第 1 批；与 007 等价，顺序一致）
+-- 开放 API Key 管理菜单（第 1 批；与 007 等价，顺序一致）
 INSERT INTO sys_menu (id, pid, name, type, platform_only, path, component, auth_code, title, icon, sort, create_time, status, is_deleted)
 VALUES (3209, 3204, 'IotOpenApiKeys', 'menu', 0, '/iot/open-api-keys', '/iot/openApiKeys/index', 'iot:openapi:key-list', 'page.iot.openApiKey.title', 'carbon:key', 17, NOW(), 1, 0);
 INSERT INTO sys_menu (id, pid, name, type, platform_only, auth_code, title, sort, create_time, status, is_deleted)

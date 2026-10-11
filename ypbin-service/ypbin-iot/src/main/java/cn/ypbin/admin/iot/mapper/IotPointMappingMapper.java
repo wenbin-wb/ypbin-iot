@@ -30,7 +30,7 @@ public interface IotPointMappingMapper extends BaseMapper<IotPointMapping> {
      * {@code iot.ingest.propertyid.orphan}），但**行本身还在**，需要一个库级计数让运维看见存量规模。</p>
      *
      * <p><b>只读计数，不做删除</b>（刻意）：物理删除映射行会改变设备的采集配置，属需要人确认的动作；
-     * 巡检只把规模暴露成指标 + 日志，处置方式见 {@code docs/IOT-ROADMAP.md} 四点十七。</p>
+     * 巡检只把规模暴露成指标 + 日志，处置（重建或清理映射）需人工确认。</p>
      *
      * <p>{@code is_deleted = 0} 写在 ON 条件里（而不是 WHERE）：逻辑删除的属性行与「物理缺失」
      * 对点位坐标是同一件事——都拿不到 {@code identifier}。</p>

@@ -60,7 +60,7 @@ public interface TenantLinkManager {
     boolean reconcile(Long tenantId);
 
     /**
-     * 本节点是否负责该租户（**不代表链路一定活着**，见 docs/IOT-ROADMAP.md 增量 3 的说明）。
+     * 本节点是否负责该租户（**不代表链路一定活着**：租约持有只说明配置已下发，不证明采集链路可用）。
      *
      * @param tenantId 租户 ID
      * @return 负责返回 {@code true}

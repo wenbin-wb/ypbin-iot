@@ -22,7 +22,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * 设备「消息跟踪」接口（看板 #8，设计 `docs/MESSAGE-TRACE-DESIGN.md` §5）。
+ * 设备「消息跟踪」接口（设计 `docs/MESSAGE-TRACE-DESIGN.md` §5）。
  *
  * <p><b>路径与网关口径</b>：客户端调 `/iot/devices/{id}/messages`，网关 {@code StripPrefix=1} 后
  * 落到本控制器的 `/devices/{deviceId}/messages`（与 {@code IotCommandController} 同构）。</p>

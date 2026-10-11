@@ -30,7 +30,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * 开放 API 门面：产品/物模型只读（看板 #11 门面，O-5）。
+ * 开放 API 门面：产品/物模型只读（门面 O-5）。
  *
  * <p>薄适配，委托 {@link IotProductService}/{@link IotThingModelService}
  * （与管理面同源）。物模型路径形状与管理面逐字一致（含 {@code productId} 段，

@@ -31,7 +31,7 @@ import org.springframework.stereotype.Component;
  * <p>为什么走 {@code SysCache} 而不是每次 Feign：{@code @SaCheckPermission} 在请求线程上同步执行，
  * 直连 system 会让每个请求都多一次远程调用；SysCache 是带本地缓存的既有通道。</p>
  *
- * <p><b>开放 API 的虚拟主体（看板 #11，方案 B2，2026-09-30 新增）</b>：按**用户 ID 段**分流 ——
+ * <p><b>开放 API 的虚拟主体（方案 B2，2026-09-30 新增）</b>：按**用户 ID 段**分流 ——
  * 落在 {@link OpenApiPrincipal#isVirtualPrincipal} 的保留段时，权限取**该请求 scopes**
  * （网关放进既有 {@code X-Roles} 头，已由 starter 解析进 {@link LoginUser#getRoles()}），
  * **不查库**；真实用户**走原路径、行为不变**。</p>

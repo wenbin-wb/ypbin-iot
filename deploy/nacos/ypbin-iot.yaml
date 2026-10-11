@@ -166,7 +166,7 @@ ypbin:
   #   Class.forName("org.apache.iotdb.jdbc.IoTDBDriver")（IotDbDriverRegistrar.ensureRegistered()）。
   #   缺这段注册代码时，enabled=true 会让 ypbin-iot **启动即失败**（DriverManager.getDriver 抛 SQLException
   #   → IotTimeSeriesConfiguration 抛 IllegalStateException）⇒ 部署前请确认注册代码在你部署的提交里，
-  #   否则先把 enabled 改回 false。详见 docs/DEPLOY-TIMESERIES.md §0.6。
+  #   否则先把 enabled 改回 false。详见 docs/DEPLOY-TIMESERIES.md §0 第 6 条「驱动必须真的被注册」。
   timeseries:
     enabled: true
     # ⚠️ URL 必须带库名 /iot：写入器与查询用的是**非限定表名**（INSERT INTO reading（…） / FROM reading），
@@ -203,7 +203,7 @@ ypbin:
     # 连接超时（毫秒）。JDBC 只有全局登录超时，启动自检会用本值调用 DriverManager.setLoginTimeout
     connect-timeout-ms: 3000
 
-  # 开放 API 文档（看板 #11 门面/F-3：ypbin-starter-api-doc，注解 + 代码生成）。
+  # 开放 API 文档（门面 F-3：ypbin-starter-api-doc，注解 + 代码生成）。
   # 安全必修（前置核验 U-6 的 R-1/R-2/R-3）：
   #   ① paths-to-match 只圈 /open-api/v1/** —— 默认值 /** 会把全部管理面端点写进对外规范；
   #   ② security-headers 显式覆盖默认值（默认含 X-Tenant-Id 等管理面头，会误导第三方以为可自选租户）；
@@ -226,7 +226,7 @@ ypbin:
     # 故不配该键）。实际边界：网关 exclude-paths 未放行 /iot/v3/api-docs（须登录态）
     # + 18084 只绑回环 ⇒ 第三方（Key）够不着，对外只给分组地址。
 
-  # 平台自告警（看板 #10；`PlatformAlertProperties.PREFIX = ypbin.platform-alert`）。
+  # 平台自告警（`PlatformAlertProperties.PREFIX = ypbin.platform-alert`）。
   # 新装默认：只落库不通知（观察期）。`enabled` 由 compose env `YPBIN_PLATFORM_ALERT_ENABLED`
   # 供给（此处不重复，避免双源打架）；`notify-enabled` 默认 false。
   # dev live 已 flip（2026-10-01，用户指定收件人）：`notify-enabled: true` +

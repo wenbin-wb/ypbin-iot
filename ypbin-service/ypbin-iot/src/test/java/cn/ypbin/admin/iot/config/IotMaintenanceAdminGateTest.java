@@ -96,7 +96,7 @@ class IotMaintenanceAdminGateTest {
         Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
 
     /**
-     * 平台模块目录 → 其子菜单清单（与 {@code docs/PLATFORM-IA-PROPOSAL.md} §4.2 的归属表一致）。
+     * 平台模块目录 → 其子菜单清单（与 3310/3320 模块目录的菜单归属一致）。
      *
      * <p>防孤儿补授必须**逐一覆盖**这两组 × 两张授权表；否则拥有子菜单却没被补授父目录的角色/模板，
      * 其菜单会被 {@code buildRouteTree} 整棵丢弃（K2），而「每个菜单都被授权」那条断言**发现不了**
@@ -135,7 +135,7 @@ class IotMaintenanceAdminGateTest {
      * 可达的租户模板授权里。每一条都对应一个真实越权面——授给租户管理员，租户即可自助扩大采集范围。
      *
      * <p>为什么是清单而不是「按 id 前缀扫」：前缀规则看不见非 32xx/33xx 段的平台级菜单；
-     * 新增平台级菜单时必须同时登记到本表（维护责任见 {@code docs/ACCESS-TECHDEBT-R8.md} §2.5）。</p>
+     * 新增平台级菜单时必须同时登记到本表（清单陈旧或条目被降级都会转红）。</p>
      */
     private static final Map<String, String> PLATFORM_LEVEL_MENUS = Map.of(
         "3206", "IotTenantLedger（租户接入台账：决定「哪些租户可被采集」）",
@@ -146,7 +146,7 @@ class IotMaintenanceAdminGateTest {
     /**
      * 「目标菜单无法静态判定」的授权语句豁免表（{@code 源文件名:语句摘要 → 理由}）。
      *
-     * <p>解析器的能力边界必须显式（{@code docs/ACCESS-TECHDEBT-R8.md} §3）：形如
+     * <p>解析器的能力边界必须显式：形如
      * {@code INSERT INTO sys_template_menu (...) SELECT tm.template_id, tm.menu_id ...} 的语句，
      * 目标菜单来自被查询的行而非常量，静态判不了 ⇒ 门禁必须**报出来**要求人工裁定，
      * 而不是静默放过。确需保留时在此登记；豁免项在脚本里已不存在时，门禁会转红（防陈旧豁免）。</p>
@@ -397,7 +397,7 @@ class IotMaintenanceAdminGateTest {
     @Test
     @DisplayName("★ 跨脚本门禁：平台级菜单显式清单 + SELECT 形态补授的可达性（补齐 R8-7 覆盖面）")
     void platformLevelMenusMustStayPlatformOnlyAndOutOfTemplates() throws IOException {
-        // 本用例补的是三处覆盖面缺口（见 docs/ACCESS-TECHDEBT-R8.md §2.5）：
+        // 本用例补的是三处覆盖面缺口：
         //   ① 只扫安装脚本 ⇒ 这里扫「安装脚本 + 全部 migration」；
         //   ② 只认 32xx/33xx 前缀 ⇒ 这里用**显式清单**，覆盖非该前缀段的平台级菜单；
         //   ③ 只认 `INSERT ... id IN (...)` 形态 ⇒ 这里把「SELECT + 常量目标」的补授也纳入，

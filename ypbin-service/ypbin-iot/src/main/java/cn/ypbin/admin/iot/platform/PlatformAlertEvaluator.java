@@ -14,7 +14,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 /**
- * 平台自告警判定器的 `@Scheduled` 壳（看板 #10）——与仓内既有 10 个同类扫描器**同范式**：
+ * 平台自告警判定器的 `@Scheduled` 壳——与仓内既有 10 个同类扫描器**同范式**：
  * `fixedDelay`（不是 `fixedRate`：一轮没跑完不该再叠一轮）+ 具名可配常量 + 失败由调度器
  * 记完整堆栈（不吞异常、不做重试——下一轮自然重试）。</p>
  *

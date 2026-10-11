@@ -21,7 +21,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
- * 开放 API 作用域白名单的一致性门禁（看板 #11；独立复核 2026-09-30 C9/D3）。
+ * 开放 API 作用域白名单的一致性门禁（独立复核 2026-09-30 C9/D3）。
  *
  * <p>为什么要有它：ALLOWED_SCOPES（本类）与 deploy/sql/007-iot-data.sql 的权限码是
  * 两份真相。若白名单里出现 SQL 里不存在的码（拼错/臆造），Key 配了该 scope 也不会在任何
