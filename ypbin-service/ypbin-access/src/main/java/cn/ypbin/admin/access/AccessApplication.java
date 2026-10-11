@@ -23,9 +23,13 @@ import org.springframework.scheduling.annotation.EnableScheduling;
  * @author wenbin
  * @since 2026-09-20
  */
+/**
+ * ⚠️ 新增 Feign 客户端时必须同步登记 {@code @EnableFeignClients} 的 basePackages：
+ * access 只扫描上面这几个包；漏登记 ⇒ 启动期 "required a bean of type IAccessMetricsClient"（实测踩过）。
+ */
 @EnableScheduling
 @EnableFeignClients(basePackages = {"cn.ypbin.admin.iot.lease", "cn.ypbin.admin.iot.device",
-    "cn.ypbin.admin.iot.availability"})
+    "cn.ypbin.admin.iot.availability", "cn.ypbin.admin.iot.access.metrics"})
 @SpringBootApplication(scanBasePackages = {"cn.ypbin.admin.access", "cn.ypbin.admin.iot.lease"})
 public class AccessApplication {
 

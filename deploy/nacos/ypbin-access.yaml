@@ -47,6 +47,10 @@ ypbin:
     node-id: ${ACCESS_NODE_ID:access-1}
     # 最多可持有租户数；不填 = 不限（单节点全量）
     capacity:
+    # 对账时间预算 := 默认 15000 = TTL(30s) 的一半：tick 还要留自检/续约/重领的余量。
+    # <= 0 关闭预算（回到"本轮全部租户都做"）。观测：iot.access.config.reconcile.deferred 增长
+    # ⇒ 预算被顶到；配合 iot.access.config.reconcile.duration 的 max 决定是否调大。
+    reconcile-budget-ms: 15000
     # 续约周期：必须 ≥ 一次调用最坏耗时（connect 1s + read 3s）的 2 倍 ⇒ ≥ 8s，
     # 启动自检会拒绝更小的值（否则一次卡顿就会让节点把自己判成失效）
     renew-interval-ms: 10000
@@ -71,20 +75,15 @@ ypbin:
       # 微批周期（毫秒）
       flush-interval-ms: 1000
 
-# ---------- 可观测（Spring Boot Actuator，2026-09-27 新增，对齐 ypbin-iot.yaml）----------
-# 为什么要有这一段：access 已经带了大量指标（iot.access.egress.* / iot.access.lease.* /
-# iot.access.config.* / iot.access.subscribe.* / iot.access.spec.* / iot.access.connection.* /
-# iot.access.decode.failure），但 `/actuator/metrics` 默认不暴露（Spring Boot 4.1.1 的
-# management.endpoints.web.exposure.include 默认只有 health）⇒ 生产只能翻 WARN 日志、看不到计数趋势。
-# 指标清单（口径/建议关注/注册位置）见 docs/METRICS.md；R8-2 的 tick/对账耗时看
-# iot.access.lease.tick.duration 与 iot.access.config.reconcile.duration 的 max。
+    # ---------- 可观测（Spring Boot Actuator，2026-09-27 新增，对齐 ypbin-iot.yaml）----------
+    # 为什么要有这一段：access 已经带了大量指标（iot.access.egress.* / iot.access.lease.* /
+    # iot.access.config.* / iot.access.subscribe.* / iot.access.spec.* / iot.access.connection.* /
+    # iot.access.decode.failure），但 `/actuator/metrics` 默认不暴露（Spring Boot 4.1.1 的
+    # management.endpoints.web.exposure.include 默认只有 health）⇒ 生产只能翻 WARN 日志、看不到计数趋势。
+    # 指标清单（口径/建议关注/注册位置）见 docs/METRICS.md；R8-2 的 tick/对账耗时看
+    # iot.access.lease.tick.duration 与 iot.access.config.reconcile.duration 的 max。
 
 # R8-2 对账时间预算：预算用尽后本轮剩余「需远端取数」的租户推迟到下一 tick（不丢）。
-# 默认 15000 = TTL(30s) 的一半：tick 还要留自检/续约/重领的余量。<= 0 关闭预算。
-# 观测：iot.access.config.reconcile.deferred 增长 ⇒ 预算被顶到；配合 reconcile.duration 的 max 决定是否调大。
-ypbin:
-  access:
-    reconcile-budget-ms: 15000
 # 上一轮新增的 iot.access.decode.failure 正是这个缺口：它只在 WARN 里可见。
 #
 # ⚠️ 安全边界（与 ypbin-iot.yaml 同一口径，改前务必读完）：

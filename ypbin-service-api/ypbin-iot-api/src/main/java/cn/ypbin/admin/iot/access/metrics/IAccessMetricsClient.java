@@ -24,7 +24,8 @@ import org.springframework.web.bind.annotation.RequestBody;
  * @author wenbin
  * @since 2026-10-10
  */
-@FeignClient(name = "ypbin-iot", contextId = "accessMetricsClient", path = "/internal/metrics")
+@FeignClient(name = "ypbin-iot", contextId = "accessMetricsClient", path = "/internal/metrics",
+    configuration = cn.ypbin.admin.iot.lease.config.LeaseFeignConfiguration.class)
 public interface IAccessMetricsClient {
 
     /**
