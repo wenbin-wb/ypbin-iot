@@ -1,7 +1,7 @@
 # ypbin-access 指标清单（运维关注点 + 机器校验）
 
 > **用途**：把「指标已注册但没人知道该看什么」变成一张可执行的清单——每条指标都有 ①口径（何时变化）
-> ②建议关注/阈值 ③注册位置。R8-9 立项要求（`docs/ACCESS-TECHDEBT-R8.md` §2.7）。
+> ②建议关注/阈值 ③注册位置。（源自 R8-9「安全网成本与可观测性」立项，该技术债台账已退役。）
 > **覆盖范围**：**`ypbin-access` 服务**的全部指标（`iot.access.*`，共 **35** 条）。
 > iot 服务的告警/入站/时序指标（`iot.alert.*`、`iot.ingest.*`、`iot.timeseries.*`、`iot.platform_alert.*`）见
 > `docs/PLATFORM-ALERTING-DESIGN.md` 与 `deploy/PROD-OPS-NOTES.md`——本文件不重复登记，避免两处漂移。

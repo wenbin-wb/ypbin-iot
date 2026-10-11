@@ -177,9 +177,9 @@ docker exec ypbin-iotdb start-cli.sh -h ypbin-iotdb -sql_dialect table -e "ALTER
 
 | 现象 | 根因 | 处置 |
 |---|---|---|
-| `ypbin-iot` 启动失败：`… IoTDB JDBC 驱动不可用（请确认 org.apache.iotdb:iotdb-jdbc 在运行时类路径）` | ① jar 不在运行时类路径；**或 ② jar 在但没被注册**（该 jar 无 `META-INF/services/java.sql.Driver`，SPI 不会自动注册，见 §0.6） | ①在宿主机查证打包结果：`unzip -l ypbin-service/ypbin-iot/target/ypbin-iot-*.jar \| grep iotdb-jdbc`（本服务镜像是 fat jar，依赖在 `BOOT-INF/lib`，**不是** `/app/lib`；temurin JRE 镜像里没有 `unzip`/`jar`，别在容器里查）；②确认部署的提交里有 `IotDbDriverRegistrar.ensureRegistered()`（显式 `Class.forName`） |
+| `ypbin-iot` 启动失败：`… IoTDB JDBC 驱动不可用（请确认 org.apache.iotdb:iotdb-jdbc 在运行时类路径）` | ① jar 不在运行时类路径；**或 ② jar 在但没被注册**（该 jar 无 `META-INF/services/java.sql.Driver`，SPI 不会自动注册，见 §0 第 6 条） | ①在宿主机查证打包结果：`unzip -l ypbin-service/ypbin-iot/target/ypbin-iot-*.jar \| grep iotdb-jdbc`（本服务镜像是 fat jar，依赖在 `BOOT-INF/lib`，**不是** `/app/lib`；temurin JRE 镜像里没有 `unzip`/`jar`，别在容器里查）；②确认部署的提交里有 `IotDbDriverRegistrar.ensureRegistered()`（显式 `Class.forName`） |
 | 启动失败：`table-name 只允许字母/数字/下划线` | Nacos 里 `table-name` 写了非法值（如 `iot.reading`、带引号） | 只写裸表名 `reading`；库名放 URL 路径里 |
-| 写入失败日志「未指定数据库」（设计文档/≤2.0.7 文档写的码是 `701`，2.0.11 确切码未实测） | JDBC URL 缺库名（见 §0.2） | URL 改成 `jdbc:iotdb://ypbin-iotdb:6667/iot?sql_dialect=table` |
+| 写入失败日志「未指定数据库」（设计文档/≤2.0.7 文档写的码是 `701`，2.0.11 确切码未实测） | JDBC URL 缺库名（见 §0 第 2 条） | URL 改成 `jdbc:iotdb://ypbin-iotdb:6667/iot?sql_dialect=table` |
 | 写入/查询报「表/列不存在」（错误码 **616** `COLUMN_NOT_EXIST`） | 未跑 `iotdb-init`，或表名与 DDL 不一致 | `docker logs ypbin-iotdb-init`；必要时 `--force-recreate iotdb-init` |
 | 查询报「类型不匹配」（错误码 **614** `DATA_TYPE_MISMATCH`） | 写入值与列类型不符（如把文本写进 `value_double`），或 DDL 与代码列顺序漂移 | 核对 `deploy/iotdb-init.sql` 与 `IotDbTimeSeriesWriter.COLUMNS` 是否逐列一致 |
 | `801: Username or password is wrong` | IoTDB 侧改了口令，Nacos 或 `iotdb-init` 没同步（或反之） | §6 的**三处联动** |
@@ -412,7 +412,7 @@ Nacos live 换回 dump 的最小做法：`python3 tools/rotate-iotdb-password.py
 | 显式声明 `time TIMESTAMP TIME` 的最低版本 | ⚠️ 官方 Table Management 说「V2.0.8 起支持自定义时间列命名」，我们固定 2.0.11 故可用 | 若把镜像降到 2.0.1-beta，须删掉 DDL 里 `time TIMESTAMP TIME,'` 一段 |
 | 镜像内是否**真的**有 curl | ⚠️ 按 adoptium 官方 Dockerfile 与 IoTDB Dockerfile **推断有**（未在容器内 `command -v curl` 实测） | 探针不依赖 curl（6667 是 Thrift 口，curl 也没用）；要用 curl 前先实测 |
 | `iotdb` 的 `hostname: ypbin-iotdb` 自解析 | ⚠️ 官方 standalone compose 同样把 hostname 设为内部地址同名，但**未在容器内验证**服务端自解析/绑定行为 | 若启动异常，先按官方 compose 的写法核查；容器名 `ypbin-iotdb` 在自定义网络内可解析属 Docker 文档化行为 |
-| **驱动是否被注册**（不是"是否在类路径"） | ✅ 已核实前提：`iotdb-jdbc:2.0.1-beta` 的 jar **无** `META-INF/services/java.sql.Driver` ⇒ 必须显式注册（§0.6）；✅ 注册代码已在主线（`IotDbDriverRegistrar.ensureRegistered()` 在 `IotTimeSeriesConfiguration.afterPropertiesSet()` 与两个实现类的构造器里各调一次，本机实测启动自检通过） | 部署前仍建议 grep 一次部署提交：`git grep -n "IotDbDriverRegistrar" <部署提交>`；没有就把 `enabled` 改回 `false` |
+| **驱动是否被注册**（不是"是否在类路径"） | ✅ 已核实前提：`iotdb-jdbc:2.0.1-beta` 的 jar **无** `META-INF/services/java.sql.Driver` ⇒ 必须显式注册（§0 第 6 条）；✅ 注册代码已在主线（`IotDbDriverRegistrar.ensureRegistered()` 在 `IotTimeSeriesConfiguration.afterPropertiesSet()` 与两个实现类的构造器里各调一次，本机实测启动自检通过） | 部署前仍建议 grep 一次部署提交：`git grep -n "IotDbDriverRegistrar" <部署提交>`；没有就把 `enabled` 改回 `false` |
 | `start-cli.sh -e` 的退出码语义 | ✅ **已实测**（2026-09-24 连接类 + 2026-09-26 补测 SQL 类，本机容器）：语句成功 `exit 0`；连接失败 `exit 1`；**口令错 `exit 1`**；**SQL 语义错（`SHOW TABLES FROM no_such_db`）`exit 1`**。⚠️ **交互模式（不带 `-e`，语句经 stdin）无论语句成败都退 0** —— 不得用它跑初始化脚本 | 这是 `iotdb-init` 重试判定与失败判定的共同前提；因此 `iotdb-init` **坚持用 `-e`**，只把口令改走 stdin（§6.1） |
 | IoTDB 口令**长度上限** | ✅ **已核实**（2026-09-26，活服务端）：48 字符口令执行 `ALTER USER` 返回 `820: The length of password must be less than or equal to 32` | 生成口令用 `openssl rand -hex 12`（24 字符 ≤32）；`tools/rotate-iotdb-password.py` 已在任何写入前拒绝 >32 的口令 |
 | `start-cli.sh` 是否支持配置文件/环境变量传口令 | ✅ **已核实不支持**（2026-09-26，读镜像内 `/iotdb/sbin/start-cli.sh` 原文）：口令只有命令行 `-pw <值>` 一条路；其 `checkEnvVariables` 只识别 `-D IOTDB_INCLUDE` / `-D IOTDB_CLI_CONF` | 健康检查改「不发口令的 TCP 探活」；需要认证的一次性任务把口令经 **stdin** 送入（裸 `-pw` 触发 `please input your password:`） |

@@ -163,7 +163,7 @@ curl -s -o /dev/null -w '19000 %{http_code}\n' -m 10 http://127.0.0.1:19000/
 | 服务用**超管账号**（`nacos`/全局管理员）连 Nacos，而非最小权限的 client 用户 | 已知，未改（改动面=新建用户 + 角色/命名空间授权 + 服务配置同步，属另开一轮）。建议后续建专用 client 用户 |
 | `NACOS_ADMIN_PASSWORD` / `NACOS_AUTH_IDENTITY_VALUE` 存在于容器 env（`docker inspect` 可读） | 与 `docs/DEPLOY-CREDENTIAL-HYGIENE.md` §4 同口径：本轮只消除 argv/events 暴露；收紧 docker 权限或对外暴露时应轮换 |
 | `install.sh` 的「把服务器口令改成 .env 值」这段路径 | **未做端到端验证**（本轮改的是已在跑的实例，没有重装）。只做了 `bash -n` 语法检查与端点/参数名的一手核实；首次安装前请按 §4 判据自检 |
-| `install.sh` 在本仓是 fork 继承版，路径大量指向 `$ROOT/ypbin-admin/deploy` | 已知项（`docs/IOT-ROADMAP.md`），本轮**未修**；本仓实际部署走 compose |
+| `install.sh` 在本仓是 fork 继承版，路径大量指向 `$ROOT/ypbin-admin/deploy` | 已知项（fork 继承，非本仓缺陷），本轮**未修**；本仓实际部署走 compose |
 | Nacos 8848/9848/8080 仍绑 `INTERNAL_BIND_ADDR`（本仓示例默认 `0.0.0.0`） | 与本轮正交；若公网可达，开 auth 后 8848 仍可被匿名探测（会得到 403）。建议把绑定收紧到回环并只让 compose 网络访问 |
 
 ## 8. 实测回执（生产 2026-09-26，部署后）
