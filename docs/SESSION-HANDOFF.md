@@ -70,6 +70,16 @@
 - ✅ **#19 R8-5 对称清理 + R8-6 框架契约（2026-10-09，PR #195 → main `9a568c19`；框架仓 PR #21 → `584b394`）**：本仓 `fence()` 补 `planner.forget`（与下架路径逐条对称，access **119/0/0/0**，变异 1/1 转红）；**框架仓** `ypbin-iot-starter` 新增契约测试 `IotLifecycleTest#everyAddMustCloseOldSessionAndRebindNewInstance`（LIFE-13）——「规格变化只重发 ADD」与「REMOVE→ADD」两条路径都必须**先关旧会话、再产生新实例**，并写入 `CONTRACT.md` §四 行为承诺第 7 条 + `CHANGELOG.md`（框架侧 **148/0/0/0** 含 JaCoCo 覆盖率门禁，变异 2/2 转红）。**这条契约正是 R8-5/R8-6 残余风险的唯一支点**（本仓订阅对账用会话实例同一性判断是否重新订阅）。
 - 🔄 **#20/#21 R8-2（2026-10-09，PR #197 → `b284b30f`、PR #198 → `71484d37`）**：**方案 A 对账时间预算**（`ypbin.access.reconcile-budget-ms` 默认 15000 = TTL 一半；超预算的候选**推迟到下一 tick**、不丢；预算用尽时跳过周期安全网；新指标 `iot.access.config.reconcile.deferred`）+ **方案 E 拆调度线程池**（`spring.task.scheduling.pool.size: 2`，1s egress 上报不再排在 10s 长 tick 之后，含配置门禁 `AccessSchedulingConfigTest`）。access **122/0/0/0**，变异 1/1 + 1/1 转红。**R8-2 剩余 B/C/D**：B（有界并发）需处理并发安全；**C/D 以覆盖换成本，不建议做**。
 - ✅ **#22 R8-8（2026-10-10，PR #200 → `07bbf4bf`）**：用户拍板**可用性优先** —— 台账表写失败**不再回滚设备/点位业务写入**（`TenantLedgerService#bumpConfigEpoch` 捕获 ⇒ 返回 false + ERROR + 指标 `iot.ledger.bump.failure`），靠周期安全网兜底；**锁类失败（1205/1213）改为重新抛出**（InnoDB 死锁回滚整个事务，吞掉会「外层提交谎报成功、写入已丢」）；`bumpConfigEpochOfCurrentTenant` 补 `@Transactional` 修自调用语义。决策/兜底/边界见 `deploy/PROD-OPS-NOTES.md` **§11**。**R6 独立复核（2 个外委子代理）无阻断项**，据建议整改 8 处（含 IT 判别力、RENAME 崩溃自愈、收敛口径修正）。单测 **894/0/0/0**、真库 IT **6/0/0/0**、变异 3/3 转红。
+- ✅ **「看得见」批（2026-10-11，PR #202/#203、UI PR #73）**：把 access 域指标接入平台自告警 + 只读运维页。
+  ① **平台自告警 4 条新规则**（`PLATFORM_LEDGER_BUMP_FAILING` / `PLATFORM_RECONCILE_DEFERRED` / `PLATFORM_TICK_SLOW` / `PLATFORM_INSTANCE_UNREACHABLE`），
+     阈值分别为「增长即告警」/「增长即告警」/「tick max ≥ 15s = TTL 一半」/「心跳 ≥ 45s = 3×上报间隔」；
+     数据源是 access **主动推送**（`AccessMetricsReporter` 每 15s → iot `POST /internal/metrics/access-report` → `AccessMetricsReportStore`，**不落库**）；
+     启动宽限 45s（避免每次 iot 重启误报 CRITICAL）。
+  ② **只读运维页**：`GET /iot/access-overview`（平台级 `iot:ledger:list`）+ UI「接入节点与指标」页签（复用既有平台菜单，不新造授权面）。
+  ③ **测试实证抓到 2 个真问题**：a) 节点注册了但没持有租户时 `selectOne` 为 null ⇒ 概览接口 500（已判空）；
+     b) 变异脚本两次把注释写在行尾吞掉 `;` ⇒ **api 模块根本没装上新 jar**、变异"看起来生效"实则打的是旧类（教训：变异后要确认进了被测 classpath；单模块运行不会重建 api 模块，需先 install）。
+  ④ 验证：iot 912/0/0/0、access 125/0/0/0、MetricsRegistryGate 2/0/0（新指标已登记 METRICS.md 共 35 条）、架构门禁 20/0/0（本轮两次 R10：内联 FQCN）、UI typecheck + lefthook 全绿。
+  ⚠️ **未部署/未在 dev 实测渲染**（发布动作另行安排）。
 
 ## 3. 开放 API 第 1/2 批速览
 
@@ -116,7 +126,8 @@
 4. **#8 二批**：触发条件仍未满足（`docs/MESSAGE-TRACE-PHASE2.md` §1）⇒ 维持只立项不实施；**#9** 已搁置。
 5. 若要在 dev 上做"故障注入式验收"或"更长观察窗口"，另立验收批（不要把它当成 #10 的默认尾巴）。
 6. **R8 技术债（2026-10-10）：8 条全部收口** —— #15 立项、#16 R8-7、#17 R8-4、#18 R8-9 A/B、#19 R8-5+R8-6（+ 框架仓 #21）、#20/#21 R8-2 A+E、#22 R8-8 B。**已按「不值得/有覆盖损失」登记不做的**：R8-2 的 B/C/D。
-   **后续可选方向**（需你选）：① 让 access/台账指标**看得见**（接 `PlatformHealthRule` 自告警，或做只读运维页）；② `TASK-BOARD` §3 的 P2 增强项（D 批）；③ `#8 二批`（触发条件未满足）；④ `ypbin-site#30`（vue-tsc 支持 TS 7 后解除 typescript 主版本 isolate）。
+   **后续可选方向**（需你选）：① **部署到 dev 做一次真实验收**（前端渲染 + 4 条规则的 FIRING/RESOLVED 邮件，属发布动作）；
+   ② `TASK-BOARD` §3 的 P2 增强项（D 批）；③ `#8 二批`（触发条件未满足）；④ `ypbin-site#30`（vue-tsc 支持 TS 7 后解除 typescript 主版本 isolate）。
 7. 其他未开工方向（用户已提及、未选定）：**D**（`TASK-BOARD.md` §3 的 P2 增强项）；**访问控制技术债之外的**技术债批次。
 
 ## 6. 遗留风险（如实）
