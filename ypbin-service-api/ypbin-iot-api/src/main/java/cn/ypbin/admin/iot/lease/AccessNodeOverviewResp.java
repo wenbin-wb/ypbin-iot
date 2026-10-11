@@ -17,7 +17,11 @@ import java.time.LocalDateTime;
  * @param accessNode       节点标识
  * @param maxTenants       容量上限（`null` = 不限）
  * @param holdingCount     当前持有（`active`）租户数
- * @param lastHeartbeatAt  最近一次心跳（续约）时刻
+ * @param lastRegisteredAt 最近一次**注册/复活**时刻（⚠️ 不是心跳：续约不写它，见
+ *                        {@code AccessNodeRegistry}；节点是否活着请看 {@code leaseAlive}）
+ * @param leaseAlive      依据「最早租约到期时刻 vs 当前时刻」判定的租约是否仍有效：
+ *                        {@code true} = 仍在续约（活着）；{@code false} = 已过期（该节点可能失联）
+ * @param leaseRemainingSec 距最早租约到期的秒数（负 = 已过期）
  * @param leaseExpireMin   该节点最早到期时刻（用来判断「下一个接管点」）
  * @author wenbin
  * @since 2026-10-11
@@ -26,6 +30,8 @@ public record AccessNodeOverviewResp(
     String accessNode,
     Integer maxTenants,
     Long holdingCount,
-    LocalDateTime lastHeartbeatAt,
-    LocalDateTime leaseExpireMin) {
+    LocalDateTime lastRegisteredAt,
+    LocalDateTime leaseExpireMin,
+    Boolean leaseAlive,
+    Long leaseRemainingSec) {
 }

@@ -96,4 +96,31 @@ class AccessOverviewControllerTest {
         accessNode.setMaxTenants(max);
         return accessNode;
     }
+
+    @Test
+    @DisplayName("★ 租约存活由「最早到期 vs 当前时刻」推导：过期 ⇒ leaseAlive=false；未到期 ⇒ true")
+    void leaseAliveMustBeDerivedFromEarliestExpiry() throws Exception {
+        when(accessNodeMapper.selectList(any())).thenReturn(List.of(node("access-1", 10)));
+        when(assignmentMapper.selectCount(any())).thenReturn(1L);
+        // 最早到期：一次给"1 小时后"（活的），一次给"1 小时前"（已过期）
+        cn.ypbin.admin.iot.entity.TenantNodeAssignment alive =
+            new cn.ypbin.admin.iot.entity.TenantNodeAssignment();
+        alive.setLeaseExpireAt(java.time.LocalDateTime.now().plusHours(1));
+        when(assignmentMapper.selectOne(any())).thenReturn(alive);
+
+        mockMvc.perform(get("/access-overview"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.nodes[0].leaseAlive").value(true))
+            .andExpect(jsonPath("$.data.nodes[0].lastRegisteredAt").doesNotExist());
+
+        when(assignmentMapper.selectOne(any())).thenReturn(null);
+        cn.ypbin.admin.iot.entity.TenantNodeAssignment dead =
+            new cn.ypbin.admin.iot.entity.TenantNodeAssignment();
+        dead.setLeaseExpireAt(java.time.LocalDateTime.now().minusHours(1));
+        when(assignmentMapper.selectOne(any())).thenReturn(dead);
+
+        mockMvc.perform(get("/access-overview"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.nodes[0].leaseAlive").value(false));
+    }
 }
