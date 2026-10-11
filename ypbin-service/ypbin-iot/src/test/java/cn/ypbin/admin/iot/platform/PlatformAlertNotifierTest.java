@@ -22,7 +22,7 @@ import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.ObjectProvider;
 
 /**
- * 平台告警通知投递器用例（看板 #10 二批）。
+ * 平台告警通知投递器用例（二批）。
  *
  * 锁四条安全判据：
  * ① 开关关闭 ⇒ 一律不投递（观察期无打扰）；

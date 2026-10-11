@@ -164,7 +164,7 @@ public class RetentionCleanupServiceImpl implements RetentionCleanupService {
             if (orphans > 0) {
                 log.warn("[iot] 孤儿点位映射巡检：{} 条映射引用的物模型属性行已不存在"
                         + "（读数会被按「孤儿」丢弃并计入 iot.ingest.propertyid.orphan；"
-                        + "本巡检**只计数不删除**，处置方式见 docs/IOT-ROADMAP.md 四点十七）",
+                        + "本巡检**只计数不删除**，处置需人工确认）",
                     orphans);
             } else {
                 log.info("[iot] 孤儿点位映射巡检：0 条（映射与物模型属性一一对应）");

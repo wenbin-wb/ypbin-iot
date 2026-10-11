@@ -5,7 +5,7 @@ import lombok.Getter;
 import lombok.Setter;
 
 /**
- * 平台告警条目（看板 #10 二批前端列表的读模型）。
+ * 平台告警条目（二批前端列表的读模型）。
  *
  * 只含读侧字段；metricSnapshot 是判定时的指标快照（JSON 文本），由前端原样展示。
  */

@@ -30,7 +30,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * 平台自告警服务（看板 #10，设计 `docs/PLATFORM-ALERTING-DESIGN.md` §4/§5）。
+ * 平台自告警服务（设计 `docs/PLATFORM-ALERTING-DESIGN.md` §4/§5）。
  *
  * <p><b>一轮做什么</b>：读指标快照 → 逐规则判定（纯函数）→ 落库（开单 / 续期 / 收口）。</p>
  *

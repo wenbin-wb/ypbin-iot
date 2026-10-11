@@ -11,7 +11,7 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
 
 /**
- * 平台告警通知投递器（看板 #10 二批「开通通知」）。
+ * 平台告警通知投递器（二批「开通通知」）。
  *
  * <p>复用既有通知通道的底层调用（system 侧站内信/邮件，与 SystemAlertNotificationSender
  * 同一套 Req），但不经过 iot_alert_notification 待发队列 —— 平台告警没有设备实例，

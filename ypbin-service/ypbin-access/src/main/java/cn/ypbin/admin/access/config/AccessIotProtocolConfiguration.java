@@ -150,7 +150,8 @@ public class AccessIotProtocolConfiguration {
     }
 
     /**
-     * TCP 透传文本帧解码器（过渡实现，见 {@code docs/STARTER-FEEDBACK.md} SF-6）。
+     * TCP 透传文本帧解码器（过渡实现，框架侧缺口与替换路径见
+     * {@code docs/VALUE-DECODE-DESIGN.md} §5「反哺与替换路径」）。
      *
      * <p>用 {@code @Bean + @ConditionalOnMissingBean} 而不是给实现类标 {@code @Component}：前者才真的可替换
      * （宿主自定义同类型 bean 时优雅退让），后者会在宿主再定义时抛 {@code NoUniqueBeanDefinitionException}

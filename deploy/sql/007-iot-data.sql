@@ -175,7 +175,7 @@ UPDATE sys_menu SET pid = 3204 WHERE id IN (3200, 3201, 3202, 3203);
 -- =============================================================
 -- 平台模块目录（2026-09-26 追加）：新增「基础管理」「运维与监控」两个顶级模块目录，
 -- 并把 10 个既有顶级菜单 reparent 到模块下（8 个进 3310、2 个进 3320）；其余 3 个顶级（1/3204/5000）不动。
--- 方案见 docs/PLATFORM-IA-PROPOSAL.md §7.1.1（第二轮独立复核 PASS（有条件），见 §8.6）。
+-- ID 归属与 platform_only 规则见本段下文（第二轮独立复核 PASS（有条件））。
 -- id 规划：33xx = 平台模块目录段（只放 type=catalog 且 pid=0 的模块目录），不与 32xx（IoT 段）混用。
 --   2026-09-26 查**活库** sys_menu（id BETWEEN 3300 AND 3399）确认 0 行、仓内 SQL 亦无 3310/3320。
 -- 层级形态参照平台既有分组菜单：type=catalog + component=BasicLayout，子菜单路径保持各自的绝对路径不变。
@@ -385,7 +385,7 @@ CREATE TABLE iot_device_credential
 -- ⚠️ 唯一键含 device_id：requestId 由**设备**生成，跨设备不保证唯一（平台下发的 requestId 才是
 --    平台生成的全局唯一值，见 iot_command_instance 的 (tenant_id, request_id)）。
 -- =============================================================
--- 设备批量导入（CSV）+ 批次管理（2026-09-30 追加，任务看板 #7）
+-- 设备批量导入（CSV）+ 批次管理（2026-09-30 追加）
 -- 覆盖：iot_device_import_batch（一次上传 = 一个批次）
 --       iot_device_import_row  （批次下逐行的结果与错误，失败行可下载后改完重传）
 -- 租户表：含 tenant_id 且**不**进 deploy/nacos/ypbin-iot.yaml 的 ignore-tables
@@ -665,7 +665,7 @@ CREATE TABLE iot_alert_notification
 ) COMMENT 'IoT 告警通知投递记录（设计 §2.1 表 D；与告警状态分开存，通知全挂时告警仍可见）';
 
 -- =============================================================
--- 设备批量导入（CSV）+ 批次管理：权限码与菜单（2026-09-30 追加，任务看板 #7）
+-- 设备批量导入（CSV）+ 批次管理：权限码与菜单（2026-09-30 追加）
 -- 权限码**一个**：iot:device:import（上传）。读路径（模板/批次/明细/失败行）沿用 iot:device:list。
 -- id 段：320024 是 id 段内的下一个空位（3200 下已用到 320023，见上一段的 debug 两项）。
 --   2026-09-30 查仓内 SQL 与既有菜单段确认 3200~3207 与 320001~320024/320101~/320201~/320301~/
@@ -687,7 +687,7 @@ SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (320024);
 INSERT INTO sys_template_menu (template_id, menu_id)
 SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (320024);
 -- =============================================================
--- 平台自告警实例表（看板 #10，设计 docs/PLATFORM-ALERTING-DESIGN.md §3.1）
+-- 平台自告警实例表（设计 docs/PLATFORM-ALERTING-DESIGN.md §3.1）
 -- 与设备告警 iot_alert_instance **物理分离**：平台健康规则没有设备也没有点位。
 -- 去重形态照 iot_alert_instance：active_dedup_key 活动期间=dedup_key、恢复置 NULL。
 -- =============================================================
@@ -718,9 +718,9 @@ CREATE TABLE iot_platform_alert
     UNIQUE KEY uk_platform_alert_active (tenant_id, active_dedup_key),
     KEY idx_platform_alert_state (tenant_id, state, start_ts),
     KEY idx_platform_alert_rule (tenant_id, rule_code, start_ts)
-) COMMENT 'IoT 平台自告警实例（看板 #10；与设备告警物理分离，uk_platform_alert_active 是去重的库级保证）';
+) COMMENT 'IoT 平台自告警实例（与设备告警物理分离，uk_platform_alert_active 是去重的库级保证）';
 
--- 平台告警菜单（看板 #10 二批；与 migration/2026-10-05-iot-platform-alert-menu.sql 等价）
+-- 平台告警菜单（二批；与 migration/2026-10-05-iot-platform-alert-menu.sql 等价）
 INSERT INTO sys_menu (id, pid, name, type, platform_only, path, component, auth_code, title, icon, sort, create_time, status, is_deleted)
 VALUES (3208, 3204, 'IotPlatformAlert', 'menu', 0, '/iot/platform-alerts', '/iot/platformAlert/index', 'iot:alert:list', 'page.iot.platformAlert.title', 'carbon:alarm', 15, NOW(), 1, 0);
 INSERT INTO sys_role_menu (role_id, menu_id)
@@ -728,7 +728,7 @@ SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (3208);
 INSERT INTO sys_template_menu (template_id, menu_id)
 SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (3208);
 
--- 开放 API Key 表（看板 #11 第 1 批；与 migration/2026-10-01-iot-open-api-key.sql 等价）
+-- 开放 API Key 表（第 1 批；与 migration/2026-10-01-iot-open-api-key.sql 等价）
 CREATE TABLE IF NOT EXISTS iot_open_api_key (
   id BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键',
   tenant_id BIGINT NOT NULL COMMENT '租户 ID',
@@ -749,7 +749,7 @@ CREATE TABLE IF NOT EXISTS iot_open_api_key (
   KEY idx_tenant_status (tenant_id, status)
 ) COMMENT='IoT 开放 API Key（只存哈希，明文仅创建时返回一次）';
 
--- 开放 API Key 管理菜单（看板 #11 第 1 批；与 migration 等价）
+-- 开放 API Key 管理菜单（第 1 批；与 migration 等价）
 INSERT INTO sys_menu (id, pid, name, type, platform_only, path, component, auth_code, title, icon, sort, create_time, status, is_deleted)
 VALUES (3209, 3204, 'IotOpenApiKeys', 'menu', 0, '/iot/open-api-keys', '/iot/openApiKeys/index', 'iot:openapi:key-list', 'page.iot.openApiKey.title', 'carbon:key', 17, NOW(), 1, 0);
 INSERT INTO sys_menu (id, pid, name, type, platform_only, auth_code, title, sort, create_time, status, is_deleted)
@@ -760,7 +760,7 @@ SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (3209, 320901, 320902)
 INSERT INTO sys_template_menu (template_id, menu_id)
 SELECT 1, id FROM sys_menu WHERE is_deleted = 0 AND id IN (3209, 320901, 320902);
 
--- 命令实例客户端幂等键（看板 #11 O-7 C2；与 migration/2026-10-06-iot-command-client-key.sql 逐字等价）。
+-- 命令实例客户端幂等键（开放 API O-7 C2；与 migration/2026-10-06-iot-command-client-key.sql 逐字等价）。
 ALTER TABLE iot_command_instance
     ADD COLUMN client_request_id VARCHAR(64) NULL COMMENT '客户端幂等键（开放 API/第三方提供；同租户+同设备唯一；null=平台生成 request_id，不参与去重）',
     ADD UNIQUE KEY uk_command_client_key (tenant_id, device_id, client_request_id);

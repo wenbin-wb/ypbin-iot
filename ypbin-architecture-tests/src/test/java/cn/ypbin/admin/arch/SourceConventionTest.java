@@ -131,7 +131,7 @@ class SourceConventionTest {
      * <ol>
      *   <li><b>异步线程写入的追加大流量表</b>：写入无 Sa-Token 上下文，走基类审计字段自动填充会抛
      *       {@code SaTokenContextException}（本仓 {@code SysLog}/{@code SysTrackEvent} 的类注释已写明）；</li>
-     *   <li><b>纯关联表</b>：只承载两个外键，无审计/逻辑删除语义（{@code ypbin-admin-dev} SKILL 第 262 行）。</li>
+     *   <li><b>纯关联表</b>：只承载两个外键、无审计/逻辑删除语义（{@code implements Serializable} 自含字段，见 {@code ypbin-admin-dev} SKILL.md 第 6 条「实体继承体系」）。</li>
      * </ol>
      *
      * <p>清单本身受「过期检测」约束：每个键必须对应真实存在、且<b>确实没有</b>继承基类的实体类，

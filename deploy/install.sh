@@ -1423,7 +1423,7 @@ if [ -n "$NACOS_TOKEN" ]; then
 else
   # 复现一次登录请求只为拿到「HTTP 状态 + 响应正文」这一手判据；token 一律脱敏后再打印。
   # ⚠️ 此处**刻意不用 `| head -c` 截断**：head 读够就退出会让上游 sed 拿到 EPIPE（Broken pipe）并返回 4，
-  # 在 `set -euo pipefail`（本脚本第 60 行，全文无 set +e）下会直接中止整个脚本——响应体超过管道缓冲区
+  # 在 `set -euo pipefail`（本脚本第 62 行，全文无 set +e）下会直接中止整个脚本——响应体超过管道缓冲区
   # （如反向代理返回的大 HTML 错误页）时必现。改用 bash 子串截断，不产生任何 EPIPE 风险。
   warn "Nacos 登录未拿到 accessToken，跳过配置导入。登录请求的 HTTP 状态与响应（token 已脱敏）："
   NACOS_LOGIN_RESP="$(curl -sS -w '\n    http_code=%{http_code}' \

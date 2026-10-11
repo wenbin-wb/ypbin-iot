@@ -14,8 +14,7 @@
 #        与 `iot.timeseries.write.rows`（iot 落库）的**增量差**超容差 ⇒ ALERT（疑似真丢数据）。
 #        为什么需要它（2026-09-27 实测）：access 日志里 `inbound buffer overflow … dropped frames=N`
 #        每 ~2s 一条且单调增长，**但数据一条都没丢**（同一 61s 窗口 accepted == sent == write.rows == +31，
-#        与设备 2s/帧 一致；被淘汰的是 `drainFrames()` 无人消费的**辅助缓冲副本**，
-#        字节码证据见 docs/STARTER-FEEDBACK.md UP-12）。
+#        与设备 2s/帧 一致；被淘汰的是 `drainFrames()` 无人消费的**辅助缓冲副本**，非业务数据）。
 #        ⇒ 靠「日志里有没有 dropped」判丢数据会**误报**；靠这条对账才是**真丢数据**的判据。
 #        计数器归零（access 或 iot 重启）时本判据**不可求值**（不是 ALERT），避免重启窗口误报。
 #   L2（真值，窗口 900s）：`iot.timeseries.db.rows`（对 iot.reading 的 COUNT(*) 探针，
@@ -106,7 +105,7 @@ if [ "$RECONCILE" = "1" ]; then
       limit=$(( ad * REC_PCT / 100 ))
       [ "$limit" -lt "$REC_ABS" ] && limit="$REC_ABS"
       if [ $(( ad - wd )) -gt "$limit" ]; then
-        alerts+=("L1b 疑似真丢数据：access 受理 +$ad 条、iot 只落库 +$wd 条（差 $(( ad - wd )) > 容差 $limit）——口径见 docs/PROD-OPS-NOTES.md §5.2")
+        alerts+=("L1b 疑似真丢数据：access 受理 +$ad 条、iot 只落库 +$wd 条（差 $(( ad - wd )) > 容差 $limit）——口径见 deploy/PROD-OPS-NOTES.md §5.2")
       fi
     fi
   fi

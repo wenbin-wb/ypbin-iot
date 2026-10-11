@@ -106,7 +106,7 @@
             <groupId>cn.ypbin</groupId>
             <artifactId>ypbin-starter-web</artifactId>
         </dependency>
-        <!-- 开放 API 文档（看板 #11 门面/F-3）：注解 + 代码生成，不手写 openapi.yaml。
+        <!-- 开放 API 文档（门面 F-3）：注解 + 代码生成，不手写 openapi.yaml。
              版本由根 pom 的 ypbin-starter-bom 管理（与 starter 3.6.0 同发布线）。 -->
         <dependency>
             <groupId>cn.ypbin</groupId>

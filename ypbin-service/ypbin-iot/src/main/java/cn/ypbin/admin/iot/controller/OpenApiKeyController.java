@@ -14,7 +14,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * 开放 API Key 管理端点（看板 #11 第 1 批）。
+ * 开放 API Key 管理端点（第 1 批）。
  *
  * <p>⚠️ 路径刻意用 <b>/open-api-keys</b>（不是 /open-api/**）—— 网关的开放 API 过滤器只匹配
  * {@code /iot/open-api/v1/**}，管理面走既有 iot 路由与会话鉴权，绝不错配。</p>

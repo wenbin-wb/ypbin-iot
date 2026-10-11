@@ -43,7 +43,7 @@ import org.springframework.stereotype.Service;
  * 取标识与数据类型），空集合一律短路，绝不发空 IN。</p>
  *
  * <p><b>下发的是属性标识（规范坐标）</b>：{@code AccessPointMappingDto.identifier} 是采集侧上报时用的
- * 坐标（2026-09-26 统一，见 {@code docs/IOT-ROADMAP.md} 四点十七补充段）；{@code propertyId}
+ * 坐标（2026-09-26 统一）；{@code propertyId}
  * 仍作为定位信息保留在主键字段里，但**不再作为上报坐标**。属性行缺失（孤儿映射）的点位不下发。</p>
  *
  * @author wenbin
@@ -164,7 +164,7 @@ public class DeviceSpecServiceImpl implements DeviceSpecService {
         }
         if (orphanMappings > 0) {
             log.warn("[iot] 设备 {} 有 {} 条点位映射引用的物模型属性行已缺失（孤儿映射），本轮**不下发**这些点位；"
-                    + "请重建或清理映射（见 iot.pointmapping.orphan 指标与 docs/IOT-ROADMAP.md 四点十七）",
+                    + "请重建或清理映射（见 iot.pointmapping.orphan 指标，处置需人工确认）",
                 deviceId, orphanMappings);
         }
         spec.setPoints(points);

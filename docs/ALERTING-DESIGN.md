@@ -319,7 +319,7 @@ MySQL 的唯一索引对**含 NULL 的行不做约束**——只要索引涉及�
 
 **明确的「不做什么」**：本轮失败时**不得**把 `FIRING` 改成 `RESOLVED`。换句话说：**告警的恢复只能由「读到合格的、未越界的值」驱动**，不能由「读不到」驱动。这一条必须在用例里双向钉住（读到未越界 ⇒ resolve；读失败 ⇒ 保持 firing）。
 
-**并且这个不健康状态必须能被人看见**：评估器自身的心跳/滞后也要有指标（`iot.alert.evaluate.last_success_ts`、`iot.alert.evaluate.round.duration`、`iot.alert.evaluate.lag`），接入既有的 L1/L2 链路健康判据体系（`deploy/PROD-OPS-NOTES.md` 的 L1/L2/L3 + `deploy/access-tcp-simulator.md`）。**否则「评估器悄悄死了」就是又一次「静默零写入」**——那个坑本仓已经踩过一次（见 `docs/PROD-OPS-NOTES.md` 第 6 条「采集链路活性」）。
+**并且这个不健康状态必须能被人看见**：评估器自身的心跳/滞后也要有指标（`iot.alert.evaluate.last_success_ts`、`iot.alert.evaluate.round.duration`、`iot.alert.evaluate.lag`），接入既有的 L1/L2 链路健康判据体系（`deploy/PROD-OPS-NOTES.md` 的 L1/L2/L3 + `deploy/access-tcp-simulator.md`）。**否则「评估器悄悄死了」就是又一次「静默零写入」**——那个坑本仓已经踩过一次（见 `deploy/PROD-OPS-NOTES.md` 第 6 条「采集链路活性」）。
 
 #### 2.2.5 代价评估（量级）
 
@@ -607,7 +607,7 @@ MySQL 的唯一索引对**含 NULL 的行不做约束**——只要索引涉及�
 - 影响：清理任务与合规口径。**注**：`iot_alert_notification` 的 `last_error` / 投递日志增长最快，可能需要更短的保留期（**待定**）。
 
 **另有一项需要用户知晓但不必决策的事实**（提示）：
-- 现有 `docs/IOT-ROADMAP.md` 的 S5/S7/N-2/G1 等条目都在处理**接入链路的可靠性**，与本设计**没有冲突**；但「评估器自身健康」必须有独立指标并接入既有 L1/L2 判据体系，否则会重演「采集链路静默零写入」那类**无人知晓的静默失效**（`docs/PROD-OPS-NOTES.md` 第 6 条）。
+- 现有 `docs/IOT-ROADMAP.md` 的 S5/S7/N-2/G1 等条目都在处理**接入链路的可靠性**，与本设计**没有冲突**；但「评估器自身健康」必须有独立指标并接入既有 L1/L2 判据体系，否则会重演「采集链路静默零写入」那类**无人知晓的静默失效**（`deploy/PROD-OPS-NOTES.md` 第 6 条）。
 
 ---
 

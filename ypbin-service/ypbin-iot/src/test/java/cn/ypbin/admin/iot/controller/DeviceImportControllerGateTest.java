@@ -32,7 +32,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * 批量导入端点的**权限码与路由契约**门禁（看板 #7）。
+ * 批量导入端点的**权限码与路由契约**门禁（CSV 批量导入）。
  *
  * <p>三件事必须被钉死，且都靠人眼审不出来：</p>
  * <ol>

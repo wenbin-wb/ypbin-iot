@@ -8,7 +8,7 @@ import lombok.Getter;
 import lombok.Setter;
 
 /**
- * 开放 API Key（看板 #11 第 1 批）。
+ * 开放 API Key（第 1 批）。
  *
  * 安全约定（设计 §2.2/§2.5）：只存 secret_hash（HMAC-SHA256(pepper, secret)）与
  * secret_prefix（明文前若干位，仅回显辨识，不足以还原）；明文仅创建时返回一次。

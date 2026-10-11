@@ -29,7 +29,7 @@ import org.slf4j.LoggerFactory;
 /**
  * access 侧的 {@link DeviceRegistry} 实现：把「本节点租约内的设备」喂给协议栈框架。
  *
- * <p><b>两条必须守住的语义</b>（来自对框架装配源码的核实，见 IOT-ROADMAP 增量 3b-2 清单）：</p>
+ * <p><b>两条必须守住的语义</b>（来自对框架装配源码的核实）：</p>
  * <ol>
  *   <li>{@link #loadAll()} 只返回<b>本节点当前持有租约</b>的租户的设备。框架在
  *       {@code ApplicationReadyEvent} 时调用它一次；返回别的租户的设备 = 采了不该采的数据。</li>

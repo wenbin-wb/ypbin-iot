@@ -25,7 +25,7 @@ import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Mono;
 
 /**
- * 开放 API Key 认证过滤器（看板 #11 第 1 批网关侧）。
+ * 开放 API Key 认证过滤器（第 1 批网关侧）。
  *
  * <p>只匹配 /iot/open-api/v1/**（设计 §3.4 红线：绝不写成「凡带 Key 即放行」，
  * 否则会给 /internal/** 开旁路）。流程：解析 X-Api-Key: accessKeyId:secret →

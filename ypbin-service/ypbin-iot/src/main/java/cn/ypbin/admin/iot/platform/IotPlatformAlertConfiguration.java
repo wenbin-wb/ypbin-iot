@@ -13,7 +13,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Configuration;
 
 /**
- * 平台自告警配置装配（看板 #10）——与 `IotAlertConfiguration` 同范式：
+ * 平台自告警配置装配——与 `IotAlertConfiguration` 同范式：
  * `@Configuration` + `@EnableConfigurationProperties`。
  *
  * <p>本类**不**加 `@EnableScheduling`：该注解已由 `IotAlertConfiguration` 全局开启

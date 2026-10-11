@@ -48,7 +48,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * 开放 API 门面：设备域（看板 #11 门面，O-1/O-2/O-3/O-6 + O-4 的设备告警 + O-7 命令下发）。
+ * 开放 API 门面：设备域（门面 O-1/O-2/O-3/O-6 + O-4 的设备告警 + O-7 命令下发）。
  *
  * <p>薄适配：只做路径映射 + 权限码声明，业务逻辑零复制，全部委托既有 Service
  * （与管理面 {@code IotDeviceController} 等同源）。租户隔离、D0.5 不存在性语义、

@@ -12,7 +12,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 
 /**
- * 平台告警读端点门禁（看板 #10 二批）。
+ * 平台告警读端点门禁（二批）。
  *
  * 锁两条：权限码与网关路径口径。
  */

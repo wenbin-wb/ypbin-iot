@@ -6,7 +6,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
- * X-Api-Key 头解析用例（网关侧，看板 #11 第 1 批）。
+ * X-Api-Key 头解析用例（网关侧，开放 API 第 1 批）。
  */
 class OpenApiParseTest {
 

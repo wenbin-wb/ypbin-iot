@@ -243,8 +243,7 @@ public class AvailabilityServiceImpl implements AvailabilityService {
      * 由紧随其后的 {@link #canonicalizePropertyIds} 承担（2026-09-26 落地并收紧）。<b>仍未做</b>（不要夸大）：
      * ① 不做「该属性是否属于该产品/服务」的二次校验（映射行本身就是那个声明）；
      * ② {@code enabled=0}（停采）与 {@code ref_type=command} 的映射也会让属性读数通过。
-     * ② 已登记在 {@code docs/IOT-ROADMAP.md} 四点十七的补充段（“坐标形态未统一”与“孤儿映射”两项
-     * 已于 2026-09-26 闭环，见 {@link PointMappingIndex} 的类注释）。</p>
+     * （“坐标形态未统一”与“孤儿映射”两项已于 2026-09-26 闭环，见 {@link PointMappingIndex} 的类注释）</p>
      *
      * <p><b>落点与设计原文的差异（已由用户决策，如实登记）</b>：设计 §6.5 建议把校验放在**入站适配层**，
      * 并写明「不改 {@code AvailabilityService.ingest} 的语义、HTTP 通道同防护属独立决策（登记为 P2-7）」。
@@ -313,7 +312,7 @@ public class AvailabilityServiceImpl implements AvailabilityService {
      * <p><b>规范坐标 = 属性标识</b>：本方法把通过校验的读数一律改写成
      * {@code iot_property.identifier} 再交给下游（最新值 / 时序 / 影子 reported）。
      * 于是**写入侧只剩一种形态**，不再出现「同一个 {@code iot:latest} 里两种 field、按标识查不到
-     * access 来源数据」的读侧后果（见 {@code docs/IOT-ROADMAP.md} 四点十七补充段）。</p>
+     * access 来源数据」的读侧后果。</p>
      *
      * <p><b>过渡期仍接受历史的主键字符串形态</b>：滚动升级期间旧版 access 还在发主键字符串，
      * 若入站只认标识会把它们**整批误杀**（表现为升级过程中数据缺口）。因此本方法按
@@ -406,7 +405,7 @@ public class AvailabilityServiceImpl implements AvailabilityService {
      *   <li><b>坐标级撞名</b>（{@link PointMappingIndex.DeviceCoordinates#duplicateIdentifiers()}）：
      *       同设备两条映射的属性标识相同（物模型只在 service 内保证唯一）⇒ 两个点位真实共享一个规范坐标，
      *       本平台无法分开。此处只告警；彻底解法（拒绝同设备同名标识的映射）属产品策略，
-     *       登记在 {@code docs/IOT-ROADMAP.md} 四点十七，本轮不做。</li>
+     *       **登记为待办，本轮不做**。</li>
      * </ul>
      *
      * @param deviceId    设备 ID

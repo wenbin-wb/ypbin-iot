@@ -3,7 +3,7 @@ package cn.ypbin.admin.iot.openapi;
 import java.time.LocalDate;
 
 /**
- * 开放 API 具名常量（看板 #11 第 1 批；对照设计 §2.4/§3.3）。
+ * 开放 API 具名常量（第 1 批；对照设计 §2.4/§3.3）。
  *
  * 避免魔法值：虚拟主体保留段、Key 前缀、默认限流/配额均在此集中。
  */

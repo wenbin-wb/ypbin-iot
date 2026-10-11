@@ -17,7 +17,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * 平台告警读端点（看板 #10 二批「前端平台告警列表」）。
+ * 平台告警读端点（二批「前端平台告警列表」）。
  *
  * <p>读侧与评估器（PlatformAlertService）解耦：只查落库结果，不做判定。</p>
  *

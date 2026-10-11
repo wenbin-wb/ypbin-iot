@@ -39,7 +39,7 @@ import org.slf4j.LoggerFactory;
  * {@code iot:latest:{租户}:{设备}} 哈希里出现两种 field（access 来源是主键、MQTT/前端是标识），
  * 读侧按标识查询**拿不到 access 来源的数据**。现在一律上报 {@code identifier}，
  * 并由 iot 侧入站再归一一次（滚动升级期间旧实例仍可能发主键字符串，入站两种都认）。
- * 详见 {@code docs/IOT-ROADMAP.md} 四点十七补充段。</p>
+ * 该统一的口径见 {@code AccessReading} / {@link cn.ypbin.admin.iot.mapping.PointMappingIndex}。</p>
  *
  * <p><b>属性标识缺失（孤儿映射）不静默</b>：映射行引用的 {@code iot_property} 行被物模型重导入
  * 物理删除后，设备规格里该点位的 {@code identifier} 为空。此时**必须丢弃该读数并计数 + WARN**，
@@ -53,7 +53,7 @@ import org.slf4j.LoggerFactory;
  * 会落成 {@code [B@<hash>} 这种无值语义的文本（曲线只能进文本列 ⇒ 画不出来）。因此这里插入
  * {@link ValueDecoder} 一道：按协议码选解码器，按物模型数据类型与点位映射参数产出规范值；
  * **解不出来就丢弃 + 计数 + WARN**，绝不把 {@code [B@…} 交给出口。缺口归属与替代路径见
- * {@code docs/STARTER-FEEDBACK.md} SF-6 与 {@code docs/VALUE-DECODE-DESIGN.md}。</p>
+ * {@code docs/VALUE-DECODE-DESIGN.md} §5「反哺与替换路径」。</p>
  *
  * <p>线程安全：本对象只在协议栈的订阅回调线程上使用；计数用普通 {@code long} 字段由调用方
  * 保证可见性，或改由出口侧统计（3b-2 占位实现从简）。</p>

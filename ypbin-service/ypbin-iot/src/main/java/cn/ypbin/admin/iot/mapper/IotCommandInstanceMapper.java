@@ -48,7 +48,7 @@ public interface IotCommandInstanceMapper extends BaseMapper<IotCommandInstance>
     IotCommandInstance selectByRequestId(@Param("requestId") String requestId);
 
     /**
-     * 按客户端幂等键查实例（看板 #11 O-7 C2；租户条件由插件注入，device 显式限定防跨设备复用）。
+     * 按客户端幂等键查实例（开放 API O-7 C2；租户条件由插件注入，device 显式限定防跨设备复用）。
      *
      * @param deviceId 设备 ID
      * @param clientRequestId 客户端幂等键（已归一化 trim）

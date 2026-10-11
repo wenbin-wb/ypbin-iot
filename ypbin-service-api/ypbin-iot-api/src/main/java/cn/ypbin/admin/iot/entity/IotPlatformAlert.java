@@ -17,7 +17,7 @@ import lombok.Getter;
 import lombok.Setter;
 
 /**
- * 平台自告警实例（看板 #10，设计 `docs/PLATFORM-ALERTING-DESIGN.md` §3.1）。
+ * 平台自告警实例（设计 `docs/PLATFORM-ALERTING-DESIGN.md` §3.1）。
  *
  * <p><b>为什么与设备告警 {@code iot_alert_instance} 分成两张表</b>（设计 §1.3）：
  * 设备告警以 `ruleId` + `deviceId` + `propertyId` 为键，而平台健康规则

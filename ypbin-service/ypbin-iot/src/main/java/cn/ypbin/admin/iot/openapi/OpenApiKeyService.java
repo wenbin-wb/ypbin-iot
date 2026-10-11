@@ -28,7 +28,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
 /**
- * 开放 API Key 服务（看板 #11 第 1 批）。
+ * 开放 API Key 服务（第 1 批）。
  *
  * 安全要点（设计 §2.5）：只存 HMAC-SHA256(pepper, secret) 哈希与前 8 位明文前缀；
  * 明文仅创建响应返回一次；校验用常量时间比较；失败统一 INVALID 防枚举。

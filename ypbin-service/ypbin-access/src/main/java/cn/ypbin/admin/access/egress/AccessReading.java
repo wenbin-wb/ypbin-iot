@@ -22,7 +22,8 @@ import java.time.Instant;
  *
  * <p><b>坐标形态</b>：{@code propertyId} 承载的是**属性标识**（{@code iot_property.identifier}，
  * 即规范坐标），不是属性主键的字符串形式——2026-09-26 起统一。字段名保持不变（改的是取值语义，
- * 不是给同一个概念换名字）；理由与统一前的读侧后果见 {@code docs/IOT-ROADMAP.md} 四点十七补充段。</p>
+ * 不是给同一个概念换名字）。统一前 access 侧上报的是主键字符串，与 MQTT/前端用的标识不一致，
+ * 读侧按标识查询拿不到 access 来源的数据。</p>
  *
  * @param deviceId   设备主键（字符串形式，与协议栈一致）
  * @param propertyId 属性标识（规范坐标，{@code iot_property.identifier}）

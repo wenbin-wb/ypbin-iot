@@ -16,8 +16,8 @@ package cn.ypbin.admin.access.decode;
  * {@code PointValue.value} 交给宿主（{@code ypbin-iot-protocol-tcp} 的 {@code TcpSession#dispatch}，
  * v0.1.0 源码第 295 行 {@code PointValue.good(address, payload, ...)}），字节没有任何类型语义；
  * 而姊妹模块 MQTT 有 {@code MqttPayloadFormat}（TEXT/NUMBER/BINARY）在协议层就解码。
- * 缺口是**框架侧**的（缺 TCP 的 payload-format / 缺宿主可插的解码 SPI，见
- * {@code docs/STARTER-FEEDBACK.md} SF-6），故本层按本仓铁律**先反馈、同时给过渡实现**：
+ * 缺口是**框架侧**的（缺 TCP 的 payload-format / 缺宿主可插的解码 SPI，反哺与替换路径见
+ * {@code docs/VALUE-DECODE-DESIGN.md} §5），故本层按本仓铁律**先反馈、同时给过渡实现**：
  * 解码器只吃「原始字节」，按物模型数据类型与点位映射参数产出规范值；框架补上能力后本层整体删除。</p>
  *
  * <p><b>契约（调用方按此保证「解码失败不静默」）</b>：实现必须返回

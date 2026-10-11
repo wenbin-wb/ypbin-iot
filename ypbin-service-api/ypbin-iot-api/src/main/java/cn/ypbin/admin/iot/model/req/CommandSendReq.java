@@ -70,7 +70,7 @@ public class CommandSendReq {
     private Boolean writeDesired;
 
     /**
-     * 客户端幂等键（看板 #11 O-7 C2；可选）。
+     * 客户端幂等键（开放 API O-7 C2；可选）。
      *
      * <p>同一租户+同一设备下重复提交同键 ⇒ 返回已有实例、<b>不二次下发</b>（形态见
      * {@code RequestIdRules}：字母/数字/下划线/点/冒号/连字符，1~64 字符；非法直接拒绝，

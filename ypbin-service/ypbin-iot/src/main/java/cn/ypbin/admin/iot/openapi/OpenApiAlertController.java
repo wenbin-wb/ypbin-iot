@@ -24,7 +24,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * 开放 API 门面：告警查询只读（看板 #11 门面，O-4）。
+ * 开放 API 门面：告警查询只读（门面 O-4）。
  *
  * <p>薄适配，委托 {@link AlertInstanceService}（与管理面 {@code IotAlertController}
  * 的读路径同源；未启用告警时 Service 抛错，不返回空列表）。</p>

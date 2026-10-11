@@ -16,11 +16,11 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * 开放 API 的**虚拟主体**约定（看板 #11，方案 B2）——**纯逻辑，零 IO**。
+ * 开放 API 的**虚拟主体**约定（方案 B2）——**纯逻辑，零 IO**。
  *
  * <p><b>背景（F-1 实测结论）</b>：既有权限解析（`IotPermissionProvider`）只认"库里的真实用户"
  * （`SysCache.getUserPermissions(userId)`），**任何 scope 注入位都不被读取** ⇒ 虚拟主体权限恒空。
- * 生产实测（`docs/OPENAPI-PREFLIGHT.md` §9.3）已确认：虚拟主体带 `X-Roles` / `X-Api-Scopes`
+ * 生产实测已确认：虚拟主体带 `X-Roles` / `X-Api-Scopes`
  * 调受保护端点**一律 403**；且真实用户带**乱码** `X-Roles` 仍 200 ⇒ 证明 `X-Roles` 当时完全不被读。</p>
  *
  * <p><b>B2 做法</b>：网关为 API Key 请求注入一个**保留用户 ID 段**的虚拟主体，并把该 Key 的
