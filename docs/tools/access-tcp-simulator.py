@@ -15,7 +15,8 @@
 
 ⚠️ 与真实设备的差异（不要把它当成采集能力的证明）：
   1. 它只会「连上来就发」，不响应任何下行写；TCP 适配器本身也只声明 WRITE + SUBSCRIBE_STREAM。
-  2. 帧内容是固定文本，不代表任何真实工业协议（Modbus/OPC UA 的寄存器语义完全没有覆盖）。
+  2. 帧内容是固定文本（`KEY=VALUE,...`），不代表任何真实工业协议（Modbus/OPC UA 的寄存器语义完全没有覆盖）。
+     帧内 4 个键（`TEMP`/`HUMIDITY`/`SERIALNO`/`BOUNDARY`）与演示设备 9300012 的 4 条点位映射 raw_address 对应。
   3. 它不模拟断线重连/心跳超时/半开连接，因此**链路的健壮性没有被验证**。
 
 用法：
@@ -39,7 +40,11 @@ def serve_connection(conn: socket.socket, addr, interval: float, counter: dict, 
     try:
         while True:
             seq += 1
-            payload = f"TEMP=23.5,SEQ={seq}\n".encode("utf-8")
+            # 4 个键与演示设备 9300012（demo-dev-curve）的 4 条点位映射的 raw_address 一一对应
+            # （见 deploy/sql/fixes/2026-10-12-iot-demo-tcp-multi-key.sql）。多键帧让 4 个点位都能
+            # 从同一帧按各自 raw_address 取键解码；SEQ 作为帧内序号供人读。
+            payload = (f"TEMP=23.5,HUMIDITY={55 + seq % 10},"
+                       f"SERIALNO=SN-{seq:06d},BOUNDARY=42,SEQ={seq}\n").encode("utf-8")
             conn.sendall(payload)
             with lock:
                 counter["frames"] += 1
