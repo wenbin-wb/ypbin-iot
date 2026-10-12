@@ -46,6 +46,17 @@ spring:
                 - Path=/ai/**
               filters:
                 - StripPrefix=1
+            # 安全（M2）：/iot/internal/** 是服务间内网面，绝不对外暴露。
+            # 必须在 iot 通配路由之前（order=-1）；RedirectTo 短路，永不转发到上游。
+            # 运行期硬保证在 InternalEndpointBlockFilter（WebFilter，早于路由解析）；
+            # 本路由为配置层纵深防御与可见性，两处 YAML 必须保持同构。
+            - id: iot-internal-deny
+              uri: lb://ypbin-iot
+              order: -1
+              predicates:
+                - Path=/iot/internal/**
+              filters:
+                - RedirectTo=404,/iot/internal-denied
             - id: iot-openapi
               uri: lb://ypbin-iot
               # 开放 API（门面）：只剥服务短名、保留 /open-api/v1 前缀落到 iot 门面
@@ -78,6 +89,11 @@ ypbin:
   # ---------------------------------------------------------------------------
   openapi:
     require-signature: true
+    # M1（破坏性变更，默认 true=严格）：签名载荷纳入 HTTP method + path。
+    # 覆盖后，拦截到一条已签名请求也无法在 nonce TTL 内改 method/path 打另一个端点。
+    # ⚠️ 部署前需同步通知/升级已接入客户端（其签名算法必须把 __method/__path 纳入规范串）；
+    #    过渡期可临时置 false（须与 require-signature 一并放宽），详见 docs/OPENAPI-DESIGN.md §2.8。
+    sign-include-method-path: true
   gateway:
     # -------------------------------------------------------------------------
     # 入口身份头清洗（SF-5 纵深防御，2026-09-29 补）

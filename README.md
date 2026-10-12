@@ -77,8 +77,10 @@
   由 `DeviceSpecServiceImpl` 组装；它只下发**启停位为启用**且**物模型属性行存在**的点位。
 - **静默失效是头号敌人**：设备/点位变更与「推进配置版本号」在**同一事务**里，否则接入侧永远
   不知道配置变了（历史上是 G7 静默零更新）。
-- **`/internal/**` 是内网面**：只对内部凭证开放，与用户侧 `/iot/**` 分离；MQTT 入站是唯一
-  用原始 HTTP 状态码的例外（EMQX 规则要按状态码决定重试）。
+- **`/internal/**` 是内网面（网关 + 服务双层防护）**：网关在路由/过滤器处**硬拒绝**
+  `/iot/internal/**`（返回 404，不向外部确认路径存在，见 `InternalEndpointBlockFilter` 与两处
+  gateway 路由配置），服务侧再用 `X-Internal-Token` 守卫（未配置即 fail-closed）；用户侧 `/iot/**`
+  与内网面在 URL 上分离。MQTT 入站是唯一用原始 HTTP 状态码的例外（EMQX 规则要按状态码决定重试）。
 
 ## 🚀 快速开始
 
@@ -88,11 +90,27 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/wenbin-wb/ypbin-iot/main/deploy/install.sh)
 ```
 
-脚本会拉取代码、起基础设施（MySQL / Redis / Nacos / IoTDB）、建库导配置、构建并拉起全部服务。
+脚本会拉取代码、起基础设施（MySQL / Redis / Nacos / IoTDB）、建库导配置、构建并拉起全部服务，
+并**把本仓（ypbin-iot）检出到 `$ROOT/ypbin-admin`**：fork 的 compose、`nacos/*`、`006/007` 与
+`*-iot-*` 迁移都从那里取，所以「一键安装」装出来的是本仓全栈，而不是只有 admin 基座。
 前提：一台能跑 Docker 的 Linux 主机、能访问 GitHub（或 Gitee 镜像，脚本会自动切换）、Java 21 与 Maven。
 
+> ⚠️ **必须先准备 EMQX 凭据（硬前置）**：`docker-compose.yml` 用 `${EMQX_API_KEY:?}`/`${EMQX_API_SECRET:?}`
+> 表达"必需变量"，缺失时**任何** `docker compose` 命令都会被拦下（包括只起基础设施）。
+> 请在 EMQX Dashboard → API Keys 创建后这样安装：
+> ```bash
+> EMQX_API_KEY=<key> EMQX_API_SECRET=<secret> \
+>   bash <(curl -fsSL https://raw.githubusercontent.com/wenbin-wb/ypbin-iot/main/deploy/install.sh)
+> ```
+> 脚本会把它们持久化进 `.env`（600）。其余 compose 必填变量（MySQL/Redis/Nacos/AI/IoTDB 口令）
+> 由脚本生成；EMQX **不会**被随机生成——造一个"格式对但连不上"的假凭据比直接失败更坏。
+
 > ⚠️ **检出目录名**：脚本既能从 `ypbin-admin` 检出目录跑，也能从本 fork 的检出目录跑
-> （Nacos 配置模板目录带回退查找；两个候选目录都不存在时**直接报错中止**，不会静默跳过配置导入）。
+> （Nacos 配置模板目录带回退查找；候选来源都不可用时**直接报错中止**，不会静默跳过配置导入）。
+
+> ⚠️ **已有旧检出（纯 admin）**：若 `$ROOT/ypbin-admin` 里已经是 upstream admin 的检出，
+> 一键安装会**明确报错**并给出迁移指引（而不是把纯 admin 检出将就升级成"半个 ypbin-iot"）。
+> 想只装 admin 基座：`YPBIN_ADMIN_REPO=<upstream admin 仓地址>`。
 
 ### 手工部署
 

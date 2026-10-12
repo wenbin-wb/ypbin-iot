@@ -52,6 +52,18 @@ public final class OpenApiKeyConstants {
     /** 允许的未来时钟偏移（秒）：容忍客户端与服务端小幅不同步，但不接受明显来自未来的时间戳。 */
     public static final long SIGN_CLOCK_SKEW_SECONDS = 5L;
 
+    /**
+     * 参与签名的 HTTP method 约定键（M1：签名覆盖 method/path，防拦截后改端点重放）。
+     *
+     * <p>由网关在构造 {@code signParams} 时注入（值 = 大写 method），外部客户端计算签名时
+     * <b>必须</b>把同名键一并纳入规范串；网关侧同名字面量在 {@code OpenApiKeyAuthFilter}，
+     * 两模块一致性由契约测试用固定向量钉住。</p>
+     */
+    public static final String SIGN_METHOD_KEY = "__method";
+
+    /** 参与签名的请求 path 约定键（值 = 网关侧原始 path，含 {@code /iot/open-api/v1} 前缀）。 */
+    public static final String SIGN_PATH_KEY = "__path";
+
     /** nonce 防重放计数 Redis key 前缀（按 Key + nonce 唯一）。 */
     public static final String SIGN_NONCE_KEY_PREFIX = "ypbin:openapi:sign:nonce:";
 

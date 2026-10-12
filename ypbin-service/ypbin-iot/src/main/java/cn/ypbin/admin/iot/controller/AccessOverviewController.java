@@ -10,15 +10,15 @@
 package cn.ypbin.admin.iot.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
-import cn.ypbin.admin.iot.entity.TenantNodeAssignment;
+import cn.ypbin.admin.iot.lease.AccessNodeLeaseAggregate;
 import cn.ypbin.admin.iot.lease.AccessNodeOverviewResp;
 import cn.ypbin.admin.iot.mapper.AccessNodeMapper;
 import cn.ypbin.admin.iot.mapper.TenantNodeAssignmentMapper;
 import cn.ypbin.admin.iot.platform.AccessMetricsReportStore;
 import cn.ypbin.starter.core.model.R;
-import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -44,9 +44,6 @@ import org.springframework.web.bind.annotation.RestController;
 @RequiredArgsConstructor
 public class AccessOverviewController {
 
-    /** 租约状态：在采。与 {@code LeaseState.ACTIVE} 的 code 一致（裸字符串在 SQL 与门禁中已多处存在）。 */
-    private static final String STATE_ACTIVE = "active";
-
     private final AccessNodeMapper accessNodeMapper;
     private final TenantNodeAssignmentMapper assignmentMapper;
     private final AccessMetricsReportStore reportStore;
@@ -59,17 +56,25 @@ public class AccessOverviewController {
     @GetMapping
     @SaCheckPermission("iot:ledger:list")
     public R<Map<String, Object>> overview() {
+        // M7：一次 GROUP BY 取回「每节点在采租户数 + 最早到期」；旧实现每节点
+        // 1 次 selectCount + 3 次 selectOne（同一参数里连续调了三次最早到期），N 节点 = 1+4N 条 SQL。
+        Map<String, AccessNodeLeaseAggregate> aggregates = new HashMap<>();
+        for (AccessNodeLeaseAggregate aggregate : assignmentMapper.selectActiveAggregateByNode()) {
+            aggregates.put(aggregate.getAccessNode(), aggregate);
+        }
         List<AccessNodeOverviewResp> nodes = accessNodeMapper.selectList(null).stream()
-            .map(row -> new AccessNodeOverviewResp(
-                row.getAccessNode(),
-                row.getMaxTenants(),
-                assignmentMapper.selectCount(Wrappers.lambdaQuery(TenantNodeAssignment.class)
-                    .eq(TenantNodeAssignment::getAccessNode, row.getAccessNode())
-                    .eq(TenantNodeAssignment::getState, STATE_ACTIVE)),
-                row.getLastHeartbeatAt(),
-                earliestLeaseExpireAt(row.getAccessNode()),
-                leaseAlive(earliestLeaseExpireAt(row.getAccessNode())),
-                leaseRemainingSec(earliestLeaseExpireAt(row.getAccessNode()))))
+            .map(row -> {
+                AccessNodeLeaseAggregate aggregate = aggregates.get(row.getAccessNode());
+                LocalDateTime leaseExpireMin = aggregate == null ? null : aggregate.getEarliestExpireAt();
+                return new AccessNodeOverviewResp(
+                    row.getAccessNode(),
+                    row.getMaxTenants(),
+                    aggregate == null ? 0L : aggregate.getHoldingCount(),
+                    row.getLastHeartbeatAt(),
+                    leaseExpireMin,
+                    leaseAlive(leaseExpireMin),
+                    leaseRemainingSec(leaseExpireMin));
+            })
             .toList();
 
         Map<String, Object> metrics = new LinkedHashMap<>();
@@ -116,22 +121,4 @@ public class AccessOverviewController {
         return Duration.between(LocalDateTime.now(), leaseExpireMin).toSeconds();
     }
 
-    /**
-     * 该节点最早的租约到期时刻；**没持有任何租户时返回 `null`**（节点刚注册 / 刚全部释放）。
-     *
-     * <p>为什么必须判空：空表上 `selectOne` 返回 null，直接取字段会让整个概览接口 500——
-     * 而这正是「节点刚注册还没领到租户」的正常状态（测试实证过）。</p>
-     *
-     * @param accessNode 节点标识
-     * @return 最早到期时刻，或 `null`
-     */
-    private LocalDateTime earliestLeaseExpireAt(String accessNode) {
-        TenantNodeAssignment earliest = assignmentMapper.selectOne(
-            Wrappers.lambdaQuery(TenantNodeAssignment.class)
-                .select(TenantNodeAssignment::getLeaseExpireAt)
-                .eq(TenantNodeAssignment::getAccessNode, accessNode)
-                .orderByAsc(TenantNodeAssignment::getLeaseExpireAt)
-                .last("LIMIT 1"));
-        return earliest == null ? null : earliest.getLeaseExpireAt();
-    }
 }

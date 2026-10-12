@@ -121,9 +121,11 @@
 
 ## 5. 反哺与替换路径（**必读**）
 
-1. **反哺（已闭环）**：缺口（TCP 无 `payload-format`、core 无宿主可插解码 SPI）已作为反哺条目提给 starter，
-   **starter v0.2.0（PR #19）已修**：新增 `ypbin.iot.protocol.tcp.payload-format`（`text`/`number`/`binary`），
-   本仓过渡层因此已达删除条件。
+1. **反哺（部分交付，尚未闭环）**：缺口（TCP 无 `payload-format`、core 无宿主可插解码 SPI）已提给 starter，
+   **starter v0.2.0（PR #19）只交付 `ypbin.iot.protocol.tcp.payload-format`（`text`/`number`/`binary`）**；
+   `valueSelector`（按点位声明取帧内字段）或宿主解码 SPI **仍是「后续演进项」**——TCP `text` 只交付整帧，
+   多地址场景 fail-fast。因此**前置条件 = starter 交付 `valueSelector` 或宿主解码 SPI；
+   在此之前本仓过渡层必须保留**（`raw_address` 作为帧键的约定同时保留）。
 2. **期望的框架能力**（二选一即可）：
    - **A（推荐）** 给 TCP 模块加 `ypbin.iot.protocol.tcp.payload-format`（`text`/`number`/`binary`，与 MQTT 同名同语义，
      `text` 用**严格 UTF-8**、非法即 BAD），并给 `PointValue` 一个「按点位声明取帧内字段」的宿主钩子

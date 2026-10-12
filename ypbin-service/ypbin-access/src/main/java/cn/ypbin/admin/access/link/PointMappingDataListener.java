@@ -24,6 +24,7 @@ import io.micrometer.core.instrument.MeterRegistry;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.LongAdder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -55,8 +56,9 @@ import org.slf4j.LoggerFactory;
  * **解不出来就丢弃 + 计数 + WARN**，绝不把 {@code [B@…} 交给出口。缺口归属与替代路径见
  * {@code docs/VALUE-DECODE-DESIGN.md} §5「反哺与替换路径」。</p>
  *
- * <p>线程安全：本对象只在协议栈的订阅回调线程上使用；计数用普通 {@code long} 字段由调用方
- * 保证可见性，或改由出口侧统计（3b-2 占位实现从简）。</p>
+ * <p>线程安全：解码失败/未映射/孤儿映射三个自检计数改用 {@link LongAdder}（多协议线程可能并发回调；
+ * 普通 {@code long} 自增会丢更新）。它们<b>只用于自检与测试断言</b>，不参与业务判定；
+ * 面向运维的告警计数仍以 {@code iot.access.decode.failure} 等 Micrometer 指标为准。</p>
  *
  * @author wenbin
  * @since 2026-09-21
@@ -84,13 +86,13 @@ public class PointMappingDataListener implements DataListener {
 
     private final MeterRegistry meterRegistry;
 
-    private long unmappedCount;
+    private final LongAdder unmappedCount = new LongAdder();
 
     /** 因映射缺少属性标识（孤儿映射）而丢弃的读数条数（与「地址未映射」分开计）。 */
-    private long orphanCount;
+    private final LongAdder orphanCount = new LongAdder();
 
     /** 因解码失败（帧格式/键/类型/数值形态）而丢弃的读数条数（与上面两类原因分开计）。 */
-    private long decodeFailureCount;
+    private final LongAdder decodeFailureCount = new LongAdder();
 
     public PointMappingDataListener(String deviceId, String protocol, Integer pollIntervalMs,
                                     List<AccessPointMappingDto> points, AccessReadingSink sink,
@@ -117,7 +119,7 @@ public class PointMappingDataListener implements DataListener {
         String address = value.address().raw();
         AccessPointMappingDto point = pointByAddress.get(address);
         if (point == null) {
-            unmappedCount++;
+            unmappedCount.increment();
             log.warn("[access] 采集到未映射的地址，已丢弃：device={} address={}（点位映射缺失？）",
                 LogSanitizer.sanitize(deviceId), LogSanitizer.sanitize(address));
             return;
@@ -125,7 +127,7 @@ public class PointMappingDataListener implements DataListener {
         // 规范坐标：属性标识。缺标识说明该映射是孤儿（物模型属性行已被删除）⇒ 丢弃 + 计数 + WARN
         String identifier = point.getIdentifier();
         if (identifier == null || identifier.isBlank()) {
-            orphanCount++;
+            orphanCount.increment();
             log.warn("[access] 点位映射缺少属性标识（物模型属性行可能已被重导入删除），已丢弃该读数："
                     + "device={} address={} 属性主键={}（请重建该点位映射）",
                 LogSanitizer.sanitize(deviceId), LogSanitizer.sanitize(address),
@@ -173,7 +175,7 @@ public class PointMappingDataListener implements DataListener {
      * @param rawValue  原始值（只取长度）
      */
     private void onDecodeFailure(AccessPointMappingDto point, DecodeFailure failure, Object rawValue) {
-        decodeFailureCount++;
+        decodeFailureCount.increment();
         // 计数器在启动期已按全部原因码预注册（值 0）⇒ 这里只自增，不再建 meter（见 DecodeFailureMetrics）
         Counter counter = DecodeFailureMetrics.counter(meterRegistry, failure);
         counter.increment();
@@ -190,18 +192,18 @@ public class PointMappingDataListener implements DataListener {
         return rawValue instanceof byte[] payload ? payload.length : -1;
     }
 
-    /** 本设备被丢弃的未映射读数条数（供自检与测试断言）。 */
+    /** 本设备被丢弃的未映射读数条数（供自检与测试断言；并发下无丢更新）。 */
     public long unmappedCount() {
-        return unmappedCount;
+        return unmappedCount.sum();
     }
 
     /** 本设备因孤儿映射（缺属性标识）被丢弃的读数条数（供自检与测试断言）。 */
     public long orphanCount() {
-        return orphanCount;
+        return orphanCount.sum();
     }
 
     /** 本设备因解码失败被丢弃的读数条数（供自检与测试断言）。 */
     public long decodeFailureCount() {
-        return decodeFailureCount;
+        return decodeFailureCount.sum();
     }
 }

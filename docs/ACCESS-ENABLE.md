@@ -159,7 +159,8 @@ UPDATE iot_device SET endpoint = 'tcp://172.20.0.1:19002' WHERE id = 9300012;
   `KEY=VALUE` 解析、键由点位映射 `raw_address` 声明，再按物模型 `data_type` 规范化为数值/布尔/文本；
   解不出来就**丢弃 + 计数 + WARN**（`iot.access.decode.failure{reason=…}`），不再产生 `[B@…`。
   完整口径、扩展点与**替换路径**见 [`VALUE-DECODE-DESIGN.md`](VALUE-DECODE-DESIGN.md) §5（含框架侧缺口与反哺结果：
-  starter v0.2.0 已加 `ypbin.iot.protocol.tcp.payload-format`，本过渡层已达删除条件）。
+  starter v0.2.0 只交付 `ypbin.iot.protocol.tcp.payload-format`，`valueSelector`/宿主解码 SPI 仍是后续演进项 ⇒
+  **本过渡层必须保留**，删除前置条件是 starter 交付 `valueSelector` 或宿主解码 SPI）。
   演示设备 9300012 的 `raw_address` 已由 `holding:0` 修正为帧键 `TEMP`
   （`deploy/sql/fixes/2026-09-27-iot-demo-tcp-frame-key.sql`，回滚物 `deploy/sql/rollback/2026-09-27-iot-demo-tcp-frame-key-rollback.sql`；
   放 `fixes/` 而非 `migration/`：后者受 SQL 等价门禁约束，本条是运行时数据的订正而非安装脚本的一部分）。

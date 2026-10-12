@@ -103,6 +103,7 @@ class LeaseServiceImplTest {
     private TenantLedgerMapper ledgerMapper;
     private AccessNodeRegistry registry;
     private LeaseProperties properties;
+    private SimpleMeterRegistry meterRegistry;
     private LeaseServiceImpl service;
 
     /** 模拟 access_node 表：注册写入、按节点名查询/加锁读出（未注册节点必须查不到）。 */
@@ -140,10 +141,13 @@ class LeaseServiceImplTest {
         properties.setAssignableTenantIds(List.of(11L, 22L));
         lenient().when(mapper.selectList(any())).thenReturn(List.of());
         lenient().when(mapper.selectCount(any())).thenReturn(0L);
+        // M3：归属存在性判定改走「含软删」查询；默认无任何归属行（含软删）
+        lenient().when(mapper.selectIncludingDeletedByTenantIds(any())).thenReturn(List.of());
         // M0b-4：服务改用数据库时钟 ⇒ 桩一个固定值（否则 selectNow() 返回 null 会 NPE）
         lenient().when(mapper.selectNow()).thenReturn(LocalDateTime.of(2026, 9, 21, 12, 0));
+        meterRegistry = new SimpleMeterRegistry();
         service = new LeaseServiceImpl(mapper, maintenanceWindowMapper, registry, ledgerMapper, properties,
-            new SimpleMeterRegistry(), noTx());
+            meterRegistry, noTx());
     }
 
     @Test
@@ -595,6 +599,50 @@ class LeaseServiceImplTest {
                 // 单测无需真实回滚
             }
         });
+    }
+
+    @Test
+    @DisplayName("★ M3：存在软删归属行时先 revive（清 is_deleted）再分配，绝不静默跳过导致永久零采集")
+    void softDeletedAssignmentMustBeRevivedInsteadOfSilentlySkipped() {
+        registerNode();
+        when(mapper.update(isNull(), any())).thenReturn(0);
+        // 租户 11 有软删归属行（占住唯一键），租户 22 无任何行
+        TenantNodeAssignment softDeleted = assignment(11L, "access-old", 1L, LeaseState.ACTIVE);
+        softDeleted.setIsDeleted(1);
+        when(mapper.selectIncludingDeletedByTenantIds(any())).thenReturn(List.of(softDeleted));
+        when(mapper.reviveIgnoringDuplicates(any(), any(), any(), any())).thenReturn(1);
+        when(mapper.insertIgnoringDuplicates(any())).thenReturn(1);
+
+        service.acquire(acquireReq(NODE));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Long>> reviveIds = ArgumentCaptor.forClass(List.class);
+        verify(mapper, times(1)).reviveIgnoringDuplicates(reviveIds.capture(), eq(NODE),
+            eq(LeaseState.ACTIVE.getCode()), any());
+        assertThat(reviveIds.getValue()).as("软删行必须被 revive，否则 INSERT IGNORE 永远静默跳过")
+            .containsExactly(11L);
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<TenantNodeAssignment>> inserted = ArgumentCaptor.forClass(List.class);
+        verify(mapper, times(1)).insertIgnoringDuplicates(inserted.capture());
+        assertThat(inserted.getValue()).extracting(TenantNodeAssignment::getTenantId)
+            .as("已 revive 的租户不得再 INSERT（否则仍会撞唯一键）").containsExactly(22L);
+    }
+
+    @Test
+    @DisplayName("★ M3：INSERT IGNORE 影响行数小于请求行数时必须有计数指标（防静默失效）")
+    void skippedInsertMustIncrementCounter() {
+        registerNode();
+        when(mapper.update(isNull(), any())).thenReturn(0);
+        // 请求 2 行、只写入 1 行（另 1 行撞唯一键）
+        when(mapper.insertIgnoringDuplicates(any())).thenReturn(1);
+
+        service.acquire(acquireReq(NODE));
+
+        io.micrometer.core.instrument.Counter skipped =
+            meterRegistry.find("iot.lease.insert_skipped").counter();
+        assertThat(skipped).as("被跳过的行必须有可观测计数（M3 静默失效的告警信号）").isNotNull();
+        assertThat(skipped.count()).isEqualTo(1.0d);
     }
 
     /** 注册一个「不限容量」的节点（与 access 默认配置一致：maxTenants 不填）。 */

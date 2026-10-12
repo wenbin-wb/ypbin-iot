@@ -31,6 +31,7 @@ import cn.ypbin.starter.core.exception.GlobalErrorCode;
 import cn.ypbin.starter.crud.service.BaseServiceImpl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import java.util.List;
+import java.util.Objects;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -152,8 +153,9 @@ public class IotPointMappingServiceImpl extends BaseServiceImpl<IotPointMappingM
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
                 "属性不属于设备所绑定产品的物模型：" + req.getPropertyId());
         }
+        // access_mode 可能为 null（历史/导入数据）：用 Objects.equals 避免 NPE（null != READ_WRITE ⇒ 拒绝）
         if (!AccessMode.READ_WRITE.getCode().equals(property.getAccessMode())
-            && !property.getAccessMode().equals(req.getRw())) {
+            && !Objects.equals(property.getAccessMode(), req.getRw())) {
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
                 "映射读写权限与属性 access_mode 不一致：属性=" + property.getAccessMode()
                     + " 映射=" + req.getRw());

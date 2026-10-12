@@ -102,6 +102,16 @@
 | `iot.platform_alert.notify.failed` | Counter | 投递失败次数（异常 + 对端返回失败） | **期望 0**；增长 ⇒ 看 `last_error`/系统邮件配置 | PlatformAlertNotifier.java |
 
 
+### 2.9 iot 服务侧补充登记（不属 ypbin-access；`MetricsRegistryGateTest` 只校验 `iot.access.*`）
+
+| 指标 | 类型 | 口径（何时变化） | 建议关注 / 阈值 | 注册文件 |
+|---|---|---|---|---|
+| `iot.lease.insert_skipped` | Counter | 首次分配批量 `INSERT IGNORE` 时被唯一键跳过的归属行数（含「软删归属行占住唯一键」这一静默失效形态，M3） | **期望 0**；增长 ⇒ 有租户可能被静默跳过：先查该租户是否有软删归属行，再看是否多副本并发抢先 | LeaseServiceImpl.java |
+
+> 说明：该指标产在 **ypbin-iot** 服务（租约分配路径），既不在本清单原本的 ypbin-access 范围，
+> 也不经 access→iot 指标快照上报；此处只做**登记**（名字/口径/注册位置）。
+> 平台自告警目前**未**为该 meter 加规则（属未完成项），需要时在 `PlatformHealthSnapshot` 的枚举指标里补上。
+
 ## 3. 与 R8 其它条目的关系
 
 - **平台自告警（2026-10-10）**：本清单的 `iot.access.config.reconcile.deferred`、`iot.access.lease.tick.duration`（max）、 `iot.access.metrics.report.failure` 由 access 每 15s 推送给 iot，进入 4 条平台自告警规则（`PLATFORM_RECONCILE_DEFERRED`/`PLATFORM_TICK_SLOW`/`PLATFORM_INSTANCE_UNREACHABLE`/`PLATFORM_LEDGER_BUMP_FAILING`） ⇒ 平台告警页 + 邮件/站内信可见；iot 侧心跳 `iot.platform_alert.access.report.lag`。
@@ -117,3 +127,4 @@
 |---|---|
 | 2026-10-09 | 建立本清单：把 `ypbin-access` 的 **33 条**指标逐条登记（口径 / 建议关注 / 注册文件），并新增 3 条计时器（tick / 对账 / 单租户取数）；配套门禁 `MetricsRegistryGateTest` 防清单与代码漂移。 |
 | 2026-10-09（R8-2 实施批） | 登记新增的 `iot.access.config.reconcile.deferred`（对账时间预算推迟计数）⇒ 共 **34** 条；门禁反向检查同时补上「前缀常量 + 后缀片段」风格（此前只认完整字面量，**真的漏过这条新指标**——已由门禁自身抓出）。 |
+| 2026-10-18（M3 加固） | 补充登记 iot 服务侧 `iot.lease.insert_skipped`（首次分配被唯一键跳过的归属行数）；注明不在 access 门禁覆盖范围内。 |
