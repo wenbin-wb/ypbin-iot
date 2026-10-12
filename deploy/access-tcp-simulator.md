@@ -2,7 +2,7 @@
 
 > 建立于 **2026-09-26**（承一轮事故：机器重启后采集链路静默变成"零写入"，排查见下）。
 > 脚本本体是**仓库里的测试工具**：`ypbin-iot/docs/tools/access-tcp-simulator.py`
-> （git-tracked，最后提交 `225de4a`，md5 `8f56983a52a36efc5c79491e5e8572e4`）。
+> （git-tracked，md5 `5c6f75b7a97df6fa3c42a84bab473530`）。
 
 ---
 
@@ -24,7 +24,7 @@
 | 维度 | 证据 |
 |---|---|
 | 端口 | 脚本默认 `--port 19002`；`--bind` 默认 `0.0.0.0`（**我们刻意改成 `172.20.0.1`**，见 §3） |
-| 帧格式 | `payload = f"TEMP=23.5,SEQ={seq}\n"` —— 被动设备：**accept 后按周期单向发帧**，不响应下行 |
+| 帧格式 | `TEMP=23.5,HUMIDITY=<n>,SERIALNO=SN-<n>,BOUNDARY=42,SEQ=<n>\n` —— 被动设备：**accept 后按周期单向发帧**，不响应下行。4 键与设备 9300012 的 4 条点位映射 raw_address 对应（2026-10-12 起）|
 | 目标地址 | `172.20.0.1` 经 `docker network inspect deploy_ypbin-net` 确认 = `{"Subnet":"172.20.0.0/24","Gateway":"172.20.0.1"}` ⇒ **宿主机侧网桥网关** |
 | access 侧行为 | 重启后 access 日志持续 `open failed for connection t1-d9300012` + `Connection refused: /172.20.0.1:19002` |
 | **成功态对应** | access 日志 `[access] 订阅成功：deviceId=9300012 点位数=4` 只在模拟器在线时出现：**01:52:35 / 02:57:46 / 03:13:12（本地 CST）** —— 正是 access 三次 (重)启动且模拟器在跑的时刻 |
