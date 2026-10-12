@@ -1,0 +1,32 @@
+name: Dependency Review
+
+# 为什么新增本工作流（2026-10-12 全项目审计）：
+# 本仓 CI 此前**没有依赖漏洞门禁** —— Dependabot 只负责"开 PR 升级"，并不阻断「已含已知 CVE 的依赖」
+# 被合并；审计因此把"无依赖漏洞扫描"列为 CI 门禁缺口之一。
+#
+# 为什么是**独立新工作流**而不是加进 ci.yml：按 SYNC.md 第二节，admin 的既有工作流（ci.yml /
+# codeql.yml / release.yml）属"明确不动"——改它们会扩大与 upstream 的分歧面；新增独立文件不产生
+# 同步冲突点，这也是本仓既有的做法（iot-integration-tests / iot-iotdb-it / sync-whitelist 等均为新增）。
+#
+# 门槛取 high：低/中危先"看得见"（PR 里会出摘要），但不阻断合并；高危即失败。
+# 若门禁过严影响推进，可把 fail-on-severity 调成 critical，或对特定 GHSA 加 allow-ghsas 白名单并写明理由。
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  dependency-review:
+    name: 依赖漏洞评审（PR 增量）
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 评审本次 PR 引入/升级的依赖是否有已知漏洞
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: on-failure
