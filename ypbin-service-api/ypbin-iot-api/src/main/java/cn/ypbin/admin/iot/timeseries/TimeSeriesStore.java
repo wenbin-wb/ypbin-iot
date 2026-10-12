@@ -64,6 +64,27 @@ public interface TimeSeriesStore {
     List<TimeSeriesPointResp> query(Long tenantId, Long deviceId, List<String> propertyIds, Long from,
                                     Long to, int limit);
 
-    /** 存储是否可用（未启用/未实现时查询端点据此报错，而不是静默返回空）。 */
+    /**
+     * 存储是否**已启用/已接入**（廉价判据；未启用/未实现时查询端点据此报错，而不是静默返回空）。
+     *
+     * <p>⚠️ 语义边界：本方法回答的是「配置开关」，**不回答「此刻连得上吗」**。读路径用它区分
+     * 「未启用」（应报错）与「已启用」（去查询，失败由 query 如实抛出），因此必须廉价、不发网络 IO。
+     * 需要真实可达性时用 {@link #reachable()}。</p>
+     *
+     * @return 已接入返回 true
+     */
     boolean available();
+
+    /**
+     * 真实可达性探测（会发起一次连接；**不要**放在查询热路径逐次调用）。
+     *
+     * <p>默认实现退化为 {@link #available()}（不探测）：仅「未接入」的实现（如
+     * {@code UnavailableTimeSeriesStore}）因此天然返回 false；IoTDB 实现覆盖为连接级探测。
+     * 供健康检查/运维使用：把「配置了却连不上」暴露成 DOWN，而不是等用户查曲线才报错。</p>
+     *
+     * @return 存储可建立连接返回 true
+     */
+    default boolean reachable() {
+        return available();
+    }
 }

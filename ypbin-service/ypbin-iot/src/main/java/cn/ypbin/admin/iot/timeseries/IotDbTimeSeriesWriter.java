@@ -13,7 +13,6 @@ import cn.ypbin.starter.core.util.LogSanitizer;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -22,7 +21,6 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Properties;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
@@ -161,6 +159,10 @@ public class IotDbTimeSeriesWriter implements TimeSeriesWriter {
     static final long WARN_MIN_INTERVAL_MS = 2_000L;
 
     private final TimeSeriesProperties properties;
+
+    /** IoTDB 连接的单点工厂（驱动/凭据/取连接只在这里；池化未做，见工厂类注释）。 */
+    private final IotDbConnectionFactory connectionFactory;
+
     private final Counter failedCounter;
     private final Counter attemptedCounter;
     private final Counter rowsCounter;
@@ -178,9 +180,9 @@ public class IotDbTimeSeriesWriter implements TimeSeriesWriter {
     private final AtomicBoolean firstSuccessLogged = new AtomicBoolean(false);
 
     public IotDbTimeSeriesWriter(TimeSeriesProperties properties, MeterRegistry meterRegistry) {
-        // 本类可被直接构造（不经 IotTimeSeriesConfiguration）⇒ 构造时确保驱动已注册（幂等、无副作用）
-        IotDbDriverRegistrar.ensureRegistered();
+        // 本类可被直接构造（不经 IotTimeSeriesConfiguration）⇒ 连接工厂构造时确保驱动已注册（幂等）
         this.properties = properties;
+        this.connectionFactory = new IotDbConnectionFactory(properties);
         this.failedCounter = Counter.builder(METRIC_FAILED)
             .description("时序写入失败的批次数").register(meterRegistry);
         this.attemptedCounter = Counter.builder(METRIC_ATTEMPTED)
@@ -255,13 +257,10 @@ public class IotDbTimeSeriesWriter implements TimeSeriesWriter {
      * @param chunk 分块数据
      */
     private void writeChunk(String sql, List<TimeSeriesPoint> chunk) {
-        Properties credentials = new Properties();
-        credentials.setProperty("user", properties.getUsername());
-        credentials.setProperty("password", properties.getPassword());
         Connection connection = null;
         PreparedStatement statement = null;
         try {
-            connection = DriverManager.getConnection(properties.getUrl(), credentials);
+            connection = connectionFactory.open();
             statement = connection.prepareStatement(sql);
             for (TimeSeriesPoint point : chunk) {
                 bind(statement, point);

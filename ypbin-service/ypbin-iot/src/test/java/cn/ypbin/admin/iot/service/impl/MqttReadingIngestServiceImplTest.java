@@ -33,6 +33,7 @@ import cn.ypbin.admin.iot.values.RedisLatestValueWriter;
 import tools.jackson.databind.DeserializationFeature;
 import tools.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -261,6 +262,35 @@ class MqttReadingIngestServiceImplTest {
             .as("超长报文必须计入拒绝指标（写 400 但不计数 = 可观测性假阴性）")
             .isEqualTo(1.0d);
         verifyNoInteractions(availabilityService, deviceMapper, receiptMapper);
+    }
+
+    @Test
+    @DisplayName("★ 体积护栏按 UTF-8 字节数：字符数未超限但字节数超限（中文）必须整批 400")
+    void oversizedUtf8BodyMustBeRejectedByByteLength() {
+        // MAX-10 个 ASCII + 5 个中文：字符数 = MAX-5（< 上限），UTF-8 字节数 = MAX-10 + 15 = MAX+5（> 上限）。
+        // 旧实现按 String.length() 会放行 ⇒ 实际内存/传输体积可达上限的 3 倍。
+        String body = "x".repeat(MqttReadingIngestReq.MAX_BODY_LENGTH - 10) + "中".repeat(5);
+        assertThatThrownBy(() -> service.ingest(body))
+            .isInstanceOf(MqttIngestRejectionException.class)
+            .extracting(ex -> ((MqttIngestRejectionException) ex).getReason())
+            .isEqualTo(MqttIngestRejectReason.BODY_TOO_LARGE);
+        assertThat(meterRegistry.get(MqttReadingIngestServiceImpl.METRIC_REJECTED)
+            .tag("reason", "BODY_TOO_LARGE").counter().count())
+            .as("按字节超限也必须计入拒绝指标").isEqualTo(1.0d);
+        verifyNoInteractions(availabilityService, deviceMapper, receiptMapper);
+    }
+
+    @Test
+    @DisplayName("★ utf8ByteLength 与 getBytes(UTF_8).length 逐字节一致（含代理对与落单代理）")
+    void utf8ByteLengthMustMatchJdkEncoding() {
+        String corpus = "abc" + "中" + "\uD83D\uDE00" + "a\uD800b" + "\uDC00";
+        assertThat(MqttReadingIngestServiceImpl.utf8ByteLength(corpus))
+            .as("含代理对/落单代理时也必须与 JDK 编码结果一致")
+            .isEqualTo(corpus.getBytes(StandardCharsets.UTF_8).length);
+        assertThat(MqttReadingIngestServiceImpl.utf8ByteLength(null)).isZero();
+        assertThat(MqttReadingIngestServiceImpl.utf8ByteLength("")).isZero();
+        assertThat(MqttReadingIngestServiceImpl.utf8ByteLength("中")).isEqualTo(3);
+        assertThat(MqttReadingIngestServiceImpl.utf8ByteLength("\uD83D\uDE00")).isEqualTo(4);
     }
 
     @Test

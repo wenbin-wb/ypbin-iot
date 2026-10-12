@@ -30,6 +30,7 @@ import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
 import java.util.Properties;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -52,6 +53,20 @@ import org.mockito.MockedStatic;
  * @since 2026-09-24
  */
 class IotDbTimeSeriesStoreTest {
+
+    /**
+     * 在任何 {@code mockStatic(DriverManager.class)} 之前把驱动**真实注册**进 JVM 全局注册表。
+     *
+     * <p>否则首个「在 mock 下构造写入器/存储/连接工厂」的用例会让驱动类在
+     * {@code DriverManager.registerDriver} 被拦成 no-op 的上下文里完成首次加载；此后
+     * {@code Class.forName} 对已加载类是 no-op，驱动在本 JVM 内再也注册不上，后跑的
+     * {@code IotDbDriverRegistrarTest} 会报 {@code No such driver}（CI 冷状态实测到的形态）。
+     * 这里先注册好，测试顺序就不再影响 JVM 全局注册表。</p>
+     */
+    @BeforeAll
+    static void registerIotDbDriverBeforeStaticMocking() {
+        IotDbDriverRegistrar.ensureRegistered();
+    }
 
     /** 表模型连接串必须带 {@code sql_dialect=table}（官方 JDBC 文档），并带库名（非限定表名的前提）。 */
     private static final String URL = "jdbc:iotdb://127.0.0.1:6667/ypbin_it?sql_dialect=table";
@@ -176,7 +191,9 @@ class IotDbTimeSeriesStoreTest {
                 .query(TENANT_ID, DEVICE_ID, "temp'; DROP TABLE reading; --", null, null, 10))
                 .isInstanceOf(BusinessException.class)
                 .hasMessageContaining("点位标识不合法");
-            driverManager.verifyNoInteractions();
+            // 「不碰库」的准确判据是「没有发起 getConnection」：构造存储时会做一次驱动注册校验
+            // （DriverManager.getDrivers()，不建连接），那不是数据库访问。
+            driverManager.verify(() -> DriverManager.getConnection(anyString(), any(Properties.class)), never());
         }
     }
 
@@ -264,6 +281,25 @@ class IotDbTimeSeriesStoreTest {
             new IotDbTimeSeriesStore(properties()).query(TENANT_ID, DEVICE_ID, "temp", TS, TS, 10);
 
             verify(stubs.connection(), never()).prepareStatement(anyString());
+        }
+    }
+    @Test
+    @DisplayName("★ reachable：能建立连接即 true、SQLException 时 false（不把「已启用」当「连得上」）")
+    void reachableMustProbeRealConnection() throws SQLException {
+        Connection ok = mock(Connection.class);
+        try (MockedStatic<DriverManager> driverManager = mockStatic(DriverManager.class)) {
+            driverManager.when(() -> DriverManager.getConnection(anyString(), any(Properties.class)))
+                .thenReturn(ok);
+            assertThat(new IotDbTimeSeriesStore(properties()).reachable())
+                .as("连接可建立 ⇒ 可达").isTrue();
+        }
+        // ⚠️ 异常先建好：SQLException 构造函数会碰 DriverManager（正被静态 mock）
+        SQLException failure = new SQLException("iotdb down");
+        try (MockedStatic<DriverManager> driverManager = mockStatic(DriverManager.class)) {
+            driverManager.when(() -> DriverManager.getConnection(anyString(), any(Properties.class)))
+                .thenThrow(failure);
+            assertThat(new IotDbTimeSeriesStore(properties()).reachable())
+                .as("连不上必须 false（旧实现 available() 恒 true，无法区分）").isFalse();
         }
     }
 }

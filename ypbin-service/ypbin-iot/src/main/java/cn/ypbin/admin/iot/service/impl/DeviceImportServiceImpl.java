@@ -109,6 +109,9 @@ public class DeviceImportServiceImpl implements DeviceImportService {
     /** 失败行下载的单次上限（一个批次最多 1 万行，这里是防御性上限而非业务上限）。 */
     static final int FAILED_CSV_MAX_ROWS = DeviceImportLimits.MAX_ROWS;
 
+    /** 文件名入库/展示的最大长度（列宽与可读性上限）。 */
+    static final int MAX_FILE_NAME_LENGTH = 200;
+
     /** 明细分页的默认/最大每页条数。 */
     static final long DEFAULT_PAGE_SIZE = 20L;
 
@@ -775,12 +778,35 @@ public class DeviceImportServiceImpl implements DeviceImportService {
         }
     }
 
-    private String normalizeFileName(String fileName) {
+    /**
+     * 归一化上传文件名：剥离路径分隔符（{@code /}、{@code \}）与控制字符，trim 后截断到
+     * {@value #MAX_FILE_NAME_LENGTH} 字符。
+     *
+     * <p>文件名只入库/展示、没有文件系统落点，但「原样回显用户可控文本」仍有两个问题：
+     * ① 含 {@code /}、{@code \} 时在日志/页面里可伪装成路径；② 控制字符（换行/制表/ANSI 等）可伪造
+     * 日志行。因此统一剥离，而不是只 trim + 截断。空/全被剥离时回退为 {@code 未命名.csv}。</p>
+     *
+     * @param fileName 原始文件名（可空）
+     * @return 归一化文件名（绝不返回空串）
+     */
+    static String normalizeFileName(String fileName) {
         if (!StringUtils.hasText(fileName)) {
             return "未命名.csv";
         }
-        String trimmed = fileName.trim();
-        return trimmed.length() > 200 ? trimmed.substring(0, 200) : trimmed;
+        StringBuilder cleaned = new StringBuilder(fileName.length());
+        for (int index = 0; index < fileName.length(); index++) {
+            char ch = fileName.charAt(index);
+            if (ch == '/' || ch == '\\' || Character.isISOControl(ch)) {
+                continue;
+            }
+            cleaned.append(ch);
+        }
+        String normalized = cleaned.toString().trim();
+        if (normalized.isEmpty()) {
+            return "未命名.csv";
+        }
+        return normalized.length() > MAX_FILE_NAME_LENGTH
+            ? normalized.substring(0, MAX_FILE_NAME_LENGTH) : normalized;
     }
 
     private String emptyToNull(String value) {
