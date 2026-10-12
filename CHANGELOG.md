@@ -8,6 +8,52 @@
 
 ### 修复
 
+- **一键安装 IoT 断点：库表/菜单未装 + 迁移不幂等**（`deploy/install.sh`、`deploy/sql/migration/iot-migrations.list`）：
+  - R1：`install.sh` 在 `$ROOT/ypbin-admin` 克隆的是 **upstream admin**，其 `deploy/sql` 只有 001–005 ⇒
+    fork 的 `006-iot-schema.sql` / `007-iot-data.sql` 永远不会被导入，一键安装装出来**没有 IoT 表与菜单**。
+    修复**不动** SYNC.md §三·五点名的 52 行 `ypbin-admin/` 路径，改为按序解析 SQL 来源：① 脚本自身位置的
+    `deploy/sql`（与既有 UP-6/UP-7 的 `NACOS_DIR` 自定位同一套做法）；② 远端 `YPBIN_IOT_RAW_BASE`
+    （默认 GitHub raw，带 Gitee 兜底与既有 `CURL_*` 硬超时）逐文件下载；两处都拿不到即 `die`（不静默跳过）。
+  - R2：`deploy/sql/migration/` 的 DDL/DML **不幂等**（`CREATE TABLE` 无 `IF NOT EXISTS`、含 `ALTER`/`INSERT`），
+    重复执行必失败。新增迁移账本 `ypbin_schema_migrations`（脚本 `CREATE TABLE IF NOT EXISTS` 自建，**刻意不放进
+    006/007**，以免破坏 R3 的语句级等价门禁），只应用账本里没有的 `*-iot-*.sql`；已有库无账本时按哨兵表
+    `iot_device` 探测：存在则 WARN 后预置基线（可见的假设），不存在则按名全量应用；提供
+    `IOT_MIGRATE_BASELINE=1` / `IOT_MIGRATE_FORCE=1` 逃生开关。
+  - 新增 `deploy/sql/migration/iot-migrations.list` 作为远端兜底的下载清单，并由
+    `tools/check-iot-sql-equivalence.sh` 校验「清单 = 目录内实际文件」。
+- **IoTDB 口令与 OpenAPI pepper 未贯通交付**（`deploy/install.sh`、`deploy/nacos/ypbin-iot.yaml`、`deploy/docker-compose.yml`）：
+  - `install.sh` 首次部署随机生成 `IOTDB_PASSWORD`（24 位 hex）与 `YPBIN_OPENAPI_SECRET_PEPPER`（≥32 字节）写 `.env`(600)；
+    新增 `ensure_iotdb_auth()` 在 Nacos 导入前把 IoTDB 内 root 口令对齐到 `.env` 值（口令只经 stdin、不进 argv，
+    以「新口令能连」为判据）；无法对齐即 `die`，**不猜、不覆盖线上口令**；
+  - `deploy/nacos/ypbin-iot.yaml` 的 `timeseries.password` 改为 `${IOTDB_PASSWORD}` 占位符（install.sh 的 sed
+    渲染键由 4 个增至 5 个，只替换非注释行）；`docker-compose.yml` 给 `ypbin-iot` 注入 pepper。
+- **compose 必填变量缺失导致「只起基础设施」也失败（EMQX 硬前置）**（`deploy/install.sh`、`deploy/.env.example`、
+  `docs/DEPLOY-BACKEND.md`）：`docker compose` 对**整份文件**插值，任一 `${VAR:?}` 缺失都会让
+  `up -d nacos redis mysql` 一起失败。新增 `ensure_compose_required_env()` 在**任何 compose 调用之前**机械抽出
+  全部 `:?` 必填变量逐个处置：`EMQX_API_KEY`/`EMQX_API_SECRET` **绝不自动生成**、缺失时先于 compose fail-loud
+  并给来源/用法；`AI_MODEL_SECRET_KEY` 复用旧 `.env` 缺键也补齐（env 优先）并校验 16/24/32 字节；
+  `IOTDB_PASSWORD` 延后到 `ensure_iotdb_auth()` 处理。
+- **curl 一键安装的 fork 专属 deploy 资源缺失**（`deploy/install.sh`、`docs/DEPLOY-BACKEND.md` §2.2）：
+  `bash <(curl ...)` 时脚本落在 /tmp，install.sh 又只克隆 upstream admin，导致 `redis-auth-conf.sh`、
+  `iotdb-init.*`、`nacos/ypbin-iot.yaml`、`sql/006+007+迁移` 全拿不到（此前会 `die 缺少 redis-auth-conf.sh`）。
+  新增 `resolve_deploy_src()`：检出路径优先（`<repo>/deploy` / `$ROOT/ypbin-admin/deploy`），否则浅克隆
+  fork 到 `$ROOT/ypbin-iot`（`YPBIN_IOT_REPO`，GitHub→Gitee 降级，分支跟 `BRANCH`），解析出统一资源根
+  `DEPLOY_SRC` 供 redis-auth-conf/Nacos/SQL 使用；两路都失败则一次性 die 并列出缺项。SQL 远端 raw 下载
+  降级为备选路径。纯 admin compose（不含 `ypbin-iot`/`ypbin-access`/`iotdb`）会跳过 fork 资源解析与校验，
+  不误伤该语义。
+- **curl 一键安装装不出 IoT 服务（门面级缺口，已修）**（`deploy/install.sh`、`SYNC.md` §三·五、
+  `docs/DEPLOY-BACKEND.md` §2.3）：根因是 install.sh 把 **upstream admin** clone 到 `$ROOT/ypbin-admin`，
+  而 `ypbin-iot`/`ypbin-access` 的 compose `build:` context、fork nacos 模板、`006+007` 都只在 fork 检出里。
+  改为 [2/7] **默认把 fork（ypbin-iot）clone 到 `$ROOT/ypbin-admin`**（`YPBIN_IOT_REPO`，Gitee 降级，
+  分支跟 `BRANCH`），与 SYNC §三·五 的推荐部署法等价 ⇒ [4/7] Maven 构建与 [6/7] compose 同用 fork 检出，
+  一键安装能装出含 `ypbin-iot`/`ypbin-access`/`iotdb` 的全栈。`YPBIN_ADMIN_REPO=<upstream>` 可退回纯 admin
+  语义。**已有的非 fork `$ROOT/ypbin-admin`** 且要装含 IoT 服务的 compose ⇒ 脚本 die + 迁移指引
+  （不静默将就半个系统）。**代价如实登记**：这是 install.sh 对 upstream 的**语义级**偏离，下次
+  `git merge upstream/main` 该文件冲突概率更高（该文件已在白名单内，冲突属预期）。
+- **部署日志的密钥明文回显收敛**（`deploy/install.sh`）：`AI_MODEL_SECRET_KEY` 自动生成时不再把密钥值
+  打进部署日志（改为只提示「已写入 .env 的哪个键 + 如何查看」）；Nacos 口令改写失败的 warn 不再回显
+  `NACOS_CURRENT_PASSWORD` 的值。`XXL_JOB_ADMIN_PASSWORD` 保持既有的「不回显、只提示查看命令」语义。
+  同步把 `.github/workflows/sync-whitelist.yml` 注释里的白名单计数 20 → 21。
 - **部署凭据卫生**（`deploy/`，反馈 UP-8/UP-9）：
   - compose 健康检查不再携带口令：Redis 改 `nc -z` 探端口、MySQL 改 `mysqladmin ping -h 127.0.0.1`——
     原 `redis-cli -a <口令>` / `mysqladmin -p<口令>` 会把口令写进 exec argv，`docker top` / `docker events` 可见；
@@ -24,6 +70,12 @@
   `XXL_JOB_ADMIN_PASSWORD`，不再写"默认 admin/123456"。
 
 ### 新增
+
+- **数据备份/恢复工具链**（`deploy/backup.sh`、`deploy/restore.sh`、`deploy/backup.service`/`backup.timer`、
+  `deploy/PROD-OPS-NOTES.md` §13）：MySQL（`mysqldump --single-transaction`，口令经 `MYSQL_PWD` 不进 argv）
+  与 IoTDB（`docker cp /iotdb/data` 热拷贝）定时备份，产物带时间戳与 `.sha256`、默认保留最近 14 份轮转、
+  支持 `--dry-run`；恢复脚本默认只打印计划、**必须显式 `--yes`** 才执行，恢复前核对 sha256。**边界如实登记**：
+  IoTDB 热拷贝不保证崩溃一致性、不支持增量，无 PITR、无异地容灾，真机未验证（详见文档）。
 
 - **埋点事件目录分层：新增 admin 的 project 层目录**（`ypbin-common/src/main/resources/META-INF/ypbin/tracking-events.json`）。
   承接从 starter 的 base 目录**迁出**的业务示例事件 `system.user.export`（starter 侧同批把它从 `docs/tracking-events.json` 移除）。

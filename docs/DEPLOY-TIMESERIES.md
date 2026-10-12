@@ -73,9 +73,11 @@
 - **口令**：`iotdb-init` 用 `IOTDB_USER: root` + `IOTDB_PASSWORD: ${IOTDB_PASSWORD:-}`（compose 注入，
   **没有默认值**；缺失即为空 ⇒ 上一段的第 ① 道 `exit 1`）。这是口令的**第三处**，
   改口令时三处必须一起改，见 §6.1；口令值只在 `deploy/.env`（600）里，**不进 argv**（脚本用 stdin 投递，见 §6.1 表格）。
-- 为什么不用 `install.sh` 而是放 compose：`install.sh` 的 Nacos 占位符替换键是**固定 4 个**
-  （`MYSQL_ROOT_PASSWORD` / `REDIS_PASSWORD` / `INTERNAL_TOKEN` / `GATEWAY_SIGN_TOKEN`），时序初始化与它无耦合；
-  放 compose 则 `up -d` 一条命令可复现，不需要动那个 96KB 的脚本。
+- 为什么不用 `install.sh` 而是放 compose：`iotdb-init` 的建库/建表 DDL 与 Nacos 占位符替换机制**无耦合**；
+  放 compose 则 `up -d` 一条命令可复现，不需要让 IoTDB 初始化依赖 install.sh 的渲染步骤。
+  （注：install.sh 的 Nacos 占位符替换键 2026-10-12 起从 4 个增加到 5 个，+`IOTDB_PASSWORD`，
+  用于渲染 §6.1 的口令；但它只负责"把 .env 的值写进 Nacos/改 IoTDB 内口令"，
+  建库建表仍由本 compose 服务的 `iotdb-init.sh` 完成。）
 - 手动重跑（幂等，可随时执行）：
   ```bash
   cd deploy && docker compose up -d --force-recreate iotdb-init && docker logs ypbin-iotdb-init
@@ -217,6 +219,39 @@ docker exec ypbin-iotdb start-cli.sh -h ypbin-iotdb -sql_dialect table -e "ALTER
   > 本仓**不记录**线上口令状态（口令值不入库）；轮换的执行记录落在轮换工作目录（700）与部署回执里。
 
 ### 6.1 口令轮换与「口令不进 argv」
+
+#### 全新安装：install.sh 已自动完成（2026-10-12 起，无需人工）
+
+Docker 模式一键安装不再需要人工改 IoTDB 口令：
+
+1. `install.sh` 首次部署随机生成 24 位 hex 的 `IOTDB_PASSWORD` 写入 `deploy/.env`（600，不回显）；
+2. `[5.5/7]` 起 IoTDB 容器后，`ensure_iotdb_auth()` 轮询 `ypbin-iotdb:6667` 就绪；
+3. 若 IoTDB 仍是官方默认 `root`：用 **stdin**（裸 `-pw`，口令不进宿主/容器 argv）执行
+   `ALTER USER root SET PASSWORD '<新值>'`，再用**新口令连一次**作判据（**不看**交互式退出码，
+   交互模式恒退 0，见下方警告）；
+4. 随后导入 Nacos 时把 `deploy/nacos/ypbin-iot.yaml` 的 `${IOTDB_PASSWORD}` 渲染成同一个值。
+
+⇒ 三处（IoTDB 内 / `deploy/.env` / Nacos 活配置）一次对齐，`iotdb-init` 自然建库建表成功。
+
+**失败语义（fail-loud，不静默降级）**：旧 `.env` **缺** `IOTDB_PASSWORD` 且 IoTDB 已不是默认 `root`
+⇒ 直接 `die`（脚本不猜、不覆盖线上口令）；`IOTDB_PASSWORD` 非空但与 IoTDB 实际值不一致 ⇒ 同样 `die`
+并给排查指引。`IOTDB_PASSWORD` 约束为 **<=32 字符、只允许 `A-Za-z0-9._~-`**（脚本生成的默认值是 24 位 hex）。
+
+**手工核验命令**（全新安装后跑；判据 = 新口令能连、默认 root 被拒、argv/健康检查里无 `-pw <值>`）：
+
+```bash
+cd /opt/ypbin/ypbin-iot     # 换成你的部署根
+run_cli() { printf '%s\n' "$1" | docker exec -i ypbin-iotdb bash -c \
+  'start-cli.sh -h ypbin-iotdb -p 6667 -u root -pw -sql_dialect table -e "SHOW DATABASES"'; }
+NEW=$(sed -n 's/^IOTDB_PASSWORD=//p' deploy/.env | head -1)
+run_cli "$NEW"  >/dev/null 2>&1 && echo "新口令可连 OK" || echo "新口令连不上 → 见本节排障"
+run_cli root    >/dev/null 2>&1 && echo "!! 仍可用默认 root —— 未轮换" || echo "默认 root 已被拒 OK"
+docker top ypbin-iotdb -eo args | grep -c -- '-pw '          # 期望 0
+docker inspect -f '{{json .Config.Healthcheck.Test}}' ypbin-iotdb   # 期望 TCP 探活串（含 /dev/tcp）
+docker inspect -f '{{.State.ExitCode}}' ypbin-iotdb-init     # 期望 0（一次性容器 Exited (0)）
+```
+
+#### 既有部署 / 手工轮换（下面的 ①～④ 仍然适用）
 
 **为什么必须轮换**：改动前的健康检查是
 `start-cli.sh -h ypbin-iotdb -u root -pw <口令> -sql_dialect table -e "SHOW DATABASES"`，
@@ -377,18 +412,21 @@ Nacos live 换回 dump 的最小做法：`python3 tools/rotate-iotdb-password.py
 | 回滚物 | 轮换工作目录 `/opt/ypbin/iotdb-rotation-<TS>/`（700；内含 600 的 `before-deploy.env` / `before-compose.yml` / `before-compose.override.yml` / `before-iotdb-init.sh` / `before-ypbin-iot.yaml`）；本次部署的旧镜像 tag 与旧 jar 由**部署**步骤留（`ypbin/ypbin-iot:rollback-<部署TS>` + `/opt/ypbin/l3-pw-*/ypbin-iot-old.jar`） |
 
 
-⚠️ `deploy/nacos/ypbin-iot.yaml` **也过** `install.sh` 的同一段 `sed`（7 个 nacos 配置一起处理），
-但可替换键**只有 4 个**：`MYSQL_ROOT_PASSWORD` / `REDIS_PASSWORD` / `INTERNAL_TOKEN` / `GATEWAY_SIGN_TOKEN`
-（该文件里的 `${GATEWAY_SIGN_TOKEN}` 正是会被替换的键之一）。所以别在 `password` 上写
-`${IOTDB_PASSWORD}` 之类的新占位符：既不会被替换、也不会被自动生成，只会多一层"以为配了、其实没配"的错觉。
-**未修项（已登记）**：因此「全新安装」仍需人工执行上述 ①～③——`install.sh` 渲染不了 IoTDB 内的口令，
-也不会生成 `deploy/.env` 的 `IOTDB_PASSWORD`（补这个缺口要动 `install.sh` 的渲染键清单，属白名单文件的额外改动，本轮不做）。
-现在的失败形态是**显式且局部**的：`docker compose up -d` 里只有 `iotdb-init` 会以
-`未提供 IOTDB_PASSWORD（拒绝回退到官方公开默认口令 'root'）` 退出 1，其余服务照常起；
-⚠️ **不要**把 `deploy/.env.example` 原样抄成 `.env`：那样 `IOTDB_PASSWORD` 会是占位串，
-`iotdb-init` 会以 801 连续失败退出 1（失败很响，但仍需知道原因在口令）。
-（这正是本轮**没有**在 compose 用 `${IOTDB_PASSWORD:?}` 的原因：compose 对整份文件插值，
-`ps`/`up -d nacos redis mysql` 等无关命令都会被一起拦掉。）
+⚠️ 本文件 `deploy/nacos/ypbin-iot.yaml` 的 `password` **现在是占位符** `${IOTDB_PASSWORD}`，由
+`install.sh` 在导入 Nacos 前从 `deploy/.env` 渲染（只替换非注释行，注释里的 `${...}` 保持原样，同 UP-7）。
+渲染键清单因此从 4 个增加到 5 个（+`IOTDB_PASSWORD`）。**手工/既有部署**若不走 install.sh，请用
+`tools/rotate-iotdb-password.py` 改 Nacos live 的值（只改值、别整份覆盖本文件）。
+
+**本轮已修（2026-10-12）**：`install.sh` 会生成 `IOTDB_PASSWORD`（首次随机、复用旧 .env 沿用）、
+在 IoTDB 就绪后用 stdin 改 IoTDB 内口令、并把 Nacos 占位符渲染成同值 ⇒ **全新安装不再需要人工执行 ①～③**
+（见本节开头「全新安装」）。失败形态仍是显式且局部的：`iotdb-init` 缺口令/口令错会退出 1（不回退公开
+默认口令）；`install.sh` 在无法对齐时 `die` 并给处置，绝不猜口令。
+
+⚠️ **不要**把 `deploy/.env.example` 原样抄成 `.env`：那样 `IOTDB_PASSWORD` 是占位串，
+`iotdb-init` 会以 801 连续失败退出 1。
+（`deploy/docker-compose.yml` 仍**不用** `${IOTDB_PASSWORD:?}`：compose 对整份文件插值，
+`:?` 会让 `ps`/`up -d ...` 等无关命令一起被拦掉；缺口令的 fail-fast 改由 `iotdb-init` 与
+`install.sh` 的 `ensure_compose_required_env()`/`ensure_iotdb_auth()` 承担。）
 
 - **端口暴露面**：`ports` 只发布 6667，且走**独立**变量 `IOTDB_BIND_ADDR`（默认回环）。
   ⚠️ 本仓 `deploy/.env.example` 把 `INTERNAL_BIND_ADDR` 设成 `0.0.0.0`——若 IoTDB 复用那个变量，

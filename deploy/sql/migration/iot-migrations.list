@@ -1,0 +1,33 @@
+# IoT 迁移清单（按文件名排序 = 结构演进顺序）。
+# 用途：install.sh 在「脚本自身位置拿不到 deploy/sql/」时（如 README 的 bash <(curl ...) 场景），
+#       从远端按本清单逐个下载 *-iot-*.sql；本清单必须与目录内实际文件一一对应，
+#       由 tools/check-iot-sql-equivalence.sh 校验（多一个/少一个都会转红）。
+# 新增迁移：把文件放进 deploy/sql/migration/ 后，把文件名按序追加到本清单末尾。
+2026-09-19-iot-device-schema.sql
+2026-09-19-iot-lease-schema.sql
+2026-09-19-iot-m1-thing-model-schema.sql
+2026-09-19-iot-m2-access-node-ledger.sql
+2026-09-19-iot-m2-availability-schema.sql
+2026-09-19-iot-m2-event-log-schema.sql
+2026-09-19-iot-m2-maintenance-schema.sql
+2026-09-19-iot-menu-data.sql
+2026-09-20-iot-m1-thing-model-menu.sql
+2026-09-21-iot-m2-ledger-menu.sql
+2026-09-22-iot-m2-availability-menu.sql
+2026-09-23-iot-m2-maintenance-menu.sql
+2026-09-24-iot-m2-series-permission.sql
+2026-09-25-iot-menu-group.sql
+2026-09-26-iot-platform-module-menu.sql
+2026-09-27-iot-latest-value-permission.sql
+2026-09-28-iot-menu-icons.sql
+2026-09-29-iot-menu-onboarding-ledger.sql
+2026-09-30-iot-credential-menu.sql
+2026-09-30-iot-credential-schema.sql
+2026-09-30-iot-device-import-schema.sql
+2026-10-01-iot-mqtt-ingest-receipt.sql
+2026-10-02-iot-command-instance.sql
+2026-10-03-iot-alert-menu.sql
+2026-10-03-iot-alert-schema.sql
+2026-10-04-iot-device-import-menu.sql
+2026-10-05-iot-platform-alert-schema.sql
+2026-10-06-iot-command-client-key.sql

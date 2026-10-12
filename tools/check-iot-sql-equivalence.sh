@@ -29,6 +29,22 @@ fi
 # shellcheck disable=SC2086
 norm $migrations > "$migration"
 
+# 迁移清单（iot-migrations.list）：install.sh 在「脚本自身位置拿不到 deploy/sql/」时（README 的
+# `bash <(curl ...)` 场景）按它从远端逐个下载 *-iot-*.sql。清单必须与目录内实际文件一一对应——
+# 少一个 ⇒ 远端兜底安装缺迁移；多一个 ⇒ 下载不存在的文件直接失败。故在此与 glob 结果强校验。
+MANIFEST="deploy/sql/migration/iot-migrations.list"
+if [ ! -f "$MANIFEST" ]; then
+  echo "::error::缺少 $MANIFEST（install.sh 远端兜底依赖它逐份下载迁移）" >&2
+  exit 1
+fi
+manifest_names="$(grep -vE '^[[:space:]]*(#|$)' "$MANIFEST" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | sort)"
+dir_names="$(printf '%s\n' $migrations | sed 's#.*/##' | sort)"
+if [ "$manifest_names" != "$dir_names" ]; then
+  echo "::error::$MANIFEST 与 deploy/sql/migration/*-iot-*.sql 不一致（新增迁移后请同步清单）" >&2
+  diff -u <(printf '%s\n' "$dir_names") <(printf '%s\n' "$manifest_names") >&2 || true
+  exit 1
+fi
+
 if diff -u "$fresh" "$migration"; then
   echo "OK: IoT 迁移脚本与全新安装脚本的语句等价"
 else

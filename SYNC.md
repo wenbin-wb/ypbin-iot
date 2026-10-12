@@ -34,7 +34,9 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 > 只会被当噪音忽略。现在：白名单内冲突 = warning + summary 列出；白名单外冲突 = 判红（那才是
 > 「分歧面失控」的信号）。
 
-> **白名单膨胀要记账**：目前 **20** 个文件（权威清单 = `tools/sync-whitelist-regex.sh`；本表与它必须逐项一致）。
+> **白名单膨胀要记账**：目前 **21** 个文件（权威清单 = `tools/sync-whitelist-regex.sh`；本表与它必须逐项一致）。
+> 2026-10-12：**加第 21 项 `CHANGELOG.md`**（本批 deploy/IoT 修复需要写发布台账；无法用新文件表达，
+> 与 upstream 冲突时整体取本仓版本，代价同 README.md）。
 > 2026-10-09：**移除 2 个死条目**（`deploy/sql/007-iot-data.sql`、`deploy/sql/migration/2026-10-05-iot-platform-alert-schema.sql`）——
 > 这两份文件在 upstream **不存在**，而两个门禁的判据都是「与 upstream 的差异」⇒ 它们永远不会被命中，留着只会让计数虚高、
 > 并制造「007 既是既有文件又是新文件」的自相矛盾（下方"新文件"行才是它们的归属）。
@@ -61,6 +63,7 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 | `README.md` | **整体重写为 IoT 版** | **2026-09-29 加**（M-6）：原 README 是 admin 原版（标题、徽章、截图、功能清单全是基座的），**读起来像另一个项目**。这是「仓库门面」性质的内容，**只能用既有文件表达**——新增 `README-IOT.md` 之类只会让访客仍然先看到错误的那个（GitHub 默认渲染 `README.md`）。同时它是**仓库首屏可信度**问题：README 里承诺的能力与实际不符属对外陈述。**代价如实登记**：README 是上游高频改动文件（徽章/截图/功能表），下一次 `git merge upstream/main` 必然冲突，且**必须整体取本仓版本**（不是逐行合并）——这份代价由「门面必须说真话」换取 |
 | `deploy/nacos/ypbin-common.yaml` | 在既有 `ypbin.security.identity` 节下**补一行** `trusted-source-token: ${GATEWAY_SIGN_TOKEN}`（+ 注释） | **2026-09-29 加**（#6b 部署阻塞面，P0）：starter **3.6.0 起**，`ypbin.security.identity.enabled: true`（**本文件既有行**）会强制要求同节的 `trusted-source-token`，缺失即**启动失败**（jar 内 `IdentityAutoConfiguration#identityHeaderFilterRegistration` 抛 `IllegalStateException`）。**为什么不能用新文件**：问题就在**这一行**——`enabled=true` 已经写在这个既有文件里，约束是「给这个既有键补一个兄弟键」；另立 `ypbin-common-iot.yaml` 之类**不会**让既有 Key 的缺配消失（`ypbin-common.yaml` 仍会被 `install.sh` 导入 Nacos，且这是**共享**配置，所有 Servlet 服务都吃它）。**为什么必须进仓而不是只改运行中的 Nacos**：`install.sh` 会把 `deploy/nacos/*.yaml` **整体覆盖**到 Nacos ⇒ 只在实例上手工补键必然在下次重跑时退化（这正是上一轮的临时处置留下的风险）。**代价如实登记**：多一个 merge 冲突点（该文件上游改动频率低，且本次是纯加法一行，代价可接受）。⚠️ **更好的长期做法是改上游 admin 仓**（本仓下次同步自然继承、分歧面回到 18）——本轮受「改动落在 ypbin-iot」的范围约束才走白名单。回归由 `tools/check-identity-config.sh` 在 `Sync Whitelist` 门禁里守住（5 条变异均已实测转红） |
 | `ypbin-gateway/src/main/resources/application.yml` | 路由/清洗/免登录段并入本地配置 | **2026-10-01 加**（#11 第 1 批网关侧）：nacos 3.x 服务端脚本化读写 API 已移除（一手实测 GET/POST 全 404）⇒ 网关配置只能随 jar 发布，routes/exclude 必须落在网关既有 application.yml。可审计：若未来 nacos 支持 API，可回退到 nacos 配置（SYNC 分歧面 +1）。长期应反哺 admin 仓（网关工程属 upstream）。<br>**⚠️ 2026-10-08 更正**：本条当时的理由"nacos 3.x 服务端脚本化读写 API 已移除（全 404）"**不成立**——v1 确实全 404，但 **v3 admin API 读写均可用**（`/nacos/v3/auth/user/login` + `/nacos/v3/admin/cs/config` GET/POST，2026-10-08 实测；工具 `tools/set-nacos-flag.py`）⇒ 触发条件"若未来 nacos 支持 API"**已满足**，"网关配置回退到 Nacos"从"不可行"变成"**可行性已成立、决策未做**"。本白名单条目**暂不变**（未回退前仍需改该 application.yml），待另立评估 | 
+| `CHANGELOG.md` | 在 `## [未发布]` 段追加本批 deploy/IoT 修复条目 | **2026-10-12 加**：发布台账/对外门面，GitHub 与发布流程只认根 `CHANGELOG.md`，另写一份不会被看到（同 README.md 的理由）。**代价如实登记**：与 upstream 该文件冲突时**整体取本仓版本**（不是逐行合并）。改的是「允许改这个既有文件」，不改变任何门禁判据。 |
 | `deploy/sql/006-iot-schema.sql`、`007-iot-data.sql` | **新文件** | 全新安装用 |
 | `deploy/sql/migration/*-iot-*.sql` | **新文件**（命名必须含 `-iot-`） | 已上线库用；按文件名排序拼接后与 `006+007` **语句等价**（有 CI 校验）。顺序即结构演进顺序：`device-schema` → `lease-schema` → `menu-data` |
 | `admin-ui`（后续） | 路由/菜单注册 | 前端增量时再补清单 |
@@ -121,9 +124,23 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
    处置：**镜像 admin 的结论**（同 reason + 同理由引用），不要各判各的——否则两边会漂移出两套结论。
 2. **依赖机器人（Dependabot）默认会改 admin 拥有的 workflow 文件**，合入即破坏白名单；
    `Sync Whitelist` 会把这类 PR 判红，正确做法是去 admin 仓升级、本仓靠同步获得。
-3. **部署目录名**：`deploy/install.sh` 多数路径仍按 `ypbin-admin/` 目录名拼（不改）；但 **Nacos 模板目录**
-   自 admin@`922d0d50` 起改为按脚本自身位置解析（`SCRIPT_DIR/nacos`，`bash <(curl)` 时回退 `$ROOT/ypbin-admin/deploy/nacos`）
-   ⇒ fork 检出成任意目录名都能找到自己的模板。
+3. **部署目录名 / admin 检出源**：`deploy/install.sh` 多数路径仍按 `ypbin-admin/` 目录名拼
+   （R5：不改这些行）；但 **2026-10-12 起 admin 检出源默认是 fork（ypbin-iot）**：curl 一键安装
+   （`bash <(curl ...)`）时脚本把本仓 clone 到 `$ROOT/ypbin-admin`（`YPBIN_IOT_REPO`，GitHub→Gitee
+   降级，分支跟 `BRANCH`），与人工执行 `git clone <this-repo> ypbin-admin` **等价** ⇒ 一键安装能装出
+   ypbin-iot 全栈（ypbin-iot/access/iotdb 服务 + fork nacos 模板 + 006/007 表/菜单）。纯 admin 基座用
+   `YPBIN_ADMIN_REPO=<upstream>` 显式退回。**已有 `$ROOT/ypbin-admin` 若非 fork 检出**且要装含 IoT
+   服务的 compose ⇒ 脚本**直接 die** 并给迁移指引（不静默将就半个系统）。
+   fork 专属 deploy 资源（`redis-auth-conf.sh` / `iotdb-init.*` / `nacos/ypbin-iot.yaml` / `006+007+迁移`）
+   由 `resolve_deploy_src()` 统一解析：脚本自身位置 / `$ROOT/ypbin-admin/deploy` / 已克隆的
+   `$ROOT/ypbin-iot/deploy` 优先，否则浅克隆 fork；两路都失败即 die。**纯 admin compose**
+   （不含 `ypbin-iot`/`ypbin-access`/`iotdb` 服务）会跳过 fork 资源解析与校验，不误伤该语义。
+
+   > **分歧面记账（2026-10-12）**：admin 检出源默认 fork + `YPBIN_ADMIN_REPO` + `resolve_deploy_src()`
+   > 是 `deploy/install.sh` 对 upstream 的又一处**语义级**偏离（不是纯加法）：upstream 的 install.sh
+   > 克隆 upstream admin，本仓默认克隆 fork。**代价如实登记**：与 upstream 该文件的 diff 更大、下次
+   > `git merge upstream/main` 更可能冲突（该文件本就在白名单内，冲突属预期）；收益是 curl 一键安装
+   > 不再是「半个系统」。纯 admin 用户可用 `YPBIN_ADMIN_REPO` 恢复 upstream 语义。
 4. **同步后要重扫 CodeQL**：同步会把 admin 的新代码带进来，其新增/结案状态同样要按第 1 条镜像处置。
 
 ## 四、门禁

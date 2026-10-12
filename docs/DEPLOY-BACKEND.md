@@ -53,6 +53,93 @@ curl -s http://127.0.0.1:18084/actuator/health
   （下载 artifact → 覆盖 `iot-ui-dist` → `docker restart ypbin-iot-ui`），并核对
   「CI 产物与服务器文件逐字节一致」的 md5。
 
+## 2.1 compose 必填变量（`${VAR:?}`）：EMQX 是**硬前置**，缺失时在「起任何容器之前」报错
+
+**为什么单列**：`docker compose` 对**整份文件**做变量插值。任一 `${VAR:?}` 缺失，**与该服务无关**
+的命令也会一起失败——实测（2026-10-12，只读 `config`，未起容器、未连生产）：
+
+```
+docker compose -f deploy/docker-compose.yml --env-file <缺 EMQX 的 .env> config nacos
+→ rc=1: error while interpolating services.ypbin-iot.environment.EMQX_API_KEY:
+        required variable EMQX_API_KEY is missing a value
+```
+
+也就是说「先只把 nacos/redis/mysql/iotdb 拉起来」也做不到，且错误信息指向的是 compose 插值，
+而不是「哪个键为什么缺」。`install.sh` 因此新增 `ensure_compose_required_env()`：在**任何 compose 调用之前**
+机械抽出将要执行的 `docker-compose.yml` 里全部 `${VAR:?...}`（正则只认 `:?`，不会把 `${VAR:-默认}` 算进来），
+逐个校验并按语义处置：
+
+| 必填变量 | install.sh 的处置 |
+|---|---|
+| `MYSQL_ROOT_PASSWORD` / `REDIS_PASSWORD` / `NACOS_AUTH_TOKEN` / `NACOS_AUTH_IDENTITY_KEY` / `NACOS_AUTH_IDENTITY_VALUE` / `NACOS_ADMIN_PASSWORD` | 自动生成/补生成（写 `.env` 600）；前置校验只兜底断言非空 |
+| `AI_MODEL_SECRET_KEY` | 全新部署自动生成；复用旧 `.env` 缺键也补齐（env 优先）；长度必须 16/24/32 字节，非法即 die |
+| `IOTDB_PASSWORD` | 延后：IoTDB 容器就绪后由 `ensure_iotdb_auth()` 生成/对齐（见 DEPLOY-TIMESERIES.md §6.1） |
+| `EMQX_API_KEY` / `EMQX_API_SECRET` | **绝不自动生成**（随机值＝格式对但不能用的假凭据）。缺失时**在 compose 之前**一次性 die，提示去 EMQX Dashboard → 访问控制/API Keys 创建，然后 `EMQX_API_KEY=... EMQX_API_SECRET=... bash deploy/install.sh`（脚本持久化进 `.env` 600） |
+| 其它未知 `${VAR:?}` | die 并列出，人工确认（禁静默降级） |
+
+> 该清单是**运行时**从 compose 文件抽出的（不是写死在脚本里），所以 compose 以后加/删 `:?` 不会被漏掉；
+> `deploy/.env.example` 顶部另有一份静态清单便于阅读，两者以脚本抽出结果为准。
+> ⚠️ EMQX 两项是**外部 EMQX broker 的真实凭据**，脚本无法替你「生成」；缺它就该失败，而不是静默换假值。
+
+## 2.2 fork 专属 deploy 资源：curl 一键安装如何拿到（`resolve_deploy_src`）
+
+**2026-10-12 起 `install.sh` 默认把 fork（ypbin-iot）clone 到 `$ROOT/ypbin-admin`**（见 §2.3），
+所以正常情况下 `$ROOT/ypbin-admin/deploy` 自带全部 fork 资源。但为覆盖引用脚本时
+(`bash <(curl ...)` 落 `/tmp`、`sudo` 后 `SCRIPT_DIR` 变化、已有检出、`YPBIN_ADMIN_REPO` 覆盖)，
+`install.sh` 仍用 `resolve_deploy_src()` 统一解析**一个资源根** `DEPLOY_SRC`（不再逐个文件兜底）：
+
+1. 脚本自身位置（`<repo>/deploy`）——README 推荐部署法（本仓检出运行），**不重复克隆**；
+2. `$ROOT/ypbin-admin/deploy`——本仓检出到 ypbin-admin（sudo 后 `SCRIPT_DIR` 落到 /tmp 时也命中）；
+3. `$ROOT/ypbin-iot/deploy`——已浅克隆的 fork，复用；
+4. 都没有 ⇒ `git clone --depth 1 -b $BRANCH $YPBIN_IOT_REPO $ROOT/ypbin-iot`（GitHub→Gitee 降级）；
+5. 仍失败 ⇒ **一次性 die 并列出缺哪些资源**（禁静默跳过）。
+
+解析后：`redis-auth-conf.sh` 从 `$DEPLOY_SRC` 取；Nacos 模板目录 = `$DEPLOY_SRC/nacos`；
+`import_iot_sql()` 的本地 SQL 源 = `$DEPLOY_SRC/sql`（远端 raw 下载降级为备选）。
+
+**新增 deploy 资源时必须同步更新 `install.sh` 的 `FORK_DEPLOY_RESOURCES` 清单**——它是机器判据
+（curl 路径下资源是否齐备），报告/本文的资源分类表是它的说明：
+
+| 资源 | upstream/main | 用途 |
+|---|---|---|
+| `redis-auth-conf.sh` | **无** | fork 专属；install.sh [5.5] 生成 Redis `requirepass` 受管配置 |
+| `iotdb-init.sh` / `iotdb-init.sql` | **无** | fork 专属；fork compose 的 `iotdb-init` 服务挂载 |
+| `docker-compose.yml` | 有但不同 | fork 版含 `ypbin-iot`/`ypbin-access`/`iotdb`；现由 `$ROOT/ypbin-admin`（fork 检出）直接使用，见 §2.3 |
+| `nacos/ypbin-iot.yaml` / `nacos/ypbin-access.yaml` | **无** | fork 专属服务配置 |
+| `nacos/ypbin-common.yaml` / `nacos/ypbin-gateway.yaml` | 有但不同 | **fork 版为准**（identity token / iot 路由） |
+| `sql/006-iot-schema.sql` / `sql/007-iot-data.sql` / `sql/migration/iot-migrations.list` | **无** | IoT 表/菜单与远端下载清单 |
+| `nginx-microservice.conf`（compose 也挂 `./nginx-microservice.conf`） | 有且**相同** | 无需 fork 源 |
+
+> ✅ **2026-10-12 起已修**：`install.sh` 的 [2/7] **默认把 fork（ypbin-iot）clone 到 `$ROOT/ypbin-admin`**
+> （`YPBIN_IOT_REPO`，Gitee 降级，分支跟 `BRANCH`；`YPBIN_ADMIN_REPO` 可显式覆盖），与 SYNC §三·五 的
+> 推荐部署法等价 ⇒ `[4/7]` 的 Maven 构建与 [6/7] 的 compose 都用同一份 fork 检出，compose 用的就是
+> fork 的 `docker-compose.yml`（含 `ypbin-iot`/`ypbin-access`/`iotdb`/`iotdb-init`）。
+> 纯 admin 基座部署显式 `YPBIN_ADMIN_REPO=<upstream>`；**已有非 fork 的 `$ROOT/ypbin-admin`** 且要装
+> 含 IoT 服务的 compose ⇒ 脚本 **die + 迁移指引**（不静默将就半个系统）。
+
+## 2.3 一键安装（curl 路径）现在装什么 / 怎么迁移
+
+**桩测证明到的**（未真机起容器）：`resolve_admin_source()` 选中的是 **fork 仓库**；11 项 fork 专属
+deploy 资源全部可解析；clone 出来的 `deploy/docker-compose.yml` 经 `docker compose config --quiet`
+可解析出 **14 个服务**：`nacos / redis / mysql / iotdb / iotdb-init / ypbin-gateway / ypbin-auth /
+ypbin-system / ypbin-ai / ypbin-iot / ypbin-access / xxl-job-admin / ypbin-admin-ui / ypbin-iot-ui`。
+
+**因此语义上会构建并启动的范围**（构建/启动本身未在本轮真机验证）：admin 基座 5 服务 + `ypbin-iot`/
+`ypbin-access` + IoTDB（含一次性 `iotdb-init` 建库建表）+ XXL-JOB + 前端两套；数据库落 admin 基座
+001–005 + fork 的 006/007（IoT 表与菜单）+ 全部 `*-iot-*` 迁移记账。
+
+**仍需运维外部提供 / 不在 compose 内**：
+- `EMQX_API_KEY`/`EMQX_API_SECRET`：硬前置（compose 用 `:?`），必须先在 EMQX Dashboard 创建 API Key；
+  外部 EMQX broker、EMQX 隧道/入口那一套是**独立的中间件机部署**（`deploy/emqx/*`），不在本 compose 内。
+- IoT 前端静态产物：`install.sh` 只构建 admin-ui；`ypbin-iot-ui` 的 `iot-ui-dist` 需由
+  `deploy/ui-up.sh` 或 CI 产物单独准备（否则该 nginx 容器是空目录）。
+- 其它外部凭据（AI 模型 Key、邮件 SMTP 等）按各自文档配置。
+
+**从「已有纯 admin 检出」迁移**：脚本会 die 并打印两条路——① `rm -rf $ROOT/ypbin-admin && git clone -b
+$BRANCH <fork URL> $ROOT/ypbin-admin`（或直接在含 deploy/ 的本仓检出里跑脚本）；② 确实只装纯 admin
+基座就显式 `YPBIN_ADMIN_REPO=https://github.com/wenbin-wb/ypbin-admin.git` 后重跑（此时 fork 资源校验
+按 compose 是否含 IoT 服务自动降级，不会误拦）。
+
 ## 3. 回滚
 
 ```bash

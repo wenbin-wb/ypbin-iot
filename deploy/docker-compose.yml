@@ -454,6 +454,12 @@ services:
       # 身份头签名与内部调用密钥（真值 deploy/.env）：nacos 配置里的 ${GATEWAY_SIGN_TOKEN}/${INTERNAL_TOKEN} 占位由容器 env 解析
       GATEWAY_SIGN_TOKEN: ${GATEWAY_SIGN_TOKEN:-}
       INTERNAL_TOKEN: ${INTERNAL_TOKEN:-}
+      # 开放 API Key 的 HMAC pepper（真值只写 deploy/.env(600)）：OpenApiKeyService 用
+      # HMAC-SHA256(pepper, secret) 存哈希。只有 **ypbin-iot** 读取（网关只透传参数、验签在 iot 内完成；
+      # grep YPBIN_OPENAPI_SECRET_PEPPER 全仓读取点只有 iot 侧）。
+      # ⚠️ 换值会使既有 OpenAPI Key 全部失效（库内只存 HMAC，不可逆推）；缺失时创建/校验 fail-closed。
+      # 用空兜底而非 `:?`：缺 pepper 的失败形态是 iot 侧明确的业务拒绝，不该波及同目录其它 compose 命令。
+      YPBIN_OPENAPI_SECRET_PEPPER: ${YPBIN_OPENAPI_SECRET_PEPPER:-}
     ports:
       # ⚠️ 绑定地址**刻意与 INTERNAL_BIND_ADDR 分开**（同 IoTDB 的 IOTDB_BIND_ADDR 先例，2026-09-26）。
       # 原因：18084 现在暴露 `/actuator/metrics` 与 `/actuator/health`（可观测缺口补齐，见
