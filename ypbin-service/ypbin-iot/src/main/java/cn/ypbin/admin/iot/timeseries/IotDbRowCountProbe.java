@@ -14,11 +14,9 @@ import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.util.Properties;
 import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -84,15 +82,19 @@ public class IotDbRowCountProbe {
     public static final long DEFAULT_PROBE_INITIAL_DELAY_MS = 60_000L;
 
     private final TimeSeriesProperties properties;
+
+    /** IoTDB 连接的单点工厂（驱动/凭据/取连接只在这里；池化未做，见工厂类注释）。 */
+    private final IotDbConnectionFactory connectionFactory;
+
     private final Counter probeFailedCounter;
 
     /** 最近一次成功测得的库内行数（gauge 的取值源）。 */
     private final AtomicLong dbRows = new AtomicLong(ROW_COUNT_UNKNOWN);
 
     public IotDbRowCountProbe(TimeSeriesProperties properties, MeterRegistry meterRegistry) {
-        // 同写入器/查询器：本类可被直接构造，连库前必须先确保驱动已注册（幂等、无副作用）
-        IotDbDriverRegistrar.ensureRegistered();
+        // 同写入器/查询器：本类可被直接构造，连接工厂构造时确保驱动已注册（幂等、无副作用）
         this.properties = properties;
+        this.connectionFactory = new IotDbConnectionFactory(properties);
         Gauge.builder(METRIC_DB_ROWS, dbRows, AtomicLong::doubleValue)
             .description("时序库内实际行数（低频 SELECT COUNT(*) 真值对账；-1 = 尚未成功测得）")
             .register(meterRegistry);
@@ -110,10 +112,7 @@ public class IotDbRowCountProbe {
         initialDelayString = "${ypbin.timeseries.db-rows-probe-initial-delay-ms:60000}")
     public void probeOnce() {
         String sql = "SELECT COUNT(*) FROM " + properties.getTableName();
-        Properties credentials = new Properties();
-        credentials.setProperty("user", properties.getUsername());
-        credentials.setProperty("password", properties.getPassword());
-        try (Connection connection = DriverManager.getConnection(properties.getUrl(), credentials);
+        try (Connection connection = connectionFactory.open();
              Statement statement = connection.createStatement()) {
             // 远程调用必须显式超时（本仓铁律）：超时下推到 IoTDB 的 RPC 请求（见类注释的一手依据）
             statement.setQueryTimeout(properties.getDbRowsProbeQueryTimeoutSeconds());

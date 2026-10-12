@@ -12,13 +12,11 @@ package cn.ypbin.admin.iot.timeseries;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.iot.validate.PropertyIdRules;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Properties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -53,10 +51,13 @@ public class IotDbTimeSeriesStore implements TimeSeriesStore {
 
     private final TimeSeriesProperties properties;
 
+    /** IoTDB 连接的单点工厂（驱动/凭据/取连接只在这里；池化未做，见工厂类注释）。 */
+    private final IotDbConnectionFactory connectionFactory;
+
     public IotDbTimeSeriesStore(TimeSeriesProperties properties) {
-        // 同写入器：本类可被直接构造，查询前必须先确保驱动已注册（幂等，无副作用）
-        IotDbDriverRegistrar.ensureRegistered();
+        // 同写入器：本类可被直接构造，连接工厂构造时确保驱动已注册（幂等，无副作用）
         this.properties = properties;
+        this.connectionFactory = new IotDbConnectionFactory(properties);
     }
 
     @Override
@@ -70,10 +71,7 @@ public class IotDbTimeSeriesStore implements TimeSeriesStore {
             + " AND " + propertyIdPredicate(propertyIds)
             + " AND time >= " + fromTs + " AND time <= " + toTs
             + " ORDER BY time ASC LIMIT " + limit;
-        Properties credentials = new Properties();
-        credentials.setProperty("user", properties.getUsername());
-        credentials.setProperty("password", properties.getPassword());
-        try (Connection connection = DriverManager.getConnection(properties.getUrl(), credentials);
+        try (Connection connection = connectionFactory.open();
              Statement statement = connection.createStatement();
              ResultSet resultSet = statement.executeQuery(sql)) {
             List<TimeSeriesPointResp> points = new ArrayList<>();
@@ -88,9 +86,30 @@ public class IotDbTimeSeriesStore implements TimeSeriesStore {
         }
     }
 
+    /**
+     * 是否**已启用/已接入**时序库（装配到本实现即 true）。
+     *
+     * <p>⚠️ 本方法**不探测网络**、也不改变 readonly 语义：它只回答「查询端点该不该按『未启用』报错」。
+     * 「现在连得上吗」由 {@link #reachable()} 做真实探测（含 TCP + 认证）。</p>
+     *
+     * @return 已接入返回 true（本实现被装配即代表 enabled=true）
+     */
     @Override
     public boolean available() {
         return true;
+    }
+
+    /**
+     * 真实可达性探测：委托 {@link IotDbConnectionFactory#probe()}（建立一条连接即视为可达，随即关闭）。
+     *
+     * <p>与 {@link #available()} 的分工：{@code available()} 是「配置开关」（廉价、查询前判据），
+     * {@code reachable()} 是「现在连得上吗」（会建连接，供健康检查/运维使用，**不要在查询热路径逐次调用**）。</p>
+     *
+     * @return 可建立连接返回 true；失败返回 false（失败原因在工厂侧记 WARN）
+     */
+    @Override
+    public boolean reachable() {
+        return connectionFactory.probe();
     }
 
     /**

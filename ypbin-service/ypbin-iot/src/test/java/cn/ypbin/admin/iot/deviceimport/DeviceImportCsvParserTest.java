@@ -358,4 +358,33 @@ class DeviceImportCsvParserTest {
         assertThat(csv).contains(DeviceImportColumn.headerLine());
         assertThat(csv.lines().count()).isEqualTo(2L);
     }
+    @Test
+    @DisplayName("★ 失败行 CSV：危险首字符（= + - @ TAB CR）必须中和为文本（电子表格公式注入）")
+    void failedCsvMustNeutralizeSpreadsheetFormula() {
+        List<DeviceImportCsvParser.FailedRow> rows = List.of(
+            new DeviceImportCsvParser.FailedRow("=cmd|' /C calc'!A0,tcp,tcp://h:1,,,,,",
+                DeviceImportErrorCode.ENDPOINT_INVALID.getCode(), "m1"),
+            new DeviceImportCsvParser.FailedRow("+1+1,tcp,tcp://h:2,,,,,",
+                DeviceImportErrorCode.ENDPOINT_INVALID.getCode(), "m2"),
+            new DeviceImportCsvParser.FailedRow("-2-2,tcp,tcp://h:3,,,,,",
+                DeviceImportErrorCode.ENDPOINT_INVALID.getCode(), "m3"),
+            new DeviceImportCsvParser.FailedRow("@SUM(A1:A2),tcp,tcp://h:4,,,,,",
+                DeviceImportErrorCode.ENDPOINT_INVALID.getCode(), "m4"),
+            new DeviceImportCsvParser.FailedRow("\t=1+1,tcp,tcp://h:5,,,,,",
+                DeviceImportErrorCode.ENDPOINT_INVALID.getCode(), "m5"),
+            new DeviceImportCsvParser.FailedRow("GW-1,设备,tcp,tcp://h:6,,,,,",
+                DeviceImportErrorCode.ENDPOINT_INVALID.getCode(), "m6"));
+
+        String csv = parser.buildFailedCsv(rows);
+
+        assertThat(csv).contains("'=cmd|' /C calc'!A0");
+        assertThat(csv).contains("'+1+1");
+        assertThat(csv).contains("'-2-2");
+        assertThat(csv).contains("'@SUM(A1:A2)");
+        assertThat(csv).contains("'\t=1+1");
+        assertThat(csv)
+            .as("普通内容不得被无端加前缀（否则用户重传时值就变了）")
+            .contains("GW-1,设备")
+            .doesNotContain("'GW-1");
+    }
 }

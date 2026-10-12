@@ -11,6 +11,7 @@ package cn.ypbin.admin.iot.timeseries;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.nio.charset.StandardCharsets;
@@ -18,6 +19,8 @@ import java.nio.file.Paths;
 import java.sql.Driver;
 import java.sql.DriverManager;
 import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.List;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -73,6 +76,52 @@ class IotDbDriverRegistrarTest {
 
         assertThat(process.waitFor()).as("子 JVM 未正常退出，输出：%n%s", output).isZero();
         assertThat(output).as("子 JVM 里构造后仍找不到驱动 ⇒ 构造器没注册（或驱动不在类路径）").contains(PROBE_OK);
+    }
+
+    @Test
+    @DisplayName("★ 类已加载但注册表里没有时，ensureRegistered 必须补注册（静态 mock 毒化/驱动静态块失败的自愈）")
+    void mustRepairWhenLoadedButNotRegistered() throws Exception {
+        // 先确保有可注销的驱动，再注销全部 IoTDB 驱动，构造「类已加载但未注册」的冷状态
+        IotDbDriverRegistrar.ensureRegistered();
+        List<Driver> iotDbDrivers = iotDbDrivers();
+        assertThat(iotDbDrivers).as("前置：应至少有一个已注册的 IoTDB 驱动").isNotEmpty();
+        for (Driver driver : iotDbDrivers) {
+            DriverManager.deregisterDriver(driver);
+        }
+        assertThatThrownBy(() -> DriverManager.getDriver(IOTDB_URL))
+            .as("注销后必须真的查不到，否则本用例测不到补注册路径")
+            .isInstanceOf(SQLException.class);
+
+        IotDbDriverRegistrar.ensureRegistered();
+
+        assertThat(DriverManager.getDriver(IOTDB_URL))
+            .as("ensureRegistered 必须把「类已加载但未注册」的驱动补注册回来（CI 冷状态缺陷的回归）")
+            .isNotNull();
+    }
+
+    @Test
+    @DisplayName("幂等：重复 ensureRegistered 不产生重复的 IoTDB 驱动注册")
+    void mustNotRegisterDuplicates() {
+        IotDbDriverRegistrar.ensureRegistered();
+        int before = iotDbDrivers().size();
+        IotDbDriverRegistrar.ensureRegistered();
+        IotDbDriverRegistrar.ensureRegistered();
+        assertThat(iotDbDrivers())
+            .as("重复调用不得重复注册（ensureRegistered 内部的已注册检查）")
+            .hasSize(before);
+    }
+
+    /** 当前已注册的 IoTDB 驱动（按类名比对；不假设只有一条）。 */
+    private static List<Driver> iotDbDrivers() {
+        List<Driver> result = new ArrayList<>();
+        var drivers = DriverManager.getDrivers();
+        while (drivers.hasMoreElements()) {
+            Driver driver = drivers.nextElement();
+            if (driver.getClass().getName().equals("org.apache.iotdb.jdbc.IoTDBDriver")) {
+                result.add(driver);
+            }
+        }
+        return result;
     }
 
     /**

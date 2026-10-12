@@ -795,4 +795,22 @@ class DeviceImportServiceImplTest {
         }
         return messages;
     }
+    @Test
+    @DisplayName("★ 文件名归一化：剥离路径分隔符/控制字符、trim、截断，空则回退「未命名.csv」")
+    void fileNameMustBeSanitizedBeforePersist() {
+        assertThat(DeviceImportServiceImpl.normalizeFileName(null)).isEqualTo("未命名.csv");
+        assertThat(DeviceImportServiceImpl.normalizeFileName("   ")).isEqualTo("未命名.csv");
+        assertThat(DeviceImportServiceImpl.normalizeFileName("../../etc/passwd"))
+            .as("路径分隔符被剥离（文件名只入库/展示，但不得在日志/页面里伪装成路径）")
+            .isEqualTo("....etcpasswd");
+        assertThat(DeviceImportServiceImpl.normalizeFileName("a/b\\c.csv")).isEqualTo("abc.csv");
+        assertThat(DeviceImportServiceImpl.normalizeFileName("dev\u0000ice\u001F.csv"))
+            .as("控制字符被剥离（防伪造日志行）")
+            .isEqualTo("device.csv");
+        assertThat(DeviceImportServiceImpl.normalizeFileName("///")).isEqualTo("未命名.csv");
+        assertThat(DeviceImportServiceImpl.normalizeFileName("x".repeat(300)))
+            .as("超过上限必须截断").hasSize(DeviceImportServiceImpl.MAX_FILE_NAME_LENGTH);
+        assertThat(DeviceImportServiceImpl.normalizeFileName("  devices.csv  "))
+            .isEqualTo("devices.csv");
+    }
 }

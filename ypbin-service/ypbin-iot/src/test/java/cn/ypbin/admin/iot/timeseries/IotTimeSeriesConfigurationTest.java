@@ -89,4 +89,11 @@ class IotTimeSeriesConfigurationTest {
         // 断言点是「不抛异常且可重复调用」——告警频率由 AtomicBoolean 保证（日志内容不便断言）
         assertThatCode(() -> writer.writeAll(List.of())).doesNotThrowAnyException();
     }
+    @Test
+    @DisplayName("未接入实现：available()/reachable() 都为 false（reachable 不假装能探测）")
+    void unavailableStoreMustBeUnavailableAndUnreachable() {
+        TimeSeriesStore store = new UnavailableTimeSeriesStore();
+        assertThat(store.available()).isFalse();
+        assertThat(store.reachable()).isFalse();
+    }
 }

@@ -356,21 +356,48 @@ public final class DeviceImportCsvParser {
     }
 
     /**
-     * CSV 字段转义（含分隔符/引号/换行时用引号包裹，引号翻倍）。
+     * CSV 字段转义（含分隔符/引号/换行时用引号包裹，引号翻倍），并**中和电子表格公式注入**。
+     *
+     * <p><b>为什么必须中和</b>：失败行 CSV 会原样回吐用户的原始行（设备名/端点等）。若某字段以
+     * {@code =}、{@code +}、{@code -}、{@code @}、TAB、CR 开头，Excel/LibreOffice 打开时会把它当公式
+     * 执行（CSV / formula injection）。中和方式：在危险首字符前加一个单引号 {@code '}——电子表格把该
+     * 单元格当作文本，用户看到的仍是原文（单引号是文本标记，不显示）。</p>
      *
      * @param value 取值
-     * @return 转义后的字段
+     * @return 转义并中和后的字段
      */
     private String escape(String value) {
         if (value == null) {
             return "";
         }
-        boolean needsQuote = value.indexOf(',') >= 0 || value.indexOf('"') >= 0
-            || value.indexOf('\n') >= 0 || value.indexOf('\r') >= 0;
+        String neutralized = neutralizeSpreadsheetFormula(value);
+        boolean needsQuote = neutralized.indexOf(',') >= 0 || neutralized.indexOf('"') >= 0
+            || neutralized.indexOf('\n') >= 0 || neutralized.indexOf('\r') >= 0;
         if (!needsQuote) {
+            return neutralized;
+        }
+        return "\"" + neutralized.replace("\"", "\"\"") + "\"";
+    }
+
+    /**
+     * 公式注入中和：危险首字符（{@code = + - @} / TAB / CR）前加单引号，使电子表格按文本处理。
+     *
+     * <p>只处理**首字符**：电子表格仅在单元格以这些字符开头时解释为公式，中间出现不影响。
+     * 代价是 {@code -12} 这类以负号开头的合法文本会多一个前导单引号（失败行是诊断输出，可接受）。</p>
+     *
+     * @param value 非 null 取值
+     * @return 中和后的取值
+     */
+    private static String neutralizeSpreadsheetFormula(String value) {
+        if (value.isEmpty()) {
             return value;
         }
-        return "\"" + value.replace("\"", "\"\"") + "\"";
+        char first = value.charAt(0);
+        if (first == '=' || first == '+' || first == '-' || first == '@'
+            || first == '\t' || first == '\r') {
+            return "'" + value;
+        }
+        return value;
     }
 
     /**

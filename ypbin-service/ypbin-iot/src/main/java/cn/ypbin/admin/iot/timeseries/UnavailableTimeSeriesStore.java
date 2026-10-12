@@ -33,4 +33,10 @@ public class UnavailableTimeSeriesStore implements TimeSeriesStore {
     public boolean available() {
         return false;
     }
+
+    @Override
+    public boolean reachable() {
+        // 未接入 ⇒ 无需（也无法）探测；语义与 available() 一致为 false
+        return false;
+    }
 }

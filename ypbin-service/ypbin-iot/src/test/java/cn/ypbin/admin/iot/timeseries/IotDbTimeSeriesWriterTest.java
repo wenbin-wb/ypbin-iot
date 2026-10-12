@@ -43,6 +43,7 @@ import java.util.List;
 import java.util.Properties;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -70,6 +71,20 @@ import org.slf4j.LoggerFactory;
  * @since 2026-09-24
  */
 class IotDbTimeSeriesWriterTest {
+
+    /**
+     * 在任何 {@code mockStatic(DriverManager.class)} 之前把驱动**真实注册**进 JVM 全局注册表。
+     *
+     * <p>否则首个「在 mock 下构造写入器/存储/连接工厂」的用例会让驱动类在
+     * {@code DriverManager.registerDriver} 被拦成 no-op 的上下文里完成首次加载；此后
+     * {@code Class.forName} 对已加载类是 no-op，驱动在本 JVM 内再也注册不上，后跑的
+     * {@code IotDbDriverRegistrarTest} 会报 {@code No such driver}（CI 冷状态实测到的形态）。
+     * 这里先注册好，测试顺序就不再影响 JVM 全局注册表。</p>
+     */
+    @BeforeAll
+    static void registerIotDbDriverBeforeStaticMocking() {
+        IotDbDriverRegistrar.ensureRegistered();
+    }
 
     /** 表模型连接串必须带 {@code sql_dialect=table}（官方 JDBC 文档），并带库名（非限定表名的前提）。 */
     private static final String URL = "jdbc:iotdb://127.0.0.1:6667/ypbin_it?sql_dialect=table";
@@ -433,7 +448,9 @@ class IotDbTimeSeriesWriterTest {
         try (MockedStatic<DriverManager> driverManager = mockStatic(DriverManager.class)) {
             new IotDbTimeSeriesWriter(properties(10), registry).writeAll(List.of());
 
-            driverManager.verifyNoInteractions();
+            // 「不连库」的准确判据是「没有发起 getConnection」：构造写入器时会做一次驱动注册校验
+            // （DriverManager.getDrivers()，不建连接），那不是数据库访问。
+            driverManager.verify(() -> DriverManager.getConnection(anyString(), any(Properties.class)), never());
             assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_FAILED).counter().count())
                 .as("空集合不是失败：不得计数")
                 .isZero();

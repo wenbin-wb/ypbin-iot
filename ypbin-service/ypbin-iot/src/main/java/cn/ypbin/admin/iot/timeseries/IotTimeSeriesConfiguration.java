@@ -12,9 +12,12 @@ package cn.ypbin.admin.iot.timeseries;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.sql.DriverManager;
 import java.sql.SQLException;
+import java.time.Clock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.InitializingBean;
+import org.springframework.boot.health.contributor.HealthIndicator;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -92,8 +95,9 @@ public class IotTimeSeriesConfiguration implements InitializingBean {
     }
 
     /**
-     * 时序写入器：未启用时用「WARN 一次并丢弃」的实现（不静默），启用时由后续增量提供 JDBC 实现。
+     * 时序写入器：未启用时用「WARN 一次并丢弃」的实现（不静默）；启用时用 IoTDB JDBC 实现。
      *
+     * @param meterRegistry 指标注册表
      * @return 写入器
      */
     @Bean
@@ -105,10 +109,8 @@ public class IotTimeSeriesConfiguration implements InitializingBean {
     }
 
     /**
-     * 历史查询的存储实现：IoTDB 未接入时用「不可用」实现（查询端点据此明确报错，而不是返回空列表）。
-     *
-     * <p>IoTDB JDBC 实现落地时替换本 bean；替换时**必须**加条件或 `@Primary`，
-     * 否则两个 {@code TimeSeriesStore} bean 会 `NoUniqueBeanDefinitionException`。</p>
+     * 历史查询的存储实现：未启用时用「不可用」实现（查询端点据此明确报错，而不是返回空列表）；
+     * 启用时用 IoTDB JDBC 实现（查询走 {@code IotDbTimeSeriesStore}）。
      *
      * @return 存储实现
      */
@@ -118,5 +120,22 @@ public class IotTimeSeriesConfiguration implements InitializingBean {
             return new UnavailableTimeSeriesStore();
         }
         return new IotDbTimeSeriesStore(properties);
+    }
+
+    /**
+     * 时序库可达性健康指示器：**仅在启用时注册**（未启用不注册 ⇒ 不会让整体健康状态因「未启用」变 DOWN）。
+     *
+     * <p>它调用 {@code TimeSeriesStore.reachable()} 做真实探测（建一条连接即视为可达），
+     * 结果自带 {@value IotDbTimeSeriesHealthIndicator#DEFAULT_CACHE_TTL_MS} ms 缓存，
+     * 避免健康端点被轮询时把探测变成对 IoTDB 的压测。运维影响：启用后 IoTDB 不可达会让
+     * {@code /actuator/health} 变 DOWN；当前 compose 未对 ypbin-iot 配 healthcheck，不会触发重启。</p>
+     *
+     * @param timeSeriesStore 时序存储（真实探测入口）
+     * @return 健康指示器
+     */
+    @Bean
+    @ConditionalOnProperty(prefix = TimeSeriesProperties.PREFIX, name = "enabled", havingValue = "true")
+    public HealthIndicator iotDbTimeSeriesHealthIndicator(TimeSeriesStore timeSeriesStore) {
+        return new IotDbTimeSeriesHealthIndicator(timeSeriesStore, Clock.systemUTC());
     }
 }

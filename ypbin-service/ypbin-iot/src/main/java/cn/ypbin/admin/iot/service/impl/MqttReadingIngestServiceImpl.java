@@ -69,6 +69,15 @@ import tools.jackson.databind.ObjectReader;
  * **不保证**「不同 requestId 携带同一份数据只落一次」——后者是设备侧的责任（每次上报用新 requestId，
  * 重发沿用原 requestId）。</p>
  *
+ * <p><b>并发同 requestId 重投的边界（2026-10-12 补记）</b>：预查 + {@code INSERT ... ON DUPLICATE KEY
+ * UPDATE} 只保证**回执行唯一**，**不保证业务副作用唯一**——两个并发请求都可能在各自事务快照里看不到
+ * 回执、都通过预查并各执行一次 {@code availabilityService.ingest}（最新值/断档/影子/时序），随后回执被
+ * 去重。因此 {@code iot.mqtt.ingest.duplicated} 在并发窗口内会**漏计**（只有命中预查的那条才计数）。
+ * 影响：多数副作用是同值覆盖（幂等形态），但不构成 at-most-once；断档闭合/影子合并存在被执行两次的
+ * 窗口。详见 {@code docs/MESSAGE-TRACE-DESIGN.md} §1.3.1b。低风险加固方案（**默认不实施**）：同事务内
+ * 先 {@code INSERT ... ON DUPLICATE KEY UPDATE} 抢槽、再决定是否执行 ingest——它把回执写入提前到业务
+ * 落库之前，失败路径需重做，改动面大于收益。</p>
+ *
  * @author wenbin
  * @since 2026-10-01
  */
@@ -150,9 +159,13 @@ public class MqttReadingIngestServiceImpl implements MqttReadingIngestService {
         // 体积护栏必须在**这里**（而不是控制器）：控制器里直接写 400 会绕过 reject()，
         // 于是 iot.mqtt.ingest.rejected{reason=BODY_TOO_LARGE} **永远为 0**——监控规则"看起来配好了、
         // 却永不触发"（独立复核以实测判出的真缺陷）。护栏仍早于 JSON 解析，防内存放大的目的不变。
-        if (rawBody != null && rawBody.length() > MqttReadingIngestReq.MAX_BODY_LENGTH) {
+        // 体积护栏按 **UTF-8 字节数**（不是 String.length() 的字符数）：多字节内容下字符数会低估
+        // 实际内存/传输体积（中文 1 字符 = 3 字节）⇒ 按字符判定等于把上限放宽到 3~4 倍。
+        // 逐字符累加而不 getBytes()：护栏的目的正是防内存放大，再分配等大字节数组会抵消它。
+        int bodyBytes = utf8ByteLength(rawBody);
+        if (bodyBytes > MqttReadingIngestReq.MAX_BODY_LENGTH) {
             reject(MqttIngestRejectReason.BODY_TOO_LARGE,
-                "报文长度 " + rawBody.length() + " 超过上限 " + MqttReadingIngestReq.MAX_BODY_LENGTH);
+                "报文长度 " + bodyBytes + " 字节超过上限 " + MqttReadingIngestReq.MAX_BODY_LENGTH + " 字节");
         }
         MqttReadingIngestReq req = parse(rawBody);
         // 第①段：纯内存的报文/字段校验——任何一条不合法都在动库之前整批拒绝
@@ -325,6 +338,41 @@ public class MqttReadingIngestServiceImpl implements MqttReadingIngestService {
         log.info("[emqx→iot] MQTT 入站受理成功：deviceId={} 条数={} requestId长度={}",
             LogSanitizer.sanitize(deviceId), accepted, requestId.length());
         return MqttReadingIngestResult.accepted(deviceId, requestId, accepted, dropped);
+    }
+
+    /**
+     * 字符串的 UTF-8 编码字节数（**不分配 byte[]**）。
+     *
+     * <p>与 {@code value.getBytes(StandardCharsets.UTF_8).length} 逐字节等价：1/2/3 字节按码点范围，
+     * 合法代理对按 4 字节；**落单代理**按 1 字节（Java 的 UTF-8 编码器把非法代理替换成 {@code '?'}），
+     * 因此不会把「含落单代理的报文」算得比真实编码更大。</p>
+     *
+     * @param value 待测字符串（null 视为 0 字节）
+     * @return UTF-8 字节数
+     */
+    static int utf8ByteLength(String value) {
+        if (value == null) {
+            return 0;
+        }
+        int bytes = 0;
+        for (int index = 0; index < value.length(); index++) {
+            char ch = value.charAt(index);
+            if (ch < 0x80) {
+                bytes += 1;
+            } else if (ch < 0x800) {
+                bytes += 2;
+            } else if (Character.isHighSurrogate(ch) && index + 1 < value.length()
+                && Character.isLowSurrogate(value.charAt(index + 1))) {
+                bytes += 4;
+                index++;
+            } else if (Character.isSurrogate(ch)) {
+                // 落单代理：UTF-8 编码器替换成 '?'（1 字节），与 getBytes 保持一致
+                bytes += 1;
+            } else {
+                bytes += 3;
+            }
+        }
+        return bytes;
     }
 
     /**

@@ -9,6 +9,10 @@
  */
 package cn.ypbin.admin.iot.timeseries;
 
+import java.sql.Driver;
+import java.sql.DriverManager;
+import java.sql.SQLException;
+import java.util.Enumeration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -43,17 +47,70 @@ public final class IotDbDriverRegistrar {
     }
 
     /**
-     * 加载驱动类（其静态初始化会把自己注册进 {@code DriverManager}）；已加载过再调用无副作用。
+     * 确保驱动类已加载**且已注册**进 {@code DriverManager}（可重复调用，幂等）。
      *
-     * @throws IllegalStateException 驱动不在运行时类路径时抛出（不静默继续）
+     * <p><b>为什么不能只 {@code Class.forName}</b>：{@code Class.forName} 只在**首次**加载类时触发静态块，
+     * 而静态块里的 {@code DriverManager.registerDriver(...)} 可能没有真正生效——两种已发生的路径：
+     * ① 驱动自身在静态块里 catch 了 {@code SQLException} 只 {@code log.error}（注册失败不抛）；
+     * ② 类的首次加载发生在 {@code DriverManager} 被静态 mock 的测试上下文里，{@code registerDriver}
+     * 被拦成 no-op。此后 {@code Class.forName} 对「已加载」的类是 no-op ⇒ 驱动**永远不会**被注册，
+     * 首次建连报 {@code SQLException: No suitable driver}（CI 冷状态实测到的形态）。</p>
+     *
+     * <p>因此这里在加载后**校验并补注册**：已注册则直接返回（幂等，不产生重复驱动），未注册则显式
+     * 实例化驱动并 {@code registerDriver}；补注册失败时 <b>fail-fast</b> 抛带明确原因的
+     * {@link IllegalStateException}（不静默降级成「等第一次建连再报错」）。</p>
+     *
+     * @throws IllegalStateException 驱动不在运行时类路径，或已加载但无法注册时抛出（不静默继续）
      */
     public static void ensureRegistered() {
+        Class<?> driverClass;
         try {
-            Class.forName(IOTDB_DRIVER_CLASS);
+            driverClass = Class.forName(IOTDB_DRIVER_CLASS);
         } catch (ClassNotFoundException ex) {
             throw new IllegalStateException("IoTDB JDBC 驱动不在运行时类路径（需要 org.apache.iotdb:iotdb-jdbc，"
                 + "runtime 依赖）：" + IOTDB_DRIVER_CLASS, ex);
         }
-        log.debug("[iot] 已显式加载 IoTDB JDBC 驱动：{}", IOTDB_DRIVER_CLASS);
+        if (isRegistered(driverClass)) {
+            log.debug("[iot] IoTDB JDBC 驱动已注册：{}", IOTDB_DRIVER_CLASS);
+            return;
+        }
+        try {
+            Driver driver = (Driver) driverClass.getDeclaredConstructor().newInstance();
+            DriverManager.registerDriver(driver);
+            log.info("[iot] IoTDB JDBC 驱动此前未注册，已显式补注册：{}", IOTDB_DRIVER_CLASS);
+        } catch (ReflectiveOperationException | SQLException ex) {
+            throw new IllegalStateException("IoTDB JDBC 驱动已加载但注册失败（首次建连会失败，故 fail-fast）："
+                + IOTDB_DRIVER_CLASS, ex);
+        }
+    }
+
+    /**
+     * 驱动类是否已注册进 {@code DriverManager}（按类对象比对，不按 URL 前缀）。
+     *
+     * <p>静态 mock 上下文下 {@code getDrivers()} 可能返回 {@code null} 或抛运行时异常（Mockito 对
+     * {@code Enumeration} 无默认空值）：这里按「未注册」处理并继续走补注册路径（mock 下
+     * {@code registerDriver} 本身是 no-op），从而不在测试里引入 NPE/异常，也不会把 mock 状态当成真实事实。</p>
+     *
+     * @param driverClass 驱动类
+     * @return 已注册返回 true
+     */
+    private static boolean isRegistered(Class<?> driverClass) {
+        Enumeration<Driver> drivers;
+        try {
+            drivers = DriverManager.getDrivers();
+        } catch (RuntimeException ex) {
+            log.debug("[iot] 无法枚举已注册 JDBC 驱动（DriverManager 可能被 mock）：{}", ex.toString());
+            return false;
+        }
+        if (drivers == null) {
+            return false;
+        }
+        while (drivers.hasMoreElements()) {
+            Driver driver = drivers.nextElement();
+            if (driver != null && driver.getClass() == driverClass) {
+                return true;
+            }
+        }
+        return false;
     }
 }

@@ -55,6 +55,16 @@
 - ✅ **索引齐备的**：`iot_command_instance`(`tenant_id, device_id, create_time`)、`iot_event_log`(`tenant_id, device_id, event_ts`)、`outage_event`(`tenant_id, device_id, start_ts`) 均支持"设备+时间"。
 - 🔴 **既有门禁覆盖缺口（本设计复核时发现，与本能力无关）**：`iot_command_instance` 与 `iot_mqtt_ingest_receipt` 实体均 `extends TenantBaseEntity`，但**均未登记进** `IotTenantIsolationGateTest#M1_TENANT_TABLES`（该清单当前止于 `iot_device_import_row`）⇒ 清单式门禁**不覆盖这两张租户表**（`007-iot-data.sql:475-476` 的 DDL 注释早已点名要求登记）。**建议作为独立小修立即补 2 行**，不必等本设计评审。
 
+#### 1.3.1b ⚠️ 一期幂等的语义边界：只保「回执行唯一」，不保「业务副作用唯一」（2026-10-12 补记）
+
+`MqttReadingIngestServiceImpl#apply`（`MqttReadingIngestServiceImpl.java:300`）是「先查回执 → 执行 ingest → 写回执」：
+
+- 幂等预查（`:302`）只认「该设备该 `requestId` 的回执行是否存在」；
+- 回执写入（`:328`）用唯一键 + `ON DUPLICATE KEY UPDATE` 兜底 ⇒ **回执行不重复**；
+- 但两个**并发**同 `requestId` 的请求都可能在各自事务快照里看不到回执、都通过预查，于是 `availabilityService.ingest`（`:313`）被各执行一次（最新值/断档/影子/时序），随后回执被去重。
+
+⇒ 结论：**幂等只保证回执行唯一，不保证业务副作用唯一**（**不是** at-most-once）。多数副作用是同值覆盖（幂等形态），但断档闭合 / 影子合并存在被执行两次的窗口；`iot.mqtt.ingest.duplicated` 在并发窗口内会**漏计**（只有命中预查的那条才计数）。低风险加固方案（同事务内先 `INSERT ... ON DUPLICATE KEY UPDATE` 抢槽、再决定是否 ingest）**默认不实施**，理由（回执写入提前到业务落库之前的失败路径）见 `MqttReadingIngestServiceImpl` 类注释。
+
 #### 1.3.2 未核实项（**实施前必须实测放行**）
 
 - **各链路的实际写入覆盖面**：设备上报的**每条**消息是否都产生回执，还是只在批量场景产生，**未核实**。
