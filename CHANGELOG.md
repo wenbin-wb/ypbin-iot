@@ -8,6 +8,13 @@
 
 ### 修复
 
+- **dev 部署多点位 TCP 采集修复**（`ypbin-access`；对应 `fix(access)` PR #212 落地部署）。
+  部署前实证：`iot.access.egress.sent = 0`、`iot.access.subscribe.failure = 638`——多点位 TCP 设备因
+  starter 0.2.0 单点位契约（`TcpSession.subscribe` 对 >1 地址 fail-fast）被无限重试且整机零采集；
+  部署后 `subscribe.success` 恢复、`egress.sent` 稳定增长、`subscribe.failure` 停止增长。
+  产物 md5：`ypbin-access` = `a798d2c4`、`ypbin-iot` = `7ce973d6`；
+  回滚资产：镜像 tag `ypbin/ypbin-{access,iot}:pre-multiaddr-20261012-044443` + 同名 `backup/pre-multiaddr-20261012-044443/`。
+
 - **部署凭据卫生**（`deploy/`，反馈 UP-8/UP-9）：
   - compose 健康检查不再携带口令：Redis 改 `nc -z` 探端口、MySQL 改 `mysqladmin ping -h 127.0.0.1`——
     原 `redis-cli -a <口令>` / `mysqladmin -p<口令>` 会把口令写进 exec argv，`docker top` / `docker events` 可见；
