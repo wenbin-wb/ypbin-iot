@@ -19,6 +19,7 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
@@ -42,6 +43,9 @@ import org.springframework.stereotype.Service;
 public class OpenApiKeyService {
 
     private static final Logger log = LoggerFactory.getLogger(OpenApiKeyService.class);
+
+    /** {@code last_used_at} 落库节流默认间隔（秒）：verify 每请求同步调用，不能每请求回写热点行。 */
+    static final long DEFAULT_LAST_USED_WRITE_INTERVAL_SECONDS = 30L;
 
     private final IotOpenApiKeyMapper keyMapper;
 
@@ -72,14 +76,28 @@ public class OpenApiKeyService {
      */
     private final ObjectProvider<StringRedisTemplate> redisTemplateProvider;
 
+    /**
+     * {@code last_used_at} 节流状态：key 行 id → 上次落库时刻（epoch ms）。
+     *
+     * <p>只影响「观测用的最后使用时间」精度，不参与鉴权判定；进程重启后最多多写一次。
+     * 条目数 = Key 数（有界），不随请求增长。</p>
+     */
+    private final Map<Long, Long> lastUsedWriteAtMs = new ConcurrentHashMap<>();
+
+    /** 两次 {@code last_used_at} 落库的最小间隔（毫秒）；0 = 不节流（每请求写）。 */
+    private final long lastUsedWriteIntervalMillis;
+
     @Autowired
     public OpenApiKeyService(IotOpenApiKeyMapper keyMapper,
                              @Value("${ypbin.openapi.secret-pepper:}") String pepper,
                              @Value("${ypbin.openapi.require-signature:false}") boolean localRequireSignature,
+                             @Value("${ypbin.openapi.last-used-write-interval-seconds:30}")
+                             long lastUsedWriteIntervalSeconds,
                              ObjectProvider<NonceStore> nonceStoreProvider,
                              ObjectProvider<StringRedisTemplate> redisTemplateProvider) {
         this(keyMapper, pepper, nonceStoreProvider.getIfAvailable(
-            InMemoryNonceStore::new), localRequireSignature, redisTemplateProvider);
+            InMemoryNonceStore::new), localRequireSignature, redisTemplateProvider,
+            lastUsedWriteIntervalSeconds);
     }
 
     /**
@@ -128,11 +146,30 @@ public class OpenApiKeyService {
     public OpenApiKeyService(IotOpenApiKeyMapper keyMapper, String pepper, NonceStore nonceStore,
                              boolean localRequireSignature,
                              ObjectProvider<StringRedisTemplate> redisTemplateProvider) {
+        this(keyMapper, pepper, nonceStore, localRequireSignature, redisTemplateProvider,
+            DEFAULT_LAST_USED_WRITE_INTERVAL_SECONDS);
+    }
+
+    /**
+     * 全参构造（供装配层传入本地强制开关与 {@code last_used_at} 节流间隔）。
+     *
+     * @param keyMapper                     Key 表 Mapper
+     * @param pepper                        pepper
+     * @param nonceStore                    nonce 存储
+     * @param localRequireSignature         iot 自身配置的强制签名开关
+     * @param redisTemplateProvider         Redis 访问（可为 null）
+     * @param lastUsedWriteIntervalSeconds  last_used_at 落库最小间隔（秒）；0 = 不节流
+     */
+    public OpenApiKeyService(IotOpenApiKeyMapper keyMapper, String pepper, NonceStore nonceStore,
+                             boolean localRequireSignature,
+                             ObjectProvider<StringRedisTemplate> redisTemplateProvider,
+                             long lastUsedWriteIntervalSeconds) {
         this.keyMapper = keyMapper;
         this.pepper = pepper;
         this.nonceStore = nonceStore;
         this.localRequireSignature = localRequireSignature;
         this.redisTemplateProvider = redisTemplateProvider;
+        this.lastUsedWriteIntervalMillis = Math.max(0L, lastUsedWriteIntervalSeconds) * 1000L;
     }
 
     /**
@@ -298,12 +335,37 @@ public class OpenApiKeyService {
         if (!verifySignatureIfPresent(req, row)) {
             return OpenApiKeyVerifyDtos.VerifyResp.invalid();
         }
-        row.setLastUsedAt(LocalDateTime.now());
-        keyMapper.updateById(row);
+        touchLastUsed(row);
         int qps = row.getRateLimitQps() == null ? OpenApiKeyConstants.DEFAULT_RATE_LIMIT_QPS : row.getRateLimitQps();
         int quota = row.getDailyQuota() == null ? OpenApiKeyConstants.DEFAULT_DAILY_QUOTA : row.getDailyQuota();
         return new OpenApiKeyVerifyDtos.VerifyResp(true, row.getTenantId(),
             OpenApiKeyConstants.virtualUserId(row.getId()), splitScopes(row.getScopes()), qps, quota);
+    }
+
+    /**
+     * 节流回写 {@code last_used_at}（M4）。
+     *
+     * <p><b>为什么必须节流</b>：{@code verify()} 被网关对每个 {@code /iot/open-api/v1/**} 请求同步调用，
+     * 旧实现每请求都 {@code updateById} ⇒ 同一热点 Key 行在并发下互相争锁，吞吐被单行写放大拖垮。
+     * 这里在内存里按 Key 记住上次落库时刻，间隔内直接跳过；精度损失只体现在「最后使用时间」这一
+     * 观测字段上，不影响鉴权/吊销（吊销每请求查库，无缓存）。</p>
+     *
+     * <p>间隔由 {@code ypbin.openapi.last-used-write-interval-seconds} 配置（默认 30s）。</p>
+     *
+     * @param row 已通过密钥校验的 Key 行
+     */
+    private void touchLastUsed(IotOpenApiKey row) {
+        if (row.getId() == null) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        Long last = lastUsedWriteAtMs.get(row.getId());
+        if (last != null && now - last < lastUsedWriteIntervalMillis) {
+            return;
+        }
+        lastUsedWriteAtMs.put(row.getId(), now);
+        row.setLastUsedAt(LocalDateTime.now());
+        keyMapper.updateById(row);
     }
 
     /**

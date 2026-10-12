@@ -1,11 +1,11 @@
 # 开放 API（M-5）设计方案
 
-> ⚠️ **本方案为设计稿、未实现；待用户拍板后实施。**
+> ⚠️ **本文为设计基线（写于实现前）；第 1/2 批已按本文实施完成，见下方实施状态与 §1.2/§6/§8。**
 >
 > **实施状态（2026-10-01 更新）**：本文为设计基线（写于实现前）。第 1/2 批已按本文实施：
 > Key 体系、网关 OpenApiKeyAuthFilter、限流/配额（**进度：已全部落地**，见 §1.2 端点盘点与 §8 不做清单）。
 > 下文「不存在任何开放 API 实现」等是**基线写作时的快照**，不再反映现状；
-`ypbin-iot` 无 `openapi` 包、无 API Key 表、无限流组件（`deploy/sql/006-iot-schema.sql` 全表清单无 `iot_api_key`；`docs/IOT-PLATFORM-DESIGN.md:763` 仅把它列为**计划**表）。
+基线写作时 `ypbin-iot` 尚无 `openapi` 包、无 API Key 表、无限流组件（`deploy/sql/006-iot-schema.sql` 全表清单当时无 `iot_api_key`；`docs/IOT-PLATFORM-DESIGN.md:763` 当时仅把它列为**计划**表）；现均已落地。
 > 文档落盘不等于功能可用；第 10 节列出全部「需要用户拍板」事项，未拍板项不得开工。
 
 | 项 | 值 |
@@ -200,6 +200,7 @@
 | **吊销** | `status` 置禁用 **或** 删除（软删）；**立即生效**（校验时每请求查库/缓存，不做长 TTL 本地缓存绕过） |
 | **轮换** | 同一 Key 行**支持双密钥并存窗口**：新增 `secret_hash`+`secret_prefix` 覆盖前，**保留旧密有效 N 分钟**（建议具名常量 `ROTATION_GRACE_MINUTES = 30`），让第三方平滑切换；宽限期后旧密自动失效 |
 | **轮换通知** | 首期不做主动通知（无 Webhook，见第 8 节）；由第三方轮询或人工操作 |
+| **`last_used_at` 回写节流（M4）** | 校验每请求同步调用，为免热点 Key 行锁竞争，`last_used_at` 按 `ypbin.openapi.last-used-write-interval-seconds`（默认 30s）节流落库；只影响「最后使用时间」这一观测字段的精度，**不影响吊销生效**（吊销仍每请求查库、无长 TTL 缓存） |
 | **审计** | 创建/轮换/吊销**必须**写审计（谁、何时、哪个 Key、动作）—— 见第 6 节 |
 
 > **取舍**：双密钥宽限期比「立即失效」实现复杂（多一列 `prev_secret_hash`/`prev_expire_at`），但**避免第三方切换期的服务中断**。若不接受该复杂度，可选「立即失效 + 要求第三方停服切换」——**需用户拍板**（第 10 节 Q4）。
@@ -209,6 +210,33 @@
 - 字段 `ip_whitelist`（CIDR 列表，逗号分隔）；**空 = 不限来源**。
 - 校验位置：**网关**（拿得到真实客户端 IP）。**注意**：网关在 `X-Forwarded-For` 可信性尚未核实的场景下，直接取远端 IP 更安全；**取 XFF 必须先把网关自身加入可信代理**，否则可被伪造（**未核实项**，见第 11 节）。
 - 建议：**首期把 IP 白名单做成「可选、默认关闭」**，但**字段与校验代码位**预留，避免后期改表。
+
+### 2.8 请求签名覆盖范围（M1：method/path）与破坏性变更
+
+**现状（已实现）**：网关 `OpenApiKeyAuthFilter.buildSignPayload` 收集 query 参数后，
+按开关把 **HTTP method（大写）与请求 path** 以保留键 `__method` / `__path` 注入 `signParams`；
+iot 侧 `OpenApiSignVerifier` 对同一份参数 Map 用 starter `SignGenerator` 重算 HMAC-SHA256
+（网关与 iot 用**同一算法与同一规范化**，避免两侧对不上）。`__method`/`__path` 是**网关注入**的：
+客户端若自带同名字段会被忽略，网关按真实请求覆盖，防伪造。
+
+- **覆盖范围**：query 参数 + method + path（`__method`/`__path` 参与规范串，按键排序、percent-encode）。
+- **body 未纳入签名**：网关是 WebFlux，请求体是 `Flux<DataBuffer>`、默认只能消费一次；
+  在鉴权过滤器里读 body 参与验签会导致转发给下游时 body 已耗尽（业务侧收空体）。
+  故本期**不纳入 body**，body 完整性依赖 TLS + 幂等键；这是**已知残余风险**（拦截者仍可在
+  同一 method/path 上改 body）。后续若引入 `CacheRequestBody` 缓存再评估纳入 body SHA-256。
+- **配置开关**：`ypbin.openapi.sign-include-method-path`，**默认 `true` = 严格**；
+  过渡期可临时置 `false`（此时退回「仅 query 参与签名」的旧口径，须与 `require-signature`
+  一并放宽，且**只是过渡**，不可长期开启）。
+
+> 🔴 **破坏性变更（部署前必读）**：开启后，**已接入的外部客户端必须同步升级签名算法**——
+> 在计算规范串时把 `__method`（真实大写 HTTP method）与 `__path`（外部请求路径，含
+> `/iot/open-api/v1` 前缀）作为普通参数一并纳入（键排序、值与键均 percent-encode，空值跳过）。
+> 否则服务端重算结果与客户端签名不一致 ⇒ **线上全部 401**。
+>
+> **生产环境已设置 pepper 且可能已有 Key 在用**：部署网关/iot 前必须**同步通知并升级客户端**；
+> 无法同步升级时，临时把 `ypbin.openapi.sign-include-method-path` 置 `false`，升级完成后再置 `true`。
+> 两模块一致性由跨模块契约测试钉住：网关侧 `OpenApiSignPayloadContractTest` 与 iot 侧
+> `OpenApiSignVerifierTest` 各自对同一组参数断言**同一个硬编码 HMAC 向量**，一侧改动另一侧未跟即转红。
 
 ---
 
@@ -484,7 +512,7 @@
 
 ---
 
-## 9. 实施顺序（草案，待拍板后细化）
+## 9. 实施顺序（历史草案；已按此顺序落地）
 
 1. **前置核验**：O-1…O-7 端点只读/副作用逐一核验；`-Pit` 测试基线确认。
 2. **数据面**：`iot_api_key` 建表 + 迁移脚本（**须遵守 SQL 双写纪律**，参照 `deploy/sql/migration/` 既有命名与 `rollback/` 配套）。
@@ -545,7 +573,7 @@
 
 | 结论 | 证据位置 |
 |---|---|
-| 开放 API 整块未开始（立项时） | 本文档 §1.2（端点盘点）与 §8（不做清单） |
+| 开放 API 立项时整块未开始（**现已落地**：Key 管理 + 签名 + nonce + IP 白名单 + 限流配额 + 只读门面 + whoami） | 本文档 §1.2（端点盘点）与 §8（不做清单） |
 | API Key 口径（哈希/轮换/限流） | `docs/IOT-PLATFORM-DESIGN.md:712,727,763,778` |
 | `/openapi/**` 前缀（上游） | `docs/IOT-PLATFORM-DESIGN.md:778` |
 | 真状态码唯一例外（`/internal/mqtt/**`） | `docs/IOT-PLATFORM-DESIGN.md:781,786` |

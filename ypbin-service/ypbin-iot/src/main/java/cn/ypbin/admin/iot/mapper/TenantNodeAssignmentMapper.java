@@ -10,13 +10,15 @@
 package cn.ypbin.admin.iot.mapper;
 
 import cn.ypbin.admin.iot.entity.TenantNodeAssignment;
+import cn.ypbin.admin.iot.lease.AccessNodeLeaseAggregate;
 import cn.ypbin.admin.iot.lease.TenantEpochItem;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import java.time.LocalDateTime;
 import java.util.List;
 import org.apache.ibatis.annotations.Insert;
-import java.time.LocalDateTime;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
+import org.apache.ibatis.annotations.Update;
 
 /**
  * 租户节点归属 Mapper（平台表，租户插件按 {@code ignore-tables} 忽略它）。
@@ -83,6 +85,68 @@ public interface TenantNodeAssignmentMapper extends BaseMapper<TenantNodeAssignm
      * @param assignments 待写入的归属（id/时间戳由调用方生成或由 SQL 补齐）
      * @return 实际写入行数（不含被跳过者）
      */
+    /**
+     * 按租户 ID 查询归属行，**包含逻辑删除行**（M3：软删行会占住唯一键，必须先看到才能 revive）。
+     *
+     * <p>为什么不能用 MyBatis-Plus 的 {@code selectList}：它会自动追加 {@code is_deleted = 0}，
+     * 于是「有软删行」的租户被误判为「无归属」⇒ 每轮都尝试插入、被 {@code INSERT IGNORE} 静默跳过，
+     * 表现为该租户**永久零采集且无日志无指标**。</p>
+     *
+     * @param tenantIds 租户 ID 列表（调用方保证非空）
+     * @return 归属行（含已删除）；查无返回空集合
+     */
+    @Select("<script>SELECT * FROM tenant_node_assignment WHERE tenant_id IN "
+        + "<foreach collection='list' item='item' open='(' separator=',' close=')'>#{item}</foreach>"
+        + "</script>")
+    List<TenantNodeAssignment> selectIncludingDeletedByTenantIds(@Param("list") List<Long> tenantIds);
+
+    /**
+     * 批量复活（或接管）**逻辑删除**的归属行：清删除标记并重置为可采集状态。
+     *
+     * <p>与 {@code AccessNodeRegistry.register} / {@code AvailabilityServiceImpl.applyBatch} 同一纪律：
+     * 唯一键不含量删标记，软删行会一直占着 {@code uk_tenant_node_assignment_tenant}，
+     * 只有显式 revive 才能让该租户重新获得归属（否则 {@code INSERT IGNORE} 永远静默跳过）。
+     * 条件限定 {@code is_deleted = 1}：并发下若别的副本已复活该行，本语句影响 0 行、自然让位。</p>
+     *
+     * <p><b>epoch 取 {@code epoch + 1}</b>：revive 属「归属重新分配」，必须与
+     * {@code LeaseServiceImpl.doAcquire} 的接管路径一样推进 epoch；若重置为初始值，
+     * 持有旧快照（epoch 更大）的接入侧会认为服务端更旧而不自更新 ⇒ 继续用过期配置。</p>
+     *
+     * @param tenantIds  待复活租户（调用方保证非空）
+     * @param accessNode 接管节点
+     * @param state      租约状态码
+     * @param expireAt   租约到期时间
+     * @return 实际复活行数
+     */
+    @Update("<script>UPDATE tenant_node_assignment "
+        + "SET access_node = #{accessNode}, epoch = epoch + 1, state = #{state}, "
+        + "lease_expire_at = #{expireAt}, is_deleted = 0, update_time = NOW() "
+        + "WHERE is_deleted = 1 AND tenant_id IN "
+        + "<foreach collection='list' item='item' open='(' separator=',' close=')'>#{item}</foreach>"
+        + "</script>")
+    int reviveIgnoringDuplicates(@Param("list") List<Long> tenantIds,
+        @Param("accessNode") String accessNode,
+        @Param("state") String state, @Param("expireAt") LocalDateTime expireAt);
+
+    /**
+     * 按节点聚合「在采租户数 + 最早租约到期时刻」（M7：运维概览用**一条** GROUP BY 取代 N+1）。
+     *
+     * <p>为什么不能在 Java 里逐节点 {@code selectCount}/{@code selectOne}：N 个节点会产生
+     * {@code 1 + 3N} 条 SQL（旧实现同一构造参数里连续调了三次最早到期查询），
+     * 且状态列是稳定码而非枚举，聚合条件必须在 SQL 侧与 {@code LeaseState.ACTIVE} 同口径。</p>
+     *
+     * @return 每个有在采租户的节点一行（无在采租户的节点不出现）
+     */
+    @Select("""
+        SELECT access_node AS accessNode,
+               COUNT(*) AS holdingCount,
+               MIN(lease_expire_at) AS earliestExpireAt
+        FROM tenant_node_assignment
+        WHERE state = 'active' AND is_deleted = 0
+        GROUP BY access_node
+        """)
+    List<AccessNodeLeaseAggregate> selectActiveAggregateByNode();
+
     @Insert("<script>INSERT IGNORE INTO tenant_node_assignment "
         + "(id, tenant_id, access_node, epoch, state, lease_expire_at, create_time, update_time, "
         + "status, is_deleted) VALUES "

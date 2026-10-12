@@ -172,6 +172,9 @@ public final class OpenApiSignVerifier {
      * 规范串变成空串，而空串在密码学上是合法可签的输入 ⇒ 若判为"未启用签名"就会放行，
      * 若判为"齐备"又等于允许一个无内容的签名。故统一按"有无有效参数"判定。</p>
      *
+     * <p><b>排除网关注入的保留键</b>（{@code __method}/{@code __path}，M1）：它们由网关无条件注入，
+     * 不是客户端"意图签名"的信号；若计入，则「未签名的仅 Key 请求」也会被误判为意图签名而被拒绝。</p>
+     *
      * @param params 参数集（可空）
      * @return 存在有效参数返回 {@code true}
      */
@@ -180,11 +183,25 @@ public final class OpenApiSignVerifier {
             return false;
         }
         for (Map.Entry<String, String> entry : params.entrySet()) {
+            if (isServerInjectedKey(entry.getKey())) {
+                continue;
+            }
             if (notBlank(entry.getKey()) && notBlank(entry.getValue())) {
                 return true;
             }
         }
         return false;
+    }
+
+    /**
+     * 是否为网关构造签名载荷时注入的保留键（客户端不能靠它触发"意图签名"判定）。
+     *
+     * @param key 参数键
+     * @return 保留键返回 {@code true}
+     */
+    private static boolean isServerInjectedKey(String key) {
+        return OpenApiKeyConstants.SIGN_METHOD_KEY.equals(key)
+            || OpenApiKeyConstants.SIGN_PATH_KEY.equals(key);
     }
 
     private static boolean notBlank(String value) {

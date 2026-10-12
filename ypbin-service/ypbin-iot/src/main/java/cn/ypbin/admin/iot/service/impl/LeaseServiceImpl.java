@@ -101,6 +101,7 @@ public class LeaseServiceImpl implements LeaseService {
     private final Counter takeoverCounter;
     private final Counter expiredCounter;
     private final Counter revokedCounter;
+    private final Counter insertSkippedCounter;
     private final TransactionTemplate transactionTemplate;
 
     /**
@@ -128,6 +129,8 @@ public class LeaseServiceImpl implements LeaseService {
             .description("失效扫描置为待接管的租户数").register(meterRegistry);
         this.revokedCounter = Counter.builder(METRIC_PREFIX + "revoked")
             .description("续约时被回收（服务端已不认为属于该节点）的租户数").register(meterRegistry);
+        this.insertSkippedCounter = Counter.builder(METRIC_PREFIX + "insert_skipped")
+            .description("首次分配时被唯一键跳过（含软删归属行撞键）的行数").register(meterRegistry);
     }
 
     @Override
@@ -208,13 +211,30 @@ public class LeaseServiceImpl implements LeaseService {
             }
         }
 
-        // ③ 新分配：assignable 里还没有归属行的租户，一次批量插入（唯一键冲突的跳过）
+        // ③ 新分配：无归属行的租户批量 INSERT；有**软删归属行**的租户先批量 revive。
+        //    唯一键 uk_tenant_node_assignment_tenant 不含量删标记 ⇒ 软删行会占住键位，
+        //    旧实现直接 INSERT IGNORE 会被静默跳过、该租户永久零采集且无日志无指标（M3）。
         int remaining = capacity == Integer.MAX_VALUE
             ? Integer.MAX_VALUE : Math.max(0, capacity - countHeld(node));
         if (remaining > 0) {
-            List<TenantNodeAssignment> fresh = newTenantsWithoutAssignment(remaining, node, expireAt);
-            if (!fresh.isEmpty()) {
-                int inserted = mapper.insertIgnoringDuplicates(fresh);
+            AllocationPlan plan = planAllocation(remaining, node, expireAt);
+            if (plan.revived() > 0) {
+                takeoverCounter.increment(plan.revived());
+                log.info("[iot] 复活软删归属行：node={} 复活数={}", LogSanitizer.sanitize(node),
+                    plan.revived());
+            }
+            if (!plan.fresh().isEmpty()) {
+                int inserted = mapper.insertIgnoringDuplicates(plan.fresh());
+                int skipped = plan.fresh().size() - inserted;
+                if (skipped > 0) {
+                    // 影响行数 < 请求行数：唯一键冲突（并发抢先，或仍有未复活的软删行）。
+                    // 旧实现只增量、不记日志 ⇒ 软删行撞键表现为「永远零采集且完全静默」；
+                    // 这里显式 WARN + 计数器，让这类静默失效可被运维看见。
+                    insertSkippedCounter.increment(skipped);
+                    log.warn("[iot] 首次分配有 {} 行被跳过（唯一键冲突/并发抢先；持续出现请查软删归属行）："
+                            + "node={} 请求={} 实际写入={}",
+                        skipped, LogSanitizer.sanitize(node), plan.fresh().size(), inserted);
+                }
                 if (inserted > 0) {
                     takeoverCounter.increment(inserted);
                 }
@@ -463,23 +483,52 @@ public class LeaseServiceImpl implements LeaseService {
     }
 
     /**
-     * 构造「首次分配」的实体清单（一次批量插入）。
+     * 规划一次新分配：软删归属行先批量 revive，其余无行租户构造待插入清单。
      *
-     * <p>id 用 MyBatis-Plus 的 {@code IdWorker} 预生成：批量语句绕过了 Mapper 的字段填充，
+     * <p><b>为什么要显式 revive</b>：{@code uk_tenant_node_assignment_tenant(tenant_id)} 不含删除标记，
+     * 软删行会一直占住键位；若只做 {@code INSERT IGNORE}，该租户每轮都被判 missing、插入被静默跳过，
+     * 表现为**永久零采集**。本仓 {@code AccessNodeRegistry.register} 与
+     * {@code AvailabilityServiceImpl.applyBatch} 已用同一纪律处理软删行，这里对齐。</p>
+     *
+     * <p><b>容量语义</b>：revive 与 insert 合计不超过 {@code limit}；软删行优先（否则它们可能被
+     * 新租户占满容量后继续挨饿）。id 用 {@code IdWorker} 预生成：批量语句绕过字段填充，
      * 不显式给 id 会写入 0 并在第二行冲突。</p>
      *
      * @param limit    本次最多分配几个（容量剩余）
      * @param node     节点
      * @param expireAt 到期时间
-     * @return 待插入清单（可能为空）
+     * @return 分配计划（revive 数 + 待插入清单）
      */
-    private List<TenantNodeAssignment> newTenantsWithoutAssignment(int limit, String node,
-            LocalDateTime expireAt) {
-        List<Long> missing = missingTenants();
+    private AllocationPlan planAllocation(int limit, String node, LocalDateTime expireAt) {
+        List<Long> assignable = assignableTenantIds();
+        if (assignable.isEmpty()) {
+            return new AllocationPlan(0, List.of());
+        }
+        List<TenantNodeAssignment> rows = mapper.selectIncludingDeletedByTenantIds(assignable);
+        Set<Long> present = new LinkedHashSet<>();
+        Set<Long> softDeleted = new LinkedHashSet<>();
+        for (TenantNodeAssignment row : rows) {
+            if (row.getIsDeleted() != null && row.getIsDeleted() != 0) {
+                softDeleted.add(row.getTenantId());
+            } else {
+                present.add(row.getTenantId());
+            }
+        }
+        List<Long> reviveIds = new ArrayList<>(softDeleted);
+        if (reviveIds.size() > limit) {
+            reviveIds = reviveIds.subList(0, limit);
+        }
+        // revive 属「重新分配」，epoch 在 SQL 里 +1（与接管路径同口径，避免旧快照被采纳）
+        int revived = reviveIds.isEmpty() ? 0
+            : mapper.reviveIgnoringDuplicates(reviveIds, node, LeaseState.ACTIVE.getCode(), expireAt);
+        int freshLimit = limit - reviveIds.size();
         List<TenantNodeAssignment> fresh = new ArrayList<>();
-        for (Long tenantId : missing) {
-            if (fresh.size() >= limit) {
+        for (Long tenantId : assignable) {
+            if (fresh.size() >= freshLimit) {
                 break;
+            }
+            if (present.contains(tenantId) || softDeleted.contains(tenantId)) {
+                continue;
             }
             TenantNodeAssignment assignment = new TenantNodeAssignment();
             assignment.setId(IdWorker.getId());
@@ -490,7 +539,16 @@ public class LeaseServiceImpl implements LeaseService {
             assignment.setLeaseExpireAt(expireAt);
             fresh.add(assignment);
         }
-        return fresh;
+        return new AllocationPlan(revived, fresh);
+    }
+
+    /**
+     * 一次分配的候选计划。
+     *
+     * @param revived 已 revive 的软删归属行数
+     * @param fresh   待 INSERT 的归属行（id 已预生成）
+     */
+    private record AllocationPlan(int revived, List<TenantNodeAssignment> fresh) {
     }
 
     /** 节点当前持有的租户数。 */
@@ -536,28 +594,6 @@ public class LeaseServiceImpl implements LeaseService {
         }
         List<Long> fallback = properties.getAssignableTenantIds();
         return fallback == null ? List.of() : fallback;
-    }
-
-    /** 可分配但尚无归属行的租户（一次 IN 查询；入参为空时短路返回空集合）。 */
-    private List<Long> missingTenants() {
-        List<Long> assignable = assignableTenantIds();
-        if (assignable.isEmpty()) {
-            return List.of();
-        }
-        List<TenantNodeAssignment> existing = mapper.selectList(Wrappers.<TenantNodeAssignment>lambdaQuery()
-            .select(TenantNodeAssignment::getTenantId)
-            .in(TenantNodeAssignment::getTenantId, assignable));
-        Set<Long> assigned = new LinkedHashSet<>();
-        for (TenantNodeAssignment assignment : existing) {
-            assigned.add(assignment.getTenantId());
-        }
-        List<Long> missing = new ArrayList<>();
-        for (Long tenantId : assignable) {
-            if (!assigned.contains(tenantId)) {
-                missing.add(tenantId);
-            }
-        }
-        return missing;
     }
 
     /** 实体 → 契约模型。 */

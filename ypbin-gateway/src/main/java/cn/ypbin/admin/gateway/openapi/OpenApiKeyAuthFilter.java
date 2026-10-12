@@ -44,6 +44,17 @@ public class OpenApiKeyAuthFilter implements GlobalFilter, Ordered {
     private static final String PARAM_NONCE = "nonce";
     private static final String PARAM_SIGN = "sign";
 
+    /**
+     * 参与签名的 HTTP method 保留键（M1：签名覆盖 method/path，防拦截后改端点重放）。
+     *
+     * <p>值与 {@code OpenApiKeyConstants.SIGN_METHOD_KEY} 必须一致；两模块一致性由固定向量契约测试
+     * 钉住（网关侧不依赖 iot-api，故字面量各写一遍）。</p>
+     */
+    static final String SIGN_METHOD_KEY = "__method";
+
+    /** 参与签名的请求 path 保留键（值 = 网关侧原始 path，含 {@code /iot/open-api/v1} 前缀）。 */
+    static final String SIGN_PATH_KEY = "__path";
+
     /** 限流过滤器读取用的 exchange attribute（starter `AttributeRateLimitGlobalFilter` 依赖）。
      *
      * <p>键名须与 `deploy/nacos/ypbin-gateway.yaml` 的 `ypbin.gateway.rate-limit.*-attribute`
@@ -112,8 +123,8 @@ public class OpenApiKeyAuthFilter implements GlobalFilter, Ordered {
         Map<String, Object> payload = new HashMap<>();
         payload.put("accessKeyId", accessKeyId);
         payload.put("secret", secret);
-        // 签名参数与强制模式（契约见 buildSignPayload）
-        payload.putAll(buildSignPayload(exchange, requireSignature()));
+        // 签名参数、强制模式与 method/path 覆盖开关（契约见 buildSignPayload）
+        payload.putAll(buildSignPayload(exchange, requireSignature(), signIncludeMethodPath()));
         return webClient.post()
             .uri(verifyUrl())
             .header("X-Internal-Token", internalToken())
@@ -157,13 +168,18 @@ public class OpenApiKeyAuthFilter implements GlobalFilter, Ordered {
      *     <li>{@code clientIp} 为<b>连接远端地址</b>（`getRemoteAddress`），<b>不是</b>
      *     `X-Forwarded-For` —— 网关前无可信代理，XFF 完全可伪造；连接地址伪造成本 =
      *     真实网络位置（TCP 握手绑定）。供 iot 侧 `ip_whitelist`（CIDR）校验。</li>
+     *     <li><b>M1：{@code includeMethodPath=true} 时把大写 HTTP method 与原始 path 以
+     *     {@code __method}/{@code __path} 注入 {@code signParams}</b>，客户端必须用同一口径重算，
+     *     否则验签失败（破坏性变更，见 docs/OPENAPI-DESIGN.md §2.8）。</li>
      * </ul>
      *
-     * @param exchange 请求
-     * @param require  是否强制签名
+     * @param exchange          请求
+     * @param require           是否强制签名
+     * @param includeMethodPath 是否把 method/path 纳入签名载荷
      * @return 待并入内部校验请求体的字段（**绝不返回 {@code null}**）
      */
-    static Map<String, Object> buildSignPayload(ServerWebExchange exchange, boolean require) {
+    static Map<String, Object> buildSignPayload(ServerWebExchange exchange, boolean require,
+            boolean includeMethodPath) {
         Map<String, Object> out = new HashMap<>();
         String timestamp = queryParam(exchange, PARAM_TIMESTAMP);
         String nonce = queryParam(exchange, PARAM_NONCE);
@@ -177,14 +193,37 @@ public class OpenApiKeyAuthFilter implements GlobalFilter, Ordered {
         if (sign != null) {
             out.put(PARAM_SIGN, sign);
         }
+        Map<String, String> signParams = collectSignParams(exchange);
+        if (includeMethodPath) {
+            String method = exchange.getRequest().getMethod() == null
+                ? null : exchange.getRequest().getMethod().name();
+            if (method != null && !method.isEmpty()) {
+                signParams.put(SIGN_METHOD_KEY, method);
+            }
+            String path = exchange.getRequest().getPath().value();
+            if (path != null && !path.isEmpty()) {
+                signParams.put(SIGN_PATH_KEY, path);
+            }
+        }
         // 始终放入（即使为空 Map）
-        out.put("signParams", collectSignParams(exchange));
+        out.put("signParams", signParams);
         out.put("requireSignature", require);
         String clientIp = clientIp(exchange);
         if (clientIp != null) {
             out.put("clientIp", clientIp);
         }
         return out;
+    }
+
+    /**
+     * 默认（严格）口径的签名载荷：method/path 纳入签名。
+     *
+     * @param exchange 请求
+     * @param require  是否强制签名
+     * @return 待并入内部校验请求体的字段
+     */
+    static Map<String, Object> buildSignPayload(ServerWebExchange exchange, boolean require) {
+        return buildSignPayload(exchange, require, true);
     }
 
     /**
@@ -225,6 +264,20 @@ public class OpenApiKeyAuthFilter implements GlobalFilter, Ordered {
     }
 
     /**
+     * 是否把 HTTP method + path 纳入签名载荷（M1）。
+     *
+     * <p><b>默认 true = 严格</b>：签名覆盖 method/path，拦截到一条已签名请求后无法在 nonce TTL 内
+     * 改 method/path 打另一个端点。这是<b>破坏性变更</b>——已接入客户端必须同步升级签名算法；
+     * 过渡期可临时置 false（与 {@code require-signature} 一并放宽），详见 docs/OPENAPI-DESIGN.md §2.8。</p>
+     *
+     * @return 纳入返回 {@code true}
+     */
+    private boolean signIncludeMethodPath() {
+        return Boolean.parseBoolean(
+            environment.getProperty("ypbin.openapi.sign-include-method-path", "true"));
+    }
+
+    /**
      * 取 query 参数（签名四件套按约定走 query；不读 body —— 网关 body 流式不可重复读）。
      *
      * @return 非空白值；缺失返回 {@code null}
@@ -239,18 +292,21 @@ public class OpenApiKeyAuthFilter implements GlobalFilter, Ordered {
      *
      * <p><b>刻意只收 query、不收 body</b>：网关是 WebFlux，请求体是
      * {@code Flux<DataBuffer>}、默认只能消费一次；若在此读取 body 参与验签，
-     * 转发给下游时 body 已耗尽 ⇒ 业务侧收到空请求体。故首期签名覆盖范围为
-     * query 参数，body 完整性由 TLS 与幂等键保障（见方案说明的取舍）。</p>
+     * 转发给下游时 body 已耗尽 ⇒ 业务侧收到空请求体。故签名覆盖范围为
+     * query 参数 +（M1）method/path，body 完整性由 TLS 与幂等键保障
+     * （残余风险与取舍见 docs/OPENAPI-DESIGN.md §2.8）。</p>
      *
      * <p>排序 + 单一取值口径与 starter 的 {@code SignGenerator} 一致：多值参数取**第一个**
-     * （避免两侧取值规则不同导致时对时错）。</p>
+     * （避免两侧取值规则不同导致时对时错）。客户端自带 {@code __method}/{@code __path} 一律忽略，
+     * 由网关按真实请求覆盖写入（防伪造）。</p>
      *
      * @return 参与签名的参数（**绝不返回 {@code null}**）
      */
     private static Map<String, String> collectSignParams(ServerWebExchange exchange) {
         Map<String, String> out = new TreeMap<>();
         exchange.getRequest().getQueryParams().forEach((name, values) -> {
-            if (PARAM_SIGN.equals(name) || PARAM_TIMESTAMP.equals(name) || PARAM_NONCE.equals(name)) {
+            if (PARAM_SIGN.equals(name) || PARAM_TIMESTAMP.equals(name) || PARAM_NONCE.equals(name)
+                || SIGN_METHOD_KEY.equals(name) || SIGN_PATH_KEY.equals(name)) {
                 return;
             }
             if (values == null || values.isEmpty()) {

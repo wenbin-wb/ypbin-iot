@@ -266,4 +266,59 @@ class OpenApiSignVerifierTest {
             assertThat(ttl).as("offset=%d", offset).isGreaterThanOrEqualTo(1L);
         }
     }
+
+
+    // ==================== M1：method/path 纳入签名 ====================
+
+    @Test
+    @DisplayName("🔴 M1：method/path 纳入签名后，篡改任一即验签失败；原样通过")
+    void tamperedMethodOrPathMustFail() {
+        Map<String, String> params = new HashMap<>();
+        params.put(OpenApiKeyConstants.SIGN_METHOD_KEY, "POST");
+        params.put(OpenApiKeyConstants.SIGN_PATH_KEY, "/iot/open-api/v1/devices");
+        params.put("orderNo", "A100");
+        String sign = validSign(params);
+
+        assertThat(OpenApiSignVerifier.signatureMatches(params, SECRET, sign,
+            SignAlgorithm.HMAC_SHA256)).isTrue();
+
+        Map<String, String> tamperedPath = new HashMap<>(params);
+        tamperedPath.put(OpenApiKeyConstants.SIGN_PATH_KEY, "/iot/open-api/v1/products");
+        assertThat(OpenApiSignVerifier.signatureMatches(tamperedPath, SECRET, sign,
+            SignAlgorithm.HMAC_SHA256)).as("改 path 必须验签失败").isFalse();
+
+        Map<String, String> tamperedMethod = new HashMap<>(params);
+        tamperedMethod.put(OpenApiKeyConstants.SIGN_METHOD_KEY, "GET");
+        assertThat(OpenApiSignVerifier.signatureMatches(tamperedMethod, SECRET, sign,
+            SignAlgorithm.HMAC_SHA256)).as("改 method 必须验签失败").isFalse();
+    }
+
+    @Test
+    @DisplayName("🔴 M1 跨模块契约向量：iot 侧与网关侧固定 hex 必须一致（防一侧改了另一侧不改）")
+    void contractVectorMatchesGatewaySide() {
+        Map<String, String> params = new HashMap<>();
+        params.put(OpenApiKeyConstants.SIGN_METHOD_KEY, "POST");
+        params.put(OpenApiKeyConstants.SIGN_PATH_KEY, "/iot/open-api/v1/devices");
+        params.put("orderNo", "A100");
+        params.put("amount", "99.5");
+
+        String vector = "EC0AAA65C18A1396083A8A4A3A28D045B3EA8FCB4BD472FB18990340B8ABDB50";
+        assertThat(SignGenerator.generate(params, "sk_contract_secret_001", SignAlgorithm.HMAC_SHA256))
+            .isEqualTo(vector);
+        assertThat(OpenApiSignVerifier.signatureMatches(params, "sk_contract_secret_001", vector,
+            SignAlgorithm.HMAC_SHA256)).isTrue();
+    }
+
+    @Test
+    @DisplayName("M1：保留键不构成「意图签名」（否则仅 Key 的未签名请求会被误拒）")
+    void reservedKeysDoNotImplySignatureIntent() {
+        Map<String, String> onlyReserved = new HashMap<>();
+        onlyReserved.put(OpenApiKeyConstants.SIGN_METHOD_KEY, "GET");
+        onlyReserved.put(OpenApiKeyConstants.SIGN_PATH_KEY, "/iot/open-api/v1/devices");
+
+        assertThat(OpenApiSignVerifier.intendsSignature(null, null, null, onlyReserved)).isFalse();
+        // 业务参数仍按既有语义算「意图签名」
+        assertThat(OpenApiSignVerifier.intendsSignature(null, null, null, Map.of("orderNo", "A100")))
+            .isTrue();
+    }
 }
