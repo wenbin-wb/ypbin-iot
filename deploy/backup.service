@@ -1,0 +1,29 @@
+[Unit]
+Description=ypbin-iot 每日数据备份（MySQL 逻辑全量 + IoTDB 数据卷热拷贝）
+Documentation=file:///opt/ypbin/ypbin-iot/deploy/PROD-OPS-NOTES.md
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# 部署路径按仓库约定（clone 到 ypbin-iot）；如需换路径改这一行或加 Environment=YPBIN_ROOT=...
+ExecStart=/opt/ypbin/ypbin-iot/deploy/backup.sh
+
+# 退出码语义：0 = 两个组件都备份成功；非 0 = 备份失败（脚本 die）。
+# 刻意**不**把失败吞掉：单元进 failed ⇒ `systemctl --failed` / `journalctl -u backup.service` 可见。
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ypbin-backup
+
+# 备份要调 docker（/var/run/docker.sock）并写 $ROOT/backups；只做轻量硬化，避免因权限产生假失败
+NoNewPrivileges=yes
+PrivateTmp=yes
+# 大库备份耗时可观：给足上限（与 backup.timer 的间隔无关）
+TimeoutStartSec=3600
+# 备份属 I/O 密集但低优先级：让出 CPU/IO 给在线业务
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+[Install]
+WantedBy=multi-user.target

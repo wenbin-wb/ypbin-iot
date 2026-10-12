@@ -51,6 +51,10 @@ ALLOWED+='ypbin-gateway/src/main/resources/application\.yml|'
 # `deploy/sql/migration/2026-10-05-iot-platform-alert-schema.sql`）：这两份文件在
 # upstream/main **不存在**（git ls-tree 922d0d50 deploy/sql/ 只有 001–005 + 2026-09-17 迁移），
 # 而两个门禁的判据都是「与 upstream 的差异」⇒ 它们永远不会被命中，留着只会让白名单计数虚高。
+# 第 21 项（2026-10-12 加）：CHANGELOG.md 要记录本批 deploy/IoT 改动（发布台账/对外门面），
+# 无法用新文件表达——GitHub 渲染与发布流程都只认根 `CHANGELOG.md`，另写一份不会被看到。
+# **代价如实登记**：与 upstream 该文件冲突时整体取本仓版本（同 README.md 的处理方式）。
+ALLOWED+='CHANGELOG\.md|'
 ALLOWED+=')$'
 
 printf '%s' "$ALLOWED"

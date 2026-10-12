@@ -1,0 +1,21 @@
+[Unit]
+Description=每日 03:30 触发 ypbin-iot 数据备份
+Documentation=file:///opt/ypbin/ypbin-iot/deploy/PROD-OPS-NOTES.md
+
+[Timer]
+# 业务低峰；Persistent=true 保证宕机/关机错过的触发在开机后补跑一次
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+Unit=backup.service
+# 随机抖动，避免与其它定时任务/日志轮转撞在同一秒
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target
+
+# ⚠️ 边界（必须知道，否则会把「备份成功」误当「可恢复」）：
+#   1) 本 timer 只负责**定期产出**备份；恢复演练要人工按 deploy/PROD-OPS-NOTES.md 做。
+#   2) backup.sh 的 MySQL 是 --single-transaction 逻辑备份、IoTDB 是**运行中热拷贝**（不保证崩溃一致性）；
+#      要强一致 IoTDB 备份需停 ypbin-iotdb（代价是停机），见 backup.sh 脚本头。
+#   3) 轮转默认保留最近 14 份（BACKUP_KEEP 可配）；磁盘余量与保留份数要按库大小自己算。
+#   4) 备份产物落在 $ROOT/backups（默认）；要异地容灾需自行 rsync/对象存储同步，本 timer 不做。

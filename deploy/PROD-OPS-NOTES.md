@@ -757,3 +757,64 @@ docker exec ypbin-mysql mysql -uroot -p -N -e \
 本次实测结果：注入后 `deferred` 0 → 25 → 28 持续增长；`PLATFORM_RECONCILE_DEFERRED`
 `FIRING(WARNING, observed_rounds=20, observed=84)`；还原并重建容器后转
 `RESOLVED("配置对账推迟未增长（累计 0）")`，日志有「平台健康恢复正常，告警收口」。
+
+## 13. 数据备份 / 恢复（MySQL + IoTDB）
+
+**工具**：`deploy/backup.sh`（备份）、`deploy/restore.sh`（恢复）、`deploy/backup.timer` + `backup.service`（systemd 定时）。
+
+### 13.1 备份
+
+```bash
+cd /opt/ypbin/ypbin-iot
+deploy/backup.sh --dry-run                          # 先看计划，不碰 docker、不落盘
+deploy/backup.sh                                    # 落 $ROOT/backups（默认）
+BACKUP_DIR=/data/backups BACKUP_KEEP=7 deploy/backup.sh
+```
+
+产物：`ypbin-admin-<TS>.sql`（`mysqldump --single-transaction --routines --triggers --events
+--databases ypbin_admin [xxl_job]`；口令经 env `MYSQL_PWD` 转发，不进 argv）+ `iotdb-data-<TS>.tar`
+（`docker cp ypbin-iotdb:/iotdb/data -` 热拷贝），各自生成 `.sha256`；默认保留最近 **14** 份
+（`BACKUP_KEEP` 可配，按时间戳分组轮转）。
+
+开启定时（每日 03:30，随机抖动 600s，`Persistent=true`）：
+
+```bash
+sudo install -m 644 deploy/backup.service deploy/backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now backup.timer
+systemctl list-timers backup.timer
+journalctl -u backup.service -n 50     # 备份单元的输出与退出码
+```
+
+### 13.2 恢复（默认只打印计划；**必须**显式 `--yes` 才执行破坏性动作）
+
+```bash
+cd /opt/ypbin/ypbin-iot
+deploy/restore.sh --mysql /opt/ypbin/backups/ypbin-admin-<TS>.sql \
+                  --iotdb /opt/ypbin/backups/iotdb-data-<TS>.tar          # 只打印计划
+deploy/restore.sh --mysql ... --iotdb ... --yes                           # 真正执行
+```
+
+执行前会打印来源绝对路径与 `.sha256` 核对结果；**不匹配即中止**。MySQL 侧直接重放 dump
+（含 `DROP TABLE`/`CREATE TABLE`/`INSERT`）；IoTDB 侧是「停 `ypbin-iot`/`ypbin-iotdb` → 清空具名卷
+→ `docker cp` 解包 → 起容器」整卷替换。
+
+### 13.3 恢复演练（建议每季度一次，首次上生产前必做）
+
+1. 取最近一份备份，先 `sha256sum -c *.sha256` 复核。
+2. 在**非生产**实例上 `--yes` 恢复；按 `docs/DEPLOY-TIMESERIES.md §3` 验 IoTDB 写入/查询往返，
+   按 `docs/DEPLOY-BACKEND.md` 验 MySQL 表数与关键行。
+3. 记录 RTO（恢复耗时）与 RPO（最近备份时间点到故障时间的差）。
+4. 演练后清理临时实例；生产恢复票要写明「跨组件时间点可能不同」。
+
+### 13.4 未覆盖边界（如实登记，勿当已解决）
+
+- MySQL 是**逻辑备份**：`--single-transaction` 只对 InnoDB 给事务快照，并发 DDL 下不保证一致；
+  不覆盖用户/权限/GTID 位点，**无 PITR**（按时间点恢复需要 binlog）。
+- IoTDB 是**运行中热拷贝**（`docker cp`）：不保证崩溃一致性、**不支持增量**；要强一致需停
+  `ypbin-iotdb`（代价是停机），官方支持路径是 IoTDB Tools System 的备份/导入导出（本轮未接）。
+- **跨组件不做一致性快照**：MySQL 与 IoTDB 分别备份/恢复，时间点可能不同。
+- 若 IoTDB 数据目录是 **bind mount** 而非具名卷，`restore.sh` **拒绝自动清空**，只打印手工步骤。
+- 备份默认落本地 `$ROOT/backups`（含一个自忽略的 `.gitignore`），**无异地容灾**；要异地需自行
+  rsync/对象存储同步。
+- ⚠️ **本轮未在真机验证真实备份/恢复**（环境只有命令行桩）；上面 13.1/13.2 的命令已用 docker 桩
+  跑通逻辑分支，但磁盘一致性、大库耗时、恢复后业务可用性均未实测——首次上生产前务必按 13.3 演练。

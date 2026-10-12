@@ -17,9 +17,9 @@
 #
 # 阶段总览：
 #   [1/7] 环境准备   —— 检查并安装依赖（系统/Docker/JDK21/Maven，Maven 走阿里云镜像）
-#   [2/7] 拉取代码   —— starter + admin（main 分支）+ admin-ui（main），源自动探测/降级
+#   [2/7] 拉取代码   —— starter + admin（默认 clone **fork ypbin-iot**，见下）+ admin-ui（main），源自动探测/降级
 #   [3/7] 构建 starter —— mvn install（微服务依赖 starter 2.2.3 及新能力）
-#   [4/7] 构建后端   —— Maven 打包 5 个服务可执行 jar
+#   [4/7] 构建后端   —— Maven 打包后端各服务可执行 jar
 #   [5/7] 生成配置   —— .env 凭据 + Nacos 共享配置提示
 #   [6/7] 启动服务   —— Docker: compose up（含基础设施）；NO_DOCKER: java -jar 逐个启动
 #   [7/7] 健康检查   —— 验证网关/各服务注册，输出访问地址
@@ -49,6 +49,30 @@
 #                                  auth/system/ai 校验，一般无需手传）
 #   XXL_JOB_ADMIN_PASSWORD=        XXL-Job 调度中心 admin 初始口令（自动随机生成并写入 .env，
 #                                  不复用 MYSQL_ROOT_PASSWORD；SQL 导入前按口令替换哈希占位符）
+#   IOTDB_PASSWORD=                IoTDB root 口令（Docker 模式自动随机生成并写入 .env(600)；
+#                                  容器就绪后由本脚本用 **stdin** 改一次 IoTDB 内口令，不进任何 argv）。
+#                                  复用旧 .env 时若与 IoTDB 实际口令不一致，脚本显式失败并给排查指引
+#                                  （改口令是 IoTDB/Nacos/iotdb-init 三处联动，见 docs/DEPLOY-TIMESERIES.md §6）
+#   YPBIN_OPENAPI_SECRET_PEPPER=   开放 API Key 的 HMAC pepper（≥32 字节；首次自动随机生成并写 .env）。
+#                                  ⚠️ **换值会使既有 OpenAPI Key 全部失效**（只影响 ypbin-iot 一侧）
+#   IOT_MIGRATE_BASELINE=1         已有库但无迁移账本时，跳过哨兵探测、直接按 006+007 基线预置账本
+#                                  （不执行 DDL/DML；这是「假设结构已全量具备」，见脚本内注释）
+#   IOT_MIGRATE_FORCE=1            已有库忽略账本、按名重新应用全部 -*-iot-*.sql（迁移不幂等，失败即停）
+#   YPBIN_IOT_RAW_BASE=...         IoT SQL 的远端 raw 前缀（默认 GitHub raw；仅当脚本自身位置拿不到
+#                                  deploy/sql/ 时使用，如 README 的 bash <(curl ...) 场景）；
+#   YPBIN_IOT_RAW_FALLBACK=...     对应的 Gitee 兜底前缀（仅当 fork 资源根不可用时才走的降级路径）
+#   YPBIN_IOT_REPO=...             fork 仓库 URL（默认 https://github.com/wenbin-wb/ypbin-iot.git）：
+#                                   curl 一键安装（SCRIPT_DIR 不是仓库）时，脚本会把它浅克隆到
+#                                   $ROOT/ypbin-iot，用来取 fork 专属 deploy 资源（redis-auth-conf.sh、
+#                                   nacos/*、sql/006+007+迁移、iotdb-init.*）；检出运行则直接用脚本自身位置。
+#   YPBIN_IOT_REPO_GITEE=...       对应的 Gitee 备源（默认 gitee.com/wenbin_wb/ypbin-iot.git）
+#   YPBIN_ADMIN_REPO=...           **admin 检出源**（语义变化）：默认 clone fork（ypbin-iot）到
+#                                  $ROOT/ypbin-admin，保证 ypbin-iot/access/iotdb 服务与 fork 专属
+#                                  deploy 资源齐全；想只装纯 admin 基座时指向 upstream，如
+#                                  YPBIN_ADMIN_REPO=https://github.com/wenbin-wb/ypbin-admin.git。
+#                                  若 $ROOT/ypbin-admin 已存在但不是 fork 检出且要装含 IoT 服务的
+#                                  compose，脚本会 die 并给迁移指引（不静默将就半个系统）。
+#   YPBIN_ADMIN_REPO_GITEE=...     显式 YPBIN_ADMIN_REPO 时的 Gitee 备源（仅当主源克隆失败才用）
 #   REBUILD_FRONTEND=1             强制重新构建前端。默认：产物比源码新则复用、否则自动重建
 #                                  （改了前端源码或 apps/web-antd/.env* 后重跑即可，无需先删 admin-ui-dist）；
 #                                  SKIP_FRONTEND=1 则永不构建（必须已有产物）
@@ -252,7 +276,7 @@ check_docker_disk_space() {
   avail_gb=$((avail_kb / 1024 / 1024))
   if [ "$avail_gb" -lt "$min_gb" ]; then
     warn "Docker 根目录 $root_dir 所在磁盘仅剩约 ${avail_gb}GB（建议 ≥${min_gb}GB）"
-    warn "构建 5 个服务镜像 + 前端依赖都会显著占空间；不足时会在写镜像层时报 no space left on device"
+    warn "构建各服务镜像 + 前端依赖都会显著占空间；不足时会在写镜像层时报 no space left on device"
     warn "清理：docker builder prune -af && docker image prune -f && docker system df"
     return 1
   fi
@@ -606,11 +630,142 @@ ensure_mysql_auth() {
     info "  · 若 2) 的日志出现 Access denied 且伴随账号/host 字样 ⇒ 属账号权限面，需按 mysql.user 实际内容修正"
     info "  · 若 1) 显示容器非 running/健康检查未通过 ⇒ 先按 2) 的日志解决启动问题，此时认证探测本就可能失败"
     warn "处置（**仅在上面第一条条件成立、即全新部署且无业务数据时**）：docker compose -f $ROOT/ypbin-admin/deploy/docker-compose.yml down -v 后重跑"
-    warn "      down -v 会删除 ypbin-mysql-data / ypbin-redis-data / ypbin-nacos-data 三个卷；Nacos 配置会在重跑时重新导入"
+    warn "      down -v 会删除 ypbin-mysql-data / ypbin-redis-data / ypbin-nacos-data（fork compose 下还有 ypbin-iotdb-data）等数据卷；Nacos 配置会在重跑时重新导入"
     die "MySQL 认证探测失败，已停止（避免继续以错误密码初始化库表）；具体原因见上方命令与日志"
   fi
   warn "MySQL 尚不可用（非认证问题，继续尝试）：$(printf '%s' "$err" | head -1)"
   return 0
+}
+# IoTDB 口令贯通（本轮 B4）：把 IoTDB 内的 root 口令对齐到 deploy/.env 的 IOTDB_PASSWORD。
+# 口令一律经 **stdin**（裸 `-pw`：CLI 从 stdin 读口令），宿主 argv / 容器 argv / 日志都不含口令。
+# 判据用「新口令能连」（-e 批处理退出码可靠）而**不是**交互式 ALTER 的退出码（交互模式恒退 0）。
+# 设计取舍：绝不在「不知道当前口令」时改写线上；旧 .env 缺 IOTDB_PASSWORD 且 IoTDB 已非默认 root
+# 时直接 die（宁可停，也不猜口令把线上改坏）。
+iotdb_password_charset_ok() { # IoTDB 约束：<=32 字符且只含安全字符集（会进 YAML 标量与 .env）
+  printf '%s' "$1" | grep -qE '^[A-Za-z0-9._~-]{1,32}$'
+}
+iotdb_cli_can_connect() { # $1=口令；口令经 stdin，不进 argv
+  printf '%s\n' "$1" | docker exec -i ypbin-iotdb bash -c \
+    'start-cli.sh -h ypbin-iotdb -p 6667 -u root -pw -sql_dialect table -e "SHOW DATABASES"' >/dev/null 2>&1
+}
+ensure_iotdb_auth() {
+  local new="${IOTDB_PASSWORD:-}" i ready=0
+  for i in $(seq 1 60); do
+    if docker exec ypbin-iotdb bash -c 'timeout 5 bash -c "</dev/tcp/ypbin-iotdb/6667"' >/dev/null 2>&1; then
+      ready=1; break
+    fi
+    sleep 3
+  done
+  [ "$ready" = "1" ] || die "等待 IoTDB（ypbin-iotdb:6667）就绪超时；口令未改动。自查：docker logs --tail 50 ypbin-iotdb"
+  if [ -n "$new" ]; then
+    iotdb_password_charset_ok "$new" || die "IOTDB_PASSWORD 不满足 IoTDB 约束（<=32 字符，只允许 A-Z a-z 0-9 . _ ~ -）。生成的默认值是 24 位 hex；请修正 deploy/.env 后重跑"
+    if iotdb_cli_can_connect "$new"; then
+      ok "IoTDB 口令已与 deploy/.env 的 IOTDB_PASSWORD 一致（未改动，值不回显）"
+      return 0
+    fi
+  fi
+  if iotdb_cli_can_connect "root"; then
+    if [ -z "$new" ]; then
+      new="$(rand_hex 12)"
+      printf 'IOTDB_PASSWORD=%s\n' "$new" >> "$ENV_FILE"
+      chmod 600 "$ENV_FILE"
+      export IOTDB_PASSWORD="$new"
+      warn "旧 .env 缺 IOTDB_PASSWORD：已生成随机口令并写入 $ENV_FILE（600，不回显）"
+    fi
+    info "IoTDB 仍为官方默认口令：改为 deploy/.env 的 IOTDB_PASSWORD（口令经 stdin，不进 argv）"
+    { printf '%s\n' "root"; printf "ALTER USER root SET PASSWORD '%s';\n" "$new"; } \
+      | docker exec -i ypbin-iotdb bash -c \
+        'start-cli.sh -h ypbin-iotdb -p 6667 -u root -pw -sql_dialect table' >/dev/null 2>&1 || true
+    if iotdb_cli_can_connect "$new"; then
+      ok "IoTDB 口令已改为 deploy/.env 的 IOTDB_PASSWORD（值不回显；三处联动：IoTDB 内/本 .env/Nacos 活配置）"
+      return 0
+    fi
+    die "IoTDB 口令 ALTER 后新口令仍连不上 —— 未继续改动。排障见 docs/DEPLOY-TIMESERIES.md §6.1（勿用交互式退出码判定）"
+  fi
+  if [ -z "$new" ]; then
+    die "IoTDB 既不是官方默认口令 root，deploy/.env 也没有 IOTDB_PASSWORD —— 无法在不知道当前口令时改口令（本脚本不猜/不覆盖线上口令）。
+     处置：把 IoTDB **当前生效口令**写入 $ENV_FILE 的 IOTDB_PASSWORD（600）后重跑，或按 docs/DEPLOY-TIMESERIES.md §6.1 手工对齐。"
+  fi
+  die "IoTDB 口令既不是 deploy/.env 的 IOTDB_PASSWORD，也不是官方默认 root，无法自动对齐（未改动任何线上配置）。
+     处置：核对 $ENV_FILE 的 IOTDB_PASSWORD 是否等于 IoTDB 当前口令；需要轮换时见 docs/DEPLOY-TIMESERIES.md §6.1。"
+}
+
+# ---------- compose 必填变量前置校验（2026-10-12；Lead 裁决并入 task-5）----------
+# 根因是**类别问题**：docker compose 对**整份文件**做变量插值，任一 `${VAR:?...}` 缺失都会让
+# 「只起 nacos/redis/mysql/iotdb」这类与该服务无关的命令失败。故在**任何** compose 调用之前，
+# 机械地从将要执行的 compose 文件里抽出全部 `:?` 必填变量，逐个人工分类处置、缺哪个一次性 die。
+# 处置分类（**不一律随机生成**——随机造 EMQX 凭据＝造假）：
+#   · install.sh 已生成/补生成：MYSQL_ROOT_PASSWORD / REDIS_PASSWORD / NACOS_AUTH_TOKEN /
+#     NACOS_AUTH_IDENTITY_KEY / NACOS_AUTH_IDENTITY_VALUE / NACOS_ADMIN_PASSWORD /
+#     AI_MODEL_SECRET_KEY（本函数只兜底断言非空；AI key 长度已在 [5/7] 校验）
+#   · IOTDB_PASSWORD：延后到 IoTDB 容器就绪后由 ensure_iotdb_auth 生成/对齐，这里**跳过**
+#   · EMQX_API_KEY / EMQX_API_SECRET：**硬前置，绝不自动生成**；缺失一次性 die 并给来源/用法
+#   · 其它未知必填：die 并列出（禁静默降级，交人工确认）
+compose_required_vars() { # $1=compose 文件；stdout=`:?` 形式的变量名（去重排序）
+  grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*:\?' "$1" 2>/dev/null \
+    | sed -E 's/^\$\{([A-Za-z_][A-Za-z0-9_]*):\?$/\1/' | sort -u || true
+}
+compose_env_value() { # $1=变量名；优先进程环境，其次 .env；stdout 值（不打印到日志）
+  local v="${!1:-}"
+  if [ -z "$v" ] && [ -f "$ENV_FILE" ]; then
+    v="$(grep -E "^$1=" "$ENV_FILE" | tail -1 | cut -d= -f2- || true)"
+  fi
+  printf '%s' "$v"
+}
+persist_env() { # $1=键 $2=值；仅当 .env 缺该键时追加（printf，不做 sed，避免值里的元字符被解释）
+  local key="$1" value="$2"
+  if [ ! -f "$ENV_FILE" ]; then
+    printf '%s=%s\n' "$key" "$value" > "$ENV_FILE"
+  elif ! grep -q "^${key}=" "$ENV_FILE"; then
+    printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"
+  else
+    return 0
+  fi
+  chmod 600 "$ENV_FILE"
+}
+ensure_compose_required_env() { # $1=compose 文件（默认 docker-compose.yml，相对当前目录）
+  local compose_file="${1:-docker-compose.yml}" required name val fails="" n=0
+  [ -f "$compose_file" ] || die "找不到 compose 文件 $compose_file —— 无法校验 \${VAR:?} 必填变量"
+  required="$(compose_required_vars "$compose_file")"
+  if [ -z "$required" ]; then
+    warn "compose 文件 $compose_file 里没有 \${VAR:?} 形式的必填变量；跳过前置校验"
+    return 0
+  fi
+  for name in $required; do
+    n=$((n + 1))
+    if [ "$name" = "IOTDB_PASSWORD" ]; then
+      info "compose 必填变量 IOTDB_PASSWORD：由 [5.5/7] 的 ensure_iotdb_auth 生成/对齐，此处跳过"
+      continue
+    fi
+    val="$(compose_env_value "$name")"
+    if [ -n "$val" ]; then
+      case "$name" in
+        EMQX_API_KEY|EMQX_API_SECRET) persist_env "$name" "$val" ;;  # 运维经 env 传入时持久化进 .env(600)
+      esac
+      continue
+    fi
+    case "$name" in
+      EMQX_API_KEY|EMQX_API_SECRET)
+        fails="${fails}  · ${name}（缺失）
+      EMQX 是**硬前置**（compose 用 \${${name}:?} 表达）：平台侧凭据同步 + 下行 publish 都要它，
+      EMQX 5.0 起 REST 只认 API Key。来源：EMQX Dashboard → 访问控制/API Keys 创建后取 Key/Secret。
+      用法：EMQX_API_KEY=... EMQX_API_SECRET=... bash deploy/install.sh（脚本会持久化进 $ENV_FILE，600）。
+      ⚠️ OSS 版 API Key 无角色约束（可改 ACL/建删用户）⇒ 按机密对待，别落 argv/日志。
+"
+        ;;
+      *)
+        fails="${fails}  · ${name}（缺失）：compose 以 \${${name}:?} 表达必填，但脚本不知道该值能否安全自动生成，**不猜**。
+      请显式提供（export 后重跑，或写入 $ENV_FILE 的 600 文件），或核对 compose 里的 :? 是否应改成 :- 默认值。
+"
+        ;;
+    esac
+  done
+  info "compose 前置校验：$compose_file 共检出 $n 个 \${VAR:?} 必填变量"
+  if [ -n "$fails" ]; then
+    die "compose 启动前发现必填变量缺失（**在 compose 插值之前**报出，不再落到 compose 的错误）：
+$fails"
+  fi
+  ok "compose 必填变量齐备（$n 个；EMQX 等硬前置已核）"
 }
 
 # 判定「compose 启动失败」是否与镜像仓库无关。
@@ -706,6 +861,189 @@ resolve_repo_base() {
   else
     die "GitHub 与 Gitee 均不可达：请配置代理或显式指定 YPBIN_REPO（如 https://ghproxy.com/https://github.com/wenbin-wb）后重跑"
   fi
+}
+
+# ---------- fork 专属 deploy 资源统一解析（2026-10-12；Lead 裁决并入 task-5）----------
+# 背景：`bash <(curl ...)` 一键安装时脚本被落到 /tmp（SCRIPT_DIR 不是仓库），而 install.sh
+# 克隆到 $ROOT/ypbin-admin 的是 **upstream admin**，其 deploy/ 没有 fork 专属资源
+# （redis-auth-conf.sh / iotdb-init.* / nacos/ypbin-iot.yaml 等）。此前是逐个文件兜底，
+# 容易出现「修了一个、漏了另一个」。这里统一成**一个资源根** DEPLOY_SRC：
+#   ① 脚本自身位置（本仓检出运行 = README 推荐部署法）优先，**不重复克隆**；
+#   ② 已存在的 $ROOT/ypbin-iot/deploy 直接复用；
+#   ③ 否则浅克隆 fork 到 $ROOT/ypbin-iot（YPBIN_IOT_REPO，默认 GitHub；沿脚本既有思路降级 Gitee），
+#      分支跟 BRANCH；
+#   ④ 所有候选来源都拿不到 ⇒ 一次性 die 并列出缺哪些资源（禁静默跳过）。
+# 之后 fork 专属资源一律从 DEPLOY_SRC 取：redis-auth-conf.sh、nacos/*、sql/（006/007+迁移）、
+# iotdb-init.sh/sql、docker-compose.yml（注：install.sh 目前仍执行 $ROOT/ypbin-admin/deploy 的
+# compose；这里有清单是为了「资源可解析」与后续收敛，见报告的资源清单表）。
+YPBIN_IOT_REPO="${YPBIN_IOT_REPO:-https://github.com/wenbin-wb/ypbin-iot.git}"
+YPBIN_IOT_REPO_GITEE="${YPBIN_IOT_REPO_GITEE:-https://gitee.com/wenbin_wb/ypbin-iot.git}"
+DEPLOY_SRC=""
+INSTALL_SCRIPT_DIR=""
+
+# fork 专属 deploy 资源清单（每行一项，相对 DEPLOY_SRC）。新增 deploy 资源时**必须**同步这张表，
+# 它是「curl 路径下资源是否齐备」的唯一机械判据（报告里附有同源的资源清单表）。
+FORK_DEPLOY_RESOURCES="
+redis-auth-conf.sh
+iotdb-init.sh
+iotdb-init.sql
+docker-compose.yml
+nacos/ypbin-iot.yaml
+nacos/ypbin-access.yaml
+nacos/ypbin-common.yaml
+nacos/ypbin-gateway.yaml
+sql/006-iot-schema.sql
+sql/007-iot-data.sql
+sql/migration/iot-migrations.list
+"
+
+deploy_src_has_fork_resources() { # $1=候选目录
+  [ -n "$1" ] && [ -f "$1/nacos/ypbin-iot.yaml" ] && [ -f "$1/sql/006-iot-schema.sql" ]
+}
+
+require_deploy_resources() { # $1=DEPLOY_SRC（可为空）
+  local dir="${1:-}" missing="" f total=0
+  for f in $FORK_DEPLOY_RESOURCES; do
+    total=$((total + 1))
+    if [ -z "$dir" ] || [ ! -e "$dir/$f" ]; then
+      missing="${missing}
+  · $f"
+    fi
+  done
+  if [ -n "$missing" ]; then
+    die "fork 专属 deploy 资源缺失/不可达（curl 一键安装路径的关键阻塞）。已尝试：
+  ⓐ 脚本自身位置：${INSTALL_SCRIPT_DIR:-<未知>}
+  ⓑ 本地既有检出：$ROOT/ypbin-iot/deploy
+  ⓒ 浅克隆：$YPBIN_IOT_REPO（备用 $YPBIN_IOT_REPO_GITEE），分支 $BRANCH
+缺失清单（共 $total 项中缺 $(printf '%s' "$missing" | grep -c '· ' || true) 项）：$missing
+处置：① 在含 deploy/ 的 ypbin-iot 检出里执行本脚本（README 推荐部署法）；② 或显式
+      YPBIN_IOT_REPO=<可达的 fork 仓库 URL>（Gitee 备源 YPBIN_IOT_REPO_GITEE）后重跑。"
+  fi
+  ok "fork 专属 deploy 资源齐备（$dir，共 $total 项）"
+}
+
+resolve_deploy_src() {
+  local sd cand repo target="$ROOT/ypbin-iot"
+  sd="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)"
+  INSTALL_SCRIPT_DIR="$sd"
+  # ① 本仓检出运行：脚本自身位置（<repo>/deploy 或 <repo>/）
+  for cand in "$sd" "$sd/deploy"; do
+    if deploy_src_has_fork_resources "$cand"; then
+      DEPLOY_SRC="$cand"
+      info "fork deploy 资源来源：脚本自身位置 $DEPLOY_SRC"
+      require_deploy_resources "$DEPLOY_SRC"
+      return 0
+    fi
+  done
+  # ② 推荐的检出部署法：本仓被检出到 $ROOT/ypbin-admin（非 root 跑 sudo 时 SCRIPT_DIR 会落到 /tmp，
+  #    但资源就在 admin 检出里）——直接用，不重复克隆
+  if deploy_src_has_fork_resources "$ROOT/ypbin-admin/deploy"; then
+    DEPLOY_SRC="$ROOT/ypbin-admin/deploy"
+    info "fork deploy 资源来源：$DEPLOY_SRC（推荐部署法：本仓检出在 ypbin-admin 下）"
+    require_deploy_resources "$DEPLOY_SRC"
+    return 0
+  fi
+  # ③ 已克隆的 fork（复用，不重复克隆）
+  if deploy_src_has_fork_resources "$target/deploy"; then
+    DEPLOY_SRC="$target/deploy"
+    info "fork deploy 资源来源：既有检出 $DEPLOY_SRC"
+    require_deploy_resources "$DEPLOY_SRC"
+    return 0
+  fi
+  # ④ 浅克隆 fork（GitHub → Gitee 降级）
+  if [ -d "$target/.git" ]; then
+    warn "既有 $target 不是可用的 fork 检出（缺 deploy/ 资源），移除后重新克隆"
+    rm -rf "$target"
+  fi
+  for repo in "$YPBIN_IOT_REPO" "$YPBIN_IOT_REPO_GITEE"; do
+    info "脚本自身位置没有 fork deploy 资源 ⇒ 浅克隆 fork 到 $target（$repo，分支 $BRANCH）"
+    rm -rf "$target"
+    if git clone --depth 1 --branch "$BRANCH" --single-branch "$repo" "$target" >/tmp/ypbin-iot-clone.log 2>&1; then
+      break
+    fi
+    warn "克隆失败：$repo（详见 /tmp/ypbin-iot-clone.log），尝试备用源"
+    rm -rf "$target"
+  done
+  if deploy_src_has_fork_resources "$target/deploy"; then
+    DEPLOY_SRC="$target/deploy"
+    ok "fork deploy 资源已就绪：$DEPLOY_SRC（浅克隆自 $YPBIN_IOT_REPO，分支 $BRANCH）"
+    require_deploy_resources "$DEPLOY_SRC"
+    return 0
+  fi
+  # ⑤ 所有候选来源都不可用
+  DEPLOY_SRC=""
+  require_deploy_resources ""
+}
+
+# ---------- admin 检出源：fork 默认（2026-10-12；Lead 裁决并入 task-5）----------
+# **语义变化**：本 fork 的 install.sh 默认把 **fork（ypbin-iot）** clone 到 $ROOT/ypbin-admin，
+# 使 ypbin-iot/ypbin-access/iotdb 服务、deploy/nacos/ypbin-iot.yaml、deploy/sql/006+007 等
+# fork 专属资源天然齐全（= 把 SYNC §三·五 的「人工把本仓检出到 ypbin-admin」自动化）。
+# 想只装纯 admin 基座（upstream）时显式 YPBIN_ADMIN_REPO=<upstream 地址>（语义退回纯 admin）。
+# 目录名仍是 ypbin-admin（R5：不改那些按目录名拼路径的代码，见 SYNC §三·五；只改「往该目录里 clone 谁」）。
+YPBIN_ADMIN_REPO="${YPBIN_ADMIN_REPO:-}"
+YPBIN_ADMIN_REPO_GITEE="${YPBIN_ADMIN_REPO_GITEE:-}"
+
+admin_checkout_is_fork() { # $1=检出目录；0=fork，1=非 fork（可靠判据：006 存在 或 origin 含 ypbin-iot）
+  local d="$1"
+  [ -f "$d/deploy/sql/006-iot-schema.sql" ] && return 0
+  git -C "$d" remote get-url origin 2>/dev/null | grep -q 'ypbin-iot' && return 0
+  return 1
+}
+resolve_admin_source() {
+  if [ -n "${YPBIN_ADMIN_REPO:-}" ]; then
+    ADMIN_CLONE_URL="$YPBIN_ADMIN_REPO"
+    ADMIN_CLONE_URL_ALT="${YPBIN_ADMIN_REPO_GITEE:-}"
+    case "$YPBIN_ADMIN_REPO" in
+      *ypbin-iot*) ADMIN_WANT_FORK=1 ;;
+      *) ADMIN_WANT_FORK=0 ;;
+    esac
+    info "admin 检出源：显式 YPBIN_ADMIN_REPO=$ADMIN_CLONE_URL（want_fork=$ADMIN_WANT_FORK）"
+  else
+    ADMIN_WANT_FORK=1
+    if [ "${REPO_BASE:-}" = "${GITEE_REPO:-}" ]; then
+      ADMIN_CLONE_URL="$YPBIN_IOT_REPO_GITEE"; ADMIN_CLONE_URL_ALT="$YPBIN_IOT_REPO"
+    else
+      ADMIN_CLONE_URL="$YPBIN_IOT_REPO"; ADMIN_CLONE_URL_ALT="$YPBIN_IOT_REPO_GITEE"
+    fi
+    info "admin 检出源：fork 默认 $ADMIN_CLONE_URL（纯 admin 请设 YPBIN_ADMIN_REPO）"
+  fi
+}
+ensure_admin_checkout() {
+  local d="$ROOT/ypbin-admin"
+  if [ -d "$d/.git" ]; then
+    if admin_checkout_is_fork "$d"; then
+      ok "既有 $d 是本仓（fork）检出，复用不克隆"
+    elif [ "$ADMIN_WANT_FORK" = "1" ]; then
+      die "既有 $d 不是本仓（ypbin-iot）检出（缺 deploy/sql/006-iot-schema.sql，origin 也不含 ypbin-iot）。
+    本轮默认要装**含 IoT 服务**的 ypbin-iot 全栈，直接复用这个纯 admin 检出会装出半个系统（服务/配置/菜单对不上）。
+    迁移处置（二选一）：
+      ① 把该目录换成 fork 检出：rm -rf $d && git clone -b $BRANCH $ADMIN_CLONE_URL $d
+         （或直接在含 deploy/ 的本仓检出里运行本脚本，即 SYNC §三·五 的推荐部署法）
+      ② 确实只装纯 admin 基座：export YPBIN_ADMIN_REPO=https://github.com/wenbin-wb/ypbin-admin.git 后重跑"
+    else
+      warn "既有 $d 不是本仓（fork）检出；因显式 YPBIN_ADMIN_REPO 指定了非 fork 源，按纯 admin 语义继续"
+    fi
+  elif [ -e "$d" ]; then
+    die "$d 已存在但不是 git 检出（缺 .git）——请移走/删除后重跑，或改用 --root 指到别处"
+  else
+    info "克隆 admin 检出：$ADMIN_CLONE_URL（分支 $BRANCH）"
+    if ! git clone -b "$BRANCH" "$ADMIN_CLONE_URL" "$d" 2>/tmp/ypbin-admin-clone.log; then
+      if [ -n "${ADMIN_CLONE_URL_ALT:-}" ] && [ "$ADMIN_CLONE_URL_ALT" != "$ADMIN_CLONE_URL" ]; then
+        warn "克隆 $ADMIN_CLONE_URL 失败（见 /tmp/ypbin-admin-clone.log），尝试备用源 $ADMIN_CLONE_URL_ALT"
+        rm -rf "$d"
+        git clone -b "$BRANCH" "$ADMIN_CLONE_URL_ALT" "$d" \
+          || die "admin 检出克隆失败（主源与备用源均不可达）：$ADMIN_CLONE_URL / $ADMIN_CLONE_URL_ALT"
+      else
+        die "admin 检出克隆失败：$ADMIN_CLONE_URL（详见 /tmp/ypbin-admin-clone.log）"
+      fi
+    fi
+    ok "admin 检出已就绪（$ADMIN_CLONE_URL，分支 $BRANCH）"
+  fi
+}
+# 将要执行的 compose 是否含 fork 专属服务（机械判据；据此决定是否要求 fork 资源）
+compose_needs_fork_services() { # $1=compose 文件
+  grep -qE '^[[:space:]]*(ypbin-iot|ypbin-access|iotdb):[[:space:]]*$' "$1" 2>/dev/null
 }
 
 # ---------- 交互模式 ----------
@@ -919,8 +1257,10 @@ cd "$ROOT"
 # 仓库可能由不同用户/上次部署创建，root 操作需豁免 dubious ownership
 git config --global --add safe.directory "$ROOT/ypbin-starter" 2>/dev/null || true
 git config --global --add safe.directory "$ROOT/ypbin-admin" 2>/dev/null || true
+resolve_admin_source
 [ -d ypbin-starter/.git ] || git clone -b master "$REPO_BASE/ypbin-starter.git"
-[ -d ypbin-admin/.git ]   || git clone -b "$BRANCH" "$REPO_BASE/ypbin-admin.git"
+# admin 目录 clone 谁由 resolve_admin_source/ensure_admin_checkout 决定（fork 默认；R5：目录名不变）
+ensure_admin_checkout
 if [ "$SKIP_FRONTEND" = "0" ]; then
   [ -d ypbin-admin-ui/.git ] || git clone -b main "$REPO_BASE/ypbin-admin-ui.git"
 fi
@@ -935,6 +1275,9 @@ pull_repo() { # $1=仓库目录 $2=分支
     if [ -z "${YPBIN_REPO:-}" ] && [ -n "$url" ]; then
       # 镜像与官方仓库同名（gitee.com/wenbin_wb/ypbin-*），按 URL 域名判定后拼同名镜像 URL
       repo_name="$(basename "$repo")"
+      # admin 若是 fork（origin 含 ypbin-iot），GitHub<->Gitee 镜像的同名仓库是 ypbin-iot，
+      # 不能按目录名 ypbin-admin 去换镜像（那会换到 upstream，把 fork 检出切丢）
+      case "$url" in *ypbin-iot*) repo_name="ypbin-iot" ;; esac
       case "$url" in
         *github.com*)
           git remote set-url origin "$GITEE_REPO/$repo_name"
@@ -1015,7 +1358,7 @@ if [ "${SKIP_BUILD:-0}" = "1" ]; then
   info "[4/7] 跳过构建（restart 模式，复用已有 jar）"
   JAR_DIR="$ROOT/ypbin-admin/target/microservice-jars"
 else
-info "[4/7] 构建后端 5 个服务"
+info "[4/7] 构建后端各服务"
 cd "$ROOT/ypbin-admin"
 # 完整输出错误（不吞日志）
 if ! mvn -DskipTests clean package 2>&1 | tee /tmp/admin-build.log | tail -20; then
@@ -1083,14 +1426,14 @@ rand_hex() { # $1=字节数，输出 2 倍长度小写十六进制
 if [ ! -f "$ENV_FILE" ]; then
   MYSQL_ROOT_PASSWORD="${MYSQL_ROOT_PASSWORD:-YpbinRoot$(date +%s)}"
   # AI 模型密钥的加密密钥：不接受内置默认值——公开已知的默认值等同未加密。
-  # 首次全新部署（.env 不存在、无旧密文）时自动随机生成并写入 .env，同时醒目提示妥善保存；
-  # 复用旧 .env 时绝不自动生成（换值即旧密文永久不可解密），见下方 check_required_key 前置校验。
+  # 首次全新部署时自动随机生成并写入 .env；复用旧 .env 缺键时也补齐（env 优先，2026-10-12 起），
+  # 但换值会让库内用旧密钥加密的密文永久不可解密（下方 warn 有登记）；长度由 check_required_key 校验。
   if [ -n "${AI_MODEL_SECRET_KEY:-}" ]; then
     : # 运维显式提供（多分支共用密文场景）则原样采用
   else
     AI_MODEL_SECRET_KEY="$(rand_hex 16)"
     warn "已自动生成 AI_MODEL_SECRET_KEY（AI 模型 API Key 的加密密钥）。"
-    warn ">>> 请立即抄写并妥善保存该密钥（见 .env 的 AI_MODEL_SECRET_KEY）：$AI_MODEL_SECRET_KEY"
+    warn ">>> 该密钥只写入 .env（600），**不回显**；查看：grep ^AI_MODEL_SECRET_KEY $ENV_FILE"
     warn ">>> 它用于加解密库内已存的模型 API Key，必须长期保持不变——更换或丢失后，已保存的模型密钥将永久无法解密。"
   fi
   # Nacos 服务端鉴权凭据：token 与身份标识值随机生成，避免固定默认值入库
@@ -1115,6 +1458,12 @@ if [ ! -f "$ENV_FILE" ]; then
   # XXL-JOB 调度中心初始口令：随机生成（不复用 MYSQL_ROOT_PASSWORD），登录时与库内 sha256 哈希比对。
   # 明文仅写入 .env（600），不在部署日志回显；SQL 模板里的哈希占位符由 import_xxl_job_sql 导入前替换。
   XXL_JOB_ADMIN_PASSWORD="${XXL_JOB_ADMIN_PASSWORD:-$(rand_hex 16)}"
+  # IoTDB 口令：随机 24 位 hex（满足 IoTDB “<=32 字符、[A-Za-z0-9._~-]”约束），只写 .env(600)；
+  # [5.5/7] IoTDB 容器就绪后由 ensure_iotdb_auth 用 stdin 改一次 IoTDB 内口令（三处联动的第一处）。
+  IOTDB_PASSWORD="${IOTDB_PASSWORD:-$(rand_hex 12)}"
+  # 开放 API Key 的 HMAC pepper（>=32 字节随机）：真值不入库、不进 Nacos，只写 .env(600)。
+  # ⚠️ 换值会使既有 OpenAPI Key（只存 HMAC）全部失效；首次部署自动生成，复用旧 .env 时沿用。
+  YPBIN_OPENAPI_SECRET_PEPPER="${YPBIN_OPENAPI_SECRET_PEPPER:-$(rand_hex 32)}"
   cat > "$ENV_FILE" <<EOF
 # 由 install.sh 生成
 MYSQL_ROOT_PASSWORD=$MYSQL_ROOT_PASSWORD
@@ -1128,6 +1477,8 @@ INTERNAL_TOKEN=$INTERNAL_TOKEN
 GATEWAY_SIGN_TOKEN=$GATEWAY_SIGN_TOKEN
 REDIS_PASSWORD=$REDIS_PASSWORD
 XXL_JOB_ADMIN_PASSWORD=$XXL_JOB_ADMIN_PASSWORD
+IOTDB_PASSWORD=$IOTDB_PASSWORD
+YPBIN_OPENAPI_SECRET_PEPPER=$YPBIN_OPENAPI_SECRET_PEPPER
 NACOS_ADDR=${NACOS_ADDR:-nacos:8848}
 SENTINEL_ADDR=${SENTINEL_ADDR:-sentinel-dashboard:8858}
 ADMIN_UI_PORT=$ADMIN_UI_PORT
@@ -1179,11 +1530,31 @@ else
   env_key_backfill REDIS_PASSWORD 'rand_hex 16'
 fi
 
-# AI_MODEL_SECRET_KEY 不在「补生成」范围内：全新部署已在上面自动生成并写入 .env；
-# 此处补生成仅作用于「复用旧 .env」场景，此时库里可能已有旧密文，自动生成新值=旧密文永久不可解密，
-# 故必须沿用旧值（或由运维显式传入），缺失即报错而非静默换新。
-# 这里做「存在性 + 长度」前置校验，覆盖「旧 .env 尚未包含该键」「未通过环境变量传入」「长度非法」三种情况，
-# 把失败点从第 6 步 compose 的 :? 与更晚的 AI 服务启动，提前到配置阶段；也避免再次退化成公开默认值。
+# IOTDB_PASSWORD 特例：**不做静默补生成**——它必须等于 IoTDB 内实际生效口令（三处联动，见
+# docs/DEPLOY-TIMESERIES.md §6）。旧 .env 缺键时留空，由 [5.5/7] 的 ensure_iotdb_auth 探测容器：
+# 若仍为官方默认 root 则生成随机值并改口令；若已轮换过则 die（绝不在不知道当前口令时改写线上）。
+# 全新部署已在上面生成；环境变量显式传入的值优先。
+if [ -n "${IOTDB_PASSWORD:-}" ]; then
+  export IOTDB_PASSWORD
+fi
+# YPBIN_OPENAPI_SECRET_PEPPER：环境变量显式提供 > .env 已有 > 生成一次。
+# 刻意不用 env_key_backfill（它不认「已 export 的值」），静默换新会让既有 OpenAPI Key 全部失效。
+if ! grep -q '^YPBIN_OPENAPI_SECRET_PEPPER=' "$ENV_FILE"; then
+  if [ -z "${YPBIN_OPENAPI_SECRET_PEPPER:-}" ]; then
+    YPBIN_OPENAPI_SECRET_PEPPER="$(rand_hex 32)"
+    warn "已自动生成 YPBIN_OPENAPI_SECRET_PEPPER 并写入 $ENV_FILE（600，不回显）；换值会使既有 OpenAPI Key 全部失效"
+  else
+    warn "已把显式提供的 YPBIN_OPENAPI_SECRET_PEPPER 写入 $ENV_FILE（600）"
+  fi
+  printf 'YPBIN_OPENAPI_SECRET_PEPPER=%s\n' "$YPBIN_OPENAPI_SECRET_PEPPER" >> "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+fi
+export YPBIN_OPENAPI_SECRET_PEPPER
+
+# AI_MODEL_SECRET_KEY：全新部署已在 [5/7] 自动生成并写入 .env；**复用旧 .env 缺键时也补齐**
+# （2026-10-12 Lead 裁决：老部署不能因缺键被卡死）——环境变量显式提供优先，否则生成随机值并 warn。
+# ⚠️ 补齐/换新会让库内「用其它密钥加密的模型 API Key 密文」永久无法解密（下方 warn 有登记）；
+# 长度必须是 16/24/32 字节，由 check_required_key 前置校验（失败点提前到 compose :? 与 AI 服务启动之前）。
 check_required_key() { # $1=键名 $2=生成命令提示 $3=允许的字节长度（空格分隔）
   local key="$1" hint="$2" allowed="$3" val bytes
   # 环境变量优先（与脚本其它键一致：显式 export 的应生效），其次读 .env
@@ -1200,24 +1571,61 @@ check_required_key() { # $1=键名 $2=生成命令提示 $3=允许的字节长�
     *) die "${key} 长度必须为 ${allowed} 字节（当前 ${bytes} 字节，${hint}）" ;;
   esac
 }
+# 旧 .env 缺 AI_MODEL_SECRET_KEY 时补齐（env 优先），而不是直接 die（Lead 裁决 2026-10-12）。
+if ! grep -q '^AI_MODEL_SECRET_KEY=' "$ENV_FILE"; then
+  if [ -z "${AI_MODEL_SECRET_KEY:-}" ]; then
+    AI_MODEL_SECRET_KEY="$(rand_hex 16)"
+    warn "旧 .env 缺 AI_MODEL_SECRET_KEY：已生成随机密钥并写入 $ENV_FILE（600，不回显）。"
+    warn ">>> ⚠️ 若库内已有用**其它**密钥加密的模型 API Key 密文，新密钥无法解密它们（需人工重新录入）。"
+  else
+    warn "已把显式提供的 AI_MODEL_SECRET_KEY 写入 $ENV_FILE（600）"
+  fi
+  printf 'AI_MODEL_SECRET_KEY=%s\n' "$AI_MODEL_SECRET_KEY" >> "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+fi
+export AI_MODEL_SECRET_KEY
 check_required_key AI_MODEL_SECRET_KEY '生成：openssl rand -hex 16（32 字节；-hex 12 → 24 字节、-hex 8 → 16 字节）' '16 24 32'
 
 # ---------- [5.5/7] 启动基础设施并初始化（Nacos 配置 + MySQL 库表）----------
-# Docker 模式：先只启动基础设施（nacos/redis/mysql），配置导入和建库完成后再启动业务服务
+# 先机械判定「将要执行的 compose 是否含 fork 专属服务」，据此决定是否需要 fork 资源：
+#   含（默认 fork 全栈）⇒ 必须解析成功，缺则 die；
+#   不含（如 YPBIN_ADMIN_REPO 显式指向 upstream 的纯 admin 语义）⇒ 跳过解析、资源校验降级为 info，
+#   不要把自己的纯 admin 部署拦住。
+ADMIN_COMPOSE_FILE="$ROOT/ypbin-admin/deploy/docker-compose.yml"
+if compose_needs_fork_services "$ADMIN_COMPOSE_FILE"; then
+  NEED_FORK_RESOURCES=1
+  # fork 专属 deploy 资源（redis-auth-conf.sh / nacos/* / sql/* 等）统一解析：检出路径优先，
+  # 否则浅克隆 fork 到 $ROOT/ypbin-iot；两路都拿不到即 die（见上方 resolve_deploy_src 注释）。
+  resolve_deploy_src
+else
+  NEED_FORK_RESOURCES=0
+  DEPLOY_SRC="$ROOT/ypbin-admin/deploy"
+  info "compose 不含 ypbin-iot/ypbin-access/iotdb 服务 ⇒ 纯 admin 语义：跳过 fork 资源解析与校验（DEPLOY_SRC=$DEPLOY_SRC）"
+fi
+# Docker 模式：先启动基础设施（nacos/redis/mysql，fork 的 compose 里还有 iotdb），配置导入和建库完成后再启动业务服务
 if [ "$NO_DOCKER" = "1" ]; then
   info "[5.5/7] NO_DOCKER 模式：假定外部 Nacos/Redis/MySQL 已就绪，直接导入 Nacos 配置"
+  # NO_DOCKER 无 IoTDB 容器可探测：若 Nacos 模板里确有 ${IOTDB_PASSWORD} 占位符，则由后面
+  # 「Nacos 导入段」统一校验（要求显式提供）；没有该占位符时不误伤。
 else
-  info "[5.5/7] 启动基础设施（Nacos/Redis/MySQL）"
+  info "[5.5/7] 启动基础设施（Nacos/Redis/MySQL/IoTDB）"
   cd "$ROOT/ypbin-admin/deploy"
+  # compose 必填变量前置校验：必须**先于任何** compose 调用（含下面只起基础设施的那条）——
+  # docker compose 对整份文件插值，任一 ${VAR:?} 缺失都会让无关命令一起失败（详见函数注释）。
+  ensure_compose_required_env "$PWD/docker-compose.yml"
   # Redis `requirepass` 受管配置文件（600）：compose 以只读方式挂载它，替代旧写法
   # `--requirepass <口令>`（那会把明文口令留在容器 argv）。**必须在 up 之前生成**：
   # bind 挂载的源不存在时 docker 会把它建成目录 ⇒ redis 启动期报错。
   # 生成器只读 .env、只打印长度/权限，从不打印口令值。位置与其它 deploy 资源一致（就在 compose 同目录）。
-  if [ ! -f "$PWD/redis-auth-conf.sh" ]; then
-    die "缺少 $PWD/redis-auth-conf.sh（Redis 需要它生成 requirepass 配置；本文件随仓库 deploy/ 一起分发）"
-  fi
-  if ! ENV_FILE="$ENV_FILE" OUT="$PWD/redis-requirepass.conf" bash "$PWD/redis-auth-conf.sh"; then
-    die "生成 redis-requirepass.conf 失败（Redis 需要它才能带 requirepass 启动），请先修好上面的报错再重跑"
+  if [ "$NEED_FORK_RESOURCES" = "1" ]; then
+    if [ ! -f "$DEPLOY_SRC/redis-auth-conf.sh" ]; then
+      die "缺少 $DEPLOY_SRC/redis-auth-conf.sh（Redis 需要它生成 requirepass 配置；本文件是 fork 专属资源，由 resolve_deploy_src 解析）"
+    fi
+    if ! ENV_FILE="$ENV_FILE" OUT="$PWD/redis-requirepass.conf" bash "$DEPLOY_SRC/redis-auth-conf.sh"; then
+      die "生成 redis-requirepass.conf 失败（Redis 需要它才能带 requirepass 启动），请先修好上面的报错再重跑"
+    fi
+  else
+    info "纯 admin compose：跳过 redis-requirepass.conf 生成（upstream compose 用 REDIS_PASSWORD 注入 requirepass）"
   fi
   # 基础设施镜像只走「一次 compose up」，不做任何镜像源探测/遍历：
   # REGISTRY_PREFIX 有值（使用者显式 export，或已在复用的 .env 中设置；尾斜杠已在 [5/7] 全局归一化）
@@ -1231,8 +1639,17 @@ else
     infra_registry_desc="机器默认（Docker 守护进程 registry-mirrors，无配置即官方 Docker Hub）"
     info "基础设施镜像走机器默认源，不做镜像加速探测"
   fi
+  # IoTDB 服务只在 fork 的 compose 里有；用 upstream 基座 compose 跑时没有它，不能把 iotdb
+  # 塞进 up（否则 compose 报 no such service）。按文件实际定义决定要起哪些服务。
+  INFRA_SERVICES="nacos redis mysql"
+  if grep -qE '^[[:space:]]*iotdb:[[:space:]]*$' docker-compose.yml; then
+    INFRA_SERVICES="$INFRA_SERVICES iotdb"
+  else
+    warn "当前 compose 文件 $PWD/docker-compose.yml 不含 iotdb 服务（可能是 upstream 基座编排）——跳过 IoTDB 口令对齐"
+  fi
   infra_reason=0
-  if ! REGISTRY_PREFIX="$infra_registry_prefix" docker compose -f docker-compose.yml --env-file "$ENV_FILE" up -d nacos redis mysql >/tmp/infra-up.log 2>&1; then
+  # shellcheck disable=SC2086
+  if ! REGISTRY_PREFIX="$infra_registry_prefix" docker compose -f docker-compose.yml --env-file "$ENV_FILE" up -d $INFRA_SERVICES >/tmp/infra-up.log 2>&1; then
     tail -5 /tmp/infra-up.log 2>/dev/null || true
     # 按日志分类真因（端口占用/磁盘不足/镜像拉取失败），避免一律归咎于镜像源
     infra_failure_reason || infra_reason=$?
@@ -1248,8 +1665,8 @@ else
       die "基础设施启动失败：镜像拉取失败（判定依据见上方日志特征），本次镜像源为「${infra_registry_desc}」。三条可执行路径：
      ① 该源不通时显式指定镜像前缀后重跑：export REGISTRY_PREFIX=docker.io/（强制官方源）
         或 export REGISTRY_PREFIX=<你的加速前缀>/（如 docker.m.daocloud.io/）；有值即只按该前缀拉取
-     ② 完全离线：在可联网机器 docker pull/save 三个镜像（mysql:8.4、nacos/nacos-server:v3.2.4、
-        redis:7-alpine），传上来 docker load，compose up 会直接用本地镜像、不再拉取
+     ② 完全离线：在可联网机器 docker pull/save 所需镜像（如 mysql:8.4、nacos/nacos-server:v3.2.4、
+        redis:7-alpine、apache/iotdb:2.0.11-standalone），传上来 docker load，compose up 会直接用本地镜像、不再拉取
      ③ 若日志提示自定义网络网段与残留旧网络重叠：docker network prune -f 后重跑
      （完整日志 /tmp/infra-up.log）"
     fi
@@ -1257,7 +1674,7 @@ else
     warn "基础设施启动失败，且日志中没有可识别的失败特征 —— **原因未判定**（脚本不猜）。日志最后 30 行："
     tail -n 30 /tmp/infra-up.log 2>/dev/null | sed 's/^/    /' || true
     warn "本次镜像源为「${infra_registry_desc}」；**具体原因需按下面命令的实际输出判断**："
-    info "  1) docker compose -f $ROOT/ypbin-admin/deploy/docker-compose.yml ps -a   # 三个容器各自的状态与退出码"
+    info "  1) docker compose -f $ROOT/ypbin-admin/deploy/docker-compose.yml ps -a   # 各容器状态与退出码"
     info "  2) docker compose -f $ROOT/ypbin-admin/deploy/docker-compose.yml logs --tail 50 nacos redis mysql"
     info "  3) docker info 2>&1 | tail -20; df -h \"\$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo /var/lib/docker)\""
     info "     # Docker 守护进程可用性与数据目录磁盘余量"
@@ -1265,7 +1682,11 @@ else
     info "  5) docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' | grep -E '8080|8848|3306|6379'   # 端口占用"
     die "基础设施启动失败（完整日志 /tmp/infra-up.log）——原因见上方日志与 1)~5) 的实际输出"
   fi
-  ok "基础设施已启动（Nacos/Redis/MySQL，镜像源：${infra_registry_desc}）"
+  ok "基础设施已启动（$INFRA_SERVICES，镜像源：${infra_registry_desc}）"
+  # IoTDB 必须**先于** Nacos 配置导入对齐口令：否则 ypbin-iot.yaml 会被渲染成一个 IoTDB 还不认的口令。
+  if printf '%s' " $INFRA_SERVICES " | grep -q ' iotdb '; then
+    ensure_iotdb_auth
+  fi
 fi
 
 NACOS_CONSOLE_URL="${NACOS_CONSOLE_URL:-http://localhost:8080}"
@@ -1340,7 +1761,7 @@ if [ -n "$NACOS_TOKEN" ] && [ "$NACOS_TARGET_PASSWORD" != "$NACOS_CURRENT_PASSWO
     NACOS_TOKEN="$(nacos_login "$NACOS_TARGET_PASSWORD")"
     ok "Nacos 控制台口令已改为 deploy/.env 的 NACOS_ADMIN_PASSWORD（值不打印）"
   else
-    warn "Nacos 口令改写请求未成功——若服务器当前口令不是 $NACOS_CURRENT_PASSWORD 也不是 .env 里的"
+    warn "Nacos 口令改写请求未成功——若服务器当前口令既不是脚本入口的 NACOS_PASSWORD（值不打印），也不是 .env 里的"
     warn "      NACOS_ADMIN_PASSWORD，请先对齐两者再重跑（自查：docs/NACOS-AUTH.md §4）"
   fi
 fi
@@ -1349,9 +1770,10 @@ fi
 if [ -n "$NACOS_TOKEN" ]; then
   # NACOS_DIR 按脚本自身位置解析（与检出目录名解耦：fork 如 ypbin-iot 也能找到自己的模板）；
   # bash <(curl ...) 远程执行时 BASH_SOURCE 不可用（/dev/fd），回退 $ROOT/ypbin-admin/deploy/nacos
-  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)"
-  if [ -n "$SCRIPT_DIR" ] && [ -d "$SCRIPT_DIR/nacos" ]; then
-    NACOS_DIR="$SCRIPT_DIR/nacos"
+  # fork 专属模板：DEPLOY_SRC 是 resolve_deploy_src 解析出的资源根（检出路径优先/浅克隆兜底）；
+  # nacos/ypbin-iot.yaml 与 ypbin-access.yaml 只存在于 fork，common/gateway 也以 fork 版为准。
+  if [ -n "${DEPLOY_SRC:-}" ] && [ -d "$DEPLOY_SRC/nacos" ]; then
+    NACOS_DIR="$DEPLOY_SRC/nacos"
   else
     NACOS_DIR="$ROOT/ypbin-admin/deploy/nacos"
   fi
@@ -1378,6 +1800,12 @@ if [ -n "$NACOS_TOKEN" ]; then
       warn "$expected.yaml 在 $NACOS_DIR 下不存在 ⇒ **该服务的配置不会被导入**（服务启动时可能拿不到配置）"
     fi
   done
+  # IOTDB_PASSWORD 只在「确实有模板用了它」时强制非空（Docker 模式已由 ensure_iotdb_auth 生成/对齐；
+  # NO_DOCKER 外部 IoTDB 需运维显式提供）。upstream 基座的 nacos 目录没有该占位符时不误伤。
+  if grep -q '\${IOTDB_PASSWORD}' "$NACOS_DIR"/*.yaml 2>/dev/null; then
+    [ -n "${IOTDB_PASSWORD:-}" ] || die "Nacos 模板里有 \${IOTDB_PASSWORD} 占位符但值为空：Docker 模式应已由 ensure_iotdb_auth 生成；NO_DOCKER 模式请显式设置 IOTDB_PASSWORD（外部 IoTDB 当前口令，见 docs/DEPLOY-TIMESERIES.md §6.1）"
+    iotdb_password_charset_ok "$IOTDB_PASSWORD" || die "IOTDB_PASSWORD 不满足 IoTDB 约束（<=32 字符，只允许 A-Z a-z 0-9 . _ ~ -）"
+  fi
   info "导入 Nacos 配置中心（目录 $NACOS_DIR，$NACOS_CFG_COUNT 份配置）"
   declare -a NACOS_TMP_FILES=()
   trap 'rm -f "${NACOS_TMP_FILES[@]:-}" 2>/dev/null || true' EXIT
@@ -1395,6 +1823,7 @@ if [ -n "$NACOS_TOKEN" ]; then
           -e "/^[[:space:]]*#/! s/\${REDIS_PASSWORD}/${REDIS_PASSWORD}/g" \
           -e "/^[[:space:]]*#/! s/\${INTERNAL_TOKEN}/${INTERNAL_TOKEN}/g" \
           -e "/^[[:space:]]*#/! s/\${GATEWAY_SIGN_TOKEN}/${GATEWAY_SIGN_TOKEN}/g" \
+          -e "/^[[:space:]]*#/! s/\${IOTDB_PASSWORD}/${IOTDB_PASSWORD:-}/g" \
           "$cfg_file" > "$TMP_CFG"
     else
       # REDIS_PASSWORD 为空（NO_DOCKER 外部 Redis 不认证）→ 删除非注释的 password 行，等价不配置密码；
@@ -1402,6 +1831,7 @@ if [ -n "$NACOS_TOKEN" ]; then
       sed -e "/^[[:space:]]*#/! s/\${MYSQL_ROOT_PASSWORD}/${MYSQL_ROOT_PASSWORD}/g" \
           -e "/^[[:space:]]*#/! s/\${INTERNAL_TOKEN}/${INTERNAL_TOKEN}/g" \
           -e "/^[[:space:]]*#/! s/\${GATEWAY_SIGN_TOKEN}/${GATEWAY_SIGN_TOKEN}/g" \
+          -e "/^[[:space:]]*#/! s/\${IOTDB_PASSWORD}/${IOTDB_PASSWORD:-}/g" \
           -e "/^[[:space:]]*#/! /password: \${REDIS_PASSWORD}/d" \
           "$cfg_file" > "$TMP_CFG"
     fi
@@ -1493,6 +1923,194 @@ if [ "$NO_DOCKER" != "1" ]; then
     MYSQL_PWD="$MYSQL_ROOT_PASSWORD" docker exec -e MYSQL_PWD ypbin-mysql sh -c "mysql --default-character-set=utf8mb4 -uroot < /tmp/init-xxl.sql"
     rm -f "$tmp"
   }
+  # ---------- IoT 库表与菜单（006/007 + -*-iot-*.sql 迁移账本）----------
+  # 背景（本轮修的 R1/R2/R3）：
+  #   R1：install.sh 克隆的是 **upstream admin**（其 deploy/sql 只有 001–005），fork 新增的
+  #       006-iot-schema.sql/007-iot-data.sql 永远不会被导入 ⇒ 一键安装装不出 IoT 表与菜单。
+  #       修复（**不动** SYNC.md §三·五点名的那批 ypbin-admin/ 路径行）：SQL 来源按
+  #       ① 脚本自身位置（<script_dir>/sql，与既有 UP-6/UP-7 的 NACOS_DIR 自定位同一套做法）
+  #       ② 远端 YPBIN_IOT_RAW_BASE 逐文件下载（含 Gitee 兜底 + 既有 CURL_* 硬超时）
+  #       两路解析；两路都拿不到 ⇒ die（本项目禁静默降级，绝不静默跳过）。
+  #   R2：deploy/sql/migration/ 里的 DDL/DML **不幂等**（CREATE TABLE 无 IF NOT EXISTS、含
+  #       ALTER/INSERT），重复执行必失败 ⇒ 用账本表 ypbin_schema_migrations 记录已应用的
+  #       -*-iot-*.sql，只跑未记录的。账本由本脚本 CREATE TABLE IF NOT EXISTS 自建；
+  #       **刻意不放进 006/007**：R3 的 CI 门禁要求 006+007 与全部 -*-iot-*.sql 按名排序拼接
+  #       「语句逐字等价」（tools/check-iot-sql-equivalence.sh），把建账本语句塞进去会直接破坏它。
+  #   R3：远端兜底下载的迁移清单来自 deploy/sql/migration/iot-migrations.list（本仓文件），
+  #       上面的等价校验会一并核对「清单 = 目录内实际文件」（多/少都转红）。
+  #
+  # 逃生开关（语义固定，脚本头与 docs/DEPLOY-BACKEND.md 都有登记）：
+  #   IOT_MIGRATE_BASELINE=1  已有库但无账本时**跳过哨兵探测**，直接按「已具备 006+007 全量
+  #                           结构」把全部迁移预置为已应用（不执行任何 DDL/DML）。
+  #   IOT_MIGRATE_FORCE=1     忽略账本，对已有库按名顺序**重新应用**全部 -*-iot-*.sql。
+  #                           迁移不保证幂等，很可能因主键/唯一键冲突失败 ⇒ 失败即 die。
+  mysql_exec() { MYSQL_PWD="$MYSQL_ROOT_PASSWORD" docker exec -e MYSQL_PWD ypbin-mysql mysql -uroot "$@"; }
+  mysql_scalar() { mysql_exec -N -e "$1" 2>/dev/null | tr -d ' \t\r\n' || true; }
+  mysql_apply_file() { # $1 = 宿主 SQL 路径（导入 ypbin_admin 库）
+    local src="$1"
+    docker cp "$src" ypbin-mysql:/tmp/iot-apply.sql || return 1
+    MYSQL_PWD="$MYSQL_ROOT_PASSWORD" docker exec -e MYSQL_PWD ypbin-mysql \
+      sh -c "mysql --default-character-set=utf8mb4 -uroot ypbin_admin < /tmp/iot-apply.sql" || return 1
+  }
+  iot_migration_names() { # $1 = 含 migration/ 的目录；stdout = 文件名（按名排序）
+    local dir="$1"
+    [ -d "$dir/migration" ] || return 0
+    ( cd "$dir/migration" 2>/dev/null && ls -1 -- *-iot-*.sql 2>/dev/null | sort ) || true
+  }
+  iot_fetch_file() { # $1=raw 前缀 $2=仓库相对路径 $3=落盘路径
+    curl -fsSL --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" \
+      -o "$3" "$1/$2"
+  }
+  iot_fetch_all() { # $1=raw 前缀 $2=目标目录；成功 0
+    local base="$1" dest="$2" name
+    iot_fetch_file "$base" "deploy/sql/006-iot-schema.sql" "$dest/006-iot-schema.sql" || return 1
+    iot_fetch_file "$base" "deploy/sql/007-iot-data.sql" "$dest/007-iot-data.sql" || return 1
+    iot_fetch_file "$base" "deploy/sql/migration/iot-migrations.list" "$dest/migration/iot-migrations.list" || return 1
+    while IFS= read -r name || [ -n "$name" ]; do
+      case "$name" in ''|\#*) continue ;; esac
+      iot_fetch_file "$base" "deploy/sql/migration/$name" "$dest/migration/$name" || return 1
+    done < "$dest/migration/iot-migrations.list"
+  }
+  iot_ledger_exists() { # 1/0
+    [ "$(mysql_scalar "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='ypbin_admin' AND table_name='ypbin_schema_migrations';")" = "1" ]
+  }
+  iot_migration_applied() { # $1=文件名；账本查询失败按「未应用」处理（宁重跑不误跳）
+    [ "$(mysql_scalar "SELECT COUNT(*) FROM ypbin_admin.ypbin_schema_migrations WHERE script_name='$1';")" = "1" ]
+  }
+  iot_mark_applied() { # $1=文件名
+    mysql_exec -e "INSERT IGNORE INTO ypbin_admin.ypbin_schema_migrations (script_name, applied_at) VALUES ('$1', NOW());"
+  }
+  iot_ensure_ledger() {
+    mysql_exec -e "CREATE TABLE IF NOT EXISTS ypbin_admin.ypbin_schema_migrations (script_name VARCHAR(255) NOT NULL PRIMARY KEY, applied_at DATETIME NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;"
+  }
+  iot_apply_migration() { # $1=目录 $2=文件名
+    mysql_apply_file "$1/migration/$2" && iot_mark_applied "$2"
+  }
+
+  import_iot_sql() {
+    local src_dir="" remote_dir="" sd sd2 cand base alt name full_list
+    local ledger_pre=0 sentinel seed_all=0 reason applied cnt
+    # ① 本仓检出：脚本自身位置下的 deploy/sql（含 006/007）；bash <(curl ...) 落到 /tmp 时这里为空
+    # fork 资源根已由 resolve_deploy_src() 统一解析（检出路径优先、浅克隆兜底）⇒ 默认走本地；
+    # 远端 raw 逐文件下载仅为**降级**（resolve 不可用或资源根仍缺 SQL 时）。
+    sd="${DEPLOY_SRC:-}"
+    for cand in "$sd/sql" "$sd/deploy/sql"; do
+      if [ -n "$sd" ] && [ -f "$cand/006-iot-schema.sql" ] && [ -f "$cand/007-iot-data.sql" ]; then
+        src_dir="$cand"; break
+      fi
+    done
+    if [ -z "$src_dir" ]; then
+      sd2="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)"
+      for cand in "$sd2/sql" "$sd2/deploy/sql"; do
+        if [ -n "$sd2" ] && [ -f "$cand/006-iot-schema.sql" ] && [ -f "$cand/007-iot-data.sql" ]; then
+          src_dir="$cand"; break
+        fi
+      done
+    fi
+    # ② 远端 raw 逐文件下载（主源 + Gitee 兜底）
+    if [ -z "$src_dir" ]; then
+      base="${YPBIN_IOT_RAW_BASE:-https://raw.githubusercontent.com/wenbin-wb/ypbin-iot/main}"
+      alt="${YPBIN_IOT_RAW_FALLBACK:-https://gitee.com/wenbin_wb/ypbin-iot/raw/main}"
+      remote_dir="$(mktemp -d /tmp/ypbin-iot-sql.XXXXXX)"
+      mkdir -p "$remote_dir/migration"
+      if ! iot_fetch_all "$base" "$remote_dir"; then
+        warn "IoT SQL 主源下载失败：$base，改用备用源 $alt"
+        rm -rf "$remote_dir"
+        remote_dir="$(mktemp -d /tmp/ypbin-iot-sql.XXXXXX)"
+        mkdir -p "$remote_dir/migration"
+        iot_fetch_all "$alt" "$remote_dir" || die "IoT SQL 两处来源都拿不到（本仓检出无 deploy/sql/006-iot-schema.sql；远端 $base 与 $alt 均下载失败）。
+      IoT 表与菜单不会被装上，故这里直接中止（不静默跳过）。处置：
+      ① 在含 deploy/sql/ 的 ypbin-iot 检出里执行本脚本（推荐）；
+      ② 显式指定可达 raw 前缀后重跑：YPBIN_IOT_RAW_BASE=<raw 前缀>（Gitee 备源用 YPBIN_IOT_RAW_FALLBACK）。"
+      fi
+      ok "已从远端下载 IoT SQL（$base）"
+      src_dir="$remote_dir"
+    else
+      info "IoT SQL 来源：本地资源 $src_dir（DEPLOY_SRC 或脚本自身位置）"
+    fi
+    trap 'rm -rf "${remote_dir:-}" 2>/dev/null || true' EXIT
+
+    full_list="$(iot_migration_names "$src_dir")"
+    if [ -z "$full_list" ]; then
+      full_list="$(grep -vE '^[[:space:]]*(#|$)' "$src_dir/migration/iot-migrations.list" 2>/dev/null | sort || true)"
+    fi
+    [ -n "$full_list" ] || die "IoT 迁移清单为空（$src_dir/migration/ 下没有 -*-iot-*.sql，且 iot-migrations.list 缺失或全为注释）——拒绝以空清单继续（那会让迁移静默不应用）"
+
+    iot_ledger_exists && ledger_pre=1
+    iot_ensure_ledger
+
+    if [ "${TABLE_COUNT:-0}" = "0" ]; then
+      # 边界：SYNC §三·五 的推荐部署法是把**本仓**检出到 $ROOT/ypbin-admin；此时上面的 admin 基线
+      # 循环（`$ROOT/ypbin-admin/deploy/sql/*.sql`）已经把 006/007 一起导入了，而 TABLE_COUNT 是
+      # **循环前**取的 0 ⇒ 若此处直接再导一次，重复 CREATE TABLE 必失败。用哨兵表判定并只补记账。
+      if [ "$(mysql_scalar "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='ypbin_admin' AND table_name='iot_device';")" = "1" ]; then
+        warn "检测到 iot_device 已存在（006/007 已由 admin 基线循环导入，通常因 \$ROOT/ypbin-admin 是本仓检出）——跳过重复导入，只补迁移账本"
+        cnt="$(printf '%s\n' $full_list | grep -c . || true)"
+        for name in $full_list; do iot_mark_applied "$name"; done
+        ok "已将全部 $cnt 个 IoT 迁移登记为已应用（006/007 已由基线循环落地）"
+        trap - EXIT; rm -rf "${remote_dir:-}" 2>/dev/null || true
+        return 0
+      fi
+      info "新库：导入 IoT 表结构（006-iot-schema.sql）与菜单/权限（007-iot-data.sql），目标库 ypbin_admin"
+      mysql_apply_file "$src_dir/006-iot-schema.sql" || die "导入 006-iot-schema.sql 失败"
+      ok "已执行 006-iot-schema.sql"
+      mysql_apply_file "$src_dir/007-iot-data.sql" || die "导入 007-iot-data.sql 失败"
+      ok "已执行 007-iot-data.sql"
+      cnt="$(printf '%s\n' $full_list | grep -c . || true)"
+      for name in $full_list; do iot_mark_applied "$name"; done
+      ok "已将全部 $cnt 个 IoT 迁移登记为已应用（依据：006+007 与全部 -*-iot-*.sql 语句等价，R3 门禁 tools/check-iot-sql-equivalence.sh 守门）"
+      trap - EXIT; rm -rf "${remote_dir:-}" 2>/dev/null || true
+      return 0
+    fi
+
+    # 已有库：FORCE 优先
+    if [ "${IOT_MIGRATE_FORCE:-0}" = "1" ]; then
+      warn "IOT_MIGRATE_FORCE=1：忽略账本，对已有库按名顺序重新应用全部 IoT 迁移（迁移不保证幂等，失败即中止）"
+      for name in $full_list; do
+        info "应用迁移（FORCE）$name"
+        iot_apply_migration "$src_dir" "$name" || die "迁移 $name 应用失败（IOT_MIGRATE_FORCE=1）；库可能处于半应用状态，请人工核对后重跑"
+        ok "已应用并记账 $name"
+      done
+      trap - EXIT; rm -rf "${remote_dir:-}" 2>/dev/null || true
+      return 0
+    fi
+
+    if [ "$ledger_pre" = "0" ]; then
+      sentinel="$(mysql_scalar "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='ypbin_admin' AND table_name='iot_device';")"
+      if [ "${IOT_MIGRATE_BASELINE:-0}" = "1" ]; then
+        seed_all=1; reason="IOT_MIGRATE_BASELINE=1（显式要求按 006+007 基线预置）"
+      elif [ "$sentinel" = "1" ]; then
+        seed_all=1; reason="探测到哨兵表 iot_device 已存在（推断 006+007 全量结构已落地）"
+      fi
+      if [ "$seed_all" = "1" ]; then
+        warn "已有库且无迁移账本：$reason"
+        warn ">>> 据此把全部 $(printf '%s\n' $full_list | grep -c .) 个 IoT 迁移**预置为已应用**（不执行 DDL/DML）。"
+        warn ">>> ⚠️ 这是一个**假设**：若库内实际是中间态（缺后续迁移新增的表/列），预置后本脚本不再补跑；"
+        warn ">>>    请人工核对（对照 deploy/sql/006-iot-schema.sql 与库内实际表结构），必要时用 IOT_MIGRATE_FORCE=1 重建账本。"
+        for name in $full_list; do iot_mark_applied "$name"; done
+        ok "已预置 IoT 迁移账本（$(printf '%s\n' $full_list | grep -c .) 条，未执行 DDL/DML）"
+        trap - EXIT; rm -rf "${remote_dir:-}" 2>/dev/null || true
+        return 0
+      fi
+      warn "已有库、无迁移账本、且未探测到 iot_device ⇒ 判定为「旧库首次接入 IoT」：按名顺序应用全部 IoT 迁移"
+    else
+      info "已有库且存在迁移账本：只应用账本未记录的 IoT 迁移（按文件名排序）"
+    fi
+
+    applied=0
+    for name in $full_list; do
+      if iot_migration_applied "$name"; then
+        ok "跳过（账本已记录）$name"
+        continue
+      fi
+      info "应用迁移 $name"
+      iot_apply_migration "$src_dir" "$name" || die "迁移 $name 应用失败；库可能处于半应用状态，请人工核对后重跑（账本里没有它 ⇒ 重跑仍会尝试）"
+      ok "已应用并记账 $name"
+      applied=$((applied + 1))
+    done
+    ok "IoT 迁移处理完成：本次新应用 $applied 个，其余已在账本中"
+    trap - EXIT; rm -rf "${remote_dir:-}" 2>/dev/null || true
+  }
 
   info "初始化 MySQL 库表（如已初始化会自动跳过）"
   # 等待 MySQL 健康
@@ -1527,6 +2145,13 @@ if [ "$NO_DOCKER" != "1" ]; then
       import_xxl_job_sql "$ROOT/ypbin-admin/deploy/sql/005-xxl-job.sql"
       ok "已执行 005-xxl-job.sql（xxl_job 库初始化）"
     fi
+  fi
+
+  if [ "${NEED_FORK_RESOURCES:-1}" = "1" ]; then
+    info "初始化 IoT 库表与菜单（006/007 + -*-iot-* 迁移）"
+    import_iot_sql
+  else
+    info "纯 admin compose：跳过 IoT 库表/菜单导入（本部署不含 IoT 服务）"
   fi
 fi
 
@@ -1613,7 +2238,7 @@ else
   info "[6/7] Docker 模式：compose 启动（含 Nacos/Redis/MySQL 基础设施）"
   check_docker_disk_space 5 || true
   cd "$ROOT/ypbin-admin/deploy"
-  # 微服务 compose 已内嵌基础设施（nacos/redis/mysql），单文件拉起全链路
+  # 微服务 compose 已内嵌基础设施（nacos/redis/mysql/iotdb），单文件拉起全链路
   export DOCKER_BUILDKIT=0
   # legacy builder: FROM 基础镜像优先取本地 docker images(离线/受限环境可先 docker load 再构建,避免 buildkit 联网解析元数据卡死)
   # 输出落日志以便失败时分类（终端仍实时显示尾部 20 行）

@@ -175,14 +175,13 @@ ypbin:
     # jdbc:iotdb://127.0.0.1:6667/test1?sql_dialect=table。
     url: jdbc:iotdb://ypbin-iotdb:6667/iot?sql_dialect=table
     # 下面是 IoTDB 官方**默认**用户/口令（官方 Authority Management：默认用户 root、默认口令 root）。
-    # ⚠️ 生产**必须**轮换（官方默认口令是公开的），见 docs/DEPLOY-TIMESERIES.md §6.1：本文件里的这个值
-    #   只是**模板默认值**，生效值在 **Nacos 活配置**里（轮换只改 live，不整份覆盖模板）。
+    # ⚠️ 生产**必须**轮换（官方默认口令是公开的），见 docs/DEPLOY-TIMESERIES.md §6.1。
+    #   本文件里的 `password` 是**占位符**：install.sh 导入 Nacos 前用 deploy/.env 的 IOTDB_PASSWORD
+    #   渲染（只替换非注释行，注释里的 ${...} 保持原样，同 UP-7 的做法）。install.sh 会在 IoTDB
+    #   容器就绪后**先把 IoTDB 内口令改成同一个值**（经 stdin，不进 argv），再导入本配置，
+    #   因此全新安装时三处（IoTDB 内 / .env / Nacos 活配置）由脚本一次对齐。
+    #   既有/手工部署请用 tools/rotate-iotdb-password.py（只改 live 的值，别整份覆盖本文件）。
     #   本仓**不记录**线上口令状态（口令值不入库）；执行记录落在轮换工作目录（700）与部署回执里。
-    # ⚠️ 为什么这里不写 ${IOTDB_PASSWORD} 之类的占位符：本文件也过 install.sh 那段 sed，
-    #   而 install.sh 的可替换键固定为 MYSQL_ROOT_PASSWORD / REDIS_PASSWORD / INTERNAL_TOKEN /
-    #   GATEWAY_SIGN_TOKEN 四个（本文件里的 ${GATEWAY_SIGN_TOKEN} 正是其中之一）
-    #   ⇒ 新占位符既不会被替换、也不会被自动生成，只会多一层"以为配了、其实没配"的错觉。
-    #   同样的原因：**全新安装仍需人工改口令**（install.sh 改不了 IoTDB 内的口令）——这是已登记的未修项。
     # 改口令是**三处联动**（漏一处就会以 801 失败）：
     #   1) IoTDB 侧（官方语法 ALTER USER，需 root 身份，见 docs/DEPLOY-TIMESERIES.md §6.1）：
     #      { printf '%s\n' "$OLD"; printf "ALTER USER root SET PASSWORD '%s';\n" "$NEW"; } \
@@ -191,11 +190,12 @@ ypbin:
     #        交互式执行的退出码不可靠 ⇒ 轮换后用"新口令能连、旧口令被拒且报 801"复核结果，见 §6.1 判据）
     #      （⚠️ 必须带 -h ypbin-iotdb：dn_rpc_address 是绑定地址、服务端只绑容器 eth0，用 CLI 默认的
     #        127.0.0.1 连不上；本机实测见 docs/DEPLOY-TIMESERIES.md §5/§7）
-    #   2) 本文件 password 改成同一个值（活配置；用 tools/rotate-iotdb-password.py，别整份覆盖），再重启 ypbin-iot
-    #   3) deploy/.env 的 IOTDB_PASSWORD——compose 用它注入 iotdb-init 服务（建库建表）；
+    #   2) 本文件 password（install.sh 自动从 .env 渲染；手工场景用 tools/rotate-iotdb-password.py 改 live），再重启 ypbin-iot
+    #   3) deploy/.env 的 IOTDB_PASSWORD——install.sh 随机生成（复用旧 .env 时沿用）；
+    #      compose 用它注入 iotdb-init 服务（建库建表），install.sh 也在 IoTDB 就绪后用它改 IoTDB 内口令；
     #      缺了它 iotdb-init 会**显式失败退出 1**（不会回退到公开默认口令）
     username: root
-    password: root
+    password: ${IOTDB_PASSWORD}
     # 表名，必须与 deploy/iotdb-init.sql 建的表一致
     table-name: reading
     # 一次 addBatch/executeBatch 的行数上限
