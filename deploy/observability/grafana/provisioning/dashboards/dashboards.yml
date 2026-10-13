@@ -1,0 +1,13 @@
+# Grafana 大盘 provider（issue #222）：从 /var/lib/grafana/dashboards 装载 JSON
+apiVersion: 1
+providers:
+  - name: ypbin
+    orgId: 1
+    folder: ypbin
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

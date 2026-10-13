@@ -1,0 +1,23 @@
+# =============================================================================
+# actuator-exporter systemd 单元（issue #222）
+# 安装：deploy/observability/actuator-exporter/install.sh
+# 说明：桥接器只读本地 Actuator（127.0.0.1:18084/18086），因此**不需要**对外监听，
+#       监听地址在 config.json 里固定为 127.0.0.1:9110（仅 Prometheus 抓取）。
+# =============================================================================
+[Unit]
+Description=ypbin Actuator -> Prometheus exporter (issue #222)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /opt/observability/actuator-exporter/actuator-exporter.py /opt/observability/actuator-exporter/config.json
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

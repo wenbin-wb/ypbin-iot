@@ -130,7 +130,11 @@
   + `iot.access.spec.load.duration` 是「先可观测、再改调度」的前置；方案 A（时间预算）已实施，其效果由
   `iot.access.config.reconcile.deferred` 直接观测（期望 0；增长即说明预算被顶到）。
 - **R8-9 B**（本清单的由来）：新增上述 3 条计时器；其余条目此前已注册但从未登记（即「可观测只是潜在」）。
-- **未做**：未接 Prometheus/Grafana（本仓无采集端）；若要真正"上大盘"，需先决定是否引入采集组件（单独提案）。
+- **已接最小采集端（2026-10-14，issue #222）**：dev 机已落地 Prometheus + Grafana + Alertmanager +
+  只读桥接器 `actuator-exporter`，本清单的关键指标已进入 8 条告警规则并通过 `promtool test rules`。
+  **规则清单、指标核实证据、部署/回滚与长期做法见 `docs/OPS-MONITORING.md`**。
+  ⚠️ 当前 jar 内**没有** `micrometer-registry-prometheus`（实测无 `/actuator/prometheus`），桥接器是把
+  `/actuator/metrics` 转成 Prometheus 文本的**过渡办法**；长期应在业务模块补该依赖并暴露 `prometheus` 端点。
 
 ## 变更记录
 
@@ -139,3 +143,4 @@
 | 2026-10-09 | 建立本清单：把 `ypbin-access` 的 **33 条**指标逐条登记（口径 / 建议关注 / 注册文件），并新增 3 条计时器（tick / 对账 / 单租户取数）；配套门禁 `MetricsRegistryGateTest` 防清单与代码漂移。 |
 | 2026-10-09（R8-2 实施批） | 登记新增的 `iot.access.config.reconcile.deferred`（对账时间预算推迟计数）⇒ 共 **34** 条；门禁反向检查同时补上「前缀常量 + 后缀片段」风格（此前只认完整字面量，**真的漏过这条新指标**——已由门禁自身抓出）。 |
 | 2026-10-18（M3 加固） | 补充登记 iot 服务侧 `iot.lease.insert_skipped`（首次分配被唯一键跳过的归属行数）；注明不在 access 门禁覆盖范围内。 |
+| 2026-10-14（#222） | 接最小 Prometheus/Grafana 采集端（桥接器 `actuator-exporter` + 8 条告警规则）⇒ §3 的「未做」改为「已接最小采集端」；清单与证据见 `docs/OPS-MONITORING.md`。 |

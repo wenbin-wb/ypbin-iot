@@ -1,0 +1,16 @@
+# Alertmanager 最小配置（issue #222）。
+# ⚠️ receiver 是 noop：本任务的交付面是「Prometheus 规则 + Grafana 大盘」，
+#    真实通知渠道（邮件/Webhook）需要用户决策（Webhook 是明确不做的 SSRF 面）；
+#    需要通知时把 receiver 换成真实渠道即可，规则与大盘无需改动。
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: noop
+  group_by: [alertname, service]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+receivers:
+  - name: noop

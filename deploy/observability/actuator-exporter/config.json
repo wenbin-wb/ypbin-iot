@@ -1,0 +1,38 @@
+{
+  "listen": "127.0.0.1:9110",
+  "timeout_seconds": 4,
+  "services": [
+    {
+      "name": "ypbin-iot",
+      "base_url": "http://127.0.0.1:18084",
+      "health_path": "/actuator/health/liveness",
+      "metrics": [
+        "iot.timeseries.write.rows",
+        "iot.timeseries.write.failed",
+        "iot.timeseries.db.rows",
+        "iot.timeseries.db.probe.failed",
+        "iot.timeseries.points.collected",
+        "iot.alert.evaluate.last_success_ts",
+        "iot.alert.evaluate.lag",
+        "iot.alert.evaluate.round.failed",
+        "iot.platform_alert.access.report.lag",
+        "iot.platform_alert.notify.failed"
+      ]
+    },
+    {
+      "name": "ypbin-access",
+      "base_url": "http://127.0.0.1:18086",
+      "health_path": "/actuator/health/liveness",
+      "metrics": [
+        "iot.access.subscribe.failure",
+        "iot.access.subscribe.success",
+        "iot.access.lease.tick.duration",
+        "iot.access.config.reconcile.duration",
+        "iot.access.egress.failed",
+        "iot.access.egress.dropped",
+        "iot.access.egress.pending",
+        "iot.access.metrics.report.failure"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,95 @@
+# =============================================================================
+# EMQX 双节点集群 + 收紧实验床（issue #218 / #219）
+# =============================================================================
+# 🔴 与生产 ypbin-emqx、与中间件机上"别人的项目"**完全隔离**：
+#   · 独立 compose 项目 emqx-lab；独立 network emqx-lab(172.29.0.0/16)；
+#   · 独立 named volume；宿主端口只绑 127.0.0.1 且用 1xxxx 段，不与现有端口冲突；
+#   · 不触碰 /opt/emqx、不触碰其他容器/镜像/卷/网络。
+#
+# 用法（在中间件机 /opt/emqx-lab）：
+#   cp lab/.env.example lab/.env && vi lab/.env
+#   docker compose --env-file lab/.env -f docker-compose.lab.yml up -d
+#   docker exec ypbin-emqx-lab-1 emqx ctl cluster status
+# 回滚：
+#   docker compose --env-file lab/.env -f docker-compose.lab.yml down -v
+# =============================================================================
+name: emqx-lab
+
+x-emqx-common: &emqx-common
+  image: ${EMQX_IMAGE:-docker.m.daocloud.io/emqx/emqx:5.8.9}
+  mem_limit: ${EMQX_LAB_MEM_LIMIT:-1g}
+  memswap_limit: ${EMQX_LAB_MEM_LIMIT:-1g}
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "3"
+  environment:
+    EMQX_DEFAULT_LOG_HANDLER: console
+  healthcheck:
+    test: ["CMD", "/opt/emqx/bin/emqx", "ctl", "status"]
+    interval: 15s
+    timeout: 10s
+    retries: 10
+    start_period: 60s
+
+services:
+  emqx1:
+    <<: *emqx-common
+    container_name: ypbin-emqx-lab-1
+    hostname: emqx-lab-1.local
+    environment:
+      EMQX_DEFAULT_LOG_HANDLER: console
+      EMQX_NODE__NAME: emqx@emqx-lab-1.local
+      EMQX_NODE__COOKIE: ${EMQX_LAB_COOKIE:?请在 lab/.env 设置 EMQX_LAB_COOKIE}
+      EMQX_DASHBOARD__DEFAULT_PASSWORD: ${EMQX_LAB_DASHBOARD_PASSWORD:?请在 lab/.env 设置 EMQX_LAB_DASHBOARD_PASSWORD}
+    ports:
+      - "127.0.0.1:${LAB1_MQTT_PORT:-11883}:1883"
+      - "127.0.0.1:${LAB1_DASH_PORT:-18094}:18083"
+    volumes:
+      - ./lab/emqx-lab.conf:/opt/emqx/etc/emqx.conf:ro
+      - ./lab/certs:/opt/emqx/etc/certs-lab:ro
+      - emqx-lab-1-data:/opt/emqx/data
+      - emqx-lab-1-log:/opt/emqx/log
+    networks:
+      emqx-lab:
+        aliases:
+          - emqx-lab-1.local
+          - emqx1
+
+  emqx2:
+    <<: *emqx-common
+    container_name: ypbin-emqx-lab-2
+    hostname: emqx-lab-2.local
+    environment:
+      EMQX_DEFAULT_LOG_HANDLER: console
+      EMQX_NODE__NAME: emqx@emqx-lab-2.local
+      EMQX_NODE__COOKIE: ${EMQX_LAB_COOKIE:?请在 lab/.env 设置 EMQX_LAB_COOKIE}
+      EMQX_DASHBOARD__DEFAULT_PASSWORD: ${EMQX_LAB_DASHBOARD_PASSWORD:?请在 lab/.env 设置 EMQX_LAB_DASHBOARD_PASSWORD}
+    ports:
+      - "127.0.0.1:${LAB2_MQTT_PORT:-21883}:1883"
+      - "127.0.0.1:${LAB2_DASH_PORT:-18095}:18083"
+    volumes:
+      - ./lab/emqx-lab.conf:/opt/emqx/etc/emqx.conf:ro
+      - ./lab/certs:/opt/emqx/etc/certs-lab:ro
+      - emqx-lab-2-data:/opt/emqx/data
+      - emqx-lab-2-log:/opt/emqx/log
+    networks:
+      emqx-lab:
+        aliases:
+          - emqx-lab-2.local
+          - emqx2
+
+networks:
+  emqx-lab:
+    name: emqx-lab
+    ipam:
+      config:
+        - subnet: 172.29.0.0/16
+
+volumes:
+  emqx-lab-1-data:
+  emqx-lab-1-log:
+  emqx-lab-2-data:
+  emqx-lab-2-log:

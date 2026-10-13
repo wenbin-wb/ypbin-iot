@@ -1,0 +1,102 @@
+# =============================================================================
+# ypbin IoT 关键告警规则（issue #222）—— 指标名全部在 dev 只读核实存在
+# =============================================================================
+# 指标名来源：2026-10-14 在 dev 对 :18084 / :18086 的 /actuator/metrics 逐一核实
+# （命令与输出见 docs/OPS-MONITORING.md「证据」）。桥接后名字为
+#   ypbin_actuator_counter_total / _gauge / _timer_max_seconds{service,metric}
+# 规则与 docs/OPS-MONITORING.md 的编号一一对应。
+# =============================================================================
+groups:
+  - name: ypbin-iot-critical
+    rules:
+      # ① 服务健康 DOWN
+      - alert: YpbinServiceDown
+        expr: ypbin_service_health < 1
+        for: 1m
+        labels:
+          severity: critical
+          category: availability
+        annotations:
+          summary: "服务健康检查非 UP（liveness 不可达或状态非 UP）"
+          description: "ypbin_service_health < 1 持续 1 分钟；规则①，见 docs/OPS-MONITORING.md。"
+
+      # ② 接入订阅失败（iot.access.subscribe.*）
+      - alert: YpbinAccessSubscribeFailure
+        expr: increase(ypbin_actuator_counter_total{metric="iot.access.subscribe.failure"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+          category: ingest
+        annotations:
+          summary: "接入订阅失败（iot.access.subscribe.failure 增长）"
+          description: "5 分钟内订阅失败计数有增长；规则②，见 docs/OPS-MONITORING.md。"
+
+      # ③a IoTDB 写入失败
+      - alert: YpbinIotDbWriteFailed
+        expr: increase(ypbin_actuator_counter_total{metric="iot.timeseries.write.failed"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          category: timeseries
+        annotations:
+          summary: "IoTDB 写入失败（iot.timeseries.write.failed 增长）"
+          description: "5 分钟内时序写入失败计数有增长；规则③a，见 docs/OPS-MONITORING.md。"
+
+      # ③b IoTDB 写入停滞（在采但不写）
+      - alert: YpbinIotDbWriteStalled
+        expr: increase(ypbin_actuator_counter_total{metric="iot.timeseries.write.rows"}[10m]) == 0 and on(service) increase(ypbin_actuator_counter_total{metric="iot.timeseries.points.collected"}[10m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+          category: timeseries
+        annotations:
+          summary: "IoTDB 写入停滞（在采但不写）"
+          description: "10 分钟内 iot.timeseries.write.rows 增量为 0 而 points.collected 在增长；规则③b，见 docs/OPS-MONITORING.md。"
+
+      # ③c IoTDB 落库落后（写成功但库内行数不增长）
+      - alert: YpbinTimeseriesDbRowsStalled
+        # 窗口必须显著大于探针间隔：iot.timeseries.db.rows 由低频对账探针刷新，
+        # 默认每 10 分钟一次（ypbin.timeseries.db-rows-probe-interval-ms=600000）
+        # ⇒ 用 10m 窗口会把"窗口内恰好没探针/只探到一次"误判成停滞（2026-10-14 dev 实测 pending）。
+        # 取 30m（≈3 个探针周期），且要求 write.rows 同期确实在增长，避免把"空载"当异常。
+        expr: delta(ypbin_actuator_gauge{metric="iot.timeseries.db.rows"}[30m]) <= 0 and on(service) increase(ypbin_actuator_counter_total{metric="iot.timeseries.write.rows"}[30m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+          category: timeseries
+        annotations:
+          summary: "IoTDB 落库落后（写成功但库内行数不增长）"
+          description: "30 分钟内 iot.timeseries.db.rows 增量为 0 而 write.rows 在增长；规则③c，见 docs/OPS-MONITORING.md。"
+
+      # ④ 告警评估停滞（PLATFORM_EVALUATOR_STALLED 类）
+      - alert: YpbinAlertEvaluatorStalled
+        expr: ypbin_actuator_gauge{metric="iot.alert.evaluate.lag"} > 300000
+        for: 1m
+        labels:
+          severity: critical
+          category: alerting
+        annotations:
+          summary: "告警评估停滞（iot.alert.evaluate.lag > 5 分钟）"
+          description: "评估器最后成功轮次距今超 300s（PLATFORM_EVALUATOR_STALLED 同义）；规则④，见 docs/OPS-MONITORING.md。"
+
+      # ④补充 access→iot 指标上报中断（平台自告警 PLATFORM_INSTANCE_UNREACHABLE 口径）
+      - alert: YpbinPlatformAlertAccessReportLag
+        expr: ypbin_actuator_gauge{metric="iot.platform_alert.access.report.lag"} > 45000
+        for: 1m
+        labels:
+          severity: warning
+          category: alerting
+        annotations:
+          summary: "access 指标上报中断（report.lag > 45s）"
+          description: "与平台自告警 PLATFORM_INSTANCE_UNREACHABLE 同口径；规则④补充，见 docs/OPS-MONITORING.md。"
+
+      # ⑤ 租约 tick 超预算（R8-2；审计建议的 lease/tick 判据）
+      - alert: YpbinAccessLeaseTickSlow
+        expr: ypbin_actuator_timer_max_seconds{metric="iot.access.lease.tick.duration"} > 20
+        for: 5m
+        labels:
+          severity: warning
+          category: lease
+        annotations:
+          summary: "access 租约 tick 单次耗时超预算（>20s，TTL=30s）"
+          description: "R8-2 时间预算判据；规则⑤（审计建议），见 docs/OPS-MONITORING.md。"
