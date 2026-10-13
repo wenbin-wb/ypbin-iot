@@ -20,8 +20,9 @@ import lombok.Setter;
 /**
  * IoT 点位映射（§3.9：物模型逻辑点位 ↔ 协议物理地址）。
  *
- * <p>{@code propertyId} 关联属性（或命令，按 {@code refType} 区分）；
- * 点位映射必须引用<b>已发布版本</b>的属性；协议能力不支持时显式失败，不得静默。</p>
+ * <p>{@code propertyId} 关联属性（或命令，按 {@code refType} 区分）：{@code ref_type=property} 时是
+ * {@code iot_property.id}，{@code ref_type=command} 时是 {@code iot_command.id}（M-3，命令点位是下行写点）；
+ * 点位映射必须引用<b>已发布版本</b>的属性/命令；协议能力不支持时显式失败，不得静默。</p>
  *
  * @author wenbin
  * @since 2026-09-20

@@ -114,6 +114,12 @@ class IngestPointMappingIT {
     /** 孤儿巡检 SQL 用例用的、**不存在**的属性主键。 */
     private static final Long PROP_MISSING = 943998L;
 
+    /** 孤儿巡检 SQL 用例用的**命令点位**映射主键（property_id 指向命令，天然没有 iot_property 行）。 */
+    private static final Long ORPHAN_COMMAND_MAPPING = 943996L;
+
+    /** 命令点位映射用的命令 ID（没有对应的 iot_property 行）。 */
+    private static final Long COMMAND_ID = 943995L;
+
     private static final Path REPO_ROOT = Path.of("..", "..").toAbsolutePath().normalize();
 
     private static final List<LatestValue> RECORDED_LATEST = new ArrayList<>();
@@ -358,6 +364,25 @@ class IngestPointMappingIT {
     }
 
     /**
+     * ★ M-3：命令点位映射（ref_type=command）不得让属性读数通过——坐标索引只认属性点位，
+     * 命令标识不是读数坐标，应按「未映射」整条丢弃并计数（不得写入最新值/时序/影子）。
+     */
+    @Test
+    @DisplayName("★ M-3：命令点位映射不得喂给属性读数链路（丢弃 + 计数，不写最新值/时序/活性）")
+    void commandMappingMustNotFeedPropertyReadings() {
+        insertCommandPointMapping(MAPPED_DEVICE, COMMAND_ID);
+
+        int processed = service.ingest(req(point(MAPPED_DEVICE, String.valueOf(COMMAND_ID), "1",
+            LocalDateTime.now().withNano(0).minusMinutes(1))));
+
+        assertThat(processed).as("命令点位不是读数坐标，必须按未映射丢弃").isZero();
+        assertThat(unmappedCount()).as("丢弃必须计数（不静默）").isEqualTo(1L);
+        assertThat(RECORDED_LATEST).as("命令点位不得写最新值/时序").isEmpty();
+        assertThat(RECORDED_SERIES).isEmpty();
+        assertThat(livenessOf(MAPPED_DEVICE)).as("读数被整条丢弃 ⇒ 不刷新活性").isNull();
+    }
+
+    /**
      * ★ 孤儿巡检 SQL 的真实性：`countOrphanMappings` 是**自定义 `@Select`**，租户插件与 JSqlParser 都要能过，
      * 且 `executeIgnore` 必须真的生效。单测只能 mock 它，这条只有在真库 + 生产同款租户拦截器下才证明得了。
      */
@@ -384,13 +409,21 @@ class IngestPointMappingIT {
         assertThat(after - before)
             .as("LEFT JOIN 语义正确、租户忽略生效 ⇒ 新增一条孤儿恰好 +1（基线差异法，不受同库其它租户数据影响）")
             .isEqualTo(1L);
+        // ③ 一条**命令点位**映射（property_id 指向命令，天然没有 iot_property 行）⇒ **不得**被算成属性孤儿
+        execute("INSERT INTO iot_point_mapping (id, tenant_id, device_id, property_id, ref_type, raw_address, "
+            + "address_type, create_time, update_time) VALUES (" + ORPHAN_COMMAND_MAPPING + ", " + TENANT + ", "
+            + ORPHAN_DEVICE + ", " + COMMAND_ID + ", 'command', 'cmd-orphan', 'holding', NOW(), NOW())");
+        long afterCommand = TenantContext.executeIgnore(() -> pointMappingMapper.countOrphanMappings());
+        assertThat(afterCommand)
+            .as("命令点位没有 iot_property 行，不得被算成属性孤儿（gauge 偏大会把运维引向不存在对象）")
+            .isEqualTo(after);
         // 无租户上下文（failOnMissingTenant=true）下不得放行跨租户统计
         assertThatThrownBy(() -> pointMappingMapper.countOrphanMappings())
             .as("巡检必须显式 executeIgnore；漏了要 fail-closed 而不是静默统计")
             .isInstanceOf(RuntimeException.class)
             .hasMessageContaining("租户");
         execute("DELETE FROM iot_point_mapping WHERE id IN (" + ORPHAN_PROBE_MAPPING + ", "
-            + DELETED_PROBE_MAPPING + ")");
+            + DELETED_PROBE_MAPPING + ", " + ORPHAN_COMMAND_MAPPING + ")");
     }
 
     @Test
@@ -470,6 +503,13 @@ class IngestPointMappingIT {
         execute("INSERT INTO iot_property (id, tenant_id, service_id, identifier, property_name, data_type, "
             + "create_time, update_time) VALUES (" + id + ", " + TENANT + ", " + (id - 100) + ", '"
             + identifier + "', '" + identifier + "', 'decimal', NOW(), NOW())");
+    }
+
+    private static void insertCommandPointMapping(Long deviceId, Long commandId) {
+        execute("INSERT INTO iot_point_mapping (id, tenant_id, device_id, property_id, ref_type, raw_address, "
+            + "address_type, create_time, update_time) VALUES (" + (deviceId + commandId % 100) + ", "
+            + TENANT + ", " + deviceId + ", " + commandId + ", 'command', 'cmd-" + commandId
+            + "', 'holding', NOW(), NOW())");
     }
 
     private static void insertPointMapping(Long deviceId, Long propertyId) {

@@ -9,6 +9,7 @@
  */
 package cn.ypbin.admin.iot.service.impl;
 
+import cn.ypbin.admin.iot.entity.IotCommand;
 import cn.ypbin.admin.iot.entity.IotDevice;
 import cn.ypbin.admin.iot.entity.IotPointMapping;
 import cn.ypbin.admin.iot.enums.AccessMode;
@@ -20,6 +21,7 @@ import cn.ypbin.admin.iot.entity.IotProduct;
 import cn.ypbin.admin.iot.entity.IotProperty;
 import cn.ypbin.admin.iot.entity.IotService;
 import cn.ypbin.admin.iot.lease.TenantLedgerService;
+import cn.ypbin.admin.iot.mapper.IotCommandMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.IotPointMappingMapper;
 import cn.ypbin.admin.iot.mapper.IotProductMapper;
@@ -54,21 +56,30 @@ import org.springframework.transaction.annotation.Transactional;
 public class IotPointMappingServiceImpl extends BaseServiceImpl<IotPointMappingMapper, IotPointMapping>
     implements IotPointMappingService {
 
+    /** 默认连续寄存器个数（1 = 单寄存器，v1 行为）。 */
+    private static final int DEFAULT_WORD_COUNT = 1;
+
+    /** 默认寄存器值形态（int = v1 行为）。 */
+    private static final String DEFAULT_REGISTER_FORMAT = "int";
+
     private final IotDeviceMapper iotDeviceMapper;
     private final IotPropertyMapper iotPropertyMapper;
     private final IotProductMapper iotProductMapper;
     private final IotServiceMapper iotServiceMapper;
+    private final IotCommandMapper iotCommandMapper;
     private final TenantLedgerService tenantLedgerService;
 
     public IotPointMappingServiceImpl(IotDeviceMapper iotDeviceMapper,
                                       IotPropertyMapper iotPropertyMapper,
                                       IotProductMapper iotProductMapper,
                                       IotServiceMapper iotServiceMapper,
+                                      IotCommandMapper iotCommandMapper,
                                       TenantLedgerService tenantLedgerService) {
         this.iotDeviceMapper = iotDeviceMapper;
         this.iotPropertyMapper = iotPropertyMapper;
         this.iotProductMapper = iotProductMapper;
         this.iotServiceMapper = iotServiceMapper;
+        this.iotCommandMapper = iotCommandMapper;
         this.tenantLedgerService = tenantLedgerService;
     }
 
@@ -130,17 +141,36 @@ public class IotPointMappingServiceImpl extends BaseServiceImpl<IotPointMappingM
     }
 
     /**
-     * 校验属性引用：属性存在且所属产品为已发布（§3.9 约束），并联动校验读写权限。
+     * 校验映射引用：按 {@code refType} 分流（§3.9）。
+     *
+     * <p>{@code property} 走属性校验（已发布版本的属性 + 读写联动 + 寄存器解码）；
+     * {@code command} 走命令校验（命令存在且属于设备所绑定产品的物模型）。命令点位是**下行写点**，
+     * 不承载读侧解码字段（见 {@link #rejectReadDecodeFields}）。</p>
      *
      * @param device 设备
      * @param req    请求
      */
     private void validateReference(IotDevice device, IotPointMappingReq req) {
-        if (!PointRefType.PROPERTY.getCode().equals(req.getRefType())) {
-            // M-1 点位映射仅支持属性；命令点位在 M-3 控制面落地（§3.9 ref_type 字段预留）
+        PointRefType refType = PointRefType.of(req.getRefType());
+        if (refType == null) {
+            // DTO 已用 @Pattern 兜住 HTTP 入参；服务层直调（导入/脚本/其它服务）也必须拒绝
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
-                "M-1 点位映射仅支持关联属性（refType=property），命令点位在 M-3 提供");
+                "点位映射关联类型非法（应为 property|command）：" + req.getRefType());
         }
+        if (refType == PointRefType.COMMAND) {
+            validateCommandReference(device, req);
+            return;
+        }
+        validatePropertyReference(device, req);
+    }
+
+    /**
+     * 校验属性引用：属性存在且所属产品为已发布（§3.9 约束），并联动校验读写权限。
+     *
+     * @param device 设备
+     * @param req    请求
+     */
+    private void validatePropertyReference(IotDevice device, IotPointMappingReq req) {
         IotProperty property = iotPropertyMapper.selectById(req.getPropertyId());
         if (property == null) {
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "属性不存在：" + req.getPropertyId());
@@ -164,6 +194,71 @@ public class IotPointMappingServiceImpl extends BaseServiceImpl<IotPointMappingM
                     + " 映射=" + req.getRw());
         }
         validateRegisterDecode(device, property, req);
+    }
+
+    /**
+     * 校验命令引用（{@code ref_type=command}）：命令存在、产品已发布、命令经「服务的产品」可达（§3.9）。
+     *
+     * <p>命令点位是**下行写点**（M-3）：地址与方向由映射承载，读侧解码字段不适用，
+     * 非默认值一律显式拒绝——不允许静默忽略（否则运维以为配了缩放，实际未生效）。</p>
+     *
+     * @param device 设备
+     * @param req    请求
+     */
+    private void validateCommandReference(IotDevice device, IotPointMappingReq req) {
+        IotCommand command = iotCommandMapper.selectById(req.getPropertyId());
+        if (command == null) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "命令不存在：" + req.getPropertyId());
+        }
+        IotProduct product = iotProductMapper.selectById(device.getProductId());
+        if (product == null || !ModelStatus.PUBLISHED.getCode().equals(product.getModelStatus())) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "点位映射必须引用已发布版本的命令：请先给设备绑定产品并发布物模型");
+        }
+        // 命令必须经「服务的产品」可达：否则可引用其它产品（甚至其它租户产品）的命令
+        IotService service = iotServiceMapper.selectById(command.getServiceId());
+        if (service == null || !product.getId().equals(service.getProductId())) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "命令不属于设备所绑定产品的物模型：" + req.getPropertyId());
+        }
+        rejectReadDecodeFields(req);
+    }
+
+    /**
+     * 命令点位（下行写点）拒绝读侧解码字段。
+     *
+     * <p>缩放/字序/多寄存器/有符号/位域/寄存器形态都是**读数解码**语义，对命令写入无意义；
+     * 开发阶段按「非默认即拒绝」处理，不做静默忽略。</p>
+     *
+     * @param req 请求
+     */
+    private static void rejectReadDecodeFields(IotPointMappingReq req) {
+        if (req.getScaleFactor() != null || req.getOffsetValue() != null) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "命令点位是下行写点，不支持缩放（scale_factor/offset_value）：请清空这两个字段");
+        }
+        if (req.getByteOrder() != null && !req.getByteOrder().isBlank()) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "命令点位不支持字序（byte_order）：请清空该字段");
+        }
+        if (req.getWordCount() != null && req.getWordCount() != DEFAULT_WORD_COUNT) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "命令点位不支持多寄存器（word_count 只能为 1）：请清空该字段");
+        }
+        if (Boolean.TRUE.equals(req.getSigned())) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "命令点位不支持有符号解码（signed 只能为 false）：请清空该字段");
+        }
+        if (req.getRegisterFormat() != null && !req.getRegisterFormat().isBlank()
+            && !DEFAULT_REGISTER_FORMAT.equals(req.getRegisterFormat().trim())) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "命令点位不支持寄存器值形态（register_format 只能为 int）：请清空该字段");
+        }
+        if (req.getBitOffset() != null || req.getBitLength() != null) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "命令点位不支持位域（bit_offset/bit_length）：请清空这两个字段");
+        }
     }
 
     /**
@@ -436,10 +531,10 @@ public class IotPointMappingServiceImpl extends BaseServiceImpl<IotPointMappingM
         mapping.setScaleFactor(req.getScaleFactor());
         mapping.setOffsetValue(req.getOffsetValue());
         mapping.setByteOrder(req.getByteOrder());
-        mapping.setWordCount(req.getWordCount() == null ? 1 : req.getWordCount());
+        mapping.setWordCount(req.getWordCount() == null ? DEFAULT_WORD_COUNT : req.getWordCount());
         mapping.setSigned(Boolean.TRUE.equals(req.getSigned()));
         mapping.setRegisterFormat(req.getRegisterFormat() == null || req.getRegisterFormat().isBlank()
-            ? "int" : req.getRegisterFormat().trim());
+            ? DEFAULT_REGISTER_FORMAT : req.getRegisterFormat().trim());
         mapping.setBitOffset(req.getBitOffset());
         mapping.setBitLength(req.getBitLength());
         mapping.setRw(req.getRw());

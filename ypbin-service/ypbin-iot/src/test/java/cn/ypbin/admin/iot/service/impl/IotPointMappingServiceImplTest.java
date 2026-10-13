@@ -18,11 +18,13 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import cn.ypbin.admin.iot.entity.IotCommand;
 import cn.ypbin.admin.iot.entity.IotDevice;
 import cn.ypbin.admin.iot.entity.IotPointMapping;
 import cn.ypbin.admin.iot.entity.IotProduct;
 import cn.ypbin.admin.iot.entity.IotProperty;
 import cn.ypbin.admin.iot.entity.IotService;
+import cn.ypbin.admin.iot.mapper.IotCommandMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.lease.TenantLedgerService;
 import cn.ypbin.admin.iot.mapper.IotPointMappingMapper;
@@ -65,10 +67,11 @@ class IotPointMappingServiceImplTest {
     private final IotPropertyMapper propertyMapper = mock(IotPropertyMapper.class);
     private final IotProductMapper productMapper = mock(IotProductMapper.class);
     private final IotServiceMapper serviceMapper = mock(IotServiceMapper.class);
+    private final IotCommandMapper commandMapper = mock(IotCommandMapper.class);
     private final IotPointMappingMapper mappingMapper = mock(IotPointMappingMapper.class);
     private final TenantLedgerService ledgerService = mock(TenantLedgerService.class);
     private final IotPointMappingServiceImpl service = new IotPointMappingServiceImpl(
-        deviceMapper, propertyMapper, productMapper, serviceMapper, ledgerService);
+        deviceMapper, propertyMapper, productMapper, serviceMapper, commandMapper, ledgerService);
 
     @BeforeAll
     static void initTableInfo() {
@@ -866,5 +869,125 @@ class IotPointMappingServiceImplTest {
         assertThat(resp.getRegisterFormat()).isEqualTo("bits");
         assertThat(resp.getBitOffset()).isEqualTo(3);
         assertThat(resp.getBitLength()).isEqualTo(5);
+    }
+
+    // ---------- M-3：命令点位（ref_type=command） ----------
+
+    @Test
+    @DisplayName("★ M-3 命令点位：command 映射通过校验并落库（property_id=命令 ID、refType=command）")
+    void commandMappingShouldBeAcceptedAndPersisted() {
+        stubPublishedProduct();
+        when(commandMapper.selectById(2000L)).thenReturn(command(2000L, SERVICE_ID));
+
+        service.create(commandRequest());
+
+        ArgumentCaptor<IotPointMapping> captor = ArgumentCaptor.forClass(IotPointMapping.class);
+        verify(mappingMapper).insert(captor.capture());
+        assertThat(captor.getValue().getRefType()).isEqualTo("command");
+        assertThat(captor.getValue().getPropertyId()).isEqualTo(2000L);
+        assertThat(captor.getValue().getRawAddress()).isEqualTo("40001");
+        assertThat(captor.getValue().getAddressType()).isEqualTo("holding");
+    }
+
+    @Test
+    @DisplayName("★ M-3 命令点位：命令不存在 / 产品未发布 / 命令不属于本产品 → 拒绝且不落库")
+    void invalidCommandReferenceShouldBeRejected() {
+        // ① 命令不存在
+        stubPublishedProduct();
+        when(commandMapper.selectById(2000L)).thenReturn(null);
+        assertThatThrownBy(() -> service.create(commandRequest()))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("命令不存在");
+
+        // ② 产品未发布
+        IotDevice device = new IotDevice();
+        device.setId(DEVICE_ID);
+        device.setProductId(PRODUCT_ID);
+        when(deviceMapper.selectById(DEVICE_ID)).thenReturn(device);
+        IotProduct draft = new IotProduct();
+        draft.setId(PRODUCT_ID);
+        draft.setModelStatus("draft");
+        when(productMapper.selectById(PRODUCT_ID)).thenReturn(draft);
+        when(commandMapper.selectById(2000L)).thenReturn(command(2000L, SERVICE_ID));
+        assertThatThrownBy(() -> service.create(commandRequest()))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("必须引用已发布版本的命令");
+
+        // ③ 命令挂在别的产品的服务上
+        stubPublishedProduct();
+        IotService foreignService = new IotService();
+        foreignService.setId(SERVICE_ID);
+        foreignService.setProductId(999L);
+        when(serviceMapper.selectById(SERVICE_ID)).thenReturn(foreignService);
+        when(commandMapper.selectById(2000L)).thenReturn(command(2000L, SERVICE_ID));
+        assertThatThrownBy(() -> service.create(commandRequest()))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("命令不属于设备所绑定产品的物模型");
+
+        verify(mappingMapper, never()).insert(any(IotPointMapping.class));
+    }
+
+    @Test
+    @DisplayName("★ M-3 命令点位是下行写点：缩放/字序/多寄存器/有符号/位域/寄存器形态一律拒绝（不静默忽略）")
+    void commandReadDecodeFieldsShouldBeRejected() {
+        stubPublishedProduct();
+        when(commandMapper.selectById(2000L)).thenReturn(command(2000L, SERVICE_ID));
+
+        IotPointMappingReq scale = commandRequest();
+        scale.setScaleFactor(new BigDecimal("0.1"));
+        assertThatThrownBy(() -> service.create(scale))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("不支持缩放");
+
+        IotPointMappingReq byteOrder = commandRequest();
+        byteOrder.setByteOrder("big");
+        assertThatThrownBy(() -> service.create(byteOrder))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("byte_order");
+
+        IotPointMappingReq wordCount = commandRequest();
+        wordCount.setWordCount(2);
+        assertThatThrownBy(() -> service.create(wordCount))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("word_count");
+
+        IotPointMappingReq signed = commandRequest();
+        signed.setSigned(Boolean.TRUE);
+        assertThatThrownBy(() -> service.create(signed))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("signed");
+
+        IotPointMappingReq format = commandRequest();
+        format.setRegisterFormat("float");
+        assertThatThrownBy(() -> service.create(format))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("register_format");
+
+        IotPointMappingReq bits = commandRequest();
+        bits.setBitOffset(0);
+        bits.setBitLength(1);
+        assertThatThrownBy(() -> service.create(bits))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("bit_offset");
+
+        verify(mappingMapper, never()).insert(any(IotPointMapping.class));
+    }
+
+    @Test
+    @DisplayName("★ 服务层直调：refType 非法（非 property|command）→ 拒绝（不能只靠 DTO @Pattern）")
+    void illegalRefTypeShouldBeRejected() {
+        stubPublishedProduct();
+        IotPointMappingReq req = request(DEVICE_ID, PROPERTY_ID, "RW");
+        req.setRefType("event");
+
+        assertThatThrownBy(() -> service.create(req))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("关联类型非法");
+        verify(mappingMapper, never()).insert(any(IotPointMapping.class));
+    }
+
+    private static IotCommand command(Long id, Long serviceId) {
+        IotCommand command = new IotCommand();
+        command.setId(id);
+        command.setServiceId(serviceId);
+        command.setIdentifier("setTemp");
+        return command;
+    }
+
+    private static IotPointMappingReq commandRequest() {
+        IotPointMappingReq req = request(DEVICE_ID, 2000L, "W");
+        req.setRefType("command");
+        return req;
     }
 }

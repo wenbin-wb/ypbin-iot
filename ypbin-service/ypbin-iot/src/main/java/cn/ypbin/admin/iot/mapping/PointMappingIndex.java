@@ -11,6 +11,7 @@ package cn.ypbin.admin.iot.mapping;
 
 import cn.ypbin.admin.iot.entity.IotPointMapping;
 import cn.ypbin.admin.iot.entity.IotProperty;
+import cn.ypbin.admin.iot.enums.PointRefType;
 import cn.ypbin.admin.iot.mapper.IotPointMappingMapper;
 import cn.ypbin.admin.iot.mapper.IotPropertyMapper;
 import cn.ypbin.starter.tenant.core.TenantContext;
@@ -36,6 +37,10 @@ import org.springframework.stereotype.Component;
  * 批量取回被引用的属性行（主键 + {@code identifier}）——最多两次查询，与设备数/点位数无关。
  * 空入参（{@code deviceIds} 为空）与「映射为空」都**先判空短路**：不做 {@code IN ()}、
  * 不发第二次查询、不抛异常。</p>
+ *
+ * <p><b>只认属性点位（M-3，2026-10-13）</b>：查询条件显式带 {@code ref_type=property}——命令点位
+ * （{@code ref_type=command}）是下行写点，不产出读数坐标；混进来会让命令标识进入入站成员校验
+ * （命令点位污染时序/最新值）。</p>
  *
  * <p><b>规范坐标 = 属性标识（{@code iot_property.identifier}）</b>（2026-09-26 统一）。
  * 历史遗留形态是**属性主键字符串**
@@ -216,6 +221,9 @@ public class PointMappingIndex {
             Wrappers.<IotPointMapping>lambdaQuery()
                 .select(IotPointMapping::getDeviceId, IotPointMapping::getPropertyId)
                 .in(IotPointMapping::getDeviceId, deviceIds)
+                // M-3：坐标索引只认**属性点位**。命令点位（ref_type=command）是下行写点，不是读数坐标；
+                // 放进这里会让命令标识参与入站成员校验（污染时序/最新值），必须显式排除。
+                .eq(IotPointMapping::getRefType, PointRefType.PROPERTY.getCode())
                 // 显式排序（2026-09-26，独立复核建议）：`aliasesOf` 声称「有序」，而历史形态的相对顺序
                 // 若跟随 DB 行序（无 ORDER BY 时不保证）就会出现「同一条查询的 SQL 谓词在不同次运行里顺序不同」。
                 // 按主键升序把顺序钉死，代价是一次可走主键的排序。

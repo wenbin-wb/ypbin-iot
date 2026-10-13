@@ -20,6 +20,7 @@ import cn.ypbin.admin.iot.emqx.EmqxPublishResult;
 import cn.ypbin.admin.iot.entity.IotCommand;
 import cn.ypbin.admin.iot.entity.IotCommandInstance;
 import cn.ypbin.admin.iot.entity.IotDevice;
+import cn.ypbin.admin.iot.entity.IotPointMapping;
 import cn.ypbin.admin.iot.entity.IotProperty;
 import cn.ypbin.admin.iot.entity.IotService;
 import cn.ypbin.admin.iot.enums.AccessMode;
@@ -27,9 +28,11 @@ import cn.ypbin.admin.iot.enums.CommandErrorCode;
 import cn.ypbin.admin.iot.enums.CommandInstanceStatus;
 import cn.ypbin.admin.iot.enums.CommandKind;
 import cn.ypbin.admin.iot.enums.CommandSource;
+import cn.ypbin.admin.iot.enums.PointRefType;
 import cn.ypbin.admin.iot.mapper.IotCommandInstanceMapper;
 import cn.ypbin.admin.iot.mapper.IotCommandMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
+import cn.ypbin.admin.iot.mapper.IotPointMappingMapper;
 import cn.ypbin.admin.iot.mapper.IotPropertyMapper;
 import cn.ypbin.admin.iot.mapper.IotServiceMapper;
 import cn.ypbin.admin.iot.model.req.CommandQuery;
@@ -139,6 +142,8 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
 
     private final IotCommandInstanceMapper instanceMapper;
 
+    private final IotPointMappingMapper pointMappingMapper;
+
     private final EmqxAdminClient emqxAdminClient;
 
     private final EmqxProperties emqxProperties;
@@ -162,6 +167,7 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
     public CommandInstanceServiceImpl(IotDeviceMapper deviceMapper, IotServiceMapper serviceMapper,
                                       IotPropertyMapper propertyMapper, IotCommandMapper commandMapper,
                                       IotCommandInstanceMapper instanceMapper,
+                                      IotPointMappingMapper pointMappingMapper,
                                       EmqxAdminClient emqxAdminClient, EmqxProperties emqxProperties,
                                       ObjectMapper objectMapper, IotShadowService shadowService,
                                       MeterRegistry meterRegistry) {
@@ -170,6 +176,7 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
         this.propertyMapper = propertyMapper;
         this.commandMapper = commandMapper;
         this.instanceMapper = instanceMapper;
+        this.pointMappingMapper = pointMappingMapper;
         this.emqxAdminClient = emqxAdminClient;
         this.emqxProperties = emqxProperties;
         this.objectMapper = objectMapper;
@@ -215,6 +222,8 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
         JsonNode paramsNode = CommandPayloads.readObjectOrNull(paramsJson, objectMapper);
         ThingModel model = loadThingModel(device.getProductId());
         Target target = resolveTarget(kind, model, req.getIdentifier());
+        // M-3：service_call 命中命令点位映射时，把目标协议物理点随下行 payload 携带（未配置则为 null）
+        CommandPayloads.ResolvedPoint point = resolveCommandPoint(kind, deviceId, target.commandId());
         int timeoutMs = req.getTimeoutMs() == null
             ? emqxProperties.getDefaultCommandTimeoutMs() : req.getTimeoutMs();
         String requestId = nextRequestId();
@@ -222,7 +231,7 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
         // ⚠️ payload 用 target.identifier()（**不是 label**）：property_get 不带标识时它是 null ⇒
         //    payload 里是空数组（"全部可读属性"），而实例列里记的是审计标签 all-properties
         String payload = CommandPayloads.build(kind, requestId, target.payloadId(), paramsJson,
-            objectMapper);
+            point, objectMapper);
 
         IotCommandInstance row = new IotCommandInstance();
         row.setId(IdWorker.getId());
@@ -774,6 +783,42 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
                     + LogSanitizer.sanitize(identifier));
         }
         return new Target(identifier, identifier, null);
+    }
+
+    /**
+     * 解析命令点位（M-3）：{@code service_call} 命中 {@code ref_type=command} 的**启用**映射时，
+     * 返回目标协议物理点；未配映射返回 {@code null}（payload 保持 §7.6 B2 契约不变）。
+     *
+     * <p>多条启用映射 = 配置有歧义 ⇒ **发布之前**显式业务错误（不静默挑一条，否则写错寄存器）。</p>
+     *
+     * @param kind      类型
+     * @param deviceId  设备 ID
+     * @param commandId 物模型命令定义 ID（{@code iot_command.id}；非服务调用为 {@code null}）
+     * @return 命令点位；未配置时 {@code null}
+     */
+    private CommandPayloads.ResolvedPoint resolveCommandPoint(CommandKind kind, Long deviceId,
+                                                              Long commandId) {
+        if (kind != CommandKind.SERVICE_CALL || commandId == null) {
+            return null;
+        }
+        List<IotPointMapping> mappings = pointMappingMapper.selectList(
+            Wrappers.<IotPointMapping>lambdaQuery()
+                .eq(IotPointMapping::getDeviceId, deviceId)
+                .eq(IotPointMapping::getRefType, PointRefType.COMMAND.getCode())
+                .eq(IotPointMapping::getPropertyId, commandId)
+                .eq(IotPointMapping::getEnabled, Boolean.TRUE)
+                .orderByAsc(IotPointMapping::getId));
+        if (mappings.isEmpty()) {
+            return null;
+        }
+        if (mappings.size() > 1) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "该设备的命令点位映射不唯一（" + mappings.size()
+                    + " 条启用映射），无法确定下发地址；请清理重复映射");
+        }
+        IotPointMapping mapping = mappings.get(0);
+        return new CommandPayloads.ResolvedPoint(mapping.getRawAddress(), mapping.getAddressType(),
+            mapping.getRw());
     }
 
     /**

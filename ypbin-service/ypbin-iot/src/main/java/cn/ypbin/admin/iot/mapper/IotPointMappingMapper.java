@@ -21,8 +21,11 @@ import org.apache.ibatis.annotations.Select;
  */
 public interface IotPointMappingMapper extends BaseMapper<IotPointMapping> {
 
+    /** 点位映射的关联类型：属性。命令点位（{@code ref_type=command}）没有 {@code iot_property} 行，不算孤儿。 */
+    String REF_TYPE_PROPERTY = "property";
+
     /**
-     * 统计**孤儿映射**行数：映射行仍在，但它引用的 {@code iot_property} 行已不存在（或被逻辑删除）。
+     * 统计**属性**孤儿映射行数：映射行仍在，但它引用的 {@code iot_property} 行已不存在（或被逻辑删除）。
      *
      * <p><b>为什么需要它</b>：物模型重导入（{@code IotThingModelServiceImpl#replaceTsl}）会**物理删除**
      * {@code iot_property} 行，而 {@code iot_point_mapping} 行不会跟着消失 ⇒ 库里会累积悬空引用。
@@ -42,10 +45,14 @@ public interface IotPointMappingMapper extends BaseMapper<IotPointMapping> {
      * <p>租户插件会给两侧表追加租户条件；调用方在跨租户巡检路径上必须显式
      * {@code TenantContext.executeIgnore}（否则 fail-closed 直接抛）。</p>
      *
-     * @return 孤儿映射行数
+     * <p><b>只统计属性点位（M-3）</b>：命令点位关联的是 {@code iot_command}，天然没有 {@code iot_property}
+     * 行；若不限定 {@code ref_type}，每条命令点位都会被算成孤儿，把 gauge 抬大、误导运维。（命令点位自身的
+     * 孤儿判定不在本口径内。）</p>
+     *
+     * @return 属性孤儿映射行数
      */
     @Select("SELECT COUNT(*) FROM iot_point_mapping m LEFT JOIN iot_property p"
         + " ON p.id = m.property_id AND p.is_deleted = 0"
-        + " WHERE m.is_deleted = 0 AND p.id IS NULL")
+        + " WHERE m.is_deleted = 0 AND m.ref_type = '" + REF_TYPE_PROPERTY + "' AND p.id IS NULL")
     long countOrphanMappings();
 }

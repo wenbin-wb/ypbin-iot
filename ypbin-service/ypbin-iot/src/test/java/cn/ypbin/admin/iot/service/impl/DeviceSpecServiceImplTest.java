@@ -290,4 +290,29 @@ class DeviceSpecServiceImplTest {
         property.setDataType(dataType);
         return property;
     }
+
+    @Test
+    @DisplayName("★ M-3：设备规格只下发属性点位（点位查询必须带 ref_type='property'，命令点位不得下发给接入侧）")
+    void commandMappingsMustBeExcludedFromDeviceSpec() {
+        when(deviceMapper.selectList(any())).thenReturn(List.of(device(100L)));
+        AtomicReference<String> sqlSegment = new AtomicReference<>();
+        AtomicReference<String> params = new AtomicReference<>();
+        when(mappingMapper.selectList(any())).thenAnswer(invocation -> {
+            LambdaQueryWrapper<IotPointMapping> wrapper = invocation.getArgument(0);
+            // 先渲染 SQL 段（参数在渲染时才登记，见同文件 status 过滤用例的注意事项）
+            sqlSegment.set(wrapper.getSqlSegment());
+            params.set(wrapper.getParamNameValuePairs().toString());
+            return List.of();
+        });
+
+        service.listByTenant(TENANT);
+
+        assertThat(sqlSegment.get())
+            .as("点位查询必须引用 ref_type 列（否则命令点位会被当成属性点下发给接入侧）")
+            .contains("ref_type");
+        assertThat(params.get())
+            .as("过滤值必须是 property")
+            .contains("property")
+            .doesNotContain("command");
+    }
 }
