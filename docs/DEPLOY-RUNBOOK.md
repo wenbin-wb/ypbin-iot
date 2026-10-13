@@ -337,7 +337,7 @@ code_auth() { curl -s -H "Authorization: Bearer $T" "$1" | python3 -c 'import sy
 
 | # | 核验项 | 命令 | 期望 | 不满足说明什么 |
 |---|---|---|---|---|
-| C7.1 | 【iot 18084】access→iot 指标上报 | `curl -s http://127.0.0.1:18084/actuator/metrics/iot.platform_alert.access.report.lag` | 稳态 ≈ 15000ms（一个上报周期）；`-1` = 从未收到 | ≥45s ⇒ `PLATFORM_INSTANCE_UNREACHABLE`（`deploy/PROD-OPS-NOTES.md` §12）。⚠️ `iot.platform_alert.*` 是否在当前（升级前）jar 中存在，2026-10-13 的实测**未单独点名**（那次点名的是 `iot.timeseries.*`/`iot.ingest.*`/`iot.alert.*`）⇒ 升级前若 404，按 §C.0 ③ 处理：用 jar md5 + 重启计数判升级，**不要**据此判「上报链路断了」 |
+| C7.1 | 【iot 18084】access→iot 指标上报 | `curl -s http://127.0.0.1:18084/actuator/metrics/iot.platform_alert.access.report.lag` | 稳态 ≈ 15000ms（一个上报周期）；`-1` = 从未收到 | ≥45s ⇒ `PLATFORM_INSTANCE_UNREACHABLE`（`deploy/PROD-OPS-NOTES.md` §12）。✅ **已核实存在**（2026-10-13 生产只读实测补测）：旧 jar 的 18084 指标名里有 **`iot.platform_alert.*` 7 条**（`access.report.lag` / `firing` / `notify.send` / `notify.succeeded` / `notify.failed` …）与 **`iot.lease.*` 3 条**（`expired` / `revoked` / `takeover`）⇒ 该指标**升级前后都存在**，所以**升级后若在此仍是 404/取不到，才是真信号**（不要再用「旧 jar 可能还没有这个指标」来解释）。 |
 | C7.2 | 【access 18086】上报链路失败 | access：`curl -s http://127.0.0.1:18086/actuator/metrics/iot.access.metrics.report.failure` | 期望 0 | 增长 ⇒ 推送断、平台侧相关规则判「不可判定」（`docs/METRICS.md` §2.7） |
 | C7.3 | 【systemd】喂数停摆看门狗 | `systemctl --failed`；`journalctl -u feeder-watch.service --since -30min --no-pager \| grep -E '判定: (ALERT\|无法求值)'` | 无输出 / 单元非 failed | 命中 ⇒ 停摆或判据不可求值（`deploy/PROD-OPS-NOTES.md` §5.1；注意实际周期 ≈17–20 分钟，§5.3） |
 
