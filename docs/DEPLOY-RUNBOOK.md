@@ -104,11 +104,15 @@ sha256sum -c <(grep '\.jar$' jars.manifest.sha256)
 # ② 核对「制品来自哪个 commit」：清单首部的 # git: 必须 == 你要部署的提交
 head -3 jars.manifest.sha256
 git -C <repo> rev-parse HEAD
+
+# 或一键完成①②（并断言恰好 6 个 jar）：
+#   deploy/verify-release-artifacts.sh --dir . --git "$(git -C <repo> rev-parse HEAD)"
 ```
 
 - ⚠️ **发版前提**：工作流只给「`project.version` == tag 名（去 `v`）且不含 `SNAPSHOT`」的提交产制品；
   本仓继承的 upstream `v1.0.0` tag（2026-08-28、`1.0.0-SNAPSHOT`）**不是**可部署制品（`docs/DEPLOY-BACKEND.md` §2.0）。
-- ⚠️ SBOM 是**依赖清单**，**不是漏洞扫描**（漏洞门禁见 issue #237，`docs/DEPLOY-BACKEND.md` §2.0 边界）。
+- ⚠️ SBOM 是**依赖清单**，**不是漏洞扫描**；依赖漏洞门禁已落地（`.github/workflows/dependency-vuln-gate.yml`，
+  OWASP Dependency-Check，CVSS ≥ 7 判红）——见 `docs/OPS-DEPENDENCY-VULN-GATE.md` 与 `docs/DEPLOY-BACKEND.md` §2.0。
 
 ### A.5 先做一次备份（回滚物）
 
@@ -437,7 +441,7 @@ deploy/restore.sh --mysql ... --iotdb ... --yes
 | **镜像制品化（GHCR / tar）** | Release 已产 jar + sha256 + SBOM；镜像仍由部署机 `docker compose build` | `docs/DEPLOY-BACKEND.md` §2.0 边界；审计登记 issue **#234**（镜像制品化剩余） |
 | **K8s / HA / 多副本** | 仓内只有 docker compose 编排，无 K8s manifests；多实例告警评估分布式锁未做 | `deploy/docker-compose.yml`；`README.md`「未做」（多实例告警锁） |
 | **外部 EMQX / 隧道 / 入口中间件机** | 不在本 compose 内 | `deploy/emqx/*`；`docs/EMQX-INGRESS-DESIGN.md` |
-| **SBOM = 漏洞扫描？** | **不是**：SBOM 只是依赖清单 | `docs/DEPLOY-BACKEND.md` §2.0；issue #237（漏洞门禁） |
+| **SBOM = 漏洞扫描？** | **不是**：SBOM 只是依赖清单；依赖漏洞门禁已另立（OWASP Dependency-Check，CVSS ≥ 7 判红） | `docs/DEPLOY-BACKEND.md` §2.0；`docs/OPS-DEPENDENCY-VULN-GATE.md` |
 | **明文 1883 收紧 / 限来源 / 限流** | 8883 已启用；1883 收回未做 | `README.md`「未做」 |
 | **协议/解码未支持面** | IEEE754 双精度、BADC/DCBA、有符号位域、字符串寄存器跨区等 | `docs/VALUE-DECODE-DESIGN.md` §4.2/§4.3.6/§4.4.9/§4.5.5 |
 | **MySQL/IoTDB 恢复演练** | 脚本已具备，**真机恢复未验证** | `deploy/PROD-OPS-NOTES.md` §13.3/§13.4 |
