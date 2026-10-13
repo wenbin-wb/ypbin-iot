@@ -704,3 +704,75 @@ bash /opt/ypbin/token-rotation-<TS>/rollback-<TS>.sh
 脚本做四件事：① 还原 `deploy/.env`（轮换后版本留档）；② 还原两处**非运行 admin 旧栈**的 `.env`；
 ③ 把 7 份「轮换前」的 live 快照原样重发到 Nacos；④ 按 `nacos → gateway → auth → system → iot`
 逐个重启并等就绪。**前提是 `$W/before/` 未被删除**——它就是回滚原料。
+
+## 6. 保留策略运维：开关 + 手工触发一轮清理（issue #227）
+
+**背景**：断档事件与维护窗口按保留天数清理（D0.8，默认 396 天 ≈ 13 个月），此前**只能靠定时器**
+（`ypbin.retention.cleanup-interval-ms`，默认 24h；首次延迟 `initial-delay-ms` 默认 5 分钟）。
+运维既不能「立即清一次」，也无法在需要时「临时关停」——本节的开关与内部端点补上这两件事。
+
+### 6.1 开关：`ypbin.retention.enabled`
+
+| 值 | 行为 | 出处 |
+|---|---|---|
+| `true`（默认） | 到点自动清理；手工触发会真正执行 | `deploy/nacos/ypbin-iot.yaml` 的 `retention.enabled`；`RetentionProperties` |
+| `false` | 定时与手工触发**都不删数据**；每轮只打一条 WARN（「断档事件与维护窗口会无限增长」）；孤儿映射巡检**照跑**（只读） | `RetentionCleanupServiceImpl#cleanupOnce`；`IotRetentionConfiguration#afterPropertiesSet` |
+
+> 关闭清理**不会**关闭孤儿映射巡检（`iot.pointmapping.orphan`）——它是只读计数，与不可逆删除解耦。
+
+### 6.2 手工触发：`POST /internal/retention/cleanup`
+
+- **谁能访问**：仅内网/回环 + 内部令牌。路径在 `/internal/**` 下，由 `InternalTokenGuardWebConfig` 的
+  `InternalTokenGuardInterceptor` 统一保护：必须带请求头 **`X-Internal-Token`**（值 = `ypbin.internal.token`
+  = `deploy/.env` 的 `INTERNAL_TOKEN`）；凭证未配置或错误 ⇒ fail-closed 拒绝（HTTP 200 + `R.code=401`）。
+  该端点**不绑定登录态/权限码**（内部面没有登录态，与既有 `Internal*Controller` 同一约定）。
+- **语义**：**只跑一轮、同步执行**——返回响应时这一轮已经结束，不是排队/异步 fire-and-forget。
+- **防重入**：定时任务与手工触发共用同一服务方法，用 JVM 内 `AtomicBoolean` 保证**同一时刻只跑一轮**；
+  并发触发时后到者返回 `executed=false, skipReason=already-running`，**不会**再删一轮。
+  （边界如实登记：该守卫只覆盖单实例；多副本部署需分布式锁，当前未做。）
+
+**curl 示例**（在部署机回环上执行；令牌从 `deploy/.env` 读入变量，**不要**把令牌写进命令行/日志）：
+
+```bash
+cd /opt/ypbin/ypbin-iot
+TOKEN=$(sed -n 's/^INTERNAL_TOKEN=//p' deploy/.env | head -1)
+curl -sS -X POST http://127.0.0.1:18084/internal/retention/cleanup \
+  -H "X-Internal-Token: $TOKEN"
+```
+
+> ⚠️ 直连 iot（18084）而不是经网关：`/internal/**` 不在网关路由内（网关只路由 `/iot/**`），
+> 且 18084 默认只绑回环。本仓业务响应恒 HTTP 200 + `R.code`；**判断「跑没跑」看 `data.executed`，不要看 HTTP 状态码**。
+
+**返回字段怎么读**：
+
+```json
+{"code":200,"success":true,"data":{
+  "executed":true,"skipReason":"none",
+  "outageEvents":5,"maintenanceWindows":3,"totalDeleted":8,"durationMs":42}}
+```
+
+| 字段 | 含义 |
+|---|---|
+| `executed` | **唯一权威**：这一轮是否真正执行了删除 |
+| `skipReason` | 未执行原因码：`none` / `disabled` / `invalid-config` / `already-running` |
+| `outageEvents` / `maintenanceWindows` | 本次删除的断档事件 / 维护窗口行数 |
+| `totalDeleted` | 删除总行数 |
+| `durationMs` | 本轮耗时（毫秒） |
+
+| 响应形态 | 含义 | 处置 |
+|---|---|---|
+| `executed=true` | 已执行一轮（删除行数见上） | 正常 |
+| `executed=false, skipReason="disabled"` | 开关 `ypbin.retention.enabled=false`，**未删任何数据** | 要清理就先在 Nacos 打开开关（并等生效/重启） |
+| `executed=false, skipReason="invalid-config"` | 保留天数 ≤ 0（防「清空全表」），**拒绝执行** | 修 `outage-event-days` / `maintenance-window-days` |
+| `executed=false, skipReason="already-running"` | 上一轮（定时或手工）还没结束，防重入跳过 | 稍后重试 |
+| `R.code=500` | 删除阶段异常（**如实报错，不吞**） | 看 `docker logs ypbin-iot` 的 ERROR 堆栈；闸门已释放，可重试 |
+| `R.code=401` | 内部令牌缺失/错误/未配置 | 核对 `deploy/.env` 的 `INTERNAL_TOKEN` 与请求头 |
+
+### 6.3 风险提示（必须知道）
+
+- **不可回滚**：删除的是断档事件/维护窗口历史行，没有软删、没有 undo；误删只能靠 `deploy/restore.sh` 的
+  MySQL 备份做**整库恢复**（恢复本身是破坏性的，且跨组件时间点可能不同，见 `deploy/PROD-OPS-NOTES.md` §13.4）。
+- **删除不即时**：「过期」按**数据库时钟**与配置天数计算，且跨界行**保守留到下一次**（宁可多留不可误删）；
+  单轮**只删已闭合**的行（`end_ts IS NOT NULL`）——进行中的断档/维护窗口是活数据，删掉会让可用率 fail-open。
+- **手工触发是同步动作**：大表首次清理可能耗时较长；它与其它清理互斥（防重入），但不阻塞采集/上报。
+- **只管 MySQL 的事件数据**：IoTDB 原始时序的保留由表模型 TTL 承担，不在本清理范围内。

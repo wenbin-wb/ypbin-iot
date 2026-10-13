@@ -794,6 +794,7 @@ UI/OpenAPI → business(core.device)
 | 开放 API | `/openapi/**` | API Key 认证 |
 | 内部 | `/internal/lease/**` | 租约（已落地，仅 access） |
 | 内部 | `/internal/device-credential/verify` | 设备凭据校验（已落地，2026-09-27；供排障与将来 EMQX HTTP 认证源使用，见 `docs/DEVICE-CREDENTIAL.md`） |
+| 内部（运维） | `/internal/retention/cleanup` | 手工触发**一轮**数据保留清理（同步返回删除行数/耗时/开关是否拦下；`X-Internal-Token` 守卫，见 `docs/DEPLOY-BACKEND.md` §6） |
 | 内部（入站适配） | `/internal/mqtt/**` | EMQX 上行入站适配端点（`POST /internal/mqtt/readings`）—— **唯一允许返回真 HTTP 状态码的内部端点**，见下方专条 |
 | 通用 | 统一 HTTP 200 + `R.code`；集合永不 null；分页 `PageResult`；时间 `yyyy-MM-dd HH:mm:ss`（GMT+8）；Long 转字符串 | 母仓铁律 |
 
