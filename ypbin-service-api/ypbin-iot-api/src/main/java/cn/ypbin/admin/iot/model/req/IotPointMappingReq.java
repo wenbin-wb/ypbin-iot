@@ -66,7 +66,7 @@ public class IotPointMappingReq {
     @Digits(integer = 14, fraction = 6, message = "缩放偏移超出精度范围")
     private BigDecimal offsetValue;
 
-    /** 字序（word order）：big=高字在前 / little=低字在前；仅 Modbus word_count=2 生效。 */
+    /** 字序（word order）：big=高字在前 / little=低字在前；仅 Modbus int+word_count=2 或 float 生效，其余场景非空即拒绝。 */
     @Pattern(regexp = "big|little", message = "字序非法（应为 big|little）")
     private String byteOrder;
 

@@ -169,11 +169,10 @@ public class IotPointMappingServiceImpl extends BaseServiceImpl<IotPointMappingM
     /**
      * 寄存器解码 v1 的映射校验（{@code word_count}/{@code signed}）。
      *
-     * <p><b>新字段严格 / 旧字段宽容</b>（有意的不对称，见 {@code docs/VALUE-DECODE-DESIGN.md} §4.3.2）：
-     * {@code word_count}/{@code signed} 是本版新增、语义明确 ⇒ 非适用场景（非 Modbus、位类型、非整型
-     * {@code dataType}、多寄存器非显式地址）一律 fail-fast；{@code byte_order} 是既有自由文本列、历史从未
-     * 被消费 ⇒ 只在真正生效的场景（Modbus + {@code word_count=2}）由 {@code @Pattern} 校验 {@code big|little}，
-     * 其余场景**忽略**（避免因一个没人看过的旧值把编辑历史行拦下）。</p>
+     * <p><b>统一严格</b>（2026-10-13 收紧，见 {@code docs/VALUE-DECODE-DESIGN.md} §4.3.2）：
+     * {@code word_count}/{@code signed} 非适用场景（非 Modbus、位类型、非整型 {@code dataType}、
+     * 多寄存器非显式地址）一律 fail-fast；{@code byte_order} 也统一严格——只在「Modbus int+word_count=2」
+     * 或「float」真正生效，其余场景非空即拒绝（此前「历史宽容」的理由已不成立）。</p>
      *
      * @param device   设备（提供协议码）
      * @param property 属性（提供 dataType）
@@ -242,6 +241,7 @@ public class IotPointMappingServiceImpl extends BaseServiceImpl<IotPointMappingM
     private void validateStringFormat(IotPointMappingReq req, int wordCount, boolean signed,
                                       Integer bitOffset, Integer bitLength, ThingModelDataType dataType,
                                       IotProperty property) {
+        rejectByteOrderIfPresent(req);
         if (signed) {
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
                 "register_format=string 不支持有符号（signed 必须为 false）：请清空或置 false");
@@ -268,6 +268,10 @@ public class IotPointMappingServiceImpl extends BaseServiceImpl<IotPointMappingM
     private void validateIntFormat(IotDevice device, IotProperty property, IotPointMappingReq req,
                                    int wordCount, boolean signed, ThingModelDataType dataType,
                                    boolean modbus, boolean registerType) {
+        if (wordCount != 2) {
+            // byteOrder 仅在 int+word_count=2（或 float）真正生效；其余场景非空即拒绝
+            rejectByteOrderIfPresent(req);
+        }
         if (wordCount == 1 && !signed) {
             // 默认 = 旧行为：不触发任何新字段校验（传统 5 位编号照常可用）
             return;
@@ -317,6 +321,7 @@ public class IotPointMappingServiceImpl extends BaseServiceImpl<IotPointMappingM
     private void validateBitsFormat(IotPointMappingReq req, int wordCount, boolean signed,
                                     Integer bitOffset, Integer bitLength, ThingModelDataType dataType,
                                     IotProperty property) {
+        rejectByteOrderIfPresent(req);
         if (wordCount != 1) {
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
                 "register_format=bits 要求 word_count=1（单寄存器位域），当前=" + wordCount
@@ -347,6 +352,25 @@ public class IotPointMappingServiceImpl extends BaseServiceImpl<IotPointMappingM
         } else if (dataType != ThingModelDataType.INT && dataType != ThingModelDataType.LONG) {
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
                 "register_format=bits 且 bit_length>1 要求属性类型是 int/long，当前=" + property.getDataType());
+        }
+    }
+
+    /**
+     * {@code byte_order} 统一严格校验（2026-10-13 收紧，见 docs/VALUE-DECODE-DESIGN.md §4.3.2）：
+     * 只在「Modbus {@code int}+{@code word_count=2}」或「{@code float}」真正生效；其余场景非空即拒绝。
+     *
+     * <p>此前「历史宽容」的理由（可能有脏数据）已不成立（开发阶段、无真实对接）。</p>
+     *
+     * @param req 映射请求
+     * @throws BusinessException 非生效场景却携带非空 byteOrder
+     */
+    private static void rejectByteOrderIfPresent(IotPointMappingReq req) {
+        String byteOrder = req.getByteOrder();
+        if (byteOrder != null && !byteOrder.isBlank()) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "字序（byte_order）仅在 Modbus int+word_count=2 或 float 形态生效：请清空该字段"
+                    + "（当前 register_format=" + req.getRegisterFormat() + " word_count="
+                    + req.getWordCount() + "）");
         }
     }
 

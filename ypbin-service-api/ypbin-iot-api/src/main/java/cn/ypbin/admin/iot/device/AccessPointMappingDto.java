@@ -59,7 +59,7 @@ public class AccessPointMappingDto {
     /** 线性偏移（可空）。 */
     private BigDecimal offsetValue;
 
-    /** 字序（word order）：big | little（可空）；仅 Modbus word_count=2 生效。 */
+    /** 字序（word order）：big | little（可空）；仅 Modbus int+word_count=2 或 float 生效。 */
     private String byteOrder;
 
     /** 连续寄存器个数（int/float: 1|2；bits: 1；string: 1..32；默认 1）。仅 Modbus 寄存器点位生效。 */
