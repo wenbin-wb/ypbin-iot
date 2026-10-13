@@ -36,6 +36,7 @@ import cn.ypbin.admin.iot.emqx.EmqxPublishResult;
 import cn.ypbin.admin.iot.entity.IotCommand;
 import cn.ypbin.admin.iot.entity.IotCommandInstance;
 import cn.ypbin.admin.iot.entity.IotDevice;
+import cn.ypbin.admin.iot.entity.IotPointMapping;
 import cn.ypbin.admin.iot.entity.IotProperty;
 import cn.ypbin.admin.iot.entity.IotService;
 import cn.ypbin.admin.iot.enums.CommandInstanceStatus;
@@ -43,6 +44,7 @@ import cn.ypbin.admin.iot.enums.CommandSource;
 import cn.ypbin.admin.iot.mapper.IotCommandInstanceMapper;
 import cn.ypbin.admin.iot.mapper.IotCommandMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
+import cn.ypbin.admin.iot.mapper.IotPointMappingMapper;
 import cn.ypbin.admin.iot.mapper.IotPropertyMapper;
 import cn.ypbin.admin.iot.mapper.IotServiceMapper;
 import cn.ypbin.admin.iot.model.req.CommandSendReq;
@@ -100,6 +102,8 @@ class CommandInstanceServiceImplTest {
 
     private IotCommandInstanceMapper instanceMapper;
 
+    private IotPointMappingMapper pointMappingMapper;
+
     private EmqxAdminClient emqxAdminClient;
 
     private IotShadowService shadowService;
@@ -118,6 +122,7 @@ class CommandInstanceServiceImplTest {
         TableInfoHelper.initTableInfo(assistant, IotProperty.class);
         TableInfoHelper.initTableInfo(assistant, IotService.class);
         TableInfoHelper.initTableInfo(assistant, IotCommand.class);
+        TableInfoHelper.initTableInfo(assistant, IotPointMapping.class);
     }
 
     @BeforeEach
@@ -127,12 +132,13 @@ class CommandInstanceServiceImplTest {
         propertyMapper = mock(IotPropertyMapper.class);
         commandMapper = mock(IotCommandMapper.class);
         instanceMapper = mock(IotCommandInstanceMapper.class);
+        pointMappingMapper = mock(IotPointMappingMapper.class);
         emqxAdminClient = mock(EmqxAdminClient.class);
         shadowService = mock(IotShadowService.class);
         meterRegistry = new SimpleMeterRegistry();
         service = new CommandInstanceServiceImpl(deviceMapper, serviceMapper, propertyMapper,
-            commandMapper, instanceMapper, emqxAdminClient, new EmqxProperties(), new ObjectMapper(),
-            shadowService, meterRegistry);
+            commandMapper, instanceMapper, pointMappingMapper, emqxAdminClient, new EmqxProperties(),
+            new ObjectMapper(), shadowService, meterRegistry);
     }
 
     @Test
@@ -719,6 +725,88 @@ class CommandInstanceServiceImplTest {
         assertThat(resp.getStatusCode()).isEqualTo(CommandInstanceStatus.FAILED.getCode());
         // C1 核心断言：insert 已提交（若仍在旧事务里，此行会被回滚 ⇒ 该校验无意义，故显式断言 insert 发生）
         verify(instanceMapper, times(1)).insert(any(IotCommandInstance.class));
+    }
+
+    // ---------- M-3：命令点位映射解析 ----------
+
+    @Test
+    @DisplayName("★ M-3：service_call 命中命令点位映射 ⇒ 下行 payload 携带 point（地址/类型/方向），并照常投递")
+    void serviceCallWithCommandMappingMustCarryPoint() {
+        stubDeviceAndThingModel();
+        when(pointMappingMapper.selectList(any())).thenReturn(List.of(commandMapping(1L, "holding:7")));
+        when(emqxAdminClient.publish(any(), any(), anyInt(), anyBoolean()))
+            .thenReturn(new EmqxPublishOutcome(EmqxPublishResult.DELIVERED, "msg-1"));
+
+        CommandInstanceResp resp = service.send(DEVICE,
+            req("service_call", "setTemp", Map.of("target", 26)), CommandSource.CONSOLE, 1L);
+
+        assertThat(resp.getPayload()).contains("\"point\":{")
+            .contains("\"rawAddress\":\"holding:7\"")
+            .contains("\"addressType\":\"holding\"")
+            .contains("\"rw\":\"W\"");
+        assertThat(resp.getPayload()).contains("\"params\":{\"target\":26}");
+        verify(emqxAdminClient).publish(any(), any(), anyInt(), anyBoolean());
+    }
+
+    @Test
+    @DisplayName("★ M-3：未配命令点位映射 ⇒ payload 不含 point（§7.6 B2 契约逐字不变）")
+    void serviceCallWithoutCommandMappingKeepsContract() {
+        stubDeviceAndThingModel();
+        when(emqxAdminClient.publish(any(), any(), anyInt(), anyBoolean()))
+            .thenReturn(new EmqxPublishOutcome(EmqxPublishResult.DELIVERED, "msg-1"));
+
+        CommandInstanceResp resp = service.send(DEVICE,
+            req("service_call", "setTemp", Map.of("target", 26)), CommandSource.CONSOLE, 1L);
+
+        assertThat(resp.getPayload()).doesNotContain("point");
+        assertThat(resp.getPayload()).contains("\"params\":{\"target\":26}");
+    }
+
+    @Test
+    @DisplayName("★ M-3：同一命令多条启用映射（配置歧义）⇒ 业务错误且**绝不发布**（不静默挑一条写错寄存器）")
+    void ambiguousCommandMappingMustBeRejectedBeforePublish() {
+        stubDeviceAndThingModel();
+        when(pointMappingMapper.selectList(any())).thenReturn(List.of(
+            commandMapping(1L, "holding:1"), commandMapping(2L, "holding:2")));
+
+        assertThatThrownBy(() -> service.send(DEVICE, req("service_call", "setTemp", Map.of()),
+            CommandSource.CONSOLE, 1L))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("不唯一");
+        verify(emqxAdminClient, never()).publish(any(), any(), anyInt(), anyBoolean());
+        verify(instanceMapper, never()).insert(any(IotCommandInstance.class));
+    }
+
+    @Test
+    @DisplayName("★ M-3：property_set 不解析命令点位（命令点位只服务 service_call，属性走物模型）")
+    void propertySetMustNotResolveCommandMapping() {
+        stubDeviceAndThingModel();
+        when(emqxAdminClient.publish(any(), any(), anyInt(), anyBoolean()))
+            .thenReturn(new EmqxPublishOutcome(EmqxPublishResult.DELIVERED, "msg-1"));
+
+        service.send(DEVICE, req("property_set", "temperature", Map.of("value", 1)),
+            CommandSource.CONSOLE, 1L);
+
+        verifyNoInteractions(pointMappingMapper);
+    }
+
+    /**
+     * 构造命令点位映射行（{@code ref_type=command}，property_id = 物模型命令 ID 200）。
+     *
+     * @param id      映射 ID
+     * @param address 协议地址
+     * @return 映射
+     */
+    private static IotPointMapping commandMapping(Long id, String address) {
+        IotPointMapping mapping = new IotPointMapping();
+        mapping.setId(id);
+        mapping.setDeviceId(DEVICE);
+        mapping.setPropertyId(200L);
+        mapping.setRefType("command");
+        mapping.setRawAddress(address);
+        mapping.setAddressType("holding");
+        mapping.setRw("W");
+        return mapping;
     }
 
     /**

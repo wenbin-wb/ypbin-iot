@@ -25,6 +25,7 @@ import cn.ypbin.admin.iot.mapping.PointMappingIndex.DeviceCoordinates;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.conditions.Wrapper;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import java.util.List;
 import java.util.Map;
@@ -152,6 +153,26 @@ class PointMappingIndexTest {
         assertThat(captor.getValue().getSqlSegment())
             .as("映射查询的 SQL 片段必须含 ORDER BY（否则 aliasesOf 的顺序会跟随不保证的 DB 行序）")
             .containsIgnoringCase("order by");
+    }
+
+    @Test
+    @DisplayName("★ M-3：坐标索引只取属性点位（查询条件必须带 ref_type='property'，命令点位不得进读数坐标）")
+    void commandMappingsMustBeExcludedFromCoordinateIndex() {
+        when(pointMappingMapper.selectList(any())).thenReturn(List.of());
+
+        index.loadCoordinates(Set.of(DEVICE_A));
+
+        ArgumentCaptor<LambdaQueryWrapper<IotPointMapping>> captor =
+            ArgumentCaptor.forClass(LambdaQueryWrapper.class);
+        verify(pointMappingMapper).selectList(captor.capture());
+        // 先渲染 SQL 段：MyBatis-Plus 在渲染时才把参数登记进 paramNameValuePairs（与 DeviceSpecServiceImplTest 同款）
+        assertThat(captor.getValue().getSqlSegment())
+            .as("WHERE 必须引用 ref_type 列（否则命令点位会混进读数坐标，污染时序/最新值）")
+            .contains("ref_type");
+        assertThat(captor.getValue().getParamNameValuePairs().toString())
+            .as("过滤值必须是 property")
+            .contains("property")
+            .doesNotContain("command");
     }
 
     @Test

@@ -79,6 +79,24 @@ class CommandPayloadsTest {
         JsonNode node = mapper.readTree(CommandPayloads.build(CommandKind.SERVICE_CALL, "cmd-4",
             "setTemp", "{\"target\":26}", mapper));
         assertThat(node.get("params").get("target").asInt()).isEqualTo(26);
+        assertThat(node.has("point")).as("未命中命令点位时不得出现 point（契约逐字不变）").isFalse();
+    }
+
+    @Test
+    @DisplayName("M-3：service_call 携带命令点位 ⇒ payload 增加 point（rawAddress/addressType/rw；rw 为空则省略）")
+    void serviceCallPayloadWithPoint() {
+        JsonNode node = mapper.readTree(CommandPayloads.build(CommandKind.SERVICE_CALL, "cmd-5",
+            "setTemp", "{\"target\":26}",
+            new CommandPayloads.ResolvedPoint("holding:7", "holding", "W"), mapper));
+        assertThat(node.get("params").get("target").asInt()).isEqualTo(26);
+        assertThat(node.get("point").get("rawAddress").asString()).isEqualTo("holding:7");
+        assertThat(node.get("point").get("addressType").asString()).isEqualTo("holding");
+        assertThat(node.get("point").get("rw").asString()).isEqualTo("W");
+
+        JsonNode noRw = mapper.readTree(CommandPayloads.build(CommandKind.SERVICE_CALL, "cmd-6",
+            "setTemp", "{\"target\":26}",
+            new CommandPayloads.ResolvedPoint("holding:7", "holding", null), mapper));
+        assertThat(noRw.get("point").has("rw")).as("rw 为空时省略键，不输出 null").isFalse();
     }
 
     @Test
