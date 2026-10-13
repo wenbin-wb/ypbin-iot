@@ -116,7 +116,7 @@
 | `iot.lease.insert_skipped` | Counter | 首次分配批量 `INSERT IGNORE` 时被唯一键跳过的归属行数（含「软删归属行占住唯一键」这一静默失效形态，M3） | **期望 0**；增长 ⇒ 有租户可能被静默跳过：先查该租户是否有软删归属行，再看是否多副本并发抢先 | LeaseServiceImpl.java |
 | `iot.timeseries.value.type_missing` | Counter | 落库时该属性**取不到物模型 `data_type`**，或同一归一标识出现**类型冲突** ⇒ 该读数**丢弃**（不猜、不落文本兜底） | **期望 0**；增长 ⇒ 物模型缺失/被改坏，或点位标识在不同产品下类型不一致：先查 `iot_property.data_type` | AvailabilityServiceImpl.java |
 | `iot.timeseries.value.not_numeric` | Counter | 属性声明为**数值类型**（int/long/decimal）但读数**无法解析为数值**（如 `"abc"`）⇒ 丢弃 + 节流 WARN | **期望 0**；增长 ⇒ 设备/映射把非数值送到数值点（建模或解码配置错） | AvailabilityServiceImpl.java |
-| `iot.timeseries.value.precision_lost` | Counter | 属性声明为**整数型**且值超出 `\|v\| ≤ 2^53`（`value_double` 无法精确表示）⇒ **仍写 `value_double`**（保住"同一属性同一列"不变量）+ 节流 WARN | **期望 0**；增长 ⇒ 该属性应建模为 **`string`**（用 `long` 承载 ID/序列号会静默近似） | AvailabilityServiceImpl.java |
+| `iot.timeseries.value.precision_lost` | Counter | 属性声明为**整数型**且 `\|v\| > 2^53`（`value_double` 无法精确表示）⇒ **仍写 `value_double`**（保住"同一属性同一列"不变量）+ 节流 WARN | **期望 0**；增长 ⇒ 该属性应建模为 **`string`**（用 `long` 承载 ID/序列号会静默近似） | AvailabilityServiceImpl.java |
 
 > 说明：该指标产在 **ypbin-iot** 服务（租约分配路径），既不在本清单原本的 ypbin-access 范围，
 > 也不经 access→iot 指标快照上报；此处只做**登记**（名字/口径/注册位置）。

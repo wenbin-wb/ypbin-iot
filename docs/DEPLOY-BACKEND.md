@@ -380,9 +380,10 @@ env INTERNAL_BIND_ADDR=0.0.0.0 <其余必填键...> \
 **判据（与 §5.4 完全一致，判据必须看响应体）**：
 
 ```bash
-# ✅ 指标清单可读，且含 iot.access.value.normalize.failure（3 个 reason 标签）
+# ✅ 指标清单可读，且含 iot.access.value.normalize.failure（5 个 reason 标签：
+#    not-numeric / not-boolean / unknown-data-type / non-finite / not-utf8；见 docs/METRICS.md §2.6）
 curl -s http://127.0.0.1:18086/actuator/metrics | python3 -c 'import sys,json;print([n for n in json.load(sys.stdin)["names"] if n.startswith("iot.access")])'
-# ✅ 零值可观测（实测：3 个 reason 全为 0.0）
+# ✅ 零值可观测（实测口径：**逐个 reason 都为 0.0**；reason 集见上，2026-10-13 起为 5 个）
 curl -s http://127.0.0.1:18086/actuator/metrics/iot.access.value.normalize.failure
 # ✅ 敏感端点必须**没有暴露**（看响应体是不是 404 业务信封，别看状态码）
 for e in env configprops heapdump threaddump beans loggers mappings; do
@@ -438,7 +439,7 @@ docker logs --since 5m ypbin-access 2>&1 | grep -iE 'ConfigurationProperties|Bin
 curl -s http://127.0.0.1:18086/actuator/metrics/iot.access.value.normalize.failure
 curl -s http://127.0.0.1:18086/actuator/metrics/iot.access.egress.invalid
 # ④ 端到端：某已知键值帧设备的点位仍 GOOD 且有新行（iot 侧；替换 deviceId/propertyId）
-curl -s 'http://127.0.0.1:18084/iot/devices/9300012/series?propertyId=temperature&limit=5'
+curl -s 'http://127.0.0.1:18084/devices/9300012/series?propertyId=temperature&limit=5'
 ```
 **判据**：`iot.access.egress.invalid` 不增长、`iot.access.value.normalize.failure` 为 0、
 `/series` 有新数值点（曲线可画）；若 `iot.access.egress.invalid` 增长 ⇒ 配置没切到 key-value（SDK 仍 binary）。
