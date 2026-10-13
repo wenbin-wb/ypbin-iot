@@ -1,0 +1,64 @@
+name: Central Resolution Build
+
+# 为什么需要本工作流（审计 issue #233 的实质风险）：
+# admin 既有的 `ci.yml` 在**断言**「本仓 pom 的 `ypbin-starter.version` == starter 最新 Release」之后，
+# 却 **checkout starter 的 `master` 源码并本地 install** 来构建。于是「声明的版本」与「实际用来编译的代码」
+# 是两回事：若 master 上已有、而 Release 里还没有的 API 被本仓使用，`ci.yml` 会**假绿**——
+# 换一台干净机器（只从 Maven Central 解析依赖，例如我们的发布制品工作流/任何外部使用者）就会编译失败。
+#
+# 本工作流专门堵这个洞：**不取任何源码依赖**，只用 Maven Central 上**已发布**的制品构建。
+# ⇒ 「声明版本可解析、且代码只用到了该版本里存在的 API」变成一条机器门禁。
+#
+# 为什么是**独立新工作流**而不是改 `ci.yml`：按 `SYNC.md` 第二节，admin 的既有工作流（ci/codeql/release）
+# 属"明确不动"（改它们会扩大与 upstream 的分歧面）；新增独立文件不产生同步冲突点——本仓既有做法。
+#
+# 成本与边界：这是一次**完整编译**（不跑测试，`-DskipTests`），约几分钟；只覆盖"能否用已发布制品构建"，
+# 不替代 ci.yml 的单测/架构门禁，也不替代发布流水线（那里同样用 Central 解析，见 release-artifacts.yml）。
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  central-only-build:
+    name: 仅用 Central 已发布制品构建（防"用了未发布 API"假绿）
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置 JDK 21（带 Maven 缓存）
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: 打印声明依赖版本（便于日志追溯）
+        run: |
+          set -euo pipefail
+          echo "ypbin-starter.version = $(grep -oP '(?<=<ypbin-starter.version>)[^<]+' pom.xml)"
+          echo "ypbin-iot.version     = $(grep -oP '(?<=<ypbin-iot.version>)[^<]+' ypbin-service/ypbin-access/pom.xml || true)"
+
+      # 关键：**不做任何本地 install / 不 checkout starter 源码**，全靠 Central 解析。
+      - name: 仅解析 Central 制品并编译
+        run: mvn -B -DskipTests -Djacoco.skip=true package
+
+      - name: 自检 6 个服务可执行 jar 都产出了
+        run: |
+          set -euo pipefail
+          n=0
+          for f in ypbin-gateway/target/*.jar ypbin-auth/target/*.jar ypbin-service/*/target/*.jar; do
+            [ -f "$f" ] || continue
+            case "$f" in *-sources.jar|*javadoc.jar|*.original) continue;; esac
+            if ! jar tf "$f" | grep -q '^BOOT-INF/'; then
+              echo "::error file=$f::$f 不是 Spring Boot 可执行归档"
+              exit 1
+            fi
+            n=$((n + 1))
+          done
+          echo "可执行归档数：$n"
+          [ "$n" -eq 6 ] || { echo "::error::期望 6 个服务 jar，实际 $n"; exit 1; }
