@@ -69,6 +69,29 @@
 - **部署文档同步**（`docs/microservice-deployment.md`）：XXL-JOB 初始口令改为指向 `.env` 的
   `XXL_JOB_ADMIN_PASSWORD`，不再写"默认 admin/123456"。
 
+### 变更（需协调升级）
+
+- **接入侧切到 starter 0.3.0 `payload-format=key-value`（帧内字段选择 / valueSelector），并删除帧解析过渡层**
+  （`ypbin-service/ypbin-access/**`、`deploy/nacos/ypbin-access.yaml`、`docs/VALUE-DECODE-DESIGN.md`）：
+  - `ypbin-iot.version` 0.2.0 → **0.3.0**；两处配置（Nacos `ypbin-access.yaml` + access `application.yml`）新增
+    `ypbin.iot.protocol.tcp.payload-format: key-value`；
+  - **删除** `cn.ypbin.admin.access.decode`（`ValueDecoder` / `TextFrameValueDecoder` / `DecodeFailure` /
+    `DecodeOutcome` / `DecodeFailureMetrics` + 2 个测试）与解码器 bean/注入；UTF-8、`KEY=VALUE` 拆分、按
+    `raw_address`（= selector）取键现由 SDK `TcpValueSelector` 承担；
+  - **保留**宿主「物模型类型规范化」（新 `cn.ypbin.admin.access.egress.PointValueNormalizer`，与删除前的
+    `canonicalize` 逐字等价）：SDK 明确不做类型转换，而 `AccessReading.applyScale` 只吃 `Number`/`BigDecimal`、
+    iot 侧 `ReadingValueMapper` 按词法落列 ⇒ 直接删会让 `scale/offset` 静默失效（读数错值）、bool `1/0` 落列改变。
+    `raw_address` 作为帧键的约定不变；
+  - **指标**：`iot.access.decode.failure` 下线（帧/选择失败由 SDK `iot.tcp.selector.not-found` /
+    `iot.tcp.payload.not-key-value` / `iot.tcp.payload.not-utf8` 承接）；新增
+    `iot.access.value.normalize.failure`（reason=`not-numeric`/`not-boolean`/`unknown-data-type`），已登记 `docs/METRICS.md`；
+  - **⚠️ 升级前置（会丢读数或起不来）**：**jar 与 `payload-format=key-value` 必须一起切**——
+    新 jar + 未配 key-value（SDK 默认 `binary`）⇒ 整帧 `byte[]` 被出口闸门丢弃 ⇒ **读数全丢**；
+    旧 jar（0.2.0）+ `key-value` ⇒ 0.2.0 无 `KEY_VALUE` 枚举 ⇒ **绑定失败起不来**。
+    协调切换顺序与核验见 `docs/DEPLOY-BACKEND.md` §5.8；
+  - 订阅形态**保持逐点位单地址**（key-value 下仍合法），多地址单订阅（减少 N 倍帧解析）登记为文档待办；
+  - **无 SQL 迁移**（无表结构变化）。
+
 ### 新增
 
 - **数据备份/恢复工具链**（`deploy/backup.sh`、`deploy/restore.sh`、`deploy/backup.service`/`backup.timer`、

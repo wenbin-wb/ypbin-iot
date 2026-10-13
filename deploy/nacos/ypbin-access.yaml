@@ -26,6 +26,15 @@ spring:
         size: 2
 
 ypbin:
+  # TCP 透传入站载荷格式：key-value = 帧为 KEY=VALUE 文本，SDK 用订阅地址（raw_address = selector）
+  # 从同一帧里为每个点位取值（starter 0.3.0 的 valueSelector）。
+  # ⚠️ **升级前置条件（必须与本键同时生效）**：不配本键会退回 SDK 默认 binary（整帧 byte[] 交付），
+  #    而宿主已不再做帧解析 ⇒ 读数全部丢失。已上线环境重导本 Data ID 或手工加键的升级顺序见
+  #    docs/DEPLOY-BACKEND.md「接入侧 key-value 升级前置」。
+  iot:
+    protocol:
+      tcp:
+        payload-format: key-value
   # 出站内部凭证：与 iot 的 /internal/lease/** 守卫共用同一个值（未配置 ⇒ 服务端 fail-closed 拒绝）
   internal:
     token: ${INTERNAL_TOKEN}
@@ -78,13 +87,13 @@ ypbin:
     # ---------- 可观测（Spring Boot Actuator，2026-09-27 新增，对齐 ypbin-iot.yaml）----------
     # 为什么要有这一段：access 已经带了大量指标（iot.access.egress.* / iot.access.lease.* /
     # iot.access.config.* / iot.access.subscribe.* / iot.access.spec.* / iot.access.connection.* /
-    # iot.access.decode.failure），但 `/actuator/metrics` 默认不暴露（Spring Boot 4.1.1 的
+    # iot.access.value.normalize.failure），但 `/actuator/metrics` 默认不暴露（Spring Boot 4.1.1 的
     # management.endpoints.web.exposure.include 默认只有 health）⇒ 生产只能翻 WARN 日志、看不到计数趋势。
     # 指标清单（口径/建议关注/注册位置）见 docs/METRICS.md；R8-2 的 tick/对账耗时看
     # iot.access.lease.tick.duration 与 iot.access.config.reconcile.duration 的 max。
 
 # R8-2 对账时间预算：预算用尽后本轮剩余「需远端取数」的租户推迟到下一 tick（不丢）。
-# 上一轮新增的 iot.access.decode.failure 正是这个缺口：它只在 WARN 里可见。
+# 上一轮新增的 iot.access.value.normalize.failure 正是这个缺口：它只在 WARN 里可见。
 #
 # ⚠️ 安全边界（与 ypbin-iot.yaml 同一口径，改前务必读完）：
 #   1) **只开只读且必要的最小集合，绝不用 `*`**：`*` 会连带 env / configprops / heapdump /

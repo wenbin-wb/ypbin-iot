@@ -17,14 +17,15 @@ import org.junit.jupiter.api.Test;
 /**
  * **跨模块契约**：接入侧（access）解码输出的字符串形态 → 时序表的列选择。
  *
- * <p>为什么需要这个用例（而不是只靠各自的单测）：解码在 access 模块、列选择在 iot 模块，
+ * <p>为什么需要这个用例（而不是只靠各自的单测）：规范化在 access 模块、列选择在 iot 模块，
  * 两个模块**没有编译期依赖**，靠的是「字符串形态」这一个隐式契约。这里把契约钉死：
- * access 的 {@code TextFrameValueDecoder} 对数值点输出干净数值串（如 {@code "23.5"}），
- * 只有如此 {@link ReadingValueMapper} 才会把它写进 {@code value_double}（曲线才画得出来）；
+ * access 的 {@code PointValueNormalizer}（starter {@code payload-format=key-value} 交付文本后
+ * 的宿主类型规范化）对数值点输出干净数值串（如 {@code "23.5"}），只有如此
+ * {@link ReadingValueMapper} 才会把它写进 {@code value_double}（曲线才画得出来）；
  * 文本点（{@code serialNo} 这类，含前导零）必须仍然走 {@code value_text}。</p>
  *
- * <p>形态来源：access 单测 {@code TextFrameValueDecoderTest} / {@code AccessReadingMappingTest}
- * （那里断言了「解码后 {@code String.valueOf(value)} 是纯数值串」）。</p>
+ * <p>形态来源：access 单测 {@code PointValueNormalizerTest} / {@code AccessReadingMappingTest}
+ * （那里断言了「规范化后 {@code String.valueOf(value)} 是纯数值串」）。</p>
  *
  * @author wenbin
  * @since 2026-09-27

@@ -80,11 +80,17 @@
 | `iot.access.egress.invalid` | Counter | 上报内容非法（被上游拒绝） | **期望 0**；增长 ⇒ 编码/口径 bug | HttpAccessReadingSink.java |
 | `iot.access.egress.pending` | Gauge | 当前缓冲区内待上报条数 | 稳态接近 0；**持续高位 = 上报跟不上采集** | HttpAccessReadingSink.java |
 
-### 2.6 解码
+### 2.6 值规范化（原「解码」；2026-10-13 随 starter 0.3.0 切分职责）
+
+> **指标变更登记（2026-10-13）**：`iot.access.decode.failure` 已随「帧解析过渡层」删除而**下线**
+> （其注册文件 `DecodeFailureMetrics.java` 已删除）。其中「非 UTF-8 / 无键值字段 / selector 未命中」
+> 三类失败由 starter 0.3.0 `payload-format=key-value` 的 `TcpValueSelector` 以 **BAD 质量** +
+> `iot.tcp.*` 指标（如 `iot.tcp.selector.not-found` / `iot.tcp.payload.not-key-value` /
+> `iot.tcp.payload.not-utf8`）承接，宿主原样穿透、不再重复计数；「类型规范化」三类失败由下表新指标承接。
 
 | 指标 | 类型 | 口径（何时变化） | 建议关注 / 阈值 | 注册文件 |
 |---|---|---|---|---|
-| `iot.access.decode.failure` | Counter（按 `reason` 标签） | 值解码失败（标签取值集合有界） | **期望 0**；出现即按 `reason` 定位点位类型/字节序 | DecodeFailureMetrics.java |
+| `iot.access.value.normalize.failure` | Counter（按 `reason` 标签：`not-numeric` / `not-boolean` / `unknown-data-type`） | 宿主物模型类型规范化失败（SDK 只做字段选择、不做类型转换，故这三类只能由宿主发现） | **期望 0**；出现即按 `reason` 定位点位 `data_type` 与设备帧内容 | PointValueNormalizeMetrics.java |
 
 ### 2.7 指标上报链路（access → iot 平台自告警）
 

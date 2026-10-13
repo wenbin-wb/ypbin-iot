@@ -298,8 +298,8 @@ curl -s -m 5 -o /dev/null -w '%{http_code}\n' http://113.142.217.58:18084/actuat
 
 **为什么必须补**：access 本来就带了一整套指标（`iot.access.egress.*` / `iot.access.lease.*` /
 `iot.access.config.*` / `iot.access.subscribe.*` / `iot.access.spec.*` / `iot.access.connection.*` /
-`iot.access.decode.failure`），但 `management.endpoints.web.exposure.include` 默认只有 `health`
-⇒ 生产里它们**只能靠 WARN 日志看**。上一轮新增的 `iot.access.decode.failure` 正是这个缺口的实例。
+`iot.access.value.normalize.failure`），但 `management.endpoints.web.exposure.include` 默认只有 `health`
+⇒ 生产里它们**只能靠 WARN 日志看**。`iot.access.value.normalize.failure`（2026-10-13 由 `iot.access.decode.failure` 更名而来）正是这个缺口的实例。
 
 配置落在 `deploy/nacos/ypbin-access.yaml`（Data ID `ypbin-access.yaml`），键与 §5.1 逐字相同：
 
@@ -335,17 +335,17 @@ env INTERNAL_BIND_ADDR=0.0.0.0 <其余必填键...> \
 ```
 
 **指标零值也要可观测（本轮新增的代码改动）**：Micrometer 计数器是**惰性**创建的，若把建 meter 留在
-失败路径里，「一条都没失败过」时 `/actuator/metrics/iot.access.decode.failure` 会回 **404 而不是 0**，
-值班无法区分「没有解码失败」与「指标没上报」。因此 access 启动期会把 `iot.access.decode.failure`
-按全部原因码**预注册为 0**（`AccessMetricsConfiguration` + `DecodeFailureMetrics`），失败路径只自增。
+失败路径里，「一条都没失败过」时 `/actuator/metrics/iot.access.value.normalize.failure` 会回 **404 而不是 0**，
+值班无法区分「没有规范化失败」与「指标没上报」。因此 access 启动期会把 `iot.access.value.normalize.failure`
+按全部原因码**预注册为 0**（`AccessMetricsConfiguration` + `PointValueNormalizeMetrics`），失败路径只自增。
 
 **判据（与 §5.4 完全一致，判据必须看响应体）**：
 
 ```bash
-# ✅ 指标清单可读，且含 iot.access.decode.failure（8 个 reason 标签）
+# ✅ 指标清单可读，且含 iot.access.value.normalize.failure（3 个 reason 标签）
 curl -s http://127.0.0.1:18086/actuator/metrics | python3 -c 'import sys,json;print([n for n in json.load(sys.stdin)["names"] if n.startswith("iot.access")])'
-# ✅ 零值可观测（实测：8 个 reason 全为 0.0）
-curl -s http://127.0.0.1:18086/actuator/metrics/iot.access.decode.failure
+# ✅ 零值可观测（实测：3 个 reason 全为 0.0）
+curl -s http://127.0.0.1:18086/actuator/metrics/iot.access.value.normalize.failure
 # ✅ 敏感端点必须**没有暴露**（看响应体是不是 404 业务信封，别看状态码）
 for e in env configprops heapdump threaddump beans loggers mappings; do
   body="$(curl -s http://127.0.0.1:18086/actuator/$e)"
@@ -362,6 +362,48 @@ done
 > 根因**未查明**（请求跑在虚拟线程上，JRE 镜像里没有 jcmd/虚拟线程 dump 手段）⇒ 登记为未决项。
 > 线上对应的另外两条已知问题（同一窗口观测到，非本次引入）：`NettyChannelConnection: inbound buffer overflow
 > on connection t1-d9300012` 持续增长、`IotLifecycle: failed to bind device` 360 次 —— 已在本轮回执里登记。
+
+### 5.8 接入侧 `payload-format=key-value` 升级前置（2026-10-13，必读）
+
+**背景**：接入侧已切到 starter 0.3.0 的 `ypbin.iot.protocol.tcp.payload-format=key-value`，
+并**删除了帧解析过渡层**（`cn.ypbin.admin.access.decode`）。现在：
+- 帧解析（UTF-8 + `KEY=VALUE` + 按 `raw_address` 取键）由 SDK 承接；
+- 宿主只保留**物模型类型规范化**（`PointValueNormalizer`），它只认 SDK 交付的 `String`；
+- 出口仍有一道「值仍是 `byte[]` 就丢弃」的兜底闸门（`iot.access.egress.invalid`）。
+
+**🔴 两条致命组合（升级顺序错了会丢读数或起不来）**：
+
+| 组合 | 结果 |
+|---|---|
+| **新 jar（0.3.0）+ 旧配置（未配 key-value ⇒ SDK 默认 `binary`）** | SDK 交付整帧 `byte[]` ⇒ 宿主规范化只认 String、原样透传 ⇒ 出口闸门丢弃 ⇒ **该设备读数全丢** |
+| **旧 jar（0.2.0）+ 新配置（`key-value`）** | 0.2.0 的 `TcpPayloadFormat` **没有 `KEY_VALUE` 枚举** ⇒ Spring 绑定失败 ⇒ **access 启动失败/重绑失败** |
+
+⇒ **jar 与配置必须一起切，不能先动任何一个**。推荐**维护窗口内的一次性切换**（access 有状态、单/少副本，
+短暂停采比丢数据/起不来可接受）：
+
+**升级顺序（协调切换）**
+1. 备份：记录当前 access 镜像/ jar 版本与 Nacos `ypbin-access.yaml` 原文（回滚要用）；
+2. **停 access**（`docker compose stop ypbin-access`，或缩容到 0）——避免滚动期出现「新 jar 读旧配置」；
+3. 部署新 jar（0.3.0）+ 导入新 `ypbin-access.yaml`（含 `ypbin.iot.protocol.tcp.payload-format: key-value`）：
+   - 仓库侧文件已含该键；已上线环境需**重导该 Data ID**（install.sh 路径）或**手工在 Nacos 加键**；
+4. 启动 access，按下节核验；
+5. 回滚：恢复旧 jar + 移除/恢复 `payload-format` 键（两者同时），再启动。
+
+**核验（启动后 1~2 个采集周期内）**
+```bash
+# ① 配置真的生效（Nacos 回读；键必须在，值为 key-value）
+curl -s "$NACOS_ADDR/nacos/v1/cs/configs?dataId=ypbin-access.yaml&group=DEFAULT_GROUP" \
+  | grep -E 'payload-format|key-value'
+# ② access 起来了且无绑定错误
+docker logs --since 5m ypbin-access 2>&1 | grep -iE 'ConfigurationProperties|BindException|payload-format' || echo "无绑定错误（OK）"
+# ③ 指标：规范化失败期望 0；出口 byte[] 闸门期望 0（两者任一增长 = 配置/版本没对齐）
+curl -s http://127.0.0.1:18086/actuator/metrics/iot.access.value.normalize.failure
+curl -s http://127.0.0.1:18086/actuator/metrics/iot.access.egress.invalid
+# ④ 端到端：某已知键值帧设备的点位仍 GOOD 且有新行（iot 侧；替换 deviceId/propertyId）
+curl -s 'http://127.0.0.1:18084/iot/devices/9300012/series?propertyId=temperature&limit=5'
+```
+**判据**：`iot.access.egress.invalid` 不增长、`iot.access.value.normalize.failure` 为 0、
+`/series` 有新数值点（曲线可画）；若 `iot.access.egress.invalid` 增长 ⇒ 配置没切到 key-value（SDK 仍 binary）。
 
 ### 5.5 部署脚本的「渲染后配置」不得留在盘上（凭据卫生）
 

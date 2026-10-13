@@ -18,5 +18,11 @@ spring:
 
 # 出站内部凭证（access → iot 的 /internal/lease/**）：未配置时服务端 fail-closed
 ypbin:
+  # TCP 透传入站载荷格式：key-value = SDK 按点位 selector（raw_address）从 KEY=VALUE 帧取值；
+  # 宿主不再做帧解析。⚠️ 不配会退回 SDK 默认 binary（整帧 byte[]）⇒ 读数全丢（升级顺序见 DEPLOY 文档）。
+  iot:
+    protocol:
+      tcp:
+        payload-format: key-value
   internal:
     token: ${INTERNAL_TOKEN:}

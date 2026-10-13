@@ -37,13 +37,22 @@ class IotSeamConventionTest {
     private static final Path REPO_ROOT = Path.of("..").toAbsolutePath().normalize();
 
     /**
-     * 已知的可替换端口（新增端口时同步扩展本清单，并保留「至少扫到一个」的自检）。
+     * 已知的可替换端口（**端口增删时同步维护本清单**，并保留「至少扫到一个」的自检）。
      *
-     * <p>2026-09-27 增补 {@code ValueDecoder}（读数解码钩子，见 `docs/VALUE-DECODE-DESIGN.md`）：
+     * <p><b>2026-09-27 增补 {@code ValueDecoder}</b>（读数解码钩子，见 `docs/VALUE-DECODE-DESIGN.md`）：
      * 它是独立复核曾指出的遗漏——当时文档声称「该接缝由本门禁守着」，但清单里并没有它
- * ⇒ 文档主张大于事实。故此处补上门禁条目，并要求「文档点名 ⇔ 清单存在」双向一致。</p>
+     * ⇒ 文档主张大于事实。故当时补上门禁条目，并要求「文档点名 ⇔ 清单存在」双向一致。</p>
+     *
+     * <p><b>2026-10-13 移除 {@code ValueDecoder}</b>：该端口属「帧解析过渡层」，
+     * 已随 starter v0.3.0 交付 `payload-format=key-value`（valueSelector）而**删除**
+     * （见 `docs/VALUE-DECODE-DESIGN.md` §5）。清单里留着已不存在的端口会让本规则
+     * 「空跑而不自知」——正是 2026-09-27 那条教训的另一面：**文档点名 ⇔ 清单存在**是双向的，
+     * 端口下线时也必须同步摘除。宿主侧的物模型类型规范化（`PointValueNormalizer`）
+     * **不是可替换端口**（它是宿主内部实现、不对外暴露装配接缝），故不进本清单。</p>
+     *
+     * <p>自检仍由 {@code TenantLinkManager} 承担：`scanned` 必须为正，否则本规则是空跑（假绿）。</p>
      */
-    private static final List<String> REPLACEABLE_PORTS = List.of("TenantLinkManager", "ValueDecoder");
+    private static final List<String> REPLACEABLE_PORTS = List.of("TenantLinkManager");
 
     @Test
     @DisplayName("可替换端口的实现不得标 @Component（否则 @ConditionalOnMissingBean 会被静默顶掉）")

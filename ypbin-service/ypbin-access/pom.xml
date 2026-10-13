@@ -15,10 +15,11 @@
     <description>IoT 设备接入单元（有状态、独立部署）：租约驱动的采集与 self-fencing</description>
 
     <properties>
-        <!-- 协议栈框架版本：0.2.0 是**已发布到 Maven Central 的正式版**（2026-09-21，
-             首个真实宿主即本模块）。正式版意味着本仓无需再"从源码安装 SNAPSHOT"，
-             主 CI（ci.yml，admin 拥有、本仓不可改）也能直接解析到——这正是 3b-2 曾被阻塞的原因。 -->
-        <ypbin-iot.version>0.2.0</ypbin-iot.version>
+        <!-- 协议栈框架版本：0.3.0 是**已发布到 Maven Central 的正式版**（2026-10-12），
+             交付了 TCP `payload-format=key-value`（帧内字段选择 / valueSelector）⇒ 接入侧可删除
+             「UTF-8 + KEY=VALUE 拆分」的帧解析过渡层（宿主仍保留物模型类型规范化，见
+             docs/VALUE-DECODE-DESIGN.md §5）。主 CI（ci.yml，admin 拥有、本仓不可改）可直接解析。 -->
+        <ypbin-iot.version>0.3.0</ypbin-iot.version>
     </properties>
 
     <dependencyManagement>

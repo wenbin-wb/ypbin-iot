@@ -155,12 +155,13 @@ UPDATE iot_device SET endpoint = 'tcp://172.20.0.1:19002' WHERE id = 9300012;
   `PointMappingDataListener` 的「未映射地址」WARN——独立复核 grep 该 WARN = **0 条**，不要指望用这条日志判断点位漏配）；
   实测佐证：9300012 的 `humidity`/`serialNo`/`demoBoundary` 在 Redis 里始终停在 09-25 的种子值；
 - ~~值为**原始 `byte[]`**，access 侧不做解码，最终落库是 `String.valueOf(byte[])` 即 `[B@<hash>`。~~
-  **（2026-09-27 已修）** access 侧新增解码层 `cn.ypbin.admin.access.decode`（过渡实现）：TCP 文本帧按
-  `KEY=VALUE` 解析、键由点位映射 `raw_address` 声明，再按物模型 `data_type` 规范化为数值/布尔/文本；
-  解不出来就**丢弃 + 计数 + WARN**（`iot.access.decode.failure{reason=…}`），不再产生 `[B@…`。
-  完整口径、扩展点与**替换路径**见 [`VALUE-DECODE-DESIGN.md`](VALUE-DECODE-DESIGN.md) §5（含框架侧缺口与反哺结果：
-  starter v0.2.0 只交付 `ypbin.iot.protocol.tcp.payload-format`，`valueSelector`/宿主解码 SPI 仍是后续演进项 ⇒
-  **本过渡层必须保留**，删除前置条件是 starter 交付 `valueSelector` 或宿主解码 SPI）。
+  **（2026-09-27 已修）**；**（2026-10-13 收尾）** starter **v0.3.0** 交付 `payload-format=key-value`
+  （valueSelector）后，接入侧已切到该格式并**删除帧解析过渡层** `cn.ypbin.admin.access.decode`：
+  帧的 UTF-8/`KEY=VALUE` 拆分与按 `raw_address` 取键由 SDK `TcpValueSelector` 承担；
+  **物模型类型规范化仍留在宿主**（SDK 明确不做类型转换），由
+  `cn.ypbin.admin.access.egress.PointValueNormalizer` 完成，解不出来就**丢弃 + 计数 + WARN**
+  （`iot.access.value.normalize.failure{reason=…}`）。完整职责切分、删除条件与保留契约见
+  [`VALUE-DECODE-DESIGN.md`](VALUE-DECODE-DESIGN.md) §5。
   演示设备 9300012 的 `raw_address` 已由 `holding:0` 修正为帧键 `TEMP`
   （`deploy/sql/fixes/2026-09-27-iot-demo-tcp-frame-key.sql`，回滚物 `deploy/sql/rollback/2026-09-27-iot-demo-tcp-frame-key-rollback.sql`；
   放 `fixes/` 而非 `migration/`：后者受 SQL 等价门禁约束，本条是运行时数据的订正而非安装脚本的一部分）。
@@ -367,13 +368,14 @@ UPDATE iot_device SET endpoint = 'tcp://172.20.0.1:19002' WHERE id = 9300012;
 `String.valueOf` 字符串化。姊妹模块 MQTT 有 `MqttPayloadFormat` 在协议层解码，**TCP 没有**，
 core 也没有宿主可插的解码 SPI ⇒ 属**框架侧能力缺口**（已按规矩反哺，见 UP-3）。
 
-**本轮修法（过渡实现 B + 反哺 A）**：access 新增解码层
-（`cn.ypbin.admin.access.decode.ValueDecoder` / `TextFrameValueDecoder`）：
-TCP 文本帧按 `KEY=VALUE` 解析、键由点位映射 `raw_address` 声明，再按物模型 `data_type` 规范化为
-数值/布尔/文本；**解不出来就丢弃 + 计数 + WARN**（`iot.access.decode.failure{reason=…}`，脱敏不 dump 载荷），
-出口另有一道「值仍是 `byte[]` 就丢弃」的兜底闸门。演示设备点位 `raw_address` 由 `holding:0` 修正为帧键 `TEMP`。
-**完整口径 / 扩展点 / 未做项 / 替换路径**：见 [`VALUE-DECODE-DESIGN.md`](VALUE-DECODE-DESIGN.md) §5
-（框架侧需求已由 starter v0.2.0 的 `ypbin.iot.protocol.tcp.payload-format` 承接）。
+**最终形态（2026-10-13）**：starter v0.3.0 的 `payload-format=key-value` 承接帧解析
+（UTF-8 + `KEY=VALUE` 拆分 + 按 `raw_address`/selector 取键），接入侧**已删除**帧解析过渡层
+（`cn.ypbin.admin.access.decode`）；**宿主保留**物模型类型规范化
+（`cn.ypbin.admin.access.egress.PointValueNormalizer`，因为 SDK 不做类型转换、且 `applyScale` 只吃
+`Number`/`BigDecimal`）：类型规范化失败**丢弃 + 计数 + WARN**
+（`iot.access.value.normalize.failure{reason=…}`，脱敏不 dump 值），出口另有一道「值仍是 `byte[]` 就丢弃」的兜底闸门。
+演示设备点位 `raw_address` 由 `holding:0` 修正为帧键 `TEMP`。
+**完整职责切分 / 未做项 / starter 反馈**：见 [`VALUE-DECODE-DESIGN.md`](VALUE-DECODE-DESIGN.md) §5。
 
 **当前状态**：生产实测 `iot.reading` 该设备新行 `temperature` 落 `value_double`，
 `GET /iot/devices/9300012/series?propertyId=temperature` 返回**数值点** ⇒ 曲线可画
@@ -430,7 +432,7 @@ iot 重启后**归零**（近 5 分钟 0 条，最后一次 WARN 停在 `09:46:0
 | `iot.timeseries.write.attempted` / `.rows` | 213 → 243（+30/60s） | `rows=933`（与 `/series` 24h 点位数一致） | 与模拟器 2s 节拍一致（=0.5/s） |
 | `iot.timeseries.write.failed` | 0 → 0 | **0** | 无失败 |
 | `iot.ingest.latest.failed` / `iot.ingest.propertyid.orphan` | 0 → 0 | **0 / 0** | 入站无异常 |
-| `iot.access.decode.failure{reason=unknown-data-type}` | 累计 15（全是过渡窗口），近 5 分钟 **0** | 第 2 轮重启后 **0 条** | 不增长 |
+| `iot.access.decode.failure{reason=unknown-data-type}`（**旧指标，2026-10-13 已下线**；现行等价物为 `iot.access.value.normalize.failure`） | 累计 15（全是过渡窗口），近 5 分钟 **0** | 第 2 轮重启后 **0 条** | 不增长 |
 | access 日志 ERROR | — | 近 10 分钟 36 条，**全部**是 `failed to bind device`（11 台不可达演示设备，§6.2 既有噪声）；解码相关 **0**、`读数上报失败` **0** | 无新增异常 |
 
 > ⚠️ **发现（非本次引入）**：`ypbin-access` 的 actuator **只暴露 `health`**（未配

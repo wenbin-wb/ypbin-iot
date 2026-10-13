@@ -18,7 +18,6 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import org.mockito.ArgumentCaptor;
 
-import cn.ypbin.admin.access.decode.TextFrameValueDecoder;
 import cn.ypbin.iot.core.model.DeviceSpec;
 import cn.ypbin.iot.core.model.PointAddress;
 import cn.ypbin.iot.core.model.SubscribeRequest;
@@ -478,7 +477,7 @@ class AccessSubscriptionPlannerTest {
     private AccessSubscriptionPlanner planner(AtomicReference<Map<String, DeviceSession>> bound,
                                               SimpleMeterRegistry meterRegistry) {
         return new AccessSubscriptionPlanner(bound::get, objectMapper, reading -> { },
-            List.of(new TextFrameValueDecoder()), meterRegistry, clock);
+            meterRegistry, clock);
     }
 
     private static DeviceSession subscribeReturnsFuture() {
