@@ -378,10 +378,24 @@ business 变更台账（产品/设备/点位映射/凭据）
 
 | 对象 | 语义 |
 |---|---|
-| `reported` | 设备上报的最新属性值（服务端权威最新值，落 Redis） |
-| `desired` | 平台期望值（命令/配置下发后待设备确认） |
-| 合并规则 | 查询返回 `reported` 优先，无则回退 `desired` 合并视图 |
+| `reported` | 设备上报的最新属性值（服务端权威最新值；值按读数**原值字符串**存，落 `iot_shadow.reported`，Redis 化见 §5.3） |
+| `desired` | 平台期望值。命令 `property_set + writeDesired=true` **投递成功后按属性键合并**写入；`PUT .../shadow` 可整份置换（只写、不下发） |
+| `delta` | 期望与上报的差异：`{k ∈ desired \| reported 缺 k 或值不等价}`；设备补齐上报后该键自动消失（纯读时计算，无后台任务） |
+| 合并规则 | 查询返回 `reported` 优先、无则回退 `desired` 的合并视图；`delta` 用**类型宽容**比较（`"25.0"` 与 `25` 等价，否则设备明明照做却永远清不掉） |
 | 时序 | 影子只存**最新值**；历史走时序库（§5.2）；属性值带 `ts`（采集时刻） |
+
+**desired 三种结果的确定语义（不得静默成功）**
+
+| 设备结果 | 命令实例 | 影子 `desired` |
+|---|---|---|
+| 成功（投递成功，回执 `code=0`） | `sent → succeeded` | 已写入；设备上报匹配后 `delta` 清空（命令状态由**回执**决定，与 `delta` 是两条轴） |
+| 离线（EMQX `202` 无订阅者） | `failed/NO_SUBSCRIBER` | **不写**——设备从未收到，不制造"永远待确认"的假期望 |
+| 超时 / 被设备拒绝 | `timeout` / `failed/DEVICE_REJECTED` | 已写入并保留（命令确实投递过），`delta` 持续显示"期望未达成" |
+
+> **边界（产品口径）**：`PUT /devices/{id}/shadow` 只写期望、**不触发下发**（配置面）；
+> 需要"下发并等设备确认"时走 `POST /devices/{id}/commands` 的 `property_set + writeDesired=true`
+> （复用命令实例/EMQX 发布链路，不新造平行通道）。`writeDesired` 只对 `property_set` 有效，
+> 读属性/服务调用显式拒绝。
 
 影子与 `device` 表、`data_point`（时序）、Redis 最新值的一致性见 §5.3。
 
@@ -661,9 +675,10 @@ UI/OpenAPI → business(core.device)
 
 | 操作 | 语义 |
 |---|---|
-| 读影子 | 返回 reported 优先 + desired 合并视图 |
-| 写 desired | 更新 Redis 影子 + 触发命令/配置下发（异步），设备上报后回填 reported |
-| 属性上报 | 更新 reported + 最新值 + 时序 |
+| 读影子 | 返回 `reported` 优先 + `desired` 合并视图，并给出 `delta`（期望未达成的键） |
+| 下发并写 desired | `property_set + writeDesired=true`：复用命令实例/EMQX 发布链路；**投递成功后**把该属性合并进 desired，设备上报后由 `delta` 反映是否达成 |
+| 写 desired（不下发） | `PUT /devices/{id}/shadow`：整份置换 `desired`，仅配置面写入（不触发下发） |
+| 属性上报 | 更新 `reported` + 最新值 + 时序（`delta` 自动收缩） |
 
 ---
 

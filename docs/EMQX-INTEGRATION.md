@@ -309,8 +309,8 @@ bash deploy/emqx/accept-emqx-ingress.sh \
 `R.code=500`）⇒ Java 侧用 `Object` 接收、由平台重新序列化（数字/空白归一，语义等价）；`params` **必须是对象**
 （否则明确业务错误），`data` 原样存储不解析（字符串就按字符串存）。
 
-**校验时点**：一切校验都在 **publish 之前**——设备存在性 → 端点字段（`writeDesired=true` 本轮**显式拒绝**并指引改用
-既有 `PUT /devices/{id}/shadow`；params ≤64KB 且必须是 JSON 对象）→ 物模型（标识必须在该产品物模型内；
+**校验时点**：一切校验都在 **publish 之前**——设备存在性 → 端点字段（`writeDesired` 只允许 `property_set`，
+其它类型显式拒绝；params ≤64KB 且必须是 JSON 对象）→ 物模型（标识必须在该产品物模型内；
 属性设置要求 `accessMode ∈ {W,RW}`、读属性要求 `∈ {R,RW}`）→ 标识白名单（`PropertyIdRules`，防**主题注入**）。
 任一失败 ⇒ 业务错误且**不发布**（避免"设备动了、平台说没下发"）。
 
@@ -349,7 +349,8 @@ bash deploy/emqx/accept-emqx-ingress.sh \
 > 目前由**前端扇出**成 N 条独立指令（各自 `requestId`、单批上限 20、页面有批次标记与汇总）。
 > **后续由后端多元素支持替换**（设计 §7.3 已允许该形态：`property_set` 的 `properties` 是映射、
 > `property_get` 的是列表），届时前端扇出可收回为单条——本条登记为后端后续项。
-> 另：`writeDesired` 仍是 U-B1（未实现、显式拒绝），前端**不做**那个复选框（避免假按钮）。
+> 另：`writeDesired` 已实现（#225，2026-10-13）：仅 `property_set` 生效，命令**投递成功后**合并写 desired；
+> 前端可以加那个复选框了（此前为避免假按钮不做）。
 
 ### 6.2.2 验收判据（段 B）
 
@@ -358,7 +359,9 @@ bash deploy/emqx/accept-emqx-ingress.sh \
 | 状态机 | 6×6=36 种转换逐个断言（非法被拒）；`failed`/`timeout` 可重发、其余不可 | ✅ `CommandInstanceStatusTest` 4 用例 |
 | 下发成功 | 实例 `pending→sent`；payload/topic 与契约一致；`qos=1`/`retain=false` | ✅ `CommandInstanceServiceImplTest` |
 | 设备未连 | `202` ⇒ **立即** `failed/NO_SUBSCRIBER`（不等超时） | 单测 ✅；**生产实测 ✅（2026-09-27，1072ms ≪ 15000ms，见 §6.2.3）** |
-| 校验不发布 | 未知标识 / 属性不可写 / 未知命令 / 非法 kind / `writeDesired=true` / params 非法 ⇒ 业务错误且 `verify(never()) publish` | ✅ 4 用例 |
+| 校验不发布 | 未知标识 / 属性不可写 / 未知命令 / 非法 kind / `writeDesired` 用于非 `property_set` / params 非法 ⇒ 业务错误且 `verify(never()) publish` | ✅ 用例 |
+| desired 下发 | 投递成功写 desired；离线（无订阅者）**不写**；非 `property_set` 显式拒绝；写失败抛业务错误不静默 | ✅ `CommandInstanceServiceImplTest` |
+| 影子 delta | `delta` 类型宽容比较（`"25"` == `25.0`）；设备补齐后清空；越权/租户隔离拒绝 | ✅ `IotShadowServiceImplTest` + `ShadowValueComparatorTest` |
 | 重发 | 同 requestId、`retry_count+1`、失败原因被清空（显式 set） | ✅ |
 | 回执 | `code=0→succeeded`（`reply_payload` 原样含 data/ts）；非 0→`failed`（保留 code/message）；重复→`duplicated` 不更新；设备不一致/未知 requestId/设备不存在→丢弃 | ✅ 4 用例 |
 | 超时扫描 | 批量一条 UPDATE；候选为空**短路**不打库 | ✅ 2 用例 |
@@ -426,7 +429,7 @@ jar 由**合并后的 main**（`0b6471f`）本地构建后上传部署（生产�
 
 | # | 项 | 现状 |
 |---|---|---|
-| **U-B1** | `writeDesired`（下发同时写影子 desired） | **未实现**：端点显式拒绝并指引改用既有 `PUT /devices/{id}/shadow`（不静默忽略） |
+| **U-B1** | `writeDesired`（下发同时写影子 desired） | ✅ **已实现（#225，2026-10-13）**：仅 `property_set`；命令投递成功后把 `{identifier: value}` 合并进 `iot_shadow.desired`（`JSON_MERGE_PATCH`）；离线（无订阅者）不写；`GET /shadow` 新增 `delta` |
 | **U-B2** | 设备侧持久会话（离线期间的下行排队） | 未做：设备离线时 `202` 即判失败（不排队）。官方默认队列 `max_mqueue_len=1000` 与 `session_expiry_interval=2h` 只在设备**保持会话**时生效，属 P1 与设备侧约定 |
 | **U-B3** | 取消端点（`cancelled` 态） | 状态机已支持 `cancelled`，但**未提供**取消端点（设计 §7.4 未列）；当前该态只能由未来的取消动作产生 |
 | **U-B4** | 自动重试 | **刻意不做**（设备侧不保证幂等）⇒ 只有人工重发 |
