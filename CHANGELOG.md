@@ -12,6 +12,26 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
 ## [未发布]
+### 新增（2026-10-14 批次）
+
+- **消息跟踪二批（issue #221）**：`iot_mqtt_ingest_receipt` 增 6 列（`receipt_status`/`received_count`/`persisted_rows`/`persisted_at`/`discard_reason`/`discard_detail`）+ `(tenant_id, device_id, create_time)` 索引；**整批被拒改为写 `rejected` 行**（此前零痕迹），幂等预查只认 `accepted`、命中 `rejected` 物理删除后按新批次继续；追踪接口新增阶段 `up-persisted`/`up-discarded` 与条目 6 字段。
+- **命令点位映射（issue #224）**：`ref_type=command` 可在创建/校验/查询被接纳，`service_call` 下发按唯一启用映射携带 `point{rawAddress,addressType,rw}`；属性读数/设备规格/孤儿巡检显式排除命令点位。
+- **影子 desired 下发（issue #225）**：`property_set + writeDesired=true` 且命令**投递成功**后合并写 `iot_shadow.desired`（`desired_ts` 只前进）；离线不写（不制造假期望），`delta` 读时计算、类型宽容。
+- **后台任务分布式互斥锁（issue #220）**：新增 `cn.ypbin.admin.iot.lock`（Redis Lua 抢/续/删 + 应用层租约 + 看门狗），6 个单实例任务纳入互斥；保留清理的 JVM 闸门升级为**跨实例锁**（新增跳过原因码 `lock-held-by-other`）。
+- **宿主可插字节载荷解码 SPI（issue #223）**：新增 `cn.ypbin.admin.access.decode`（`BytePayloadDecoder` + 注册表 SSOT + 失败原因码），未注册时行为与今天逐字一致（出口闸门 + `egress.invalid`），注册后解出值走既有规范化/落列；含 MQTT binary 参考实现（默认关闭）。
+- **迁移登记表与升级运行器（防升级静默漏迁移）**：`iot_schema_migration` 登记表 + `deploy/migrate.sh`（`--status`/`--dry-run`/apply/`--baseline`；校验和不一致判红且不自动重放）；`install.sh` 双写账本。**背景**：dev 实测发现 4 个迁移静默未应用导致新 jar 直接 `Unknown column 'word_count'`。
+- **Release 制品一键校验（issue #234）**：`deploy/verify-release-artifacts.sh`（sha256 校验 + 断言 6 jar + 可选 git sha 比对）。
+- **依赖漏洞门禁（issue #237）**：新增 `dependency-vuln-gate.yml`（OWASP Dependency-Check，CVSS ≥ 7 判红；NVD 库按周缓存；空库/冷缓存不静默放行，且失败**自解释**）；`deploy/dependency-check-suppressions.xml`。
+- **可观测栈与 EMQX 能力验证（issue #222/#218/#219）**：`deploy/observability/`（Prometheus + Grafana + Alertmanager + 只读 actuator 桥接器 + 8 条规则 + promtool 单测）；`deploy/emqx/` 收紧配置与隔离实验床、集群方案文档。
+- **上线手册收紧（实测驱动）**：`C2.4` 更正 SDK 指标名（`iot.tcp.*` 实际记在 **`ypbin.iot.errors` 的 `type` 标签**，且宿主可能未启用桥接）；`B.2` 迁移硬步骤（换 jar 前 `migrate.sh --status`）。
+
+### 修复
+
+- **SDK 指标桥在真实宿主从未生效**（`ypbin-iot-starter` 仓）：Boot 4.1.1 中定义 `MeterRegistry` 的是 `CompositeMeterRegistryAutoConfiguration`，原 `afterName` 锚错类且 `@ConditionalOnBean` 在装配期求值 ⇒ 宿主有 actuator 也回退 Noop、**框架指标全部丢弃**（dev 实测每次启动 WARN）。已改为 `ObjectProvider` 实例化期解析（starter 仓修复；本仓需把 `ypbin-iot.version` 升到含该修复的版本后生效）。
+
+### 运维/部署
+
+- dev 环境完成**成对升级**（iot + access 新 jar + `payload-format=key-value` + 4 个缺失迁移），核验：健康 UP、`subscribe.success=1`（每设备一次）、`egress.accepted` 与 `write.rows` 同步增长、Redis 最新值新鲜、落列错误指标全 0、保留清理端点 `executed=true`。部署回执见 dev `/root/deploy-receipt-20261014.md`。
 
 ### 新增
 
