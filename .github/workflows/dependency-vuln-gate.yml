@@ -119,17 +119,35 @@ jobs:
           key: odc-nvd-${{ runner.os }}-${{ steps.cachekey.outputs.week }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: 断言漏洞库可用（防“空库静默放行”）
+        id: assert-db
         run: |
           set -euo pipefail
           db="$ODC_DATA_DIR/odc.mv.db"
-          if [ ! -s "$db" ]; then
-            echo "::error::未找到可用的 NVD 漏洞库（$db）——离线/限流下无法给出可信的依赖漏洞结论，拒绝静默放行。"
-            echo "::error::修复：① 在仓库 Settings -> Secrets and variables -> Actions 配置 NVD_API_KEY（NVD 官网免费申请）；② 重跑本工作流并勾选 update_vulnerability_db=true 预热缓存。"
-            exit 1
+          if [ -s "$db" ]; then
+            echo "漏洞库：$db（$(du -h "$db" | cut -f1)）"
+            echo "db=ok" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
-          echo "漏洞库：$db（$(du -h "$db" | cut -f1)）"
+          # 无库：无法给出可信结论。PR 事件下**不判红**（否则首次运行/缓存失效会把门禁永久卡死），
+          # 但必须**显式**告知「本次未执行扫描」——写 step summary + warning 注解，绝不静默放行；
+          # main / schedule 事件仍 fail-closed（定时任务是真正的强制点）。
+          {
+            echo "### ⚠️ 依赖漏洞门禁本次**未执行**"
+            echo ""
+            echo "未找到可用的 NVD 漏洞库（\`$db\`）——离线/限流下无法给出可信的依赖漏洞结论。"
+            echo ""
+            echo "修复：① 在仓库 Secrets 配置 \`NVD_API_KEY\`（NVD 官网免费申请）；② 手动触发本工作流并勾选 \`update_vulnerability_db=true\` 预热缓存；③ 之后 PR 会命中 main 上保存的缓存。"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "db=missing" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "::warning::NVD 漏洞库不可用：本 PR 未执行依赖漏洞扫描（**不是通过**）。配置 NVD_API_KEY 并预热缓存后即生效。"
+            exit 0
+          fi
+          echo "::error::未找到可用的 NVD 漏洞库（$db）——拒绝静默放行（main/schedule 事件 fail-closed）。"
+          exit 1
 
       - name: 生成依赖漏洞报告（CVSS >= 7 判失败）
+        if: steps.assert-db.outputs.db == 'ok'
         run: |
           set -euo pipefail
           scope_args=()
