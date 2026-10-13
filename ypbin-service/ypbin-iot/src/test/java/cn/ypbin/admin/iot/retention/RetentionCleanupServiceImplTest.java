@@ -14,6 +14,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
@@ -24,6 +25,11 @@ import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
 import cn.ypbin.admin.iot.mapper.OutageEventMapper;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.LocalDateTime;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -80,6 +86,8 @@ class RetentionCleanupServiceImplTest {
         assertThat(result.outageEvents()).isEqualTo(5);
         assertThat(result.maintenanceWindows()).isEqualTo(3);
         assertThat(result.skipped()).isFalse();
+        assertThat(result.skipReason()).as("已执行时原因码必须是 NONE").isEqualTo(RetentionSkipReason.NONE);
+        assertThat(result.durationMs()).as("已执行必须如实带回耗时").isGreaterThanOrEqualTo(0L);
         assertThat(result.total()).isEqualTo(8);
         assertThat(registry.get(RetentionCleanupServiceImpl.METRIC_DELETED).tag("table", "outage_event")
             .counter().count()).isEqualTo(5.0d);
@@ -96,6 +104,8 @@ class RetentionCleanupServiceImplTest {
         RetentionCleanupResult result = service(properties).cleanupOnce();
 
         assertThat(result.skipped()).isTrue();
+        assertThat(result.skipReason()).as("关闭时必须如实给出 disabled，而不是无信息的 skipped")
+            .isEqualTo(RetentionSkipReason.DISABLED);
         assertThat(result.total()).isZero();
         verify(outageEventMapper, never()).deleteStartedBefore(any());
         verify(maintenanceWindowMapper, never()).deleteStartedBefore(any());
@@ -107,6 +117,8 @@ class RetentionCleanupServiceImplTest {
         for (RetentionProperties properties : new RetentionProperties[] {days(0, 396), days(396, -1)}) {
             RetentionCleanupResult result = service(properties).cleanupOnce();
             assertThat(result.skipped()).as("非法天数必须跳过而不是照删").isTrue();
+            assertThat(result.skipReason()).as("非法天数必须给出 invalid-config（与「开关关闭」区分）")
+                .isEqualTo(RetentionSkipReason.INVALID_CONFIG);
         }
         verify(outageEventMapper, never()).deleteStartedBefore(any());
         verify(maintenanceWindowMapper, never()).deleteStartedBefore(any());
@@ -143,6 +155,64 @@ class RetentionCleanupServiceImplTest {
 
         assertThat(result.skipped()).isFalse();
         assertThat(result.total()).isZero();
+    }
+
+    @Test
+    @DisplayName("★ 防重入：并发触发只跑一轮，后到者拿到 already-running（绝不并发删两轮）")
+    void concurrentTriggerMustRunOnlyOnce() throws Exception {
+        CountDownLatch enteredDelete = new CountDownLatch(1);
+        CountDownLatch releaseDelete = new CountDownLatch(1);
+        when(outageEventMapper.deleteStartedBefore(any())).thenAnswer(invocation -> {
+            enteredDelete.countDown();
+            releaseDelete.await(10, TimeUnit.SECONDS);
+            return 5;
+        });
+        when(maintenanceWindowMapper.deleteStartedBefore(any())).thenReturn(3);
+        RetentionCleanupServiceImpl svc = service(days(396, 396));
+
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            Future<RetentionCleanupResult> first = pool.submit(svc::cleanupOnce);
+            assertThat(enteredDelete.await(10, TimeUnit.SECONDS)).as("第一轮已进入删除阶段").isTrue();
+
+            Future<RetentionCleanupResult> second = pool.submit(svc::cleanupOnce);
+            RetentionCleanupResult secondResult = second.get(10, TimeUnit.SECONDS);
+            assertThat(secondResult.skipReason()).as("后到者必须是防重入跳过").isEqualTo(RetentionSkipReason.ALREADY_RUNNING);
+            assertThat(secondResult.skipped()).isTrue();
+            assertThat(secondResult.outageEvents()).isZero();
+
+            releaseDelete.countDown();
+            RetentionCleanupResult firstResult = first.get(10, TimeUnit.SECONDS);
+            assertThat(firstResult.skipped()).isFalse();
+            assertThat(firstResult.outageEvents()).isEqualTo(5);
+            assertThat(firstResult.maintenanceWindows()).isEqualTo(3);
+
+            verify(outageEventMapper, times(1)).deleteStartedBefore(any());
+            verify(maintenanceWindowMapper, times(1)).deleteStartedBefore(any());
+        } finally {
+            releaseDelete.countDown();
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    @DisplayName("★ 失败必须如实抛出，且防重入闸门要释放（下一次还能正常跑）")
+    void failureMustPropagateAndReleaseGate() {
+        when(outageEventMapper.deleteStartedBefore(any()))
+            .thenThrow(new IllegalStateException("DB 挂了"))
+            .thenReturn(7);
+        when(maintenanceWindowMapper.deleteStartedBefore(any())).thenReturn(2);
+        RetentionCleanupServiceImpl svc = service(days(396, 396));
+
+        assertThatThrownBy(svc::cleanupOnce)
+            .as("删除失败必须如实上抛（不吞）")
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("DB 挂了");
+
+        RetentionCleanupResult retry = svc.cleanupOnce();
+        assertThat(retry.skipped()).as("失败后闸门必须已释放，下一次可正常执行").isFalse();
+        assertThat(retry.outageEvents()).isEqualTo(7);
+        assertThat(retry.skipReason()).isEqualTo(RetentionSkipReason.NONE);
     }
 
     @Test
