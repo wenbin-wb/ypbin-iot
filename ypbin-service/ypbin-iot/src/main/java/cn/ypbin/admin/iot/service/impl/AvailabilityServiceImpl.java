@@ -17,6 +17,7 @@ import cn.ypbin.starter.iot.availability.AvailabilityRules;
 import cn.ypbin.admin.iot.availability.OutageDetector;
 import cn.ypbin.admin.iot.availability.OutageEventResp;
 import cn.ypbin.admin.iot.availability.OutageReason;
+import cn.ypbin.admin.iot.availability.ReadingIngestReport;
 import cn.ypbin.admin.iot.availability.ReadingIngestReq;
 import cn.ypbin.admin.iot.availability.ReadingObservationDto;
 import cn.ypbin.admin.iot.entity.DeviceLiveness;
@@ -240,10 +241,18 @@ public class AvailabilityServiceImpl implements AvailabilityService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public int ingest(ReadingIngestReq req) {
+        return ingestWithReport(req).processed();
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public ReadingIngestReport ingestWithReport(ReadingIngestReq req) {
         // 第①道：点位标识**格式/长度**（纯内存判定，早于任何库访问）
         List<ReadingObservationDto> items = dropInvalidPropertyIds(req.getItems());
+        // 被点位映射（未映射/孤儿）丢弃的点位标识：消息跟踪二批要把它写进 MQTT 回执的 discard_detail
+        List<String> droppedPropertyIds = new ArrayList<>();
         if (items.isEmpty()) {
-            return 0;
+            return new ReadingIngestReport(0, droppedPropertyIds);
         }
         // 先解析设备 → 租户：既拿到写活性所需的租户，也顺带把「设备不存在」的条目留给既有分支
         // warn + 丢弃（不应把它们报成「点位未映射」——两种原因必须可分辨）
@@ -252,9 +261,9 @@ public class AvailabilityServiceImpl implements AvailabilityService {
         CoordinateSnapshot coordinates = loadCoordinatesForItems(items, tenantByDevice.keySet());
         // 第②道：点位**成员/存在性**校验 + **坐标归一**——读数点位必须是该设备已配置且属性行仍存在的
         // 映射点位；通过后一律改写成规范坐标（属性标识）再落库（P0-6c 后半 + 2026-09-26 坐标统一）
-        items = canonicalizePropertyIds(items, tenantByDevice.keySet(), coordinates);
+        items = canonicalizePropertyIds(items, tenantByDevice.keySet(), coordinates, droppedPropertyIds);
         if (items.isEmpty()) {
-            return 0;
+            return new ReadingIngestReport(0, droppedPropertyIds);
         }
         Map<Long, DeviceReadingBatch> batches = aggregate(items);
         // 最新值（点位级）与可用率（设备级）是两条独立的关注点：这里只挑「带了点位与值」的读数，
@@ -280,7 +289,7 @@ public class AvailabilityServiceImpl implements AvailabilityService {
         List<TimeSeriesPoint> seriesPoints = timeSeriesProperties.isEnabled()
             ? collectSeriesPoints(items, tenantByDevice, coordinates) : List.of();
         writeDerivedAfterCommit(latestValues, seriesPoints, shadowUpdates);
-        return processed;
+        return new ReadingIngestReport(processed, droppedPropertyIds);
     }
 
     /**
@@ -429,13 +438,16 @@ public class AvailabilityServiceImpl implements AvailabilityService {
      * <p><b>边界</b>：{@code propertyId} 为 {@code null}/空白仍按「只报时刻+质量」的合法形态放行（不带点位）；
      * 设备无任何映射 ⇒ 该设备的读数**全部**判为未映射（丢弃 + 计数），且不会因此多发一次查询。</p>
      *
-     * @param items        已通过格式校验的上报项
-     * @param knownDevices 已解析出租户的设备 ID
+     * @param items              已通过格式校验的上报项
+     * @param knownDevices       已解析出租户的设备 ID
+     * @param snapshot           坐标快照（含物模型类型）
+     * @param droppedPropertyIds 出参：被「未映射/孤儿映射」丢弃的点位标识（追加写入）
      * @return 通过校验且坐标已归一为属性标识的上报项（保持原顺序）
      */
     private List<ReadingObservationDto> canonicalizePropertyIds(List<ReadingObservationDto> items,
                                                                 Set<Long> knownDevices,
-                                                                CoordinateSnapshot snapshot) {
+                                                                CoordinateSnapshot snapshot,
+                                                                List<String> droppedPropertyIds) {
         if (snapshot.noPointReadings()) {
             // 没有带点位的读数（纯「只报时刻+质量」批次）⇒ 一次映射查询都不发
             return new ArrayList<>(items);
@@ -470,12 +482,14 @@ public class AvailabilityServiceImpl implements AvailabilityService {
             if (deviceCoordinates.orphanForms().contains(propertyId)) {
                 // 孤儿映射：映射行在、属性行已缺失 ⇒ 与「未映射」分开计数
                 orphanPropertyIdCounter.increment();
+                droppedPropertyIds.add(propertyId);
                 log.warn("[iot] 读数上报的点位归属**孤儿映射**（物模型属性行已缺失），已丢弃该条"
                         + "（同批其它读数不受影响）：deviceId={} 点位={}（请清理或重建该点位映射）",
                     LogSanitizer.sanitize(deviceId), LogSanitizer.sanitize(propertyId));
                 continue;
             }
             unmappedPropertyIdCounter.increment();
+            droppedPropertyIds.add(propertyId);
             log.warn("[iot] 读数上报的点位未映射到该设备，已丢弃该条（同批其它读数不受影响）："
                     + "deviceId={} 点位={}",
                 LogSanitizer.sanitize(deviceId), LogSanitizer.sanitize(propertyId));

@@ -11,6 +11,7 @@ package cn.ypbin.admin.iot.mapper;
 
 import cn.ypbin.admin.iot.entity.IotMqttIngestReceipt;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import org.apache.ibatis.annotations.Delete;
 import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
@@ -33,6 +34,12 @@ import org.apache.ibatis.annotations.Select;
  * （见 {@code MqttReadingIngestServiceImpl} 的租户解析）。{@code is_deleted = 0} 必须显式写：
  * 原生 SQL 不会被逻辑删除注入器追加条件。</p>
  *
+ * <p><b>二批：{@code receipt_status} 的两种结局</b>（消息跟踪二批）：预查返回**任何**同键行，
+ * 由调用方按 {@code receipt_status} 决策——命中 {@code accepted} 才整批跳过；命中 {@code rejected}
+ * 则先 {@link #deleteRejectedByRequestId 物理删除}再按新批次继续（不能用 UPDATE 复活，
+ * 否则唯一键会吞掉本次受理回执）。删除必须是**物理**删除（{@code DELETE}）而非逻辑删除：
+ * 唯一键不含 {@code is_deleted}，逻辑删除会继续占着键位。</p>
+ *
  * @author wenbin
  * @since 2026-10-01
  */
@@ -41,11 +48,18 @@ public interface IotMqttIngestReceiptMapper extends BaseMapper<IotMqttIngestRece
     /**
      * 按设备 + 请求 ID 查回执（租户条件由插件追加）。
      *
+     * <p><b>刻意不过滤 {@code receipt_status}</b>（消息跟踪二批）：预查要能看见 {@code rejected} 行，
+     * 调用方才能「删除旧行后按新批次继续」。是否算幂等命中由调用方按 {@code receipt_status} 判定
+     * （只认 {@code accepted}）——把状态条件放 Java 侧是必需的，否则命中 rejected 行时无法触发删除。
+     * 代价：预查仍是**同一条语句**（只多选了非键列），accepted 高频路径 0 新增语句。</p>
+     *
      * @param deviceId  设备 ID
      * @param requestId 设备侧请求 ID
      * @return 回执行；不存在返回 {@code null}
      */
-    @Select("SELECT id, tenant_id, device_id, request_id, item_count FROM iot_mqtt_ingest_receipt "
+    @Select("SELECT id, tenant_id, device_id, request_id, item_count, receipt_status, received_count, "
+        + "persisted_rows, persisted_at, discard_reason, discard_detail "
+        + "FROM iot_mqtt_ingest_receipt "
         + "WHERE is_deleted = 0 AND device_id = #{deviceId} AND request_id = #{requestId} LIMIT 1")
     IotMqttIngestReceipt selectByRequestId(@Param("deviceId") Long deviceId,
                                            @Param("requestId") String requestId);
@@ -57,8 +71,29 @@ public interface IotMqttIngestReceiptMapper extends BaseMapper<IotMqttIngestRece
      * @return 受影响行数；**不得**当作「新插入条数」——见类注释
      */
     @Insert("INSERT INTO iot_mqtt_ingest_receipt "
-        + "(id, tenant_id, device_id, request_id, item_count, create_time, update_time, status, is_deleted) "
-        + "VALUES (#{id}, #{tenantId}, #{deviceId}, #{requestId}, #{itemCount}, NOW(), NOW(), 1, 0) "
+        + "(id, tenant_id, device_id, request_id, item_count, receipt_status, received_count, "
+        + "persisted_rows, persisted_at, discard_reason, discard_detail, "
+        + "create_time, update_time, status, is_deleted) "
+        + "VALUES (#{id}, #{tenantId}, #{deviceId}, #{requestId}, #{itemCount}, #{receiptStatus}, "
+        + "#{receivedCount}, #{persistedRows}, #{persistedAt}, #{discardReason}, #{discardDetail}, "
+        + "NOW(), NOW(), 1, 0) "
         + "ON DUPLICATE KEY UPDATE id = id")
     int insertReceipt(IotMqttIngestReceipt receipt);
+
+    /**
+     * 物理删除被拒回执（消息跟踪二批：让同 requestId 的重试能重新受理）。
+     *
+     * <p>只删 {@code receipt_status = 'rejected'} 行：{@code accepted} 行是幂等锚点，绝不删除。
+     * 必须有物理删除（不是 {@code deleteById} 的逻辑删除）——唯一键
+     * {@code (tenant_id, device_id, request_id)} 不含 {@code is_deleted}，逻辑删除会继续占用键位。</p>
+     *
+     * @param deviceId  设备 ID
+     * @param requestId 设备侧请求 ID
+     * @return 删除行数（0 表示并发下已被别的请求删除，属正常）
+     */
+    @Delete("DELETE FROM iot_mqtt_ingest_receipt "
+        + "WHERE is_deleted = 0 AND device_id = #{deviceId} AND request_id = #{requestId} "
+        + "AND receipt_status = 'rejected'")
+    int deleteRejectedByRequestId(@Param("deviceId") Long deviceId,
+                                  @Param("requestId") String requestId);
 }

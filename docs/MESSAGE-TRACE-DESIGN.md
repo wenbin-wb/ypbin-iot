@@ -129,6 +129,9 @@
 | `EVENT_REPORTED` | `iot_event_log` 行（`device_id` + `event_ts`，索引 `idx_iot_event_log_device_ts`） | ✅ |
 | `DEVICE_OFFLINE` | `outage_event` 行（`device_id` + `start_ts`/`end_ts`，索引 `idx_outage_event_device_start`） | ✅ |
 
+> **【二批已实施】** 上表两行为**一期状态**；二批已给 `iot_mqtt_ingest_receipt` 补 6 列，
+> 二者现由 `persisted_at` / `receipt_status` 推导（见本文件附录「实施落点」与 §11）。
+
 #### 3.3.1 ❌ 为什么 `UP_DISCARDED` 一期不可能实现（**已一手核实**）
 
 `MqttReadingIngestServiceImpl#apply`（`MqttReadingIngestServiceImpl.java:301-306`）在整批读数全部未通过点位映射校验时：
@@ -312,6 +315,7 @@
 
 | 日期 | 变更 |
 |---|---|
+| 2026-10-13 | **二批（上行结构化补齐）已实施**：`iot_mqtt_ingest_receipt` 加 6 列（`receipt_status`/`received_count`/`persisted_rows`/`persisted_at`/`discard_reason`/`discard_detail`）+ 时间窗索引 `(tenant_id, device_id, create_time)`；写入侧整批被拒落 `rejected` 行、命中 `rejected` 物理删除后可重试、accepted 行填 6 列；读侧新增阶段 `UP_PERSISTED`/`UP_DISCARDED` 与条目 6 字段。**依据**：用户决策"开发阶段按最完美做法实施、不做向后兼容妥协"（原触发条件仍未满足）。实现落点见附录。 |
 | 2026-09-30 | 建立本设计稿。结论先行、现状为一手代码盘点、非目标与"不做"清单明确（§2.2）、定位建议规则可枚举可单测（§4）、验收判据可测（§7）、分批计划含二批生产纪律（§8）。**本稿未实施任何代码改动**。 |
 | 2026-09-30 | **第二轮独立复核后修订（第 3 稿）**。第二位复核者以更细粒度逐条核对（同样附 `文件:行号`），又发现 **1 处高危权限错误 + 1 处范围夸大 + 1 处死列遗漏**，均已按证据修订：<br>• **§5 权限降级（高危，已重写为 §5.1 授权矩阵）**：原稿两个端点都挂 `iot:device:list`，但**命令 payload/回执的既有查询端点是 `iot:debug:get`**（`IotCommandController.java:76`），且仓内有**明文门禁**「查询与下发绝不能同码」（`IotCommandControllerGateTest.java:44-51`）。`iot:device:list` 是**设备列表页菜单级权限**（范围宽得多）⇒ 用它返回下行报文是**权限降级** ✗。现改为**两个端点均取较严的既有 `iot:debug:get`**（不新造码）。<br>• **§1.1 澄清② 覆盖面夸大**：`iot_mqtt_ingest_receipt` **只覆盖 EMQX MQTT 入站**；access 的 HTTP 出口 `POST /internal/readings`（`InternalReadingController.java:36-51`）**不写任何回执** ⇒ 非 MQTT 通道**恒无记录**，且 `UP_*` 阶段只对 MQTT 成立。<br>• **§1.1 澄清③ 死列（原稿完全漏掉）**：`iot_device.online_status`/`last_seen_at` **生产代码中无写入方**（唯一生产引用是 `IotDeviceServiceImpl.java:199` 的**读**；唯一写在单测）⇒ **恒为 `'unknown'`**。原稿 §4.1 曾建议"先看本页最后在线" ⇒ **会把排障引向永不更新的字段**（正是 §4.2 自己禁止的错误建议），已删除并改为只用 `DeviceLiveness`/`OutageEvent`。<br>• **§3.3.2 升级为"结构性不可得"**：原稿把 `UP_PERSISTED` 写成"弱推导"，复核证明**语义不可区分**（回执行存在 ⟺ 已受理 ⟺ 已落库，三者同一件事；真正落库出口是 IoTDB/Redis，不写 MySQL）⇒ 一期**不呈现**，改期到二批。<br>• **新增 §3.3.2b/2c**：`DOWN_ACK` **必须用 `reply_payload != null`** 判定（`status_code=failed` 有 publish 失败/设备拒绝**两个来源**，只看它会把"没发出去"误报成"设备拒绝"）；`DOWN_PUBLISHED` 的 `sent_at` 语义是"投递**成功**"，且**重发就地覆写时间戳** ⇒ 历史尝试不可还原，前端须显示"已重发 N 次（历史时刻已被覆盖）"。<br>• **新增 §6 R5/R6**：**跨源合并排序与 DB 级分页不成立**（三表时间字段语义不同、事件 `event_ts` 可能乱序 ⇒ 跨表 `ORDER BY`+`LIMIT` 用不上索引，"各表各取 N 条"会在第 2 页**漏数据**）⇒ 一期改为"时间窗内一次取全量（带上限）+ 服务层合并"，超限**显式告知截断**；**payload 无内容过滤 + 无保留期**的组合风险（`CommandSendReq.params` 为自由 `Object`，服务端不过滤，64KB `TEXT`），明细默认只回摘要、`?raw=true` 才给原文。<br>• **§5.2 路径口径统一**：原稿 §5 写 `/iot/...`、§7.1 写 `/devices/...`（自相矛盾）；现明确"客户端 `/iot/devices/{id}/messages`，Controller 映射 `/devices/{deviceId}/messages`（不带 `/iot`，网关 `StripPrefix=1`）"。<br>• **§4.2 `NO_TRACE` 重写**：原稿引用**不存在的"对账周期"配置**（全仓无此项）⇒ 改为区分三种成因（HTTP 通道恒空／设备离线／确实无通信）。<br>• **§7.1 判据 5 指向既有先例**：改用 `IotTenantIsolationIT` 的 `TENANT_A/B` + `executeIgnore` 反证模式（防假绿），并说明属 `-Pit` 面。<br>**复核边界**：两轮均为**静态读码判定**，未运行任何测试（含 `-Pit`）、未实测数据量、未联网复核厂商表述。 |
 | 2026-09-30 | **独立复核后修订（第 2 稿）**。复核（独立上下文、附 `文件:行号` 证据）判定"**修改后可用**"，并指出初稿**三处会产出错误产品语义**的缺陷，均已按证据修订：<br>• **§3.3 重写**：初稿把 8 个阶段并列枚举，掩盖两个硬问题 —— ① **`UP_DISCARDED` 一期物理上不可实现**：`MqttReadingIngestServiceImpl.java:301-306` 整批被拒时**刻意不写回执**（已被丢弃的批在库中零痕迹），初稿仅标"未核实"属**定性不足**；② **三个 `DOWN_*` 是同一行的三个时刻**（`CommandInstanceServiceImpl:204-219` insert→publish→回执），初稿的验收判据 #1 因此**自相矛盾**（"字段与表一致"与"三个阶段"不可兼得）。现改为「阶段 → 唯一推导表达式」+ §3.3.3 明确"**一行 = 一条目**"并配反例守卫。<br>• **§1.3 拆为"已核实 / 未核实"**：新增三项**确定结论** —— ① 被丢弃的上行零痕迹（**不可实现**，非"未核实"）；② 三张表**均无保留期**机制（`RetentionProperties` 只覆盖 `outage_event`/`maintenance_window`，而 `iot_event_log` 是高频上报 ⇒ 无上限增长）；③ `iot_mqtt_ingest_receipt` **无时间列索引**（按 `create_time` 查会退化）—— 后两项初稿完全漏掉。<br>• **§5/§6 安全修订（客观独立）**：初稿把明细端点也挂在 `iot:device:list`。该码是**菜单级宽权限**，用它返回明文 `payload`/`reply_payload` 等于**扩大既有暴露面** ⇒ 改为**新造更窄的 `iot:device:trace`**（先例：#7 的 `iot:device:import`），并默认只返回摘要、`?raw=true` 才给原文。<br>• **§4.2 重写**：改为**直接绑定既有枚举**（`error_code` = `DEVICE_OFFLINE|NO_SUBSCRIBER|EMQX_ERROR|DEVICE_REJECTED|TIMEOUT`，`status_code` 六态；均已在 `007-iot-data.sql:493-494` 核实），不再依赖文本猜测。<br>• **复核的另一独立发现（已回传，与本能力无关）**：`iot_command_instance` 与 `iot_mqtt_ingest_receipt` 均为租户实体却**均未登记**进 `IotTenantIsolationGateTest#M1_TENANT_TABLES` ⇒ **真实门禁覆盖缺口**（`007-iot-data.sql:475-476` 的 DDL 注释早已点名要求）。建议**立即独立小修补 2 行**，不必等本设计评审 ⇒ 已登记 §1.3.1 与 §11。<br>**复核边界（如实声明）**：复核为**读码判定**、未实跑 `mvn`（本机 2 核）⇒ "门禁缺口"的逻辑依据是测试自身的 `containsAll` 语义，**未经运行时验证**；厂商对标表述**未重新联网核实**（沿用仓内登记）。 |
@@ -328,10 +332,11 @@
 
 ---
 
-## 附：二批（上行结构化补齐）设计要点 —— **未实施，条件触发**
+## 附：二批（上行结构化补齐）设计要点 —— **已实施**
 
 > 本节是二批设计稿（第 2 稿，已过 L2 独立复核 19 项）的**要点留存**。
-> **状态：只立项、未实施、无代码改动**。触发条件满足后另开实施 PR，并按 §8 生产纪律执行；在此之前排障口径维持一期现状。
+> **状态：已实施**（用户明确决策：开发阶段按最完美做法实施、不做向后兼容妥协；原触发条件仍未满足）。
+> 6 列的写入/读取落点、4 条否决项的对应与未落地项见本节末尾「实施落点」。
 
 **触发条件（先判定，再开工）**
 
@@ -341,7 +346,7 @@
 | 上行"断点不可见"造成实际排障痛 | ❌ 未观测到（dev 实测 receipt 全受理、丢弃计数 0） |
 | 产品侧要求"定位建议"覆盖丢弃场景 | 待拍板 |
 
-> 条件 2/3 任一满足才实施。在满足前，一期页签注明「整批被拒不留痕，查日志与 `propertyid.unmapped/orphan` 指标」。
+> 实施纪律：本批在触发条件未满足时按用户决策实施；上线仍按 §8（备份、可回滚、验收窗口冻结其它容器动作 + 外委独立复核）。
 
 **拟加 6 列**（全部 NULL-able，存量行无需回填；给 `iot_mqtt_ingest_receipt` 加列）
 
@@ -357,6 +362,7 @@
 **关键设计（每条都是否决项）**
 
 1. **被拒行绝不阻塞重试**：幂等预查只认 `receipt_status='accepted'`；命中 `rejected` 行则**删除后按新批次继续**（不用 UPDATE 复活）。并发诚实声明：回执唯一键只保回执行唯一，**不保落库不重复**（与 `EMQX-INTEGRATION.md:34` 一致，不断言 at-most-once）。
+   > **实现澄清（2026-10-13）**：预查**不过滤** `receipt_status`（仍是同一条 SELECT，只多选非键列），由调用方**只认 accepted** 才算幂等命中；命中 rejected 则物删后继续。之所以不把状态条件写进 SQL：预查必须能**同时看见** rejected 行才能触发删除，否则要么加一条无条件 DELETE（给高频 accepted 路径新增语句）✗，要么依赖 UPDATE 复活 ✗。状态条件的判定成本由非键列过滤承担，见「实施落点」。
 2. **原因码复用** `MqttIngestRejectReason` 14 码，不新造；`DEVICE_NOT_FOUND` 分支天然有码（现状是 `reject(DEVICE_NOT_FOUND,…)` 抛异常）。
 3. **采集性能（生命线）**：accepted 高频路径 **0 新增语句**（同一次 insert 多 6 列 + 预查多一个状态条件）；rejected 罕见路径 +1 insert。
 4. **前端（只读，同权限 `iot:debug:get`）**：新增阶段 `UP_PERSISTED` / `UP_DISCARDED` + 3 条原因码规则（`UP_REJECTED_MAP`/`UP_PARTIAL`/`UP_DEVICE_NOT_FOUND`）。
@@ -365,4 +371,19 @@
 
 **已知缺点（不回避）**：rejected 行在重试受理时被删除 ⇒ DB 层拒绝历史断层（仅剩应用日志 + `iot.mqtt.ingest.rejected{reason}` 指标）；若将来需要拒绝审计，需另建 append-only 表（不在本期范围）。receipt 表保留期建议与 `iot_event_log` 同批评估（默认提案 90 天），属软门槛。
 
-**实施前待拍板**：Q1 是否/何时实施（推荐条件触发）；Q2 tenant 未知的 rejected 行归属（推荐 `tenant_id=0` 哑租户）；Q3 保留期天数；Q4 `discard_detail` 上限（推荐 512）。完整验收判据（B-1…B-6）与实施纪律见原设计稿留存（未并入正文，如需实施时按上述要点重建）。
+**拍板事项状态（2026-10-13）**：Q1 是否实施 —— **已拍板实施**（用户决策；原触发条件未满足）；Q2 tenant 未知的 rejected 行归属 —— **未拍板、本期未落地**（见「实施落点」未落地项）；Q3 保留期天数 —— 未定（维持软门槛，默认提案 90 天）；Q4 `discard_detail` 上限 —— 采用 512 + 前 8 个 + `",...(+N)"`。完整验收判据（B-1…B-6）与实施纪律见原设计稿留存（未并入正文）。
+
+---
+
+## 附：实施落点（2026-10-13 落地）
+
+| 事项 | 落点 |
+|---|---|
+| 6 列 + 时间窗索引 | `deploy/sql/007-iot-data.sql`（canonical DDL）、`deploy/sql/migration/2026-10-13-iot-mqtt-ingest-receipt-trace.sql`（升级）、`deploy/sql/rollback/2026-10-13-iot-mqtt-ingest-receipt-trace-rollback.sql`（回滚）；索引 `idx_iot_mqtt_ingest_receipt_time (tenant_id, device_id, create_time)` |
+| 实体/枚举 | `IotMqttIngestReceipt`（6 字段）、`MqttReceiptStatus`（`accepted`/`rejected`） |
+| 回执读写 | `IotMqttIngestReceiptMapper`：预查返回**全部状态**（由调用方只认 accepted）、插入含 6 列、`deleteRejectedByRequestId` **物理**删除 |
+| 写入侧（否决项 1/2/3） | `MqttReadingIngestServiceImpl`：整批被拒写 rejected 行（罕见路径 +1 insert）、命中 rejected 行删除后按新批次继续、accepted 行填 6 列；高频 accepted 路径 0 新增语句（同一次 insert 多 6 列 + 预查多选非键列）；`ingest` 加 `noRollbackFor=MqttIngestRejectionException` 保证 rejected 行不被回滚 |
+| 丢弃明细来源 | `AvailabilityService#ingestWithReport` + `ReadingIngestReport`：复用落库链路的**同一次**映射校验取回被丢弃 pointId，入站层不复制映射判断 |
+| 读侧（否决项 4） | `TraceStage` 新增 `UP_PERSISTED`/`UP_DISCARDED`；`DeviceTraceServiceImpl#toReceiptItem` 推导阶段与结果；`DeviceTraceItemResp` 新增 `receiptStatus`/`receivedCount`/`persistedRows`/`persistedAt`/`discardReason`/`discardDetail`；`TraceAdviceResolver` 对新阶段返回 `null`（3 条原因码规则由前端 `resolveDiscardAdvice` 推导，后端只保证字段） |
+| 租户门禁（§11 第 1 项） | `iot_command_instance`/`iot_mqtt_ingest_receipt` 已在 `IotTenantIsolationGateTest#M1_TENANT_TABLES`（本批复核前已单独修复） |
+| **未落地项（如实登记）** | Q2 `DEVICE_NOT_FOUND` 的 rejected 行归属**未落地**：该分支维持"动库前拒绝、零痕迹"（既有门禁要求未知设备拒绝时与 mapper **零交互**；且该行无法经 `requireDevice` 的时间线读到）。前端 `UP_DEVICE_NOT_FOUND` 规则因此当前为休眠态，待 Q2 重新拍板（推荐 tenant_id=0 哑租户）后再定。 |

@@ -17,7 +17,8 @@ import cn.ypbin.admin.iot.mqtt.MqttReadingIngestResult;
  *
  * <p><b>职责边界（只有两件）</b>：契约适配（JSON → 既有 {@code ReadingIngestReq}）+ 非法即整批拒绝
  * （在动库之前）。**落库链路完全复用** {@code AvailabilityService.ingest}——活性/断档、最新值、时序、
- * 影子一律走既有实现，本服务不新增任何写入路径。</p>
+ * 影子一律走既有实现。消息跟踪二批新增的唯一写入是**整批被拒时的 rejected 回执**
+ * （让断点可查询；accepted 高频路径仍 0 新增语句）。</p>
  *
  * <p><b>入参为什么是原始字符串而不是已绑定的对象</b>：{@code @RequestBody} + Bean Validation 的
  * 校验失败会被全局异常处理器转成 HTTP 200 + {@code R.code}（本仓统一异常口径），而本端点按设计决策

@@ -10,6 +10,7 @@
 package cn.ypbin.admin.iot.service;
 
 import cn.ypbin.admin.iot.availability.AvailabilityResp;
+import cn.ypbin.admin.iot.availability.ReadingIngestReport;
 import cn.ypbin.admin.iot.availability.ReadingIngestReq;
 import java.time.LocalDateTime;
 
@@ -31,6 +32,17 @@ public interface AvailabilityService {
      * @return 实际处理的观察条数（设备不存在等被丢弃的不计）
      */
     int ingest(ReadingIngestReq req);
+
+    /**
+     * 与 {@link #ingest} **完全同一条处理路径**，额外返回被点位映射丢弃的点位标识
+     * （消息跟踪二批：供 MQTT 入站回执记录 {@code discard_detail}）。
+     *
+     * <p>入站回执不复制点位映射判断，而是复用本方法的同一次处理——避免形成第二份真源。</p>
+     *
+     * @param req 上报请求（有界批次）
+     * @return 处理报告（受理条数 + 被映射校验丢弃的点位标识，顺序与入参一致）
+     */
+    ReadingIngestReport ingestWithReport(ReadingIngestReq req);
 
     /**
      * 扫描并打开断档（静默设备只能靠它发现）。

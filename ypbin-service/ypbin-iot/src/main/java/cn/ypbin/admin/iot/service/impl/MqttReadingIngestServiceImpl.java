@@ -9,10 +9,12 @@
  */
 package cn.ypbin.admin.iot.service.impl;
 
+import cn.ypbin.admin.iot.availability.ReadingIngestReport;
 import cn.ypbin.admin.iot.availability.ReadingIngestReq;
 import cn.ypbin.admin.iot.availability.ReadingObservationDto;
 import cn.ypbin.admin.iot.entity.IotDevice;
 import cn.ypbin.admin.iot.entity.IotMqttIngestReceipt;
+import cn.ypbin.admin.iot.enums.MqttReceiptStatus;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.IotMqttIngestReceiptMapper;
 import cn.ypbin.admin.iot.mqtt.MqttIngestRejectReason;
@@ -29,6 +31,7 @@ import cn.ypbin.starter.tenant.core.TenantContext;
 import com.baomidou.mybatisplus.core.toolkit.IdWorker;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
@@ -101,6 +104,12 @@ public class MqttReadingIngestServiceImpl implements MqttReadingIngestService {
     /** 原因码 tag 的键名（避免两处手写字符串）。 */
     private static final String TAG_REASON = "reason";
 
+    /** 丢弃明细列上限（与 DDL discard_detail VARCHAR(512) 一致）。 */
+    static final int MAX_DISCARD_DETAIL_LENGTH = 512;
+
+    /** 丢弃明细最多列出的 pointId 数（超出记 ,...(+N) 后缀）。 */
+    static final int MAX_DISCARD_DETAIL_IDS = 8;
+
     private final AvailabilityService availabilityService;
 
     private final IotDeviceMapper deviceMapper;
@@ -154,7 +163,9 @@ public class MqttReadingIngestServiceImpl implements MqttReadingIngestService {
     }
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
+    // noRollbackFor：整批被拒时我们**先写 rejected 回执再抛异常**，若按默认回滚会把刚落的证据一并抹掉；
+    // 被拒分支在任何业务副作用之前（accepted<=0 时落库链路尚未写任何东西），提交是安全的。
+    @Transactional(rollbackFor = Exception.class, noRollbackFor = MqttIngestRejectionException.class)
     public MqttReadingIngestResult ingest(String rawBody) {
         // 体积护栏必须在**这里**（而不是控制器）：控制器里直接写 400 会绕过 reject()，
         // 于是 iot.mqtt.ingest.rejected{reason=BODY_TOO_LARGE} **永远为 0**——监控规则"看起来配好了、
@@ -301,19 +312,34 @@ public class MqttReadingIngestServiceImpl implements MqttReadingIngestService {
         String requestId = req.getRequestId();
         IotMqttIngestReceipt existing = receiptMapper.selectByRequestId(deviceId, requestId);
         if (existing != null) {
-            // 命中即整批跳过：**不调用** ingest，因此最新值/时序/活性/影子都不会被重复写
-            duplicatedCounter.increment();
-            log.info("[emqx→iot] 重复投递命中幂等回执，本次不重复落库：deviceId={} requestId长度={}",
-                LogSanitizer.sanitize(deviceId), requestId.length());
-            return MqttReadingIngestResult.duplicated(deviceId, requestId, existing.getItemCount());
+            if (MqttReceiptStatus.REJECTED.getCode().equals(existing.getReceiptStatus())) {
+                // 消息跟踪二批否决项①：命中 rejected 行 ⇒ **物理删除后按新批次继续**（不 UPDATE 复活）。
+                // 必须删：唯一键 (tenant_id, device_id, request_id) 仍被这行占着，不删会让
+                // ON DUPLICATE KEY UPDATE 静默吞掉本次受理回执，把「可恢复」变成「永久拒绝」。
+                receiptMapper.deleteRejectedByRequestId(deviceId, requestId);
+                log.info("[emqx→iot] 命中被拒回执，已删除旧行并按新批次重新受理：deviceId={} requestId长度={}",
+                    LogSanitizer.sanitize(deviceId), requestId.length());
+            } else {
+                // 幂等预查只认 accepted：命中即整批跳过，**不调用** ingest，
+                // 因此最新值/时序/活性/影子都不会被重复写
+                duplicatedCounter.increment();
+                log.info("[emqx→iot] 重复投递命中幂等回执，本次不重复落库：deviceId={} requestId长度={}",
+                    LogSanitizer.sanitize(deviceId), requestId.length());
+                return MqttReadingIngestResult.duplicated(deviceId, requestId, existing.getItemCount());
+            }
         }
         List<ReadingObservationDto> items = req.getItems();
         ReadingIngestReq ingestReq = new ReadingIngestReq();
         ingestReq.setItems(new ArrayList<>(items));
-        int accepted = availabilityService.ingest(ingestReq);
+        // 复用落库链路的**同一次**处理，并取回被点位映射丢弃的点位标识（不复制映射判断）
+        ReadingIngestReport report = availabilityService.ingestWithReport(ingestReq);
+        int accepted = report.processed();
         if (accepted <= 0) {
             // 整批都被落库链路丢弃（点位未映射/孤儿映射/设备解析不到）：重投不会变好 ⇒ 4xx。
-            // 刻意**不写回执**：修好映射后设备用同一个 requestId 重投仍应被受理。
+            // 二批：先落一条 rejected 回执（让"断点"可查询），再抛异常——ingest 上的
+            // noRollbackFor=MqttIngestRejectionException 保证这行证据随事务提交而不被回滚。
+            writeRejectedReceipt(tenantId, deviceId, requestId, items.size(),
+                MqttIngestRejectReason.NO_ACCEPTED_ITEM, report.droppedPropertyIds());
             reject(MqttIngestRejectReason.NO_ACCEPTED_ITEM,
                 "deviceId=" + deviceId + " 本批 " + items.size() + " 条读数全部未通过点位映射校验");
         }
@@ -323,21 +349,90 @@ public class MqttReadingIngestServiceImpl implements MqttReadingIngestService {
         receipt.setDeviceId(deviceId);
         receipt.setRequestId(requestId);
         receipt.setItemCount(accepted);
-        // 返回值不用于判断（Connector/J 默认带 CLIENT_FOUND_ROWS，命中已有行也返回 1）——
-        // 并发重投的保证来自唯一键 + ON DUPLICATE KEY UPDATE，而不是这个返回值
-        receiptMapper.insertReceipt(receipt);
-        acceptedCounter.increment(accepted);
+        receipt.setReceiptStatus(MqttReceiptStatus.ACCEPTED.getCode());
+        receipt.setReceivedCount(items.size());
+        receipt.setPersistedRows(accepted);
+        receipt.setPersistedAt(LocalDateTime.now());
         int dropped = items.size() - accepted;
         if (dropped > 0) {
-            // 部分丢弃不改变 HTTP 语义（本批已被受理），但必须是**可见**的：落日志 + 由既有
-            // iot.ingest.propertyid.unmapped/orphan 指标计数
+            // 部分丢弃不改变 HTTP 语义（本批已被受理），但必须**可见**：落回执 + 日志 + 由既有
+            // iot.ingest.propertyid.unmapped/orphan 指标计数。原因码复用映射类既有枚举（不新造分类）。
+            receipt.setDiscardReason(MqttIngestRejectReason.NO_ACCEPTED_ITEM.getCode());
+            receipt.setDiscardDetail(discardDetail(report.droppedPropertyIds()));
             log.warn("[emqx→iot] 部分读数未通过点位映射校验，已丢弃（整批其余正常落库）："
                     + "deviceId={} 受理={} 丢弃={}",
                 LogSanitizer.sanitize(deviceId), accepted, dropped);
         }
+        // 返回值不用于判断（Connector/J 默认带 CLIENT_FOUND_ROWS，命中已有行也返回 1）——
+        // 并发重投的保证来自唯一键 + ON DUPLICATE KEY UPDATE，而不是这个返回值
+        receiptMapper.insertReceipt(receipt);
+        acceptedCounter.increment(accepted);
         log.info("[emqx→iot] MQTT 入站受理成功：deviceId={} 条数={} requestId长度={}",
             LogSanitizer.sanitize(deviceId), accepted, requestId.length());
         return MqttReadingIngestResult.accepted(deviceId, requestId, accepted, dropped);
+    }
+
+    /**
+     * 写一条**整批被拒**回执（消息跟踪二批否决项③：rejected 罕见路径仅 +1 insert）。
+     *
+     * @param tenantId          设备所属租户
+     * @param deviceId          设备 ID
+     * @param requestId         设备侧请求 ID（幂等键）
+     * @param receivedCount     本批收到的读数条数（含被丢弃的）
+     * @param reason            整批拒绝原因码（复用 MqttIngestRejectReason，不新造分类）
+     * @param droppedPropertyIds 被点位映射丢弃的 pointId（用于 discard_detail）
+     */
+    private void writeRejectedReceipt(Long tenantId, Long deviceId, String requestId, int receivedCount,
+                                      MqttIngestRejectReason reason, List<String> droppedPropertyIds) {
+        IotMqttIngestReceipt receipt = new IotMqttIngestReceipt();
+        receipt.setId(IdWorker.getId());
+        receipt.setTenantId(tenantId);
+        receipt.setDeviceId(deviceId);
+        receipt.setRequestId(requestId);
+        receipt.setItemCount(0);
+        receipt.setReceiptStatus(MqttReceiptStatus.REJECTED.getCode());
+        receipt.setReceivedCount(receivedCount);
+        receipt.setPersistedRows(0);
+        // persisted_at 刻意留空：整批被拒根本没有「落库完成时刻」，填时间戳就是造假
+        receipt.setDiscardReason(reason.getCode());
+        receipt.setDiscardDetail(discardDetail(droppedPropertyIds));
+        receiptMapper.insertReceipt(receipt);
+    }
+
+    /**
+     * 生成丢弃明细：未映射 pointId **前 8 个**逗号连接，超出记 {@code ,...(+N)}（N=剩余个数）；
+     * 总长不超过 {@value #MAX_DISCARD_DETAIL_LENGTH}（超长时减少列出的 pointId，保留计数后缀）。
+     *
+     * <p>为什么要截断：明细是排障线索不是审计证据（审计证据是应用日志），全量 pointId 随批大小线性膨胀，
+     * 512 + 计数已足够定位到"映射问题"。</p>
+     *
+     * @param propertyIds 被丢弃的点位标识（可空）
+     * @return 明细；无丢弃返回 {@code null}
+     */
+    static String discardDetail(List<String> propertyIds) {
+        if (propertyIds == null || propertyIds.isEmpty()) {
+            return null;
+        }
+        int shown = Math.min(MAX_DISCARD_DETAIL_IDS, propertyIds.size());
+        String detail = buildDetail(propertyIds, shown);
+        while (detail.length() > MAX_DISCARD_DETAIL_LENGTH && shown > 0) {
+            shown--;
+            detail = buildDetail(propertyIds, shown);
+        }
+        return detail;
+    }
+
+    /**
+     * 按"列出前 shown 个 + 计数后缀"拼一条明细。
+     *
+     * @param propertyIds 被丢弃的点位标识
+     * @param shown       列出的个数
+     * @return 明细
+     */
+    private static String buildDetail(List<String> propertyIds, int shown) {
+        String suffix = propertyIds.size() > shown
+            ? ",...(+" + (propertyIds.size() - shown) + ")" : "";
+        return String.join(",", propertyIds.subList(0, shown)) + suffix;
     }
 
     /**

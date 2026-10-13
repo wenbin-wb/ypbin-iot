@@ -19,9 +19,11 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import cn.ypbin.admin.iot.availability.ReadingIngestReport;
 import cn.ypbin.admin.iot.availability.ReadingIngestReq;
 import cn.ypbin.admin.iot.entity.IotDevice;
 import cn.ypbin.admin.iot.entity.IotMqttIngestReceipt;
+import cn.ypbin.admin.iot.enums.MqttReceiptStatus;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.IotMqttIngestReceiptMapper;
 import cn.ypbin.admin.iot.mqtt.MqttIngestRejectReason;
@@ -34,6 +36,7 @@ import tools.jackson.databind.DeserializationFeature;
 import tools.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -90,7 +93,8 @@ class MqttReadingIngestServiceImplTest {
     @DisplayName("合法报文选设备真实租户并复用既有 ingest，落一条幂等回执")
     void acceptedRequestMustReuseExistingIngest() {
         stubDevice();
-        when(availabilityService.ingest(any(ReadingIngestReq.class))).thenReturn(1);
+        when(availabilityService.ingestWithReport(any(ReadingIngestReq.class)))
+            .thenReturn(new ReadingIngestReport(1, List.of()));
 
         MqttReadingIngestResult result = service.ingest(validBody("r-1"));
 
@@ -98,7 +102,7 @@ class MqttReadingIngestServiceImplTest {
         assertThat(result.getAccepted()).isEqualTo(1);
         assertThat(result.getDropped()).isZero();
         ArgumentCaptor<ReadingIngestReq> captor = ArgumentCaptor.forClass(ReadingIngestReq.class);
-        verify(availabilityService).ingest(captor.capture());
+        verify(availabilityService).ingestWithReport(captor.capture());
         assertThat(captor.getValue().getItems()).hasSize(1);
         assertThat(captor.getValue().getItems().get(0).getPropertyId()).isEqualTo("temperature");
         ArgumentCaptor<IotMqttIngestReceipt> receipt =
@@ -108,13 +112,22 @@ class MqttReadingIngestServiceImplTest {
         assertThat(receipt.getValue().getRequestId()).isEqualTo("r-1");
         // 租户来自设备行（TENANT_ID），不是报文里的任何字段
         assertThat(receipt.getValue().getTenantId()).isEqualTo(TENANT_ID);
+        // 二批 6 列：accepted 行取值正确（全落库 ⇒ 无丢弃原因/明细）
+        assertThat(receipt.getValue().getReceiptStatus())
+            .isEqualTo(MqttReceiptStatus.ACCEPTED.getCode());
+        assertThat(receipt.getValue().getReceivedCount()).isEqualTo(1);
+        assertThat(receipt.getValue().getPersistedRows()).isEqualTo(1);
+        assertThat(receipt.getValue().getPersistedAt()).isNotNull();
+        assertThat(receipt.getValue().getDiscardReason()).isNull();
+        assertThat(receipt.getValue().getDiscardDetail()).isNull();
     }
 
     @Test
     @DisplayName("报文里伪造 tenantId 不生效：回执仍写设备真实租户（不信任报文里的租户）")
     void tenantMustComeFromDeviceRowNotPayload() {
         stubDevice();
-        when(availabilityService.ingest(any(ReadingIngestReq.class))).thenReturn(1);
+        when(availabilityService.ingestWithReport(any(ReadingIngestReq.class)))
+            .thenReturn(new ReadingIngestReport(1, List.of()));
         String forged = validBody("r-tenant")
             .replace("\"items\"", "\"tenantId\":9,\"items\"");
 
@@ -134,13 +147,14 @@ class MqttReadingIngestServiceImplTest {
         stubDevice();
         IotMqttIngestReceipt existing = new IotMqttIngestReceipt();
         existing.setItemCount(1);
+        existing.setReceiptStatus(MqttReceiptStatus.ACCEPTED.getCode());
         when(receiptMapper.selectByRequestId(DEVICE_ID, "r-dup")).thenReturn(existing);
 
         MqttReadingIngestResult result = service.ingest(validBody("r-dup"));
 
         assertThat(result.isDuplicated()).isTrue();
         assertThat(result.getAccepted()).isEqualTo(1);
-        verify(availabilityService, never()).ingest(any(ReadingIngestReq.class));
+        verify(availabilityService, never()).ingestWithReport(any(ReadingIngestReq.class));
         verify(receiptMapper, never()).insertReceipt(any(IotMqttIngestReceipt.class));
     }
 
@@ -158,16 +172,103 @@ class MqttReadingIngestServiceImplTest {
     }
 
     @Test
-    @DisplayName("整批都被点位映射丢弃：400 + 不写回执（修好映射后同 requestId 重投仍应受理）")
-    void fullyDroppedBatchMustBeRejectedWithoutReceipt() {
+    @DisplayName("整批都被点位映射丢弃：400 + 落 rejected 回执（persisted_rows=0、原因码、明细截断）")
+    void fullyDroppedBatchMustBeRejectedAndRecorded() {
         stubDevice();
-        when(availabilityService.ingest(any(ReadingIngestReq.class))).thenReturn(0);
+        List<String> dropped = new ArrayList<>();
+        for (int i = 1; i <= 10; i++) {
+            dropped.add("p" + i);
+        }
+        when(availabilityService.ingestWithReport(any(ReadingIngestReq.class)))
+            .thenReturn(new ReadingIngestReport(0, dropped));
 
-        assertThatThrownBy(() -> service.ingest(validBody("r-dropped")))
+        assertThatThrownBy(() -> service.ingest(bodyWithDistinctItems("r-dropped", 10)))
             .isInstanceOf(MqttIngestRejectionException.class)
             .extracting(ex -> ((MqttIngestRejectionException) ex).getReason())
             .isEqualTo(MqttIngestRejectReason.NO_ACCEPTED_ITEM);
-        verify(receiptMapper, never()).insertReceipt(any(IotMqttIngestReceipt.class));
+
+        ArgumentCaptor<IotMqttIngestReceipt> captor = ArgumentCaptor.forClass(IotMqttIngestReceipt.class);
+        verify(receiptMapper).insertReceipt(captor.capture());
+        IotMqttIngestReceipt receipt = captor.getValue();
+        assertThat(receipt.getReceiptStatus()).isEqualTo(MqttReceiptStatus.REJECTED.getCode());
+        assertThat(receipt.getReceivedCount()).isEqualTo(10);
+        assertThat(receipt.getPersistedRows()).isZero();
+        assertThat(receipt.getPersistedAt()).as("整批被拒没有落库时刻，不得填时间戳").isNull();
+        assertThat(receipt.getDiscardReason())
+            .isEqualTo(MqttIngestRejectReason.NO_ACCEPTED_ITEM.getCode());
+        assertThat(receipt.getDiscardDetail())
+            .as("前 8 个 pointId 逗号连接 + ,...(+N) 后缀")
+            .isEqualTo("p1,p2,p3,p4,p5,p6,p7,p8,...(+2)");
+    }
+
+    @Test
+    @DisplayName("🔴 命中 rejected 回执：物理删除旧行后按新批次继续（不得把可恢复变成永久拒绝）")
+    void rejectedReceiptMustBeDeletedAndRetried() {
+        stubDevice();
+        IotMqttIngestReceipt existing = new IotMqttIngestReceipt();
+        existing.setId(5L);
+        existing.setReceiptStatus(MqttReceiptStatus.REJECTED.getCode());
+        when(receiptMapper.selectByRequestId(DEVICE_ID, "r-retry")).thenReturn(existing);
+        when(availabilityService.ingestWithReport(any(ReadingIngestReq.class)))
+            .thenReturn(new ReadingIngestReport(1, List.of()));
+
+        MqttReadingIngestResult result = service.ingest(validBody("r-retry"));
+
+        assertThat(result.isDuplicated()).as("被拒行不得让重试被当成幂等重复").isFalse();
+        assertThat(result.getAccepted()).isEqualTo(1);
+        verify(receiptMapper).deleteRejectedByRequestId(DEVICE_ID, "r-retry");
+        verify(availabilityService).ingestWithReport(any(ReadingIngestReq.class));
+        ArgumentCaptor<IotMqttIngestReceipt> captor = ArgumentCaptor.forClass(IotMqttIngestReceipt.class);
+        verify(receiptMapper).insertReceipt(captor.capture());
+        assertThat(captor.getValue().getReceiptStatus()).isEqualTo(MqttReceiptStatus.ACCEPTED.getCode());
+    }
+
+    @Test
+    @DisplayName("部分丢弃：accepted 行附带触发码 + 丢弃明细，persisted_rows < received_count")
+    void partialDropMustBeRecorded() {
+        stubDevice();
+        when(availabilityService.ingestWithReport(any(ReadingIngestReq.class)))
+            .thenReturn(new ReadingIngestReport(1, List.of("p2")));
+
+        MqttReadingIngestResult result = service.ingest(bodyWithDistinctItems("r-partial", 2));
+
+        assertThat(result.isDuplicated()).isFalse();
+        assertThat(result.getAccepted()).isEqualTo(1);
+        assertThat(result.getDropped()).isEqualTo(1);
+        ArgumentCaptor<IotMqttIngestReceipt> captor = ArgumentCaptor.forClass(IotMqttIngestReceipt.class);
+        verify(receiptMapper).insertReceipt(captor.capture());
+        IotMqttIngestReceipt receipt = captor.getValue();
+        assertThat(receipt.getReceiptStatus()).isEqualTo(MqttReceiptStatus.ACCEPTED.getCode());
+        assertThat(receipt.getReceivedCount()).isEqualTo(2);
+        assertThat(receipt.getPersistedRows()).isEqualTo(1);
+        assertThat(receipt.getDiscardReason())
+            .isEqualTo(MqttIngestRejectReason.NO_ACCEPTED_ITEM.getCode());
+        assertThat(receipt.getDiscardDetail()).isEqualTo("p2");
+    }
+
+    @Test
+    @DisplayName("丢弃明细：前 8 个逗号连接，超出记 ,...(+N)；超长时减少列出个数但保留计数后缀")
+    void discardDetailMustTruncate() {
+        List<String> ids = new ArrayList<>();
+        for (int i = 1; i <= 3; i++) {
+            ids.add("p" + i);
+        }
+        assertThat(MqttReadingIngestServiceImpl.discardDetail(ids)).isEqualTo("p1,p2,p3");
+        for (int i = 4; i <= 10; i++) {
+            ids.add("p" + i);
+        }
+        assertThat(MqttReadingIngestServiceImpl.discardDetail(ids))
+            .isEqualTo("p1,p2,p3,p4,p5,p6,p7,p8,...(+2)");
+        assertThat(MqttReadingIngestServiceImpl.discardDetail(List.of())).isNull();
+        assertThat(MqttReadingIngestServiceImpl.discardDetail(null)).isNull();
+
+        List<String> longIds = new ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            longIds.add("x".repeat(128));
+        }
+        String longDetail = MqttReadingIngestServiceImpl.discardDetail(longIds);
+        assertThat(longDetail).hasSizeLessThanOrEqualTo(MqttReadingIngestServiceImpl.MAX_DISCARD_DETAIL_LENGTH)
+            .endsWith(")").contains("...(+");
     }
 
     @Test
@@ -333,6 +434,24 @@ class MqttReadingIngestServiceImplTest {
     private static String validBody(String requestId) {
         return "{\"requestId\":\"" + requestId + "\",\"items\":["
             + item(DEVICE_ID, "temperature") + "]}";
+    }
+
+    /**
+     * 构造一条含多个不同点位读数的合法入站报文（用于丢弃明细/部分丢弃用例）。
+     *
+     * @param requestId 请求 ID
+     * @param count     读数条数（点位标识为 p1..pN）
+     * @return JSON 文本
+     */
+    private static String bodyWithDistinctItems(String requestId, int count) {
+        StringBuilder sb = new StringBuilder("{\"requestId\":\"").append(requestId).append("\",\"items\":[");
+        for (int i = 0; i < count; i++) {
+            if (i > 0) {
+                sb.append(',');
+            }
+            sb.append(item(DEVICE_ID, "p" + (i + 1)));
+        }
+        return sb.append("]}").toString();
     }
 
     /**

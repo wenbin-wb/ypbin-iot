@@ -29,6 +29,7 @@ import cn.ypbin.admin.iot.availability.AvailabilityProperties;
 import cn.ypbin.admin.iot.availability.AvailabilityResp;
 import cn.ypbin.starter.iot.availability.AvailabilityRules;
 import cn.ypbin.admin.iot.availability.OutageReason;
+import cn.ypbin.admin.iot.availability.ReadingIngestReport;
 import cn.ypbin.admin.iot.availability.ReadingIngestReq;
 import cn.ypbin.admin.iot.availability.ReadingObservationDto;
 import cn.ypbin.admin.iot.entity.DeviceLiveness;
@@ -420,6 +421,35 @@ class AvailabilityServiceImplTest {
             req(point(DEVICE, "temperature", "23.5", 1_700_000_000_000L))))
             .as("观测设施故障不得把异常带出 afterCommit——「绝不外抛」必须是结构性的，不是「但愿不抛」")
             .doesNotThrowAnyException();
+    }
+
+    @Test
+    @DisplayName("★ 二批：ingestWithReport 返回被点位映射丢弃的点位标识（供 MQTT 回执 discard_detail）")
+    void ingestWithReportMustReturnDroppedPropertyIds() {
+        when(deviceMapper.selectBatchIds(any())).thenReturn(List.of(device()));
+        when(livenessMapper.selectList(any())).thenReturn(List.of());
+
+        ReadingIngestReport report = service.ingestWithReport(req(
+            point(DEVICE, "temperature", "23.5", 1_700_000_000_000L),
+            point(DEVICE, "bogus", "1", 1_700_000_000_100L)));
+
+        assertThat(report.processed()).isEqualTo(1);
+        assertThat(report.droppedPropertyIds()).containsExactly("bogus");
+        assertThat(report.hasDropped()).isTrue();
+    }
+
+    @Test
+    @DisplayName("★ 二批：全部命中映射时丢弃清单为空列表而不是 null（仓内红线）")
+    void ingestWithReportMustReturnEmptyDroppedList() {
+        when(deviceMapper.selectBatchIds(any())).thenReturn(List.of(device()));
+        when(livenessMapper.selectList(any())).thenReturn(List.of());
+
+        ReadingIngestReport report = service.ingestWithReport(
+            req(point(DEVICE, "temperature", "23.5", 1_700_000_000_000L)));
+
+        assertThat(report.processed()).isEqualTo(1);
+        assertThat(report.droppedPropertyIds()).isNotNull().isEmpty();
+        assertThat(report.hasDropped()).isFalse();
     }
 
     /** 取回交给时序写入器的点位（断言用）。 */
