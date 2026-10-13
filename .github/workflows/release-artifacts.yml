@@ -1,0 +1,90 @@
+name: Release Artifacts
+
+# 为什么需要本工作流（2026-10-12 全项目审计的 P0「制品化交付」）：
+# 本仓 admin 既有的 `release.yml` **只发 Release Notes、不产任何制品**；而 `docs/DEPLOY-BACKEND.md`
+# 明文规定「只能在能访问 GitHub 的构建机编 jar、**禁止部署机跑 Maven**」⇒ 生产交付长期靠
+# 「构建机上手工编 + scp 替换」，既没有可下载的制品，也没有可校验的来源链条。
+#
+# 为什么是**独立新工作流**而不是改 `release.yml`：按 `SYNC.md` 第二节，admin 的既有工作流
+# （ci.yml / codeql.yml / release.yml）属"明确不动"——改它们会扩大与 upstream 的分歧面；
+# 新增独立文件不产生同步冲突点，这也是本仓既有做法（iot-integration-tests / iot-iotdb-it /
+# sync-whitelist / sync-starter-version / upstream-sync 全部是新增文件）。
+#
+# 产出：`v*` tag 上把 **6 个可执行服务 jar** + 一份 `jars.manifest.sha256`（含 git sha 与构建时刻）
+# 作为该 Release 的资产。生产侧按 docs/DEPLOY-BACKEND.md「从 Release 制品部署」一节下载并校验 sha256。
+# 与 `release.yml` 的分工：那份写 Release 说明（正文），本份只挂制品（files），互不覆盖。
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要回填制品的已有 tag（例如 v1.0.0）'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  artifacts:
+    name: 构建并上传可执行 jar 制品
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码（tag 对应提交）
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: 配置 JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      # 依赖一律从 Maven Central 解析（本仓 pom 钉的是已发布版本）——
+      # **不**像 CI 作业那样取 ypbin-starter 源码本地安装：制品必须能由"一个 tag + 公开依赖"复现。
+      - name: 构建可执行 jar
+        run: mvn -B -DskipTests package
+
+      - name: 自检每个 jar 都是 Spring Boot 可执行归档（防上传错产物）
+        run: |
+          set -euo pipefail
+          n=0
+          for f in ypbin-gateway/target/*.jar ypbin-auth/target/*.jar ypbin-service/*/target/*.jar; do
+            [ -f "$f" ] || continue
+            case "$f" in *-sources.jar|*javadoc.jar|*.original) continue;; esac
+            if ! jar tf "$f" | grep -q '^BOOT-INF/'; then
+              echo "::error file=$f::$f 不是 Spring Boot 可执行归档（缺 BOOT-INF/）"
+              exit 1
+            fi
+            n=$((n + 1))
+          done
+          echo "可执行归档数：$n"
+          [ "$n" -eq 6 ] || { echo "::error::期望 6 个服务 jar（gateway/auth/system/ai/iot/access），实际 $n"; exit 1; }
+
+      - name: 生成 sha256 清单（含 git sha 与构建时刻）
+        run: |
+          set -euo pipefail
+          {
+            echo "# ypbin-iot release artifacts"
+            echo "# git: $(git rev-parse HEAD)"
+            echo "# built: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > jars.manifest.sha256
+          for f in ypbin-gateway/target/*.jar ypbin-auth/target/*.jar ypbin-service/*/target/*.jar; do
+            [ -f "$f" ] || continue
+            case "$f" in *-sources.jar|*javadoc.jar|*.original) continue;; esac
+            echo "$(sha256sum "$f" | awk '{print $1}')  $(basename "$f")" >> jars.manifest.sha256
+          done
+          cat jars.manifest.sha256
+
+      - name: 附加到该 tag 的 Release（只挂制品，不动正文）
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: |
+            jars.manifest.sha256
+            ypbin-gateway/target/*.jar
+            ypbin-auth/target/*.jar
+            ypbin-service/*/target/*.jar
+          fail_on_unmatched_files: true

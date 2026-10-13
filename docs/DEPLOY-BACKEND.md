@@ -53,6 +53,30 @@ curl -s http://127.0.0.1:18084/actuator/health
   （下载 artifact → 覆盖 `iot-ui-dist` → `docker restart ypbin-iot-ui`），并核对
   「CI 产物与服务器文件逐字节一致」的 md5。
 
+## 2.0 优先路径：从 Release 制品部署（2026-10-13 起）
+
+**为什么加这条**：上面那套「构建机手工编 → scp」有两个长期问题：① 制品只能靠人工 md5 对账，
+没有「这个 jar 来自哪个 commit」的**机器可验证**链条；② 换一台构建机就得重建整套 Maven + 本地仓库环境。
+现由 `.github/workflows/release-artifacts.yml` 在 `v*` tag 上**自动构建并挂载** 6 个服务 jar
++ 一份 `jars.manifest.sha256`（首部含 `# git: <sha>` 与 `# built: <UTC 时刻>`）。
+
+```bash
+# ① 取制品（任一台能访问 GitHub 的机器；部署机若能访问 GitHub 也可直接下载）
+TAG=v1.0.0
+gh release download "$TAG" --repo wenbin-wb/ypbin-iot --pattern '*.jar' --pattern 'jars.manifest.sha256'
+# 没有 gh 也可直连：
+#   curl -L -O https://github.com/wenbin-wb/ypbin-iot/releases/download/$TAG/<jar 文件名>
+
+# ② 校验（**必做**）：逐文件核对 sha256，并确认清单里的 git sha 就是你要部署的那个提交
+sha256sum -c <(grep '\.jar$' jars.manifest.sha256)
+git -C <repo> rev-parse HEAD      # 应与清单首部的 `# git:` 行一致
+
+# ③ 之后的「替换 → 只重启该服务 → 核对容器内 md5/health」与第 2 节的 ②③④ 完全相同
+```
+
+⚠️ **边界（如实登记）**：本工作流**只产 jar**，不产 Docker 镜像与 SBOM；镜像仍由部署机
+`docker compose build`（Dockerfile 只 `COPY target/*.jar`、不编译源码，故安全）。镜像制品化与 SBOM 属后续增量。
+
 ## 2.1 compose 必填变量（`${VAR:?}`）：EMQX 是**硬前置**，缺失时在「起任何容器之前」报错
 
 **为什么单列**：`docker compose` 对**整份文件**做变量插值。任一 `${VAR:?}` 缺失，**与该服务无关**
