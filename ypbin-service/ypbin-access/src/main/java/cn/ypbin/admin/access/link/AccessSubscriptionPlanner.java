@@ -24,6 +24,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -87,14 +88,25 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
 
     private final Clock clock;
 
+    /**
+     * 是否处于 TCP 的 {@code payload-format=key-value} 形态（由装配层从 SDK 的 {@code TcpProperties}
+     * 解析后传入，见 {@code AccessIotProtocolConfiguration}）。
+     *
+     * <p>key-value 允许**一次订阅多地址**（SDK {@code TcpValueSelector} 对每个 selector 各产出一个
+     * {@code PointValue}）；其它形态（binary/text/number）仍是「单点位流」，必须逐点位单订阅。
+     * 用配置形态分流（而不是新增开关）的收益：<b>回退配置即回退订阅形态</b>，天然是滚动回退手段。</p>
+     */
+    private final boolean tcpKeyValuePayloadFormat;
+
     /** 订阅**成功**计数（会话建立后真正订阅成功的设备数）。 */
     private final Counter subscribeSuccess;
 
     /**
      * 订阅**失败**计数（失败不写跟踪表 ⇒ 退避后会对账重试；这里让它可观测）。
      *
-     * <p>粒度 = 单次 {@code session.subscribe} 调用：非 TCP 一设备一次；TCP 逐点位订阅下一设备一轮
-     * 最多可计 N 次（每个失败地址各一次），因此「N 里成功 M 个」在本指标上表现为 N-M 次失败。</p>
+     * <p>粒度 = 单次 {@code session.subscribe} 调用：<b>一次多地址订阅</b>（key-value TCP 与非 TCP）
+     * 一设备一次；<b>逐点位单订阅</b>（非 key-value TCP）下一设备一轮最多可计 N 次（每个失败地址各一次），
+     * 因此「N 里成功 M 个」在该形态下表现为 N-M 次失败。</p>
      */
     private final Counter subscribeFailure;
 
@@ -104,17 +116,23 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
     /** 因「失败退避」跳过的次数。 */
     private final Counter backoffSkipped;
 
-    /** TCP 逐点位订阅累计发起的**单地址**订阅次数（观测一设备多订阅的规模；排查重复订阅用）。 */
+    /**
+     * TCP **逐点位单订阅**累计发起的单地址订阅次数（仅非 key-value 形态；观测一设备多订阅的规模）。
+     *
+     * <p>key-value 形态走一次多地址订阅，本计数**不增长**——测试用它区分「1 次多地址」与「N 次单地址」。</p>
+     */
     private final AtomicInteger startedTcpAddressCount = new AtomicInteger();
 
     public AccessSubscriptionPlanner(Supplier<Map<String, DeviceSession>> sessions,
                                      ObjectMapper objectMapper, AccessReadingSink readingSink,
-                                     MeterRegistry meterRegistry, Clock clock) {
+                                     MeterRegistry meterRegistry, Clock clock,
+                                     boolean tcpKeyValuePayloadFormat) {
         this.sessions = sessions;
         this.objectMapper = objectMapper;
         this.readingSink = readingSink;
         this.meterRegistry = meterRegistry;
         this.clock = clock;
+        this.tcpKeyValuePayloadFormat = tcpKeyValuePayloadFormat;
         // 指标前缀统一为 `iot.access.*`（与既有的 `iot.access.lease.*` 一致；
         // S5 引入时用的 `ypbin.access.*` 是同一批 access 指标，混用会让大盘上出现两套前缀）
         this.subscribeSuccess = meterRegistry.counter("iot.access.subscribe.success");
@@ -166,21 +184,24 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
             List<PointAddress> addresses = points.stream()
                 .map(point -> PointAddress.of(point.getAddress()))
                 .toList();
-            if (isSinglePointStream(device)) {
-                // ⚠️ UP-4 / starter 0.2.0 单点位契约：TCP 透传对 >1 地址 **fail-fast**
-                //    （TcpAdapter.MSG_MULTI_ADDRESS_UNSUPPORTED）。若把全部点位塞进一次 subscribe，
-                //    任何 >1 点位的 TCP 设备都会整机零采集（比 0.1.0 的「N 里只出 1」更糟）。
-                //    这里改为按点位逐个单地址订阅：每个地址各自注册帧消费者，同一帧会带各自 address
-                //    派发（见 TcpSession.subscribe），共享同一个 listener 按 raw_address 取键解码。
+            if (requiresPerAddressSubscribe(device)) {
+                // 非 key-value 的 TCP 是「单点位流」：TcpSession#subscribe 对 >1 地址 fail-fast
+                // （TcpAdapter.MSG_MULTI_ADDRESS_UNSUPPORTED），必须逐点位单订阅（UP-4 契约）。
+                // key-value 形态不会进这里（它走下面的一次多地址订阅）。
                 if (subscribeTcpPerAddress(device, session, points, addresses)) {
                     subscribed++;
                 }
                 continue;
             }
+            // key-value TCP 与非 TCP：一次多地址订阅。
+            // key-value 下 SDK 对**每个地址条目**各产出一个 PointValue ⇒ 重复 raw 会产生重复读数，
+            // 故按 raw 去重（与逐点位路径的 distinct 口径一致）；非 TCP 保持既有行为不动。
+            List<PointAddress> subscribeAddresses = isTcp(device)
+                ? distinctByRaw(addresses) : addresses;
             SubscribeRequest request = device.pollInterval().isZero()
-                ? SubscribeRequest.of(addresses)
-                : new SubscribeRequest(addresses, device.pollInterval(), device.pollInterval(), null,
-                    Map.of());
+                ? SubscribeRequest.of(subscribeAddresses)
+                : new SubscribeRequest(subscribeAddresses, device.pollInterval(), device.pollInterval(),
+                    null, Map.of());
             PointMappingDataListener listener = new PointMappingDataListener(device.deviceId(),
                 device.protocol().value(), pollIntervalMs(device), points, readingSink, meterRegistry);
             // ⚠️ S5 修复：**订阅成功之后**才记录跟踪。
@@ -189,7 +210,7 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
             //    现在失败不写 ⇒ 下一个租约周期自动重试。
             inFlight.add(device.deviceId());
             try {
-                startSubscribe(session, request, listener, device, addresses);
+                startSubscribe(session, request, listener, device, subscribeAddresses);
             } catch (RuntimeException ex) {
                 // ⚠️ 同步抛出（适配器契约并不禁止）：必须立刻摘掉在途标记，否则该设备**永久无法订阅**
                 //    ——注释自己说了「不移除比重复订阅更糟」，那就不能只防异步失败这条路径。
@@ -238,37 +259,75 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
         });
     }
 
-    /**
-     * 该设备是否为「单点位流」协议（当前仅 TCP 透传）。
-     *
-     * <p>为什么不靠 {@code ProtocolCapability} 判断：框架能力枚举里 TCP 与 MQTT 都用
-     * {@code SUBSCRIBE_STREAM}，<b>没有</b>「单点位/多地址」这一档（框架 issue #15）。在框架补齐
-     * 能力枚举/元数据之前，只能按协议码判断；协议码是协议的唯一身份（{@code ProtocolCode}），
-     * 所以这里不会误判。</p>
-     *
-     * @param device 设备规格
-     * @return TCP 透传返回 {@code true}
-     */
-    private static boolean isSinglePointStream(DeviceSpec device) {
+    /** 是否 TCP 透传（协议码是协议的唯一身份，{@code ProtocolCode}，不会误判）。 */
+    private static boolean isTcp(DeviceSpec device) {
         return IotProtocol.TCP.getCode().equals(device.protocol().value());
     }
 
     /**
-     * TCP 透传的**逐点位单订阅**（UP-4 契约对齐）。
+     * 该设备是否**必须**走「逐点位单订阅」（而非一次多地址订阅）。
      *
-     * <p><b>为什么保持逐点位单订阅（2026-10-13 复核）</b>：非 key-value 的 TCP 透传是「单点位流」
-     * ——裸 TCP 帧没有寻址语义，{@code TcpSession#subscribe} 对 {@code addresses().size() > 1}
-     * 直接 fail-fast（{@code iot.tcp.subscribe.multi-address-unsupported}）。本仓接入侧已切到
-     * starter 0.3.0 的 {@code payload-format=key-value}，该模式下多地址订阅**已被允许**；但本类
-     * <b>仍保持逐点位单订阅</b>（风险最小、语义与切换前一致），多地址单订阅（减少 N 倍帧解析）
-     * 登记为文档待办，见 {@code docs/VALUE-DECODE-DESIGN.md} §5。</p>
+     * <p>判据 = TCP 透传 **且** {@code payload-format} 不是 {@code key-value}：</p>
+     * <ul>
+     *   <li><b>非 key-value 的 TCP</b> 是「单点位流」：裸 TCP 帧没有寻址语义，
+     *       {@code TcpSession#subscribe} 对 {@code addresses().size() > 1} 直接 fail-fast
+     *       （{@code iot.tcp.subscribe.multi-address-unsupported}）；</li>
+     *   <li><b>key-value</b>（starter 0.3.0 的 valueSelector）允许一次订阅多地址、对每个 selector
+     *       各产出一个 {@code PointValue} ⇒ 走一次多地址订阅（N 点位从 N 次订阅降为 1 次，
+     *       同一帧只解析/派发一次）；</li>
+     *   <li><b>非 TCP</b>（Modbus/OPC UA 等）本就支持多地址，不受本判据影响。</li>
+     * </ul>
      *
-     * <p><b>逐点位单订阅在 key-value 下的语义</b>：{@code TcpSession.subscribe} 每次订阅都会新建
+     * <p><b>为什么按配置形态而不是新增开关</b>：把 {@code payload-format} 改回
+     * binary/text/number 时订阅自动回到逐点位单订阅，无需第二个开关，也天然是滚动回退手段。
+     * <b>配置不可得</b>（TCP 未启用、{@code TcpProperties} bean 缺失）时按「非 key-value」处理
+     * ⇒ 保持今天的行为。</p>
+     *
+     * <p>为什么不靠 {@code ProtocolCapability}：框架能力枚举里 TCP 与 MQTT 都用
+     * {@code SUBSCRIBE_STREAM}，没有「单点位/多地址」这一档（框架 issue #15）；key-value 的
+     * 多地址能力由 {@code payload-format} 表达，故按「协议码 + 配置形态」判断。</p>
+     *
+     * @param device 设备规格
+     * @return 必须逐点位单订阅返回 {@code true}
+     */
+    private boolean requiresPerAddressSubscribe(DeviceSpec device) {
+        return isTcp(device) && !tcpKeyValuePayloadFormat;
+    }
+
+    /**
+     * 按 {@code raw} 去重并保持首次出现顺序。
+     *
+     * <p>为什么按 raw 而不是 {@link PointAddress} 相等：同一 raw 可能因点位映射行不同而出现多次，
+     * 逐点位路径的 {@code distinct} 也是按 raw；key-value 下 SDK 对每个地址条目各产出一个
+     * {@code PointValue}，不去重会产生重复读数（listener 的 {@code pointByAddress} 是后者覆盖）。</p>
+     *
+     * @param addresses 原始地址列表
+     * @return 去重后的地址列表
+     */
+    private static List<PointAddress> distinctByRaw(List<PointAddress> addresses) {
+        Map<String, PointAddress> byRaw = new LinkedHashMap<>();
+        for (PointAddress address : addresses) {
+            byRaw.putIfAbsent(address.raw(), address);
+        }
+        return List.copyOf(byRaw.values());
+    }
+
+    /**
+     * TCP 透传的**逐点位单订阅**（UP-4 契约；**仅非 key-value 形态**走这里）。
+     *
+     * <p><b>什么时候走这里</b>：{@code requiresPerAddressSubscribe(device)} 为真，即 TCP 且
+     * {@code payload-format} 不是 {@code key-value}。裸 TCP 帧没有寻址语义，
+     * {@code TcpSession#subscribe} 对 {@code addresses().size() > 1} 直接 fail-fast
+     * （{@code iot.tcp.subscribe.multi-address-unsupported}），所以必须逐点位单订阅。
+     * <b>key-value 形态不走这里</b>：它允许一次多地址订阅（SDK valueSelector 逐个 selector 产出），
+     * 见 {@link #requiresPerAddressSubscribe(DeviceSpec)} 与 {@code docs/VALUE-DECODE-DESIGN.md} §5.5。</p>
+     *
+     * <p><b>逐点位单订阅的语义</b>：{@code TcpSession.subscribe} 每次订阅都会新建
      * {@code TcpSubscription} 并向链路注册**独立的帧消费者**，帧内的 address 用该次订阅的地址
      * （{@code addresses().get(0)}）。因此 N 个单地址订阅 ⇒ 同一帧被派发 N 次，各自带自己的
      * {@code raw_address}；它们共享同一个 {@link PointMappingDataListener}（其 {@code pointByAddress}
-     * 含全部点位），于是每个点位都能按 {@code raw_address} 取到自己的值。**帧键选择现由 starter
-     * 0.3.0 的 {@code TcpValueSelector}（key-value 的 valueSelector）承担**，宿主不再做帧解析。</p>
+     * 含全部点位），于是每个点位都能按 {@code raw_address} 取到自己的值。帧键选择由 starter
+     * 0.3.0 的 {@code TcpValueSelector} 承担，宿主不再做帧解析。</p>
      *
      * <p><b>语义保持</b>：① 成功后才计入设备跟踪（S5）；② 在途去重按「设备+地址」，部分成功后重试
      * 只补失败地址，**不会**给已成功地址重复挂监听（否则同一点位会出重复读数）；③ 失败仍走指数退避
