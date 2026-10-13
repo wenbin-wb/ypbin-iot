@@ -126,6 +126,85 @@ OPC UA `ByteString`（生产 access fat jar 不含这两个协议模块，属潜
 
 ---
 
+### 4.3 Modbus 寄存器解码 v1（**设计定稿，2026-10-13；实施前评审本小节**）
+
+> 目标：落地 §4.2 第一行「Modbus 寄存器 16/32 位、有符号/无符号、大小端」。字段契约已冻结
+> （`word_count`/`signed` 新增 + 复用 `byte_order`），本小节是实现口径；与前端并行，**命名不得各自发挥**。
+
+#### 4.3.1 字段契约（冻结）
+
+| 列 | 类型 | 语义 |
+|---|---|---|
+| `word_count` | `INT NOT NULL DEFAULT 1` | 连续寄存器个数；本版合法值 `1`\|`2`；默认 1 = 今天的行为 |
+| `signed` | `TINYINT NOT NULL DEFAULT 0` | `0`=无符号 / `1`=有符号（整型） |
+| `byte_order`（复用） | `VARCHAR(16) NULL` | **字序（word order）**：`big`=高字在前（ABCD）/`little`=低字在前（CDAB）；仅 `word_count=2` 生效 |
+
+接口字段（camelCase，前端契约）：`wordCount`（1\|2）、`signed`（**0\|1 整数，不是 Boolean**——与 DDL `TINYINT` 一致）、
+`byteOrder`（已存在，`big`\|`little`）。`address_type` 保持既有取值，本版不改语义。
+
+#### 4.3.2 生效范围与校验（不猜、明显错配拦住）
+
+| 条件 | 规则 |
+|---|---|
+| 仅 **Modbus**（`holding`/`input` 寄存器） | 三个字段生效 |
+| `word_count=2` | `address_type ∈ {holding,input}`；`raw_address` 必须是显式 `type:offset` 且 `type` 与 `address_type` 逐字一致；`byte_order` 为 null ⇒ 按 `big` |
+| `word_count=1` | `byte_order` 忽略（写 `big` 等价于不写）；`signed` 作用于 16 位值 |
+| `coil`/`discrete`（位类型） | `word_count≠1` 或 `signed≠0` ⇒ **拒绝**（位类型没有宽度/符号语义） |
+| 非 Modbus（tcp/mqtt/opcua） | 三字段必须为默认（`1/0/null`）⇒ 否则**拒绝**（明显错配）；默认值不改变行为 |
+| `dataType` | `word_count=2` 或 `signed=1` 时要求 `iot_property.data_type ∈ {int,long}`（v1 仅整型） |
+| `word_count=2` + 传统 5 位编号（如 `40001`） | **v1 拒绝**：主机侧算 `base+1` 需复刻 SDK 的段基址/1-based 规则（第二份真源）；显式 `type:offset` 无歧义 |
+
+#### 4.3.3 解码矩阵（8 组 + 长度不足）
+
+输入：`R0` = base 寄存器（SDK 交付 16 位无符号 `Integer` 0..65535）、`R1` = base+1。
+
+| word_count | signed | byte_order | 规则 | 输出类型/域 |
+|---|---|---|---|---|
+| 1 | 0 | 忽略 | `value = R0` | `Integer` 0..65535（**原样透传，与今天逐字节一致**） |
+| 1 | 1 | 忽略 | `signExtend16(R0)` | `Integer` -32768..32767 |
+| 2 | 0 | big | `(R0 << 16) \| R1` | `long` 0..4294967295 |
+| 2 | 0 | little | `(R1 << 16) \| R0` | `long` 0..4294967295 |
+| 2 | 1 | big | `signExtend32((R0 << 16) \| R1)` | `long` -2147483648..2147483647 |
+| 2 | 1 | little | `signExtend32((R1 << 16) \| R0)` | `long` -2147483648..2147483647 |
+
+- 8 组用例 = `byte_order{big,little} × word_count{1,2} × signed{0,1}`（`word_count=1` 时 `byte_order` 两组同值，仍按 8 组覆盖）；
+- 32 位无符号用 `long` 承载 `0..2^32-1`，**不截断、不溢出**；符号按 two's complement；
+- **长度不足**（任一寄存器缺失/响应短/BAD）⇒ 该点位 **BAD**，**不得用 0 充数**。
+
+#### 4.3.4 配对与失败语义（宿主侧，本任务难点）
+
+- **订阅扩地址**：`word_count=2` ⇒ 订阅 `base` 与 `base+1`（同 `address_type`）；`raw_address` 仍是**基址**，不把宽度编码进去；
+- listener 建 `registerAddress → (point, wordIndex)` 映射：base→0、base+1→1；`word_count=1` 只映射 base；
+- **GOOD**：`word_count=1` ⇒ 立即解码/上报；`word_count=2` ⇒ 暂存 `(wordIndex → 值+时刻)`，两半齐 ⇒ 合成**一条**读数并清空；
+- **BAD**：任一寄存器 BAD ⇒ 立即产出该点位 **BAD**（带 SDK 的 `qualityReason`）并清空暂存；**绝不用陈旧一半拼值、绝不用 0 充数**；
+- **陈旧一半**：同一 half 再次到达，或另一 half 与暂存 half 的时刻差 > 容差（取采集周期，未知时 5s）⇒ 丢弃暂存 + 计数
+  **`iot.access.modbus.pair.stale`**，再用新值暂存；**不与新值混**；
+- **暂存有界**：每设备至多「`word_count=2` 的点位数」条；会话变化/重订阅 ⇒ 新建 listener（旧暂存随之失效）；
+  `forget` 后下次订阅同样新建；未完成的半字在无后续回调时最多驻留到 listener 被替换（不无界增长）；
+- **不产生重复读数**：多地址单订阅下一次读只产出每点位一条。
+
+#### 4.3.5 订阅扩地址规则
+
+- 仅 `word_count=2` 扩；扩出的地址参与既有按 `raw` 去重（两个点位可共享寄存器）；
+- 地址算法：v1 只接受显式 `type:offset`；`next = type:(offset+1)`；`offset+1 > 65535` ⇒ 校验期拒绝；
+- 非 Modbus / `word_count=1`：订阅地址与今天完全一致。
+
+#### 4.3.6 未支持（保持登记，不在本版）
+
+IEEE754 浮点（需 `dataType=float` + 完整字节序枚举）；BADC/DCBA 字内字节交换（需扩 `byte_order` 枚举并单独评审）；
+`coil`/`discrete` 的宽度/符号；字符串寄存器（多寄存器 UTF-8）与位域（§4.2 各自单独立项）；
+`word_count=2` 的传统 5 位编号形式；一个点位跨不同寄存器区（base 与 base+1 必须同 `address_type`）。
+
+#### 4.3.7 向后兼容、DDL 与门禁
+
+- 默认 `word_count=1, signed=0` ⇒ 16 位无符号**原样透传**，现有点位行为逐字节不变（回归用例钉住）；
+- DDL：ALTER **同时**写入 `007-iot-data.sql` 末尾与 `deploy/sql/migration/2026-10-13-iot-modbus-register-schema.sql`
+  （排序最后）；更新 `iot-migrations.list`；登记 `ItSchema.EXTRA_SCHEMA_SCRIPTS`；跑 `tools/check-iot-sql-equivalence.sh`；
+- 新指标 `iot.access.modbus.pair.stale` 登记 `docs/METRICS.md`（`MetricsRegistryGateTest` 覆盖）；
+- `AccessPointMappingDto` 带 `wordCount`/`signed`（`byteOrder` 已有），`DeviceSpecServiceImpl.toPoint` 复制。
+
+---
+
 ## 5. 职责切分、删除条件与 starter 反馈（**必读**）
 
 ### 5.1 删除条件如何被满足（2026-10-13）
