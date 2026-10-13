@@ -28,7 +28,9 @@ import java.nio.charset.StandardCharsets;
  *       无符号用 {@code long} 承载 0..2^32-1（不截断/不溢出），有符号做 32 位符号扩展。</li>
  * </ul>
  *
- * <p>不支持 IEEE754 浮点与 BADC/DCBA 字内字节交换（见 {@code docs/VALUE-DECODE-DESIGN.md} §4.3.6）；
+ * <p>支持 IEEE754 单精度（{@link #decodeFloatBits(int, int, String)}，2 寄存器）与双精度
+ * （{@link #decodeDoubleBits(int[], String)}，4 寄存器）。**不支持** BADC/CDAB 之类「字内字节交换」的
+ * 中间排列（big=ABCD / little=DCBA 整体翻转，见 {@code docs/VALUE-DECODE-DESIGN.md} §4.2/§4.3.6）；
  * v3 起新增多寄存器 UTF-8 字符串（{@link #decodeStringUtf8(int[])}，见 §4.5）。</p>
  *
  * @author wenbin
@@ -78,6 +80,22 @@ public final class ModbusRegisterDecoder {
      */
     public static float decodeFloatBits(int first, int second, String byteOrder) {
         return Float.intBitsToFloat((int) assembleRaw32(first, second, byteOrder));
+    }
+
+    /**
+     * IEEE754 双精度浮点（64 位 ⟺ 4 寄存器）解码（v4）。
+     *
+     * <p>字序与 v1/v2 同口径：{@code big}=高字在前（寄存器序列 ABCD）、{@code little}=低字在前
+     * （DCBA，**整体翻转**）；不支持 BADC/CDAB 等字内字节交换。NaN/±Inf 的处置不在这里：调用方按
+     * {@code docs/VALUE-DECODE-DESIGN.md} §4.4.6 判 BAD + 计数（本方法只如实返回位模式对应的 double）。</p>
+     *
+     * @param words     4 个 16 位无符号寄存器值（按 word_index 升序，长度必须为 4）
+     * @param byteOrder 字序：{@code little}=低字在前（DCBA）；其它（含 null）=高字在前（ABCD）
+     * @return 该 64 位位模式对应的双精度浮点
+     * @throws IllegalArgumentException {@code words.length != 4}
+     */
+    public static double decodeDoubleBits(int[] words, String byteOrder) {
+        return Double.longBitsToDouble(assembleRaw64(words, byteOrder));
     }
 
     /**
@@ -137,5 +155,27 @@ public final class ModbusRegisterDecoder {
         long high = first & 0xFFFFL;
         long low = second & 0xFFFFL;
         return "little".equalsIgnoreCase(byteOrder) ? ((low << 16) | high) : ((high << 16) | low);
+    }
+
+    /**
+     * 按字序组装 64 位原始字：big=ABCD（words[0] 为高 16 位）；little=DCBA（整体翻转，
+     * 即 words[3] 为高 16 位）。不支持 BADC/CDAB 字内字节交换。
+     */
+    private static long assembleRaw64(int[] words, String byteOrder) {
+        if (words == null || words.length != 4) {
+            throw new IllegalArgumentException("IEEE754 双精度必须恰好 4 个寄存器：words.length="
+                + (words == null ? "null" : words.length));
+        }
+        long value = 0L;
+        if ("little".equalsIgnoreCase(byteOrder)) {
+            for (int i = words.length - 1; i >= 0; i--) {
+                value = (value << 16) | (words[i] & 0xFFFFL);
+            }
+        } else {
+            for (int word : words) {
+                value = (value << 16) | (word & 0xFFFFL);
+            }
+        }
+        return value;
     }
 }
