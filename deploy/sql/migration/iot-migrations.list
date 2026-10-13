@@ -3,6 +3,7 @@
 #       从远端按本清单逐个下载 *-iot-*.sql；本清单必须与目录内实际文件一一对应，
 #       由 tools/check-iot-sql-equivalence.sh 校验（多一个/少一个都会转红）。
 # 新增迁移：把文件放进 deploy/sql/migration/ 后，把文件名按序追加到本清单末尾。
+000-iot-migration-ledger.sql
 2026-09-19-iot-device-schema.sql
 2026-09-19-iot-lease-schema.sql
 2026-09-19-iot-m1-thing-model-schema.sql

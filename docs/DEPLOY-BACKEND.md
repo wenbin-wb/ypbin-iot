@@ -149,7 +149,7 @@ docker compose -f deploy/docker-compose.yml --env-file <缺 EMQX 的 .env> confi
 | `docker-compose.yml` | 有但不同 | fork 版含 `ypbin-iot`/`ypbin-access`/`iotdb`；现由 `$ROOT/ypbin-admin`（fork 检出）直接使用，见 §2.3 |
 | `nacos/ypbin-iot.yaml` / `nacos/ypbin-access.yaml` | **无** | fork 专属服务配置 |
 | `nacos/ypbin-common.yaml` / `nacos/ypbin-gateway.yaml` | 有但不同 | **fork 版为准**（identity token / iot 路由） |
-| `sql/006-iot-schema.sql` / `sql/007-iot-data.sql` / `sql/migration/iot-migrations.list` | **无** | IoT 表/菜单与远端下载清单 |
+| `sql/006-iot-schema.sql` / `sql/007-iot-data.sql` / `sql/migration/iot-migrations.list` | **无** | IoT 表/菜单与远端下载清单（清单首位含升级登记表 `000-iot-migration-ledger.sql`） |
 | `nginx-microservice.conf`（compose 也挂 `./nginx-microservice.conf`） | 有且**相同** | 无需 fork 源 |
 
 > ✅ **2026-10-12 起已修**：`install.sh` 的 [2/7] **默认把 fork（ypbin-iot）clone 到 `$ROOT/ypbin-admin`**
@@ -181,6 +181,22 @@ ypbin-system / ypbin-ai / ypbin-iot / ypbin-access / xxl-job-admin / ypbin-admin
 $BRANCH <fork URL> $ROOT/ypbin-admin`（或直接在含 deploy/ 的本仓检出里跑脚本）；② 确实只装纯 admin
 基座就显式 `YPBIN_ADMIN_REPO=https://github.com/wenbin-wb/ypbin-admin.git` 后重跑（此时 fork 资源校验
 按 compose 是否含 IoT 服务自动降级，不会误拦）。
+
+## 2.4 升级时的数据库迁移（`deploy/migrate.sh`）
+
+> 升级用运行器，与「全新安装」分开：`install.sh` 导 001–007 并把全部迁移登记为已应用；
+> `migrate.sh` 对**已有库**按清单顺序应用未登记迁移。两者共用同一张登记表 `iot_schema_migration`。
+
+- **登记表**：`iot_schema_migration`（`filename` 主键、`checksum`=sha256(文件)、`applied_at`、`applied_by`、`success`），
+  由 `deploy/sql/migration/000-iot-migration-ledger.sql` 建立（必须排在 `iot-migrations.list` 首位）。
+- **子命令**：`--status`（已应用/待应用/校验和不一致 + 计数）、`--dry-run`（只打印）、默认 apply。
+- **纪律**：校验和不一致 ⇒ 判红并中止（**不自动重放**已应用文件）；失败即停；口令只从 `deploy/.env` 读、
+  经 `MYSQL_PWD` 转发、**不进 argv**。
+- **参数**：`--database` / `--container`（临时库/临时容器验证）、`--host` / `--port`（直连，需宿主 mysql 客户端）、
+  `--env-file` / `--list` / `--migration-dir`。
+- **兼容旧账本** `ypbin_schema_migrations`（早期 install.sh）：旧账本有记录、新登记表无 `success=1` 记录的迁移
+  按已应用处理，apply 时补登进新表（不执行 DDL）。旧账本无 checksum ⇒ 补登值取当前文件 sha256，无法检测历史篡改。
+- **硬步骤与判据**见 `docs/DEPLOY-RUNBOOK.md` §B.2。
 
 ## 3. 回滚
 

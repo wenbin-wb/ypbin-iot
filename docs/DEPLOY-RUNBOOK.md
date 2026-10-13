@@ -26,7 +26,7 @@
 | 阶段 | 一句话 | 跳转 |
 |---|---|---|
 | 上线前 | **`access` 与 `iot` 必须同一窗口成对升级、配置随 jar 同切**；EMQX 凭据是硬前置 | [§A](#a-上线前检查pre-flight) |
-| 升级 | 备份回滚物 → 停 access → 换 iot → 换 access → 起；禁止部署机跑 Maven / `down -v` / 整栈重启 | [§B](#b-升级步骤) |
+| 升级 | 备份回滚物 → **迁移登记/应用** → 停 access → 换 iot → 换 access → 起；禁止部署机跑 Maven / `down -v` / 整栈重启 | [§B](#b-升级步骤) |
 | 上线后 | 按「制品 → 订阅 → 落列 → Modbus → 接入规范化 → 业务面」逐条核验，每条给命令+期望+说明 | [§C](#c-上线后核验清单) |
 | 回滚 | 应用/配置可回滚；**落列口径不可回退** | [§D](#d-回滚) |
 | 出事 | 先查 §E 速查表（现象 → 判据 → 原因 → 处置） | [§E](#e-故障速查) |
@@ -156,7 +156,35 @@ deploy/backup.sh
 
 > 记录：`TS`、两个 rollback 镜像 tag、两个 jar 备份路径、`.env` 备份、Nacos dump 路径、本次部署的 git sha。
 
-### B.2 协调切换（`access` + `iot` 成对）
+### B.2 数据库迁移登记（换 jar 前必做；紧跟 §B.1 备份之后）
+
+> 为什么是硬步骤：dev 升级实测暴露过「新 jar 需要新列，但迁移静默没应用」——
+> 症状是 `Unknown column 'word_count'`、`/internal/device-specs/tenant` 500、access 拿不到设备规格。
+> 迁移不在 jar 里，必须先用运行器确认并应用，再换 jar。
+
+```bash
+cd /opt/ypbin/ypbin-iot
+
+# ① 先看：已应用 / 待应用 / 校验和不一致 + 计数（只读；有 pending/mismatch 时退出码非 0）
+deploy/migrate.sh --status
+
+# ② 有 pending ⇒ 先应用迁移，再换 jar（幂等、失败即停；校验和不一致会判红并中止）
+deploy/migrate.sh
+
+# ③ 复查：待应用=0 且 校验和不一致=0 才进 §B.3
+deploy/migrate.sh --status
+```
+
+判据与纪律：
+- **待应用=0 且 校验和不一致=0** 才继续 §B.3 换 jar；否则先按输出处置。
+- **校验和不一致**：登记表记录的 sha256 与迁移文件不同，运行器**不自动重放**，按脚本打印的人工处置指引走。
+- 迁移**失败即停**，不吞错；库可能半应用时先人工核对再重跑（登记表里该文件 `success=0`）。
+
+> **分工**：`deploy/migrate.sh` = **升级**（已有库，按 `deploy/sql/migration/iot-migrations.list` 顺序应用
+> 未登记迁移，登记到 `iot_schema_migration`，含 sha256 防重放）；`deploy/install.sh` = **全新安装/整栈**
+> （导 001–007 并把全部迁移登记为已应用）。两者共用同一张登记表，可安全交替使用。
+
+### B.3 协调切换（`access` + `iot` 成对）
 
 ```bash
 cd /opt/ypbin/ypbin-iot
@@ -182,7 +210,7 @@ $COMPOSE up -d --no-deps ypbin-access
 - 若走一键安装（`install.sh`），它会拉代码 → 构建 → 起全栈，并把本仓检出到 `$ROOT/ypbin-admin`；
   首装/整栈场景用它，**单服务升级不要用整栈 `up -d`**（`README.md`「一键安装」；`docs/DEPLOY-BACKEND.md` §2.3）。
 
-### B.3 立即核对（进入 §C 之前的最低门槛）
+### B.4 立即核对（进入 §C 之前的最低门槛）
 
 ```bash
 # 容器内 jar 与制品逐字节一致（md5 或 sha256 二选一）
@@ -198,7 +226,7 @@ curl -s http://127.0.0.1:18086/actuator/health/readiness
 docker inspect -f '{{.State.Status}} restarts={{.RestartCount}} oom={{.State.OOMKilled}}' ypbin-iot ypbin-access
 ```
 
-### B.4 记录（部署回执，必须留）
+### B.5 记录（部署回执，必须留）
 
 - 部署的 git sha 与 Release tag；制品 sha256（`jars.manifest.sha256` 对应行）。
 - 容器内 jar 的 md5/sha256（与制品一致）。
@@ -256,7 +284,7 @@ code_auth() { curl -s -H "Authorization: Bearer $T" "$1" | python3 -c 'import sy
 - **升级前不存在**：`iot.timeseries.value.type_missing` / `not_numeric` / `precision_lost`、`iot.access.modbus.pair.stale`、
   `iot.access.value.normalize.failure` 是 **2026-10-13 那批变更引入的新指标**。2026-10-13 生产只读实测：两个容器已运行
   **30 小时（旧 jar）**，上述指标在 18084/18086 上**全部 404** —— 这是「尚未升级到含这些指标的版本」，**不是故障**。
-  **升级是否生效靠 [§B.3](#b3-立即核对进入-c-之前的最低门槛) 的 jar md5 与 [§C1.4](#c1-制品与进程) 的容器启动时间/重启计数判断，不要靠这些指标是否 404。**
+  **升级是否生效靠 [§B.4](#b4-立即核对进入-c-之前的最低门槛) 的 jar md5 与 [§C1.4](#c1-制品与进程) 的容器启动时间/重启计数判断，不要靠这些指标是否 404。**
 - **惰性注册**：SDK 的 `iot.tcp.*` 计数器**首次递增才出现**；`/actuator/metrics` 里 0 条/404 **无法区分**「还没失败过」与「Micrometer 桥没接上」⇒ 见 C2.4 的探针判据。
 
 ### C.1 制品与进程
@@ -291,7 +319,7 @@ code_auth() { curl -s -H "Authorization: Bearer $T" "$1" | python3 -c 'import sy
 > 期望 0 的依据是「这三类都是显式失败/建模告警」——`docs/METRICS.md` §2.9、`docs/VALUE-DECODE-DESIGN.md` §4.6.5。
 >
 > ⚠️ **升级前不存在**：C3.1–C3.3 这三个指标是 **2026-10-13 变更引入的**。2026-10-13 生产只读实测（两个容器旧 jar 已跑 **30 小时**）：
-> 这三个指标在 18084 上**全部 404** —— **这不是异常**，是「尚未升级到含这些指标的版本」。**判断升级是否生效靠 §B.3 的 jar md5 + §C1.4 的启动时间/重启计数，不要靠这三个 404。**
+> 这三个指标在 18084 上**全部 404** —— **这不是异常**，是「尚未升级到含这些指标的版本」。**判断升级是否生效靠 §B.4 的 jar md5 + §C1.4 的启动时间/重启计数，不要靠这三个 404。**
 
 ### C.4 Modbus（多寄存器配对 / 字符串 / 无重复）
 
@@ -319,7 +347,7 @@ code_auth() { curl -s -H "Authorization: Bearer $T" "$1" | python3 -c 'import sy
 | C5.2 | 【access 18086】出口 byte[] 闸门 | `curl -s http://127.0.0.1:18086/actuator/metrics/iot.access.egress.invalid` | **0 且不增长** | 有未解码 `byte[]` 交付到出口 ⇒ 配置没切到 `key-value` / 版本没对齐（`docs/DEPLOY-BACKEND.md` §5.8；`docs/METRICS.md` §2.5） |
 
 > ⚠️ **升级前不存在**：C5.1 的 `iot.access.value.normalize.failure` 是 **2026-10-13 新增指标**；2026-10-13 生产只读实测
-> （旧 jar 已跑 30 小时）在 18086 上 **404**。升级后它才出现；**升级前 404 不能判「升级没生效」**（判升级见 §B.3/§C1.4）。
+> （旧 jar 已跑 30 小时）在 18086 上 **404**。升级后它才出现；**升级前 404 不能判「升级没生效」**（判升级见 §B.4/§C1.4）。
 
 ### C.6 业务面（曲线 / 最新值 / 告警 / 菜单）
 
@@ -445,7 +473,7 @@ deploy/restore.sh --mysql ... --iotdb ... --yes
 | **明文 1883 收紧 / 限来源 / 限流** | 8883 已启用；1883 收回未做 | `README.md`「未做」 |
 | **协议/解码未支持面** | IEEE754 双精度、BADC/DCBA、有符号位域、字符串寄存器跨区等 | `docs/VALUE-DECODE-DESIGN.md` §4.2/§4.3.6/§4.4.9/§4.5.5 |
 | **MySQL/IoTDB 恢复演练** | 脚本已具备，**真机恢复未验证** | `deploy/PROD-OPS-NOTES.md` §13.3/§13.4 |
-| **数据库结构变更（006/007/迁移）** | 由 `install.sh` / migration 导入，不属本手册的「单服务升级」流程 | `deploy/sql/`；`tools/check-iot-sql-equivalence.sh` |
+| **数据库结构变更（006/007/迁移）** | 升级走 `deploy/migrate.sh`（§B.2 硬步骤）；全新安装走 `install.sh`；迁移与 006+007 的语句等价由门禁守 | `deploy/sql/`；`tools/check-iot-sql-equivalence.sh` |
 
 ---
 

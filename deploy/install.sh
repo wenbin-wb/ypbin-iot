@@ -1932,10 +1932,14 @@ if [ "$NO_DOCKER" != "1" ]; then
   #       ② 远端 YPBIN_IOT_RAW_BASE 逐文件下载（含 Gitee 兜底 + 既有 CURL_* 硬超时）
   #       两路解析；两路都拿不到 ⇒ die（本项目禁静默降级，绝不静默跳过）。
   #   R2：deploy/sql/migration/ 里的 DDL/DML **不幂等**（CREATE TABLE 无 IF NOT EXISTS、含
-  #       ALTER/INSERT），重复执行必失败 ⇒ 用账本表 ypbin_schema_migrations 记录已应用的
-  #       -*-iot-*.sql，只跑未记录的。账本由本脚本 CREATE TABLE IF NOT EXISTS 自建；
-  #       **刻意不放进 006/007**：R3 的 CI 门禁要求 006+007 与全部 -*-iot-*.sql 按名排序拼接
-  #       「语句逐字等价」（tools/check-iot-sql-equivalence.sh），把建账本语句塞进去会直接破坏它。
+  #       ALTER/INSERT），重复执行必失败 ⇒ 用账本记录已应用的 -*-iot-*.sql，只跑未记录的。
+  #       双账本：① 旧账本 ypbin_schema_migrations（本脚本自建，历史遗留，只记文件名）；
+  #               ② 新登记表 iot_schema_migration（升级运行器 deploy/migrate.sh 使用，含 sha256），
+  #                  由 migration/000-iot-migration-ledger.sql 建立（IF NOT EXISTS，幂等）。
+  #       两者**互相兼容**：install.sh 双写、migrate.sh 双写；任一有记录即算已应用。
+  #       新登记表刻意不放进 006/007：CI 门禁要求 006+007 与全部 -*-iot-*.sql 按名排序拼接
+  #       「语句逐字等价」（tools/check-iot-sql-equivalence.sh），该门禁按名排除 000 登记表文件，
+  #       并断言它仍排在 iot-migrations.list 首位（先建账本再应用）。
   #   R3：远端兜底下载的迁移清单来自 deploy/sql/migration/iot-migrations.list（本仓文件），
   #       上面的等价校验会一并核对「清单 = 目录内实际文件」（多/少都转红）。
   #
@@ -1971,20 +1975,31 @@ if [ "$NO_DOCKER" != "1" ]; then
       iot_fetch_file "$base" "deploy/sql/migration/$name" "$dest/migration/$name" || return 1
     done < "$dest/migration/iot-migrations.list"
   }
-  iot_ledger_exists() { # 1/0
+  iot_legacy_ledger_exists() { # 1/0：旧账本（早期 install.sh 自建，只记文件名）
     [ "$(mysql_scalar "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='ypbin_admin' AND table_name='ypbin_schema_migrations';")" = "1" ]
   }
-  iot_migration_applied() { # $1=文件名；账本查询失败按「未应用」处理（宁重跑不误跳）
-    [ "$(mysql_scalar "SELECT COUNT(*) FROM ypbin_admin.ypbin_schema_migrations WHERE script_name='$1';")" = "1" ]
+  iot_new_ledger_exists() { # 1/0：升级登记表（migrate.sh 用；由 migration/000-iot-migration-ledger.sql 建）
+    [ "$(mysql_scalar "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='ypbin_admin' AND table_name='iot_schema_migration';")" = "1" ]
   }
-  iot_mark_applied() { # $1=文件名
-    mysql_exec -e "INSERT IGNORE INTO ypbin_admin.ypbin_schema_migrations (script_name, applied_at) VALUES ('$1', NOW());"
+  iot_ledger_exists() { iot_legacy_ledger_exists || iot_new_ledger_exists; }
+  iot_migration_applied() { # $1=文件名；任一账本有记录即算已应用；查询失败按「未应用」处理（宁重跑不误跳）
+    [ "$(mysql_scalar "SELECT COUNT(*) FROM ypbin_admin.ypbin_schema_migrations WHERE script_name='$1';")" = "1" ] && return 0
+    [ "$(mysql_scalar "SELECT COUNT(*) FROM ypbin_admin.iot_schema_migration WHERE filename='$1' AND success=1;")" = "1" ]
   }
-  iot_ensure_ledger() {
-    mysql_exec -e "CREATE TABLE IF NOT EXISTS ypbin_admin.ypbin_schema_migrations (script_name VARCHAR(255) NOT NULL PRIMARY KEY, applied_at DATETIME NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;"
+  iot_mark_applied() { # $1=含 migration/ 的目录 $2=文件名；双写旧账本 + 新登记表（含 sha256）
+    local sum
+    sum="$(sha256sum "$1/migration/$2" | awk '{print $1}')" || return 1
+    [ -n "$sum" ] || return 1
+    mysql_exec -e "INSERT IGNORE INTO ypbin_admin.ypbin_schema_migrations (script_name, applied_at) VALUES ('$2', NOW());" || return 1
+    mysql_exec -e "INSERT INTO ypbin_admin.iot_schema_migration (filename, checksum, applied_at, applied_by, success) VALUES ('$2', '$sum', NOW(), 'install.sh', 1) ON DUPLICATE KEY UPDATE checksum=VALUES(checksum), applied_at=VALUES(applied_at), applied_by=VALUES(applied_by), success=1;" || return 1
+  }
+  iot_ensure_ledger() { # $1=含 migration/ 的目录
+    mysql_exec -e "CREATE TABLE IF NOT EXISTS ypbin_admin.ypbin_schema_migrations (script_name VARCHAR(255) NOT NULL PRIMARY KEY, applied_at DATETIME NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;" || return 1
+    # 新登记表由 000 迁移建立（唯一 DDL 事实源，避免两处漂移；IF NOT EXISTS 幂等）
+    mysql_apply_file "$1/migration/000-iot-migration-ledger.sql" || return 1
   }
   iot_apply_migration() { # $1=目录 $2=文件名
-    mysql_apply_file "$1/migration/$2" && iot_mark_applied "$2"
+    mysql_apply_file "$1/migration/$2" && iot_mark_applied "$1" "$2"
   }
 
   import_iot_sql() {
@@ -2037,7 +2052,7 @@ if [ "$NO_DOCKER" != "1" ]; then
     [ -n "$full_list" ] || die "IoT 迁移清单为空（$src_dir/migration/ 下没有 -*-iot-*.sql，且 iot-migrations.list 缺失或全为注释）——拒绝以空清单继续（那会让迁移静默不应用）"
 
     iot_ledger_exists && ledger_pre=1
-    iot_ensure_ledger
+    iot_ensure_ledger "$src_dir"
 
     if [ "${TABLE_COUNT:-0}" = "0" ]; then
       # 边界：SYNC §三·五 的推荐部署法是把**本仓**检出到 $ROOT/ypbin-admin；此时上面的 admin 基线
@@ -2046,7 +2061,7 @@ if [ "$NO_DOCKER" != "1" ]; then
       if [ "$(mysql_scalar "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='ypbin_admin' AND table_name='iot_device';")" = "1" ]; then
         warn "检测到 iot_device 已存在（006/007 已由 admin 基线循环导入，通常因 \$ROOT/ypbin-admin 是本仓检出）——跳过重复导入，只补迁移账本"
         cnt="$(printf '%s\n' $full_list | grep -c . || true)"
-        for name in $full_list; do iot_mark_applied "$name"; done
+        for name in $full_list; do iot_mark_applied "$src_dir" "$name" || die "登记迁移 $name 失败（新登记表 $src_dir/migration/$name）"; done
         ok "已将全部 $cnt 个 IoT 迁移登记为已应用（006/007 已由基线循环落地）"
         trap - EXIT; rm -rf "${remote_dir:-}" 2>/dev/null || true
         return 0
@@ -2057,7 +2072,7 @@ if [ "$NO_DOCKER" != "1" ]; then
       mysql_apply_file "$src_dir/007-iot-data.sql" || die "导入 007-iot-data.sql 失败"
       ok "已执行 007-iot-data.sql"
       cnt="$(printf '%s\n' $full_list | grep -c . || true)"
-      for name in $full_list; do iot_mark_applied "$name"; done
+      for name in $full_list; do iot_mark_applied "$src_dir" "$name" || die "登记迁移 $name 失败（新登记表 $src_dir/migration/$name）"; done
       ok "已将全部 $cnt 个 IoT 迁移登记为已应用（依据：006+007 与全部 -*-iot-*.sql 语句等价，R3 门禁 tools/check-iot-sql-equivalence.sh 守门）"
       trap - EXIT; rm -rf "${remote_dir:-}" 2>/dev/null || true
       return 0
@@ -2087,7 +2102,7 @@ if [ "$NO_DOCKER" != "1" ]; then
         warn ">>> 据此把全部 $(printf '%s\n' $full_list | grep -c .) 个 IoT 迁移**预置为已应用**（不执行 DDL/DML）。"
         warn ">>> ⚠️ 这是一个**假设**：若库内实际是中间态（缺后续迁移新增的表/列），预置后本脚本不再补跑；"
         warn ">>>    请人工核对（对照 deploy/sql/006-iot-schema.sql 与库内实际表结构），必要时用 IOT_MIGRATE_FORCE=1 重建账本。"
-        for name in $full_list; do iot_mark_applied "$name"; done
+        for name in $full_list; do iot_mark_applied "$src_dir" "$name" || die "预置迁移账本 $name 失败"; done
         ok "已预置 IoT 迁移账本（$(printf '%s\n' $full_list | grep -c .) 条，未执行 DDL/DML）"
         trap - EXIT; rm -rf "${remote_dir:-}" 2>/dev/null || true
         return 0
