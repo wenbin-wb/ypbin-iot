@@ -169,6 +169,47 @@ TCP 目前仍是**逐点位单地址订阅**（PR #212 的权宜）。`key-value
 但本次**保持逐点位单订阅**（语义与切换前一致、风险最小），「多地址单订阅」登记为后续优化项：
 验收 = 多地址单订阅下每个 selector 都产出各自的值、且部分 selector 未命中只让该点位 BAD。
 
+### 5.6 生产帧形态普查（2026-10-13，只读；结论：本次切换对**在用设备**安全）
+
+> 为什么必须先查：`payload-format` 是**接入节点级**配置（不是按设备配的）——只要有一台
+> TCP 设备发的是非键值帧，「全局切 `key-value`」就会变成生产事故。故切换前对生产库做了一次**只读**普查。
+
+**方法**（全部 `SELECT`，未做任何写入；表名与列名见 `deploy/sql/006-iot-schema.sql`）：
+
+```sql
+-- 设备按协议/状态分布
+SELECT protocol, status, is_deleted, COUNT(*) FROM iot_device GROUP BY 1,2,3;
+
+-- 每个 TCP 设备的点位清单 + 活跃度（last_good_at 是"最近一次 GOOD 读数"）
+SELECT d.device_code, d.status, COUNT(pm.id) AS pts,
+       GROUP_CONCAT(DISTINCT pm.raw_address ORDER BY pm.raw_address SEPARATOR '|') AS raws,
+       MAX(dl.last_good_at) AS last_good, MAX(dl.last_observed_at) AS last_seen,
+       MAX(dl.open_outage_id) AS open_outage
+FROM iot_device d
+LEFT JOIN iot_point_mapping pm ON pm.device_id = d.id AND pm.is_deleted = 0
+LEFT JOIN device_liveness  dl ON dl.device_id = d.id AND dl.is_deleted = 0
+WHERE d.protocol = 'tcp' AND d.is_deleted = 0
+GROUP BY d.id, d.device_code, d.status ORDER BY MAX(dl.last_good_at) DESC;
+```
+
+**结论**
+
+1. 生产 **13 台设备全部是 `demo-dev-*` 演示夹具**（无真实客户设备）：TCP 10、Modbus 1（已停用）、MQTT 1、OPC-UA 1。
+2. **唯一在采的 TCP 设备是 `demo-dev-curve`（9300012）**：其 4 个点位 `TEMP|HUMIDITY|SERIALNO|BOUNDARY`
+   与模拟器帧 `TEMP=…,HUMIDITY=…,SERIALNO=…,BOUNDARY=…,SEQ=…` **逐键对应**，
+   且 `last_good_at` = 普查时刻（持续在采）⇒ **它就是键值帧**，切 `key-value` 后行为不变。
+3. 其余 9 台 TCP 夹具的点位仍是 `holding:0`/`holding:1` 形态，属 **#217 之前的历史错位残留**
+   （`4456fe1f` 已把 9300012 的 3 个点位从 `holding:1/100/200` 订正为键名，见
+   `deploy/sql/fixes/2026-10-12-iot-demo-tcp-multi-key.sql`）。它们**早已离线**：`last_good_at`
+   为 5～18 天前，且全部挂着未闭合断档（`open_outage_id` 非空）。旧行为下它们本就是 `key-not-found`
+   （BAD），新行为下是 `selector-not-found`（BAD）⇒ **新旧等价**，切换只换消息键、不改变状态。
+
+**因此**：本次切换的"炸半径"仅限演示夹具，对在用采集链路无影响。
+
+> ⚠️ 若将来要复活这 9 台夹具（例如做断档/维护窗口演示），**必须先把 `raw_address` 对齐成帧里的键**
+> （照 #217 的做法）——这与本次切换无关，是既有的演示数据错位；否则它们会稳定 BAD。
+
+
 ## 6. 排障速查
 
 | 现象 | 指标 | 常见原因 |
