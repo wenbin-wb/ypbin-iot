@@ -76,7 +76,7 @@ TCP 帧 byte[] ──► starter TcpSession（payload-format=key-value）
 | UTF-8 校验、`KEY=VALUE` 拆分、按 `raw_address`（= selector）取键 | **starter 0.3.0** `TcpValueSelector` | 由 `ypbin.iot.protocol.tcp.payload-format=key-value` 启用；失败以 BAD 质量 + `iot.tcp.*` 指标显式表达 |
 | **物模型类型规范化**（`int`/`long`/`decimal`/`bool`/文本） | **宿主** `cn.ypbin.admin.access.egress.PointValueNormalizer` | SDK 类注释明确「不做数据类型转换，类型属于宿主物模型语义」；见下「为什么不能删」 |
 | 线性缩放/偏移 | **宿主** `AccessReading.applyScale` | 只对 `Number`/`BigDecimal` 生效 ⇒ **依赖上一步** |
-| 落 `value_double` / `value_text` | iot 侧 `ReadingValueMapper` | 按值的**词法形态**判定 ⇒ 也依赖类型规范化（如 bool `1` 必须先变 `true`） |
+| 落 `value_double` / `value_text` | iot 侧 `ReadingValueMapper` | 默认按值的**词法形态**判定（如 bool `1` 必须先变 `true/false`）；**物模型声明为 `string` ⇒ `forceText=true` 强制 `value_text`**（TCP 由 `PointValueNormalizer.Outcome` 置位、Modbus 由 `PointMappingDataListener` 置位，见 §4.5.6） |
 
 **🔴 为什么「类型规范化」不能随帧解析层一起删**（2026-10-13 复核，独立纠正）：
 
@@ -137,7 +137,7 @@ OPC UA `ByteString`（生产 access fat jar 不含这两个协议模块，属潜
 |---|---|---|
 | `word_count` | `INT NOT NULL DEFAULT 1` | 连续寄存器个数；本版合法值 `1`\|`2`；默认 1 = 今天的行为 |
 | `signed` | `TINYINT NOT NULL DEFAULT 0` | `0`=无符号 / `1`=有符号（整型）；**Java 侧用 `Boolean`**（与 `enabled` 同一约定） |
-| `byte_order`（复用） | `VARCHAR(16) NULL` | **字序（word order）**：`big`=高字在前（ABCD）/`little`=低字在前（CDAB）；仅 `word_count=2` 生效 |
+| `byte_order`（复用） | `VARCHAR(16) NULL` | **字序（word order）**：`big`=高字在前（ABCD）/`little`=低字在前（CDAB）；仅 Modbus `int`+`word_count=2` 或 `float` 生效（其余场景非空即拒绝，见 §4.3.2） |
 
 接口字段（camelCase，前端契约）：`wordCount`（1\|2）、`signed`（**Boolean，JSON `true/false`**——与实体/`enabled` 同一约定；
 DB 列仍是 `TINYINT NOT NULL DEFAULT 0`）、`byteOrder`（已存在，`big`\|`little`）。`address_type` 保持既有取值，本版不改语义。
@@ -147,17 +147,17 @@ DB 列仍是 `TINYINT NOT NULL DEFAULT 0`）、`byteOrder`（已存在，`big`\|
 | 条件 | 规则 |
 |---|---|
 | 仅 **Modbus**（`holding`/`input` 寄存器） | 三个字段生效 |
-| `word_count=2` | `address_type ∈ {holding,input}`；`raw_address` 必须是显式 `type:offset` 且 `type` 与 `address_type` 逐字一致；`byte_order` 为 null ⇒ 按 `big` |
-| `word_count=1` | `byte_order` 忽略（写 `big` 等价于不写）；`signed` 作用于 16 位值 |
+| `word_count=2`（`int`） | `address_type ∈ {holding,input}`；`raw_address` 必须是显式 `type:offset` 且 `type` 与 `address_type` 逐字一致；`byte_order` 为 null ⇒ 按 `big` |
+| `word_count=1`（`int`） | `byte_order` **必须为空**（字序仅在 `word_count=2` 或 `float` 生效，非空即拒绝）；`signed` 作用于 16 位值 |
 | `coil`/`discrete`（位类型） | **新字段严格**：`word_count≠1` 或 `signed=true` ⇒ **拒绝**（位类型没有宽度/符号语义） |
 | 非 Modbus（tcp/mqtt/opcua） | **新字段严格**：`word_count≠1` 或 `signed=true` ⇒ **拒绝**（新字段任何非默认值必然是配错，fail-fast） |
 | `dataType` | `word_count=2` 或 `signed=true` 时要求 `iot_property.data_type ∈ {int,long}`（v1 仅整型） |
 | `word_count=2` + 传统 5 位编号（如 `40001`） | **v1 拒绝**并给出可执行报错：`word_count=2 需要显式 type:offset 形式（如 holding:0）；传统 5 位编号不支持多寄存器` |
-| **`byteOrder`（旧字段，宽容）** | 在「非 Modbus / 位类型 / `word_count≠2`」的点位上**忽略**（不拒绝）：它是既有自由文本列、历史上从未被消费；若因一个没人看过的旧值把编辑历史行拦下，是误伤 |
+| **`byteOrder`（统一严格，2026-10-13 收紧）** | 只在「Modbus `int`+`word_count=2」或「`float`」真正生效；其余场景（`int`+`word_count=1`、`bits`、`string`、非 Modbus、位类型）**非空即拒绝**，文案说明「字序仅在这些场景生效，请清空」 |
 
-> **新字段严格 / 旧字段宽容的不对称是有意的**：`wordCount`/`signed` 是本版新增、语义明确，任何非默认值都只可能出现在
-> 寄存器解码意图下 ⇒ 非适用场景一律 fail-fast；`byteOrder` 是历史遗留的自由文本，过去写入过什么值不可知，故仅在
-> 真正生效的场景（Modbus + `word_count=2`）校验取值（`big`/`little`），其余场景忽略。
+> **统一严格（不再有「旧字段宽容」的不对称）**：`wordCount`/`signed`/`byteOrder` 在非适用场景一律 fail-fast。
+> 此前 `byteOrder` 的「历史宽容」理由是「可能有没人看过的旧值」；用户 2026-10-13 决策
+> （`IOT-PLATFORM-DESIGN.md` D0.9，开发阶段不做向后兼容权衡）后该理由不成立，故收紧为统一严格。
 
 #### 4.3.3 解码矩阵（8 组 + 长度不足）
 
@@ -172,7 +172,7 @@ DB 列仍是 `TINYINT NOT NULL DEFAULT 0`）、`byteOrder`（已存在，`big`\|
 | 2 | true | big | `signExtend32((R0 << 16) \| R1)` | `long` -2147483648..2147483647 |
 | 2 | true | little | `signExtend32((R1 << 16) \| R0)` | `long` -2147483648..2147483647 |
 
-- 8 组用例 = `byte_order{big,little} × word_count{1,2} × signed{false,true}`（`word_count=1` 时 `byte_order` 两组同值，仍按 8 组覆盖）；
+- 8 组用例 = `byte_order{big,little} × word_count{1,2} × signed{false,true}`（`word_count=1` 时 `byte_order` 不参与解码、两组同值，仍按 8 组覆盖；⚠️ 映射校验自 2026-10-13 起要求 `word_count=1` 的 `byte_order` 必须为空，故这里的 8 组是**解码器纯函数**回归口径，不代表 API 允许在 `word_count=1` 上写 `byte_order`）；
 - 32 位无符号用 `long` 承载 `0..2^32-1`，**不截断、不溢出**；符号按 two's complement；
 - **长度不足**（任一寄存器缺失/响应短/BAD）⇒ 该点位 **BAD**，**不得用 0 充数**。
 
@@ -235,13 +235,13 @@ DB 列仍是 `TINYINT NOT NULL DEFAULT 0`）、`byteOrder`（已存在，`big`\|
 
 接口字段（camelCase）：`registerFormat`、`bitOffset`、`bitLength`（+ v1 的 `wordCount`/`signed`/`byteOrder`）。
 
-#### 4.4.2 形态校验矩阵（**新字段严格 / `byte_order` 历史宽容**）
+#### 4.4.2 形态校验矩阵（**新字段与 `byte_order` 统一严格**）
 
 | register_format | 适用协议/地址类型 | word_count | signed | bit_offset/bit_length | byte_order | data_type（本设计建议，**待你确认**） |
 |---|---|---|---|---|---|---|
-| `int`（默认） | Modbus `holding`/`input`；v1 规则不变 | 1\|2 | v1 规则 | **必须为 null**（新字段严格） | v1（仅 `word_count=2` 生效） | v1（`word_count=2`/`signed=true` ⇒ int\|long） |
+| `int`（默认） | Modbus `holding`/`input`；v1 规则不变 | 1\|2 | v1 规则 | **必须为 null**（新字段严格） | **仅 `word_count=2` 允许非空**；`word_count=1` 非空即拒绝 | v1（`word_count=2`/`signed=true` ⇒ int\|long） |
 | `float` | Modbus `holding`/`input` | **必须 2** | **必须 false**（true ⇒ 拒绝） | **必须为 null** | 生效：big=ABCD / little=CDAB（null⇒big） | **`decimal`** |
-| `bits` | Modbus `holding`/`input` | **必须 1** | **必须 false** | **必须同时给**；`0≤offset≤15`、`1≤length≤16-offset` | **忽略** | `length=1` ⇒ `bool`；`length>1` ⇒ `int`\|`long` |
+| `bits` | Modbus `holding`/`input` | **必须 1** | **必须 false** | **必须同时给**；`0≤offset≤15`、`1≤length≤16-offset` | **必须为空（非空即拒绝）** | `length=1` ⇒ `bool`；`length>1` ⇒ `int`\|`long` |
 
 > **形态与 `word_count` 不相容时是「拒绝」，不是「静默改成期望值」**：`float` 且 `word_count≠2` ⇒ 拒绝；
 > `bits` 且 `word_count≠1` ⇒ 拒绝。UI 会把它们置为固定值并禁用，但 API 直连调用必须 fail-fast——
@@ -252,7 +252,7 @@ DB 列仍是 `TINYINT NOT NULL DEFAULT 0`）、`byteOrder`（已存在，`big`\|
 - **`data_type` 约束只对 `float`/`bits` 两种新形态生效**；`int` 保持 v1 行为（不做新的 data_type 约束），
   否则会给现有点位引入新的拒绝路径 = 破坏向后兼容；错误文案写清「该形态要求属性类型是 X」；
 - 所有拒绝都给**可执行文案**（说清该填什么/去掉什么），不许静默忽略；
-- `byte_order`：`bits` 形态忽略；`int`/`float` 按上表（它是历史自由文本列，沿用 v1 的宽容口径）。
+- `byte_order`：统一严格——只在「Modbus `int`+`word_count=2」或「`float`」允许非空；`bits`/`string`/`int`+`word_count=1`/非 Modbus/位类型**非空即拒绝**（不再有「历史宽容」）。
 
 #### 4.4.3 IEEE754 组装与产出
 
@@ -269,7 +269,7 @@ DB 列仍是 `TINYINT NOT NULL DEFAULT 0`）、`byteOrder`（已存在，`big`\|
 - `bit_length=1` ⇒ 产出 **`Boolean`**（true/false）；`bit_length>1` ⇒ 产出 **无符号 `Integer`**（0..65535，**不**符号扩展、**不**做缩放前转换）；
 - 产出后仍走既有 `AccessReading.applyScale`：`length>1` 的整数可被 scale/offset 变换；**`length=1` 的 Boolean 不参与 `applyScale`**
   （它只吃 Number/BigDecimal）⇒ **布尔位域不缩放**（文档与测试都要体现，避免有人以为配了 scale 就生效）；
-- `byte_order` 对 bits 无意义 ⇒ 忽略；越界（`offset+1>16` 等）由映射校验拒绝；直连 DB 的坏数据在 listener 里按 BAD + 日志暴露，不静默。
+- `byte_order` 对 bits 无意义 ⇒ **必须为空（非空即拒绝，见 §4.4.2）**；越界（`offset+1>16` 等）由映射校验拒绝；直连 DB 的坏数据在 listener 里按 BAD + 日志暴露，不静默。
 
 #### 4.4.5 复用 v1 骨架（不另起一套）
 
@@ -351,6 +351,7 @@ DDL（007 + `migration/2026-10-13-iot-modbus-v2-register-format-schema.sql`）�
 - `bit_offset`/`bit_length` 必须为 null；
 - `data_type` 必须 `string`；
 - `word_count` 必须 `1..32`；
+- `byte_order` 必须为 null（字序对 string 不生效；非空即拒绝，见 §4.3.2 的统一严格口径）；
 - `address_type ∈ {holding,input}`；**`word_count>1` 时** `raw_address` 必须是显式 `type:offset`
   且 type 与 `address_type` 一致（复用 v1 多寄存器地址规则）；`word_count=1` 时传统 5 位编号照常
   （无需扩地址，保持向后兼容）；
@@ -369,8 +370,9 @@ DDL（007 + `migration/2026-10-13-iot-modbus-v2-register-format-schema.sql`）�
   不做额外标记；
 - **非法 UTF-8 ⇒ 点位 BAD + 计数** `iot.access.value.normalize.failure{reason=not-utf8}`：
   在 `NormalizeFailure` 增 `NOT_UTF8`，并在 `docs/METRICS.md` 的 reason 列表显式登记；
-- `byte_order` 对 `string` **忽略**；**不支持** BADC（寄存器内字节交换）与 DCBA（寄存器倒序）——
-  保持 §4.2/§4.3.6 登记，要支持须先扩枚举并单独评审。
+- `byte_order` 对 `string` **不生效 ⇒ 必须为 null（非空即拒绝，见 §4.3.2 的统一严格口径）**；
+  **不支持** BADC（寄存器内字节交换）与 DCBA（寄存器倒序）——保持 §4.2/§4.3.6 登记，
+  要支持须先扩枚举并单独评审。
 
 #### 4.5.3 泛化后的配对（宿主侧）
 
@@ -404,46 +406,52 @@ string 要 `N` 个（1..32）⇒ 必须泛化为「按 `word_index` 收齐 N 个
 4. **但** iot 侧 `ReadingValueMapper` 按**词法形态**落列：含字母/前导零的串 ⇒ `value_text`；
    **纯数字串**（如 `"123456"`）⇒ `value_double`（现有已登记限制见 `docs/IOT-PLATFORM-DESIGN.md:575`）。
 
-**决策（Lead，2026-10-13）**：采用方案 A，但**范围收窄到仅 Modbus `register_format=string`**：
-- 新增**可选**标记 `forceText`（缺省 null/false = 既有词法落列 ⇒ 对现有数据零影响）；
-- **仅** string 点位置位；int/float/bits 与缺省标记的其它读数**保持词法落列、逐字节不变**；
-- TCP `data_type=string` 的同类问题**不在本次范围**（可能有历史数据，改落列会让既有曲线/查询取不到值），
-  另开 issue 登记（见 §4.5.6）。
+**决策（2026-10-13，用户指示 D0.9 + Lead 执行）**：采用方案 A 的**完整口径**——
+**物模型声明为 `string` ⇒ 一律落 `value_text`（TCP 与 Modbus 一致），不再按词法猜**：
+- 新增**可选**标记 `forceText`（缺省 null/false = 既有词法落列 ⇒ 非 string 类型零影响）；
+- 由**知道物模型类型的层**置位：Modbus string 在 `PointMappingDataListener`，TCP string 在
+  `PointValueNormalizer`（`Outcome.forceText`）；int/float/bits 等非 string 类型**保持词法落列、逐字节不变**；
+- 用户决策：开发阶段不做向后兼容权衡（`IOT-PLATFORM-DESIGN.md` D0.9），故不再因"TCP 可能已有历史数据"
+  而保留词法落列（原窄口径收窄作废）。
 
 #### 4.5.5 未支持（保持登记）
 
 - BADC/DCBA（寄存器内字节交换与寄存器倒序）；
 - GBK/其它编码（将来「先扩枚举再支持」）；
 - IEEE754 双精度（4 寄存器）；有符号位域；
-- 字符串寄存器跨不同寄存器区（`base..base+N-1` 必须同 `address_type`）；
-- **TCP `data_type=string` 的物模型类型覆盖**（同一词法落列缺陷；历史数据兼容需单独评估，见 §4.5.6）。
+- 字符串寄存器跨不同寄存器区（`base..base+N-1` 必须同 `address_type`）。
 
-#### 4.5.6 值类型落地的实现落点与理由（方案 A 窄口径）
+#### 4.5.6 值类型落地的实现落点与理由（完整口径：string ⇒ value_text）
 
-**交接点：access 的 `PointMappingDataListener.emit(..., forceText)`。**
-- 这里是**唯一**同时拿到「`register_format`」与「解码后值」的层：它知道该点位是不是 string，
-  且是所有取值路径（单/多寄存器）的汇聚点；
-- 透传链：`AccessReading` 加第 7 个组件 `forceText`（保留 6 参构造 = false，向后兼容）→
-  `HttpAccessReadingSink.toObservation` 写入 `ReadingObservationDto.forceText`（可选，缺省 null）→
-  iot 侧 `AvailabilityServiceImpl.collectSeriesPoints` 透传到 `TimeSeriesPoint.forceText` →
-  `IotDbTimeSeriesWriter` 调 `ReadingValueMapper.map(value, forceText)`；
+**判据是物模型类型，不是值形态**：物模型声明为 `string` ⇒ **一律落 `value_text`**（TCP 与 Modbus 一致，
+不再按词法猜）。
+
+**交接点（谁置 `forceText`）**：
+- **Modbus string**：`PointMappingDataListener`（唯一同时拿到 `register_format` 与解码后值的层，
+  且是单/多寄存器取值路径的汇聚点）；
+- **TCP string**：`PointValueNormalizer.normalize(raw, dataType)` 的 `STRING` 分支返回
+  `Outcome.okText(...)`（`forceText=true`）——它本来就是按 `iot_property.data_type` 判定类型的层，
+  TCP 的三种来源（key-value 文本点、`payload-format=text` 的整帧文本点、以及任何走 TCP string
+  规范化分支的情况）都汇聚到它；非 string（int/long/decimal/bool/enum/date_time/json_object/array）
+  返回 `forceText=false`，行为**一字不变**；
+- 透传链：`AccessReading.forceText`（保留 6 参构造 = false）→ `ReadingObservationDto.forceText`
+  （可选，缺省 null）→ `AvailabilityServiceImpl` → `TimeSeriesPoint.forceText` →
+  `IotDbTimeSeriesWriter` → `ReadingValueMapper.map(value, forceText)`；
 - `ReadingValueMapper.map(raw, true)` **不猜、不 trim**，原样落 `value_text`；
   `map(raw)`/`map(raw,false)` 保持既有词法规则（回归用例钉住）；
 - **为什么不放 iot 侧按 `data_type` 查**：那需要在写入热路径逐批查物模型
-  （`IOT-PLATFORM-DESIGN.md:575` 明确登记的代价）；显式标记由 access 在已知形态时置位，零额外查询；
-- **为什么不改 `ReadingValueMapper` 的缺省行为**：缺省一变会影响所有来源（含 TCP string 历史数据）；
-  显式标记把影响面收窄到 Modbus string。
-
-**TCP `data_type=string` 同类问题（另开 issue 登记，不在本次范围）**：同一词法落列缺陷；
-影响面是 TCP string 点位**可能已有历史数据落 `value_double`**，改落列会让既有曲线/查询取不到值 ⇒
-需先评估数据兼容（迁移/双读/回填），单独立项。
+  （`IOT-PLATFORM-DESIGN.md:575` 明确登记的代价）；显式标记由 access 在已知物模型类型时置位，零额外查询；
+- **为什么不再收窄到仅 Modbus**：用户 2026-10-13 决策（`IOT-PLATFORM-DESIGN.md` D0.9）——
+  开发阶段无真实历史数据、不做兼容权衡；TCP string 与 Modbus string 统一按"物模型声明即真相"落列。
+  （原 issue #253 的"需评估历史数据兼容"顾虑随 D0.9 作废。）
 
 #### 4.5.7 落地清单（2026-10-13）
 
 `ModbusRegisterDecoder.decodeStringUtf8`（严格 UTF-8 + 去尾 NUL）、`ModbusRegisterAddress.plus`（`next` 委托）、
 `PointMappingDataListener`（`PendingWords` 泛化配对 + string 单/多寄存器 + `forceText`）、
 `AccessSubscriptionPlanner.expandAddresses`（base..base+N-1）、`NormalizeFailure.NOT_UTF8` +
-`PointValueNormalizeMetrics` 预注册、`IotPointMappingServiceImpl.validateStringFormat`、
+`PointValueNormalizeMetrics` 预注册、`PointValueNormalizer.Outcome.forceText`（TCP string）、
+`IotPointMappingServiceImpl.validateStringFormat`、
 Req/实体/DTO 字段注释与 `@Pattern/@Max`、DDL 列注释（007 + v1/v2 迁移，SQL 等价门禁绿）、
 `AccessReading`/`ReadingObservationDto`/`TimeSeriesPoint`/`ReadingValueMapper`/`IotDbTimeSeriesWriter`
 的 `forceText` 透传。
