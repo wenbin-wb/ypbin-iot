@@ -3,9 +3,11 @@
 > **用途**：说清「TCP 帧 → 平台规范值」这条链路上**谁该解码、现在还缺什么、本轮做到哪、后面怎么替换**。
 > 一手材料（全部本机可复现）：starter 源码（tag `v0.1.0`）、本仓源码、生产容器里的 fat jar 清单、
 > 生产 IoTDB / MySQL 真值。
-> 最后更新：**2026-09-27**。
+> 最后更新：**2026-10-13**。
 > 关联文档：[`ACCESS-ENABLE.md`](ACCESS-ENABLE.md) §6.3（现场证据）。框架侧反哺（原 SF-6）已由
-> starter v0.2.0 的 `ypbin.iot.protocol.tcp.payload-format` 承接，替换路径见 §5。
+> starter v0.2.0 的 `ypbin.iot.protocol.tcp.payload-format`（`text`/`number`/`binary`）承接；
+> **v0.3.0（2026-10-12）追加 `key-value`（帧内字段选择 / valueSelector）** ⇒ 本仓「帧解析」过渡层
+> 已删除；**物模型类型规范化仍留在宿主**（SDK 明确不做类型转换），职责切分与理由见 §5。
 
 ---
 
@@ -15,7 +17,7 @@
 |---|---|
 | `[B@<hash>` 是谁产生的？ | **两段合成**：① 帧的**原始字节**来自 starter 的 TCP 协议模块——`ypbin-iot-protocol-tcp` 的 `TcpSession#dispatch` 把整帧 `byte[]` 直接当作 `PointValue.value`（tag `v0.1.0` = `878a493`，该文件第 **295** 行 `PointValue.good(address, payload, ...)`，`payload` 自第 221 行的 `Consumer<byte[]>`）；② access 的 `HttpAccessReadingSink` 用 `String.valueOf(reading.value())` 把它字符串化 ⇒ `[B@<identityHash>`。**不是** IoTDB 读出来的字节数组（生产库里存的就是字面文本，见 §1.1）。 |
 | 解码该在哪一层？ | **理想在协议层**：姊妹模块 MQTT 有 `MqttPayloadFormat`（TEXT/NUMBER/BINARY，`MqttSession#decode` 按配置解码并给出 BAD 值），**TCP 没有等价能力**，且 core 里没有任何「宿主可插的解码 SPI」⇒ 这是**框架侧能力缺口**。 |
-| 本轮选哪条路？ | **B 过渡实现 + A 反哺材料**：access 侧加一层显式解码钩子（`ValueDecoder` / `TextFrameValueDecoder`），同时按仓规开 **SF-6** 反哺 starter 并登记替换路径。理由见 §1.2。 |
+| 本轮选哪条路？ | **先 B 过渡实现，再随 starter 交付替换**：2026-09-27 先在 access 侧加过渡解码层（`ValueDecoder` / `TextFrameValueDecoder`）；starter **v0.3.0（2026-10-12）**交付 `payload-format=key-value`（valueSelector）后，**「帧解析」部分已删除**。**「物模型类型规范化」仍留在宿主**——SDK 只做字段选择、不做类型转换（其类注释明确），且它是 `applyScale` 与落列形态的前置。职责切分见 §5。 |
 
 ### 1.1 一手证据（生产真值）
 
@@ -53,55 +55,60 @@
 
 ---
 
-## 3. 本轮的过渡实现（已落地）
+## 3. 当前实现（2026-10-13 职责切分后）
 
 ```
-协议栈 TCP 会话 ──byte[]──► PointMappingDataListener ──► ValueDecoder(按协议码选) ──► 规范值
-                                                            └─ 失败 ⇒ 丢弃 + 计数(reason) + WARN（脱敏）
-                                                             AccessReading.applyScale ⇒ AccessReadingSink
+TCP 帧 byte[] ──► starter TcpSession（payload-format=key-value）
+                     └─ TcpValueSelector：UTF-8 + KEY=VALUE 拆分 + 按 raw_address(selector) 取值
+                          ├─ 失败 ⇒ 该点位 BAD（value=null + qualityReason）+ SDK 侧 iot.tcp.* 指标
+                          └─ 成功 ⇒ PointValue(value=String)
+                     ──► PointMappingDataListener（宿主）
+                          ├─ BAD ⇒ 原样穿透（不规范化、不计宿主失败）
+                          ├─ GOOD + protocol=tcp ⇒ PointValueNormalizer（按 iot_property.data_type 规范化）
+                          │     └─ 失败 ⇒ 丢弃 + iot.access.value.normalize.failure{reason} + WARN（脱敏）
+                          └─ AccessReading.applyScale ⇒ AccessReadingSink
 ```
 
-- 扩展点：`cn.ypbin.admin.access.decode.ValueDecoder`（`supports(protocol)` + `decode(raw, addressKey, dataType)`）；
-  实现以 `@Bean @ConditionalOnMissingBean` 装配（**不是** `@Component`——母仓教训三十一 + 源码门禁 `IotSeamConventionTest`）。
-- 本轮实现：`TextFrameValueDecoder`，只认 `tcp`：
-  1. 严格 UTF-8 解码（非法字节 ⇒ `NOT_UTF8`，**绝不**产出 U+FFFD）；
-  2. 帧按 `,`／`;`／换行分字段，取 `KEY=VALUE`；键 = `raw_address`（大小写不敏感、去空白、重复键先出现者生效）；
-  3. 按 `iot_property.data_type` 规范化：`int`/`long` ⇒ 整数（越界即失败，不截断）、`decimal` ⇒ `BigDecimal`、
-     `bool` ⇒ `true`/`false`、其余 ⇒ 文本原样；
-  4. 任一步不满足 ⇒ 具名失败（`DecodeFailure`：`empty-payload`/`not-utf8`/`not-key-value-frame`/`key-not-found`/
-     `empty-value`/`not-numeric`/`not-boolean`/`unknown-data-type`）。
-- 失败可见性：指标 **`iot.access.decode.failure{reason=…}`**（取值集合 = 上面的枚举，有界）+ WARN
-  （只记设备/点位/地址/**载荷长度**与原因，**不 dump 帧内容**）。
-- 兜底闸门：`HttpAccessReadingSink` 若发现值仍是 `byte[]` ⇒ 计数（`iot.access.egress.invalid`）+ WARN + 丢弃
-  ⇒ `[B@…` **在任何单条路径走偏时也不会入库**。
-- 不改既有取值路径：非 `byte[]` 载荷、以及没有解码器认领的协议码 ⇒ **原样透传**（数值/文本等已解码值一律不变；
-  Modbus 侧已核实**安全**——其会话只交付 `boolean`/`int`，从不 `byte[]`）。
-  ⚠️ **与路径无关的准确表述（独立复核点名，2026-09-27）**：**凡交付 `byte[]` 的路径都会被出口兜底闸门
-  丢弃并计数**（`iot.access.egress.invalid` + WARN），已识别的三条是：
-  - TCP 全帧（本次修复的主对象，由本层解码 ⇒ 不再走到闸门）；
-  - MQTT `payload-format=binary`（`MqttSession#decode` 的 `BINARY` 分支）；
-  - OPC UA `ByteString` 类型节点（`OpcUaSession` 交付 Milo `Variant.getValue()` 的 Java 原值 ⇒ 即 `byte[]`）。
-    ⚠️ **强度声明**：OPC UA 这条是**源码推断**，本机与生产都没有 OPC UA 模块/设备，**未实机验证**。
-  **修复前**这些 `byte[]` 会被 `String.valueOf` 落成一行 `value_text='[B@<hash>'`，**修复后不再落行**
-  ⇒ 断档/可用率口径会变（少一条无值语义的读数）。这是「垃圾绝不入库」的必然结果，属有意取舍；
-  这三条路径的**宿主侧解码**均已登记为未做项（见 §4.2）。当前生产 access fat jar 内**不含 mqtt / opcua 协议模块**，
-  故生产影响为 0（潜伏项）。
-- 兜底闸门的**覆盖边界**（如实登记）：只在默认出口 `HttpAccessReadingSink` 上；3a 的日志占位出口
-  `LoggingAccessReadingSink` 没有同类闸门——它只打 INFO 日志、**不落库**，故无数据完整性影响，
-  但装配它时残留 `byte[]` 会以 `[B@hash` 出现在日志里。
+**职责边界（关键，别再混为一谈）**：
 
----
+| 环节 | 承接方 | 说明 |
+|---|---|---|
+| UTF-8 校验、`KEY=VALUE` 拆分、按 `raw_address`（= selector）取键 | **starter 0.3.0** `TcpValueSelector` | 由 `ypbin.iot.protocol.tcp.payload-format=key-value` 启用；失败以 BAD 质量 + `iot.tcp.*` 指标显式表达 |
+| **物模型类型规范化**（`int`/`long`/`decimal`/`bool`/文本） | **宿主** `cn.ypbin.admin.access.egress.PointValueNormalizer` | SDK 类注释明确「不做数据类型转换，类型属于宿主物模型语义」；见下「为什么不能删」 |
+| 线性缩放/偏移 | **宿主** `AccessReading.applyScale` | 只对 `Number`/`BigDecimal` 生效 ⇒ **依赖上一步** |
+| 落 `value_double` / `value_text` | iot 侧 `ReadingValueMapper` | 按值的**词法形态**判定 ⇒ 也依赖类型规范化（如 bool `1` 必须先变 `true`） |
+
+**🔴 为什么「类型规范化」不能随帧解析层一起删**（2026-10-13 复核，独立纠正）：
+
+1. `AccessReading.applyScale` 只吃 `Number`/`BigDecimal`。SDK 交付 `String` ⇒ 直接删会让
+   `scaleFactor`/`offsetValue` **静默失效、读数错值**（不是格式问题）；
+2. `ReadingValueMapper` 按词法落列：bool `1/0` 必须先规范成 `true/false` 才落 `value_text`（与切换前一致）；
+3. `int`/`decimal` 收到非数值、`bool` 收到非法形态、`dataType` 缺失/未知时，切换前是
+   「丢弃 + 计数 + WARN（不猜）」；这条纪律必须保留。
+
+**失败可见性（切分后）**：
+
+- **帧/选择失败**（非 UTF-8、无键值字段、selector 未命中、值为空）⇒ SDK 以 BAD 质量表达，
+  指标 `iot.tcp.selector.not-found` / `iot.tcp.payload.not-key-value` / `iot.tcp.payload.not-utf8` 等；
+  宿主 **BAD 原样穿透**（不重复计数）。
+- **类型规范化失败**（非数值/非布尔/类型未知）⇒ 宿主丢弃 + 计数
+  **`iot.access.value.normalize.failure{reason=…}`**（取值集合有界）+ WARN（只记设备/点位/地址/**值长度**与原因，**不 dump 值内容**）。
+- 旧指标 `iot.access.decode.failure` 随帧解析层**一并下线**（登记见 `docs/METRICS.md` §2.6）。
+
+**兜底闸门不变**：`HttpAccessReadingSink` 若发现值仍是 `byte[]` ⇒ 计数（`iot.access.egress.invalid`）+ WARN + 丢弃
+⇒ `[B@…` 在任何单条路径走偏时也不会入库。当前已知的 `byte[]` 交付路径是 MQTT `payload-format=binary` 与
+OPC UA `ByteString`（生产 access fat jar 不含这两个协议模块，属潜伏项）。
 
 ## 4. 真实设备解码：扩展点与映射方式
 
 ### 4.1 已实现
 
-| 协议 / 帧形态 | 声明方式 | 产出 |
+| 协议 / 帧形态 | 声明方式 | 产出（2026-10-13 切换后） |
 |---|---|---|
-| TCP 文本键值帧 `TEMP=23.5,SEQ=12` | `raw_address='TEMP'` + 属性 `data_type=decimal` | `23.5` → `value_double` |
-| TCP 文本键值帧中的文本点 | `raw_address='SN'` + `data_type=string` | `007` → `value_text`（原样） |
-| TCP 文本键值帧中的布尔点 | `raw_address='SW'` + `data_type=bool` | `TRUE`/`1` → `true` → `value_text`（§5.2.1 布尔存文本） |
-| 任意协议的**已解码**值（Modbus/OPC UA/MQTT） | 无需声明 | 原样透传 |
+| TCP 文本键值帧 `TEMP=23.5,SEQ=12` | `payload-format=key-value` + `raw_address='TEMP'`（selector） + 属性 `data_type=decimal` | SDK 选字段 → 宿主规范化 `BigDecimal(23.5)` → `value_double` |
+| TCP 文本键值帧中的文本点 | 同上，`raw_address='SN'` + `data_type=string` | SDK 选字段 → 宿主原样保留 `007` → `value_text` |
+| TCP 文本键值帧中的布尔点 | 同上，`raw_address='SW'` + `data_type=bool` | SDK 选字段 → 宿主 `TRUE`/`1` → `true` → `value_text`（§5.2.1 布尔存文本） |
+| 任意协议的**已解码**值（Modbus/OPC UA/MQTT 非 binary） | 无需声明 | 非 `String` 原样透传（宿主规范化只作用于 TCP 的 `String`） |
 
 ### 4.2 未实现（如实声明 + 方案）
 
@@ -112,43 +119,64 @@
 | 字符串寄存器（多寄存器拼 UTF-8） | 同上，缺列 | 增 `word_count` + `encoding`；验收：中文/半角混合、奇数字节 |
 | 「整帧即值」（无键的裸值帧） | 需要一个**显式**的地址类型声明（否则只能靠「帧里没有 `=` 就拿整帧当值」这种猜测） | `AddressType` 增 `tcp-line`（或映射增 `decode_format` 列）；验收：裸值帧解出数值、且键值帧仍走键路径（互不串味） |
 | 十六进制/JSON 负载 | 未涉及本次缺陷；且需要显式声明 | 同「整帧即值」：新增解码格式声明后再实现；**不建议**把 `byte[]` 转 hex 充数（无值语义、曲线仍画不出） |
-| **其余 `byte[]` 交付路径的宿主侧解码**：MQTT `payload-format=binary`、OPC UA `ByteString` 节点 | 本次只解 TCP 文本帧；这两条交付原始 `byte[]`，本层不认领 `mqtt`/`opcua` ⇒ 被出口闸门丢弃（见 §3） | 由对应协议的宿主解码器实现 `ValueDecoder.supports("mqtt"/"opcua")`（MQTT 亦可改用 `text`/`number`）；验收：负载能按业务协议解出值且不再被闸门丢弃。⚠️ OPC UA 这条**未实机验证**（无模块/设备） |
+| **其余 `byte[]` 交付路径的宿主侧解码**：MQTT `payload-format=binary`、OPC UA `ByteString` 节点 | TCP 已由 starter `key-value` 承接帧解析；这两条仍交付原始 `byte[]`，宿主不认领 ⇒ 被出口闸门丢弃（见 §3） | 由对应协议模块的 `payload-format`（MQTT 可用 `text`/`number`）或宿主协议解码器处理；验收：负载能按业务协议解出值且不再被闸门丢弃。⚠️ OPC UA 这条**未实机验证**（无模块/设备） |
 
 > 这些都要动**平台数据模型**（列/枚举/校验/前端表单），故不在本次「修一条链路」的范围内，登记为后续增量；
 > 本次只做**能不做假设就做对**的那部分。
 
 ---
 
-## 5. 反哺与替换路径（**必读**）
+## 5. 职责切分、删除条件与 starter 反馈（**必读**）
 
-1. **反哺（部分交付，尚未闭环）**：缺口（TCP 无 `payload-format`、core 无宿主可插解码 SPI）已提给 starter，
-   **starter v0.2.0（PR #19）只交付 `ypbin.iot.protocol.tcp.payload-format`（`text`/`number`/`binary`）**；
-   `valueSelector`（按点位声明取帧内字段）或宿主解码 SPI **仍是「后续演进项」**——TCP `text` 只交付整帧，
-   多地址场景 fail-fast。因此**前置条件 = starter 交付 `valueSelector` 或宿主解码 SPI；
-   在此之前本仓过渡层必须保留**（`raw_address` 作为帧键的约定同时保留）。
-2. **期望的框架能力**（二选一即可）：
-   - **A（推荐）** 给 TCP 模块加 `ypbin.iot.protocol.tcp.payload-format`（`text`/`number`/`binary`，与 MQTT 同名同语义，
-     `text` 用**严格 UTF-8**、非法即 BAD），并给 `PointValue` 一个「按点位声明取帧内字段」的宿主钩子
-     （例如 `SubscribeRequest` 上带 `valueSelector`）；
-   - **B** 在 core 增 `ValueDecoder` SPI（协议模块解码前回调宿主），语义与本仓的 `ValueDecoder` 对齐。
-3. **替换动作（框架能力就位后）**：
-   - 删除 `cn.ypbin.admin.access.decode`（3 个类 + 1 个实现）与 `AccessIotProtocolConfiguration` 里的解码器 bean；
-   - `PointMappingDataListener` 去掉解码分支（回到「协议栈给什么就用什么」）；
-   - 设备/产品侧改配置：`ypbin.iot.protocol.tcp.payload-format=text`；
-   - **保留** `raw_address` 作为帧键的约定（框架侧若采用 B 方案，这条约定继续成立）；
-   - 届时 `iot.access.decode.failure` 指标随实现一起下线，改由框架的 BAD 值/消息键承接。
-4. **过渡期的生效范围（明确边界）**：仅 `protocol=tcp` 的 `byte[]` 载荷；只覆盖文本键值帧；
-   其它协议与其它形态不受影响；它**不修复** §3.1 记录的「TCP 只投递订阅地址列表第 0 个」这一框架限制。
+### 5.1 删除条件如何被满足（2026-10-13）
 
----
+原删除条件（本文件 2026-09-27 版）：**「starter 交付 `valueSelector` 或宿主可插解码 SPI」**。
+starter **v0.3.0（2026-10-12）**交付了 `ypbin.iot.protocol.tcp.payload-format=key-value`，
+其 `TcpValueSelector` 把订阅地址（`PointAddress.raw`）当 selector，从 `KEY=VALUE` 帧里为每个点位取值
+（同一帧可服务 0..N 个点位）⇒ **帧解析部分的前置条件已满足**，故删除：
+
+- `cn.ypbin.admin.access.decode`（`ValueDecoder` / `TextFrameValueDecoder` / `DecodeFailure` / `DecodeOutcome` / `DecodeFailureMetrics`）；
+- `AccessIotProtocolConfiguration` 的解码器 bean 与 `AccessSubscriptionPlanner`/`PointMappingDataListener` 的解码器注入；
+- 指标 `iot.access.decode.failure`（帧/选择失败由 SDK `iot.tcp.*` 承接，见 `docs/METRICS.md` §2.6）。
+
+### 5.2 为什么「物模型类型规范化」不删（留在宿主）
+
+`TcpValueSelector` 的类注释原文：**「本类不做数据类型转换，帧里的值以 `String` 交付——类型属于宿主物模型语义。」**
+这是 starter 的**有意边界**，不是缺口。于是「文本 → 物模型类型」必须留在宿主，理由见 §3 的四点
+（`applyScale` 只吃 `Number`/`BigDecimal`、`ReadingValueMapper` 词法落列、`NOT_NUMERIC` 拒绝语义）。
+落地为 `cn.ypbin.admin.access.egress.PointValueNormalizer`（与删除前的 `canonicalize` 逐字等价）。
+
+### 5.3 保留的契约
+
+- **`raw_address` 仍是「帧内字段键」**：SDK 侧 `PointAddress.raw` 就是 selector，本约定不变；
+- `scale_factor`/`offset_value` 仍作用在**规范化后**的值上（`AccessReading.applyScale`）；
+- `data_type` 仍是类型规范化的唯一事实源（`iot_property.data_type` → `AccessPointMappingDto.dataType`）。
+
+### 5.4 给 starter 的设计反馈（待决策，不在本任务内动 starter）
+
+`key-value` 解决了**字段选择**，但「宿主可插解码 SPI / 协议层类型转换」这条需求**仍然存在**：
+MQTT `payload-format=binary` 与 OPC UA `ByteString` 仍交付 `byte[]`，只能被出口闸门丢弃（§4.2）。
+两条路（**待决策，本仓不预判**）：
+- **接受现状 + 文档讲清**：宿主只保留 TCP 的物模型类型规范化，其余 `byte[]` 路径由各协议模块自己的
+  `payload-format` 解决；
+- **回头给 starter 提宿主可插解码 SPI**（原 §5 方案 B）：让协议模块解码前回调宿主，语义与本仓已删的
+  `ValueDecoder` 对齐。建议按 starter 的版本列车另行评估。
+
+### 5.5 订阅形态（登记待办，本次不改）
+
+TCP 目前仍是**逐点位单地址订阅**（PR #212 的权宜）。`key-value` 已允许一次订阅多地址
+（`TcpSession#subscribe` 对 KEY_VALUE 不做多地址 fail-fast），可减少 N 倍帧解析；
+但本次**保持逐点位单订阅**（语义与切换前一致、风险最小），「多地址单订阅」登记为后续优化项：
+验收 = 多地址单订阅下每个 selector 都产出各自的值、且部分 selector 未命中只让该点位 BAD。
 
 ## 6. 排障速查
 
 | 现象 | 指标 | 常见原因 |
 |---|---|---|
-| 该设备完全没新行，`reason=key-not-found` | `iot.access.decode.failure{reason="key-not-found"}` | 点位映射 `raw_address` 与帧里的键不一致（本次演示数据就是从 `holding:0` 改成 `TEMP`） |
-| `reason=not-key-value-frame` | 同上 | 帧不是 `KEY=VALUE`（裸值/JSON/二进制）⇒ 见 §4.2 |
-| `reason=not-utf8` | 同上 | 二进制寄存器帧；需寄存器级解码参数（§4.2） |
-| `reason=unknown-data-type` | 同上 | `iot_property.data_type` 缺失或不在 9 类之内 |
-| `reason=not-numeric` | 同上 | 值非数值或整数越界（越界**不截断**） |
-| 值仍是 `[B@…`（理论上不该出现） | `iot.access.egress.invalid` 增长 | 解码层之外的新路径绕过了 `ValueDecoder`（请补挂解码器，而不是放宽闸门） |
+| 该设备完全没新行，selector 未命中 | SDK `iot.tcp.selector.not-found`（BAD 质量） | 点位映射 `raw_address` 与帧里的键不一致（本次演示数据就是从 `holding:0` 改成 `TEMP`） |
+| 帧不是键值格式 | SDK `iot.tcp.payload.not-key-value`（BAD 质量） | 帧不是 `KEY=VALUE`（裸值/JSON/二进制）⇒ 见 §4.2 |
+| 帧非 UTF-8 | SDK `iot.tcp.payload.not-utf8`（BAD 质量） | 二进制寄存器帧；需寄存器级解码参数（§4.2） |
+| `reason=unknown-data-type` | `iot.access.value.normalize.failure{reason="unknown-data-type"}` | `iot_property.data_type` 缺失或不在 9 类之内 |
+| `reason=not-numeric` | `iot.access.value.normalize.failure{reason="not-numeric"}` | 值非数值或整数越界（越界**不截断**） |
+| `reason=not-boolean` | `iot.access.value.normalize.failure{reason="not-boolean"}` | bool 点收到非 `true/false/1/0` 形态 |
+| 值仍是 `[B@…`（理论上不该出现） | `iot.access.egress.invalid` 增长 | 新路径交付了未解码 `byte[]`（MQTT binary/OPC UA 见 §4.2；不要放宽闸门） |

@@ -40,7 +40,8 @@ import org.springframework.scheduling.annotation.Scheduled;
  * </ol>
  *
  * <p>上报「设备/点位/值/质量/时刻/周期」（Q8/D0.7 起含读数**值**，值为字符串化后的规范值——
- * 数值形态由上游解码层保证，见 {@code docs/VALUE-DECODE-DESIGN.md}）。</p>
+ * 数值形态由 starter 的 {@code payload-format}（TCP key-value/text/number）与宿主
+ * {@code PointValueNormalizer} 保证，见 {@code docs/VALUE-DECODE-DESIGN.md}）。</p>
  *
  * @author wenbin
  * @since 2026-09-22
@@ -168,11 +169,11 @@ public class HttpAccessReadingSink implements AccessReadingSink {
         }
         if (reading.value() instanceof byte[]) {
             // 兜底闸门（2026-09-27）：`String.valueOf(byte[])` 会得到 `[B@<hash>` 这种无值语义的文本，
-            // 写进库后曲线只能落文本列（画不出来）。解码应由解码层完成；这里再拦一道，保证
-            // 「垃圾形态绝不入库」不依赖单条路径的自觉。
+            // 写进库后曲线只能落文本列（画不出来）。解码/规范化应由协议模块（SDK payload-format）
+            // 或宿主 PointValueNormalizer 完成；这里再拦一道，保证「垃圾形态绝不入库」不依赖单条路径的自觉。
             invalidCounter.increment();
-            log.warn("[access] 读数值仍是未解码的原始字节，已丢弃（应由解码层处理；见 iot.access.decode.* 指标）："
-                    + "device={} property={} 载荷长度={}",
+            log.warn("[access] 读数值仍是未解码的原始字节，已丢弃（应由协议模块/宿主规范化处理；"
+                    + "见 docs/VALUE-DECODE-DESIGN.md）：device={} property={} 载荷长度={}",
                 reading.deviceId(), reading.propertyId(), ((byte[]) reading.value()).length);
             return null;
         }

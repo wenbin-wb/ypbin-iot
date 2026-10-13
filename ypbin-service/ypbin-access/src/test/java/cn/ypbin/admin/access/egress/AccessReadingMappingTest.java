@@ -15,8 +15,6 @@ import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
-import cn.ypbin.admin.access.decode.TextFrameValueDecoder;
-import cn.ypbin.admin.access.decode.ValueDecoder;
 import cn.ypbin.admin.access.link.PointMappingDataListener;
 import cn.ypbin.admin.iot.device.AccessPointMappingDto;
 import cn.ypbin.iot.core.model.PointAddress;
@@ -24,7 +22,6 @@ import cn.ypbin.iot.core.model.PointValue;
 import cn.ypbin.iot.core.model.Quality;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.math.BigDecimal;
-import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -33,12 +30,17 @@ import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
 
 /**
- * 点位映射、**原始值解码**与线性缩放的纯逻辑单测（采集数据的正确性关键面）。
+ * 点位映射、**宿主物模型类型规范化**与线性缩放的纯逻辑单测（采集数据的正确性关键面）。
  *
- * <p>这里最容易出错、且出错后**不会报错只会算错**的四件事：① 缩放/偏移该不该应用；② 地址对不上时
- * 是静默丢还是留痕；③ **上报的坐标形态**——必须是属性标识（规范坐标），不能退回属性主键字符串
- * （2026-09-26 坐标统一的落点）；
- * ④ **TCP 原始字节必须先解码**——不解码就会落成 {@code [B@<hash>}，曲线只能进文本列。</p>
+ * <p><b>切换背景</b>（2026-10-13）：接入侧已切到 starter 0.3.0 的 {@code payload-format=key-value}，
+ * SDK 完成帧解析与字段选择后交付 {@code String}（<b>不做类型转换</b>，其类注释明确类型属于宿主
+ * 物模型语义）。因此本测试的输入从「原始 {@code byte[]} 帧」改为「SDK 已选好的 {@code String}」，
+ * 并逐条断言「切换前是什么、切换后还是什么」。</p>
+ *
+ * <p>这里最容易出错、且出错后**不会报错只会算错**的四件事：① 缩放/偏移该不该应用（依赖类型规范化
+ * 先把文本变成 {@code Number}/{@code BigDecimal}）；② 地址对不上时是静默丢还是留痕；
+ * ③ **上报的坐标形态**——必须是属性标识（规范坐标），不能退回属性主键字符串（2026-09-26 坐标统一的落点）；
+ * ④ **类型规范化失败必须丢弃 + 计数**，不许猜、不许把失败画成有效值。</p>
  *
  * @author wenbin
  * @since 2026-09-21
@@ -48,8 +50,6 @@ class AccessReadingMappingTest {
     private static final String PROTOCOL_TCP = "tcp";
 
     private static final String PROTOCOL_MODBUS = "modbus";
-
-    private static final List<ValueDecoder> DECODERS = List.of(new TextFrameValueDecoder());
 
     @Test
     @DisplayName("缩放：未配置缩放/偏移时原样返回；配了就 value*scale+offset")
@@ -78,7 +78,8 @@ class AccessReadingMappingTest {
             readings);
         Instant now = Instant.parse("2026-09-21T08:00:00Z");
 
-        listener.onData(new PointValue(PointAddress.of("holding:1"), 250, Quality.GOOD, now, null));
+        // SDK key-value 交付的是 String（不做类型转换）；缩放生效依赖宿主类型规范化
+        listener.onData(PointValue.good(PointAddress.of("holding:1"), "250", now));
 
         assertThat(readings).hasSize(1);
         AccessReading reading = readings.getFirst();
@@ -96,115 +97,205 @@ class AccessReadingMappingTest {
         assertThat(reading.timestamp()).isEqualTo(now);
         assertThat(listener.unmappedCount()).isZero();
         assertThat(listener.orphanCount()).isZero();
-        assertThat(listener.decodeFailureCount()).isZero();
+        assertThat(listener.normalizeFailureCount()).isZero();
     }
 
     @Test
-    @DisplayName("★ TCP 帧解码：`TEMP=23.5,SEQ=1` → 值 \"23.5\"（干净数值串 ⇒ 自动进 value_double，曲线可画）")
-    void tcpFrameShouldBeDecodedIntoNumericValueForCurve() {
+    @DisplayName("★ key-value 数值点：SDK 交付 \"23.5\" ⇒ 规范化为 BigDecimal，形态仍是干净数值串（曲线可画）")
+    void keyValueShouldNormalizeNumericValueForCurve() {
         List<AccessReading> readings = new ArrayList<>();
         PointMappingDataListener listener = listener(PROTOCOL_TCP,
             List.of(point("TEMP", "temperature", "decimal", null, null)), readings);
 
-        listener.onData(new PointValue(PointAddress.of("TEMP"),
-            "TEMP=23.5,SEQ=12\n".getBytes(StandardCharsets.UTF_8), Quality.GOOD, Instant.now(), null));
+        listener.onData(PointValue.good(PointAddress.of("TEMP"), "23.5", Instant.now()));
 
         assertThat(readings).hasSize(1);
         Object value = readings.getFirst().value();
-        assertThat(value).as("值必须是解码后的数值，不能是原始字节").isNotInstanceOf(byte[].class);
+        assertThat(value).as("切换后值应为 BigDecimal（切换前 TextFrameValueDecoder 也产出 BigDecimal）")
+            .isInstanceOf(BigDecimal.class);
         // 出口走 String.valueOf：形态必须是纯数值串，ReadingValueMapper 才会写 value_double。
         // 这是「曲线画不出来」这条缺陷的回归断言。
         assertThat(String.valueOf(value))
             .isEqualTo("23.5")
             .matches("-?\\d+(\\.\\d+)?");
-        assertThat(listener.decodeFailureCount()).isZero();
+        assertThat(listener.normalizeFailureCount()).isZero();
     }
 
     @Test
-    @DisplayName("★ TCP 文本点：serialNo 解码后仍是文本（含前导零不被吞），不进数值列")
-    void tcpTextPointMustStayText() {
+    @DisplayName("★ key-value 文本点：serialNo 规范化后仍是文本（含前导零不被吞），不进数值列")
+    void keyValueTextPointMustStayText() {
         List<AccessReading> readings = new ArrayList<>();
         PointMappingDataListener listener = listener(PROTOCOL_TCP,
             List.of(point("SN", "serialNo", "string", null, null)), readings);
 
-        listener.onData(new PointValue(PointAddress.of("SN"),
-            "SN=007".getBytes(StandardCharsets.UTF_8), Quality.GOOD, Instant.now(), null));
+        listener.onData(PointValue.good(PointAddress.of("SN"), "007", Instant.now()));
 
         assertThat(readings).singleElement()
             .satisfies(reading -> assertThat(reading.value()).isEqualTo("007"));
     }
 
     @Test
-    @DisplayName("解码后仍应用缩放/偏移（缩放作用在解码值上，而不是原始字节上）")
-    void scaleShouldApplyToDecodedValue() {
+    @DisplayName("★ 数值等价（切换前=切换后）：\"23.5\" + scale=2 + offset=1 ⇒ 48.000000")
+    void scaleShouldApplyToNormalizedValue() {
         List<AccessReading> readings = new ArrayList<>();
         PointMappingDataListener listener = listener(PROTOCOL_TCP,
             List.of(point("TEMP", "temperature", "decimal", new BigDecimal("2"), BigDecimal.ONE)),
             readings);
 
-        listener.onData(new PointValue(PointAddress.of("TEMP"),
-            "TEMP=23.5".getBytes(StandardCharsets.UTF_8), Quality.GOOD, Instant.now(), null));
+        listener.onData(PointValue.good(PointAddress.of("TEMP"), "23.5", Instant.now()));
 
         assertThat(readings).singleElement()
-            .satisfies(reading -> assertThat(reading.value()).isEqualTo(new BigDecimal("48.000000")));
+            .satisfies(reading -> assertThat(reading.value())
+                .as("若类型规范化缺失，applyScale 对 String 原样返回 ⇒ 这里会是 \"23.5\"（读数错值）")
+                .isEqualTo(new BigDecimal("48.000000")));
     }
 
     @Test
-    @DisplayName("★ 解码失败不静默：键不匹配/二进制帧 ⇒ 丢弃 + 计数（带 reason 标签）+ WARN，且不 dump 载荷")
-    void decodeFailureMustBeCountedAndWarnedWithoutPayloadDump() {
+    @DisplayName("★ bool 等价：\"1\"/\"0\"/\"TRUE\" ⇒ true/false 文本（与切换前的落列形态一致）")
+    void boolShouldNormalizeToTrueFalseText() {
+        List<AccessReading> readings = new ArrayList<>();
+        PointMappingDataListener listener = listener(PROTOCOL_TCP,
+            List.of(point("SW1", "switch1", "bool", null, null),
+                point("SW2", "switch2", "bool", null, null),
+                point("SW3", "switch3", "bool", null, null)),
+            readings);
+
+        listener.onData(PointValue.good(PointAddress.of("SW1"), "1", Instant.now()));
+        listener.onData(PointValue.good(PointAddress.of("SW2"), "0", Instant.now()));
+        listener.onData(PointValue.good(PointAddress.of("SW3"), "TRUE", Instant.now()));
+
+        assertThat(readings).extracting(AccessReading::value)
+            .as("bool 1/0 必须规范成 true/false，否则 ReadingValueMapper 会按词法把 \"1\" 落 value_double")
+            .containsExactly("true", "false", "true");
+        assertThat(listener.normalizeFailureCount()).isZero();
+    }
+
+    @Test
+    @DisplayName("★ int/long 等价：纯十进制 → Long（越界不截断）；前导零整数按切换前口径转数值")
+    void intShouldNormalizeToLong() {
+        List<AccessReading> readings = new ArrayList<>();
+        PointMappingDataListener listener = listener(PROTOCOL_TCP,
+            List.of(point("HUM", "humidity", "int", null, null),
+                point("CNT", "count", "long", null, null)),
+            readings);
+
+        listener.onData(PointValue.good(PointAddress.of("HUM"), "45", Instant.now()));
+        listener.onData(PointValue.good(PointAddress.of("CNT"), "007", Instant.now()));
+
+        assertThat(readings).extracting(AccessReading::value)
+            .as("与切换前 TextFrameValueDecoder 逐字一致：Long.valueOf 会去掉前导零")
+            .containsExactly(45L, 7L);
+        assertThat(listener.normalizeFailureCount()).isZero();
+    }
+
+    @Test
+    @DisplayName("★ 类型规范化失败不静默：decimal 收到非数值 / long 越界 ⇒ 丢弃 + 计数 + WARN（不 dump 值）")
+    void normalizeFailureMustBeCountedAndWarnedWithoutValueDump() {
         SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
         List<AccessReading> readings = new ArrayList<>();
         PointMappingDataListener listener = new PointMappingDataListener("100", PROTOCOL_TCP, 5_000,
-            List.of(point("TEMP", "temperature", "decimal", null, null)), readings::add,
-            DECODERS, meterRegistry);
+            List.of(point("TEMP", "temperature", "decimal", null, null),
+                point("BIG", "big", "long", null, null)),
+            readings::add, meterRegistry);
         Logger listenerLogger = (Logger) LoggerFactory.getLogger(PointMappingDataListener.class);
         ListAppender<ILoggingEvent> appender = new ListAppender<>();
         appender.start();
         listenerLogger.addAppender(appender);
         try {
-            // ① 键不匹配：帧里是 HUM，而该点位声明的是 TEMP
-            listener.onData(new PointValue(PointAddress.of("TEMP"), frame("HUM=45"), Quality.GOOD,
-                Instant.now(), null));
-            // ② 二进制（大小端寄存器）帧：不是合法 UTF-8
-            byte[] registerFrame = {(byte) 0xFF, (byte) 0xFE, (byte) 0x00, (byte) 0x02};
-            listener.onData(new PointValue(PointAddress.of("TEMP"), registerFrame, Quality.GOOD,
-                Instant.now(), null));
+            listener.onData(PointValue.good(PointAddress.of("TEMP"), "not-a-number", Instant.now()));
+            listener.onData(PointValue.good(PointAddress.of("BIG"), "99999999999999999999", Instant.now()));
 
-            assertThat(readings).as("解不出来就不许进出口（更不许把 [B@… 写进库）").isEmpty();
-            assertThat(listener.decodeFailureCount()).isEqualTo(2);
-            assertThat(meterRegistry.get(PointMappingDataListener.METRIC_DECODE_FAILURE)
-                .tag("reason", "key-not-found").counter().count()).isEqualTo(1.0d);
-            assertThat(meterRegistry.get(PointMappingDataListener.METRIC_DECODE_FAILURE)
-                .tag("reason", "not-utf8").counter().count()).isEqualTo(1.0d);
+            assertThat(readings).as("规范化失败不许进出口（更不许把非法文本写进库）").isEmpty();
+            assertThat(listener.normalizeFailureCount()).isEqualTo(2);
+            assertThat(meterRegistry.get(PointValueNormalizeMetrics.METRIC_NAME)
+                .tag(PointValueNormalizeMetrics.TAG_REASON, "not-numeric").counter().count())
+                .isEqualTo(2.0d);
 
             List<String> warns = appender.list.stream()
                 .filter(event -> event.getLevel() == Level.WARN)
                 .map(ILoggingEvent::getFormattedMessage)
                 .toList();
             assertThat(warns).hasSize(2);
-            assertThat(warns.getFirst()).contains("device=100", "key-not-found", "载荷长度=6");
-            assertThat(warns.get(1)).contains("not-utf8", "载荷长度=4");
+            assertThat(warns.getFirst()).contains("device=100", "not-numeric", "值长度=12");
             assertThat(String.join("\n", warns))
-                .as("WARN 必须脱敏：不得把帧内容原样打进日志")
-                .doesNotContain("HUM=45");
+                .as("WARN 必须脱敏：不得把值内容原样打进日志")
+                .doesNotContain("not-a-number", "99999999999999999999");
         } finally {
             listenerLogger.detachAppender(appender);
         }
     }
 
     @Test
-    @DisplayName("其它协议不受影响：modbus/opcua 已解码的数值原样透传（本层不改取值路径）")
+    @DisplayName("★ dataType 缺失/未知 ⇒ UNKNOWN_DATA_TYPE 丢弃 + 计数（不猜数值还是文本）")
+    void unknownDataTypeMustFailAndCount() {
+        SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+        List<AccessReading> readings = new ArrayList<>();
+        PointMappingDataListener listener = new PointMappingDataListener("100", PROTOCOL_TCP, 5_000,
+            List.of(point("TEMP", "temperature", null, null, null),
+                point("HUM", "humidity", "not-a-type", null, null)),
+            readings::add, meterRegistry);
+
+        listener.onData(PointValue.good(PointAddress.of("TEMP"), "23.5", Instant.now()));
+        listener.onData(PointValue.good(PointAddress.of("HUM"), "45", Instant.now()));
+
+        assertThat(readings).isEmpty();
+        assertThat(listener.normalizeFailureCount()).isEqualTo(2);
+        assertThat(meterRegistry.get(PointValueNormalizeMetrics.METRIC_NAME)
+            .tag(PointValueNormalizeMetrics.TAG_REASON, "unknown-data-type").counter().count())
+            .isEqualTo(2.0d);
+    }
+
+    @Test
+    @DisplayName("★ bool 非法形态 ⇒ NOT_BOOLEAN 丢弃 + 计数")
+    void invalidBoolMustFailAndCount() {
+        SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+        List<AccessReading> readings = new ArrayList<>();
+        PointMappingDataListener listener = new PointMappingDataListener("100", PROTOCOL_TCP, 5_000,
+            List.of(point("SW", "switch1", "bool", null, null)), readings::add, meterRegistry);
+
+        listener.onData(PointValue.good(PointAddress.of("SW"), "maybe", Instant.now()));
+
+        assertThat(readings).isEmpty();
+        assertThat(listener.normalizeFailureCount()).isEqualTo(1);
+        assertThat(meterRegistry.get(PointValueNormalizeMetrics.METRIC_NAME)
+            .tag(PointValueNormalizeMetrics.TAG_REASON, "not-boolean").counter().count())
+            .isEqualTo(1.0d);
+    }
+
+    @Test
+    @DisplayName("★ SDK 的 BAD 原样穿透：不规范化、不计规范化失败（失败不得被洗白）")
+    void badQualityMustPassThroughWithoutNormalizeFailure() {
+        SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+        List<AccessReading> readings = new ArrayList<>();
+        PointMappingDataListener listener = new PointMappingDataListener("100", PROTOCOL_TCP, 5_000,
+            List.of(point("TEMP", "temperature", "decimal", null, null)), readings::add, meterRegistry);
+
+        listener.onData(PointValue.bad(PointAddress.of("TEMP"), Quality.BAD,
+            "iot.tcp.selector.not-found", Instant.now()));
+
+        assertThat(readings).singleElement().satisfies(reading -> {
+            assertThat(reading.quality()).as("BAD 必须仍是 BAD，绝不能被规范化成 GOOD").isEqualTo("BAD");
+            assertThat(reading.isGood()).isFalse();
+            assertThat(reading.value()).as("SDK 的 BAD 不带值").isNull();
+        });
+        assertThat(listener.normalizeFailureCount())
+            .as("SDK 侧失败不计入宿主规范化失败（否则双计）").isZero();
+        assertThat(meterRegistry.find(PointValueNormalizeMetrics.METRIC_NAME).counters())
+            .as("BAD 穿透不得创建任何规范化失败计数器").isEmpty();
+    }
+
+    @Test
+    @DisplayName("其它协议不受影响：modbus/opcua 已解码的数值原样透传（宿主不改取值路径）")
     void otherProtocolsMustPassThroughUnchanged() {
         List<AccessReading> readings = new ArrayList<>();
         PointMappingDataListener listener = listener(PROTOCOL_MODBUS,
             List.of(point("holding:1", "temperature", "decimal", null, null)), readings);
 
-        listener.onData(new PointValue(PointAddress.of("holding:1"), 250, Quality.GOOD,
-            Instant.now(), null));
+        listener.onData(PointValue.good(PointAddress.of("holding:1"), 250, Instant.now()));
 
         assertThat(readings).singleElement()
             .satisfies(reading -> assertThat(reading.value()).isEqualTo(250));
-        assertThat(listener.decodeFailureCount()).isZero();
+        assertThat(listener.normalizeFailureCount()).isZero();
     }
 
     @Test
@@ -214,7 +305,7 @@ class AccessReadingMappingTest {
         PointMappingDataListener listener = listener(PROTOCOL_TCP,
             List.of(point("holding:1", null, null, null, null)), readings);
 
-        listener.onData(new PointValue(PointAddress.of("holding:1"), 1, Quality.GOOD, Instant.now(), null));
+        listener.onData(PointValue.good(PointAddress.of("holding:1"), "1", Instant.now()));
 
         assertThat(readings).as("拿不到属性标识就不能发（否则等于把统一掉的形态又写回去）").isEmpty();
         assertThat(listener.orphanCount()).isEqualTo(1);
@@ -228,8 +319,7 @@ class AccessReadingMappingTest {
         PointMappingDataListener listener = listener(PROTOCOL_TCP,
             List.of(point("holding:1", "temperature", "decimal", null, null)), readings);
 
-        listener.onData(new PointValue(PointAddress.of("holding:99"), 1, Quality.GOOD,
-            Instant.now(), null));
+        listener.onData(PointValue.good(PointAddress.of("holding:99"), "1", Instant.now()));
 
         assertThat(readings).isEmpty();
         assertThat(listener.unmappedCount()).isEqualTo(1);
@@ -242,8 +332,8 @@ class AccessReadingMappingTest {
         PointMappingDataListener listener = listener(PROTOCOL_TCP,
             List.of(point("holding:1", "temperature", "decimal", null, null)), readings);
 
-        listener.onData(new PointValue(PointAddress.of("holding:1"), null, Quality.BAD,
-            Instant.now(), "timeout"));
+        listener.onData(PointValue.bad(PointAddress.of("holding:1"), Quality.BAD,
+            "timeout", Instant.now()));
 
         assertThat(readings).hasSize(1);
         assertThat(readings.getFirst().isGood()).isFalse();
@@ -261,38 +351,32 @@ class AccessReadingMappingTest {
 
         // 框架自身会拒绝空地址（PointAddress 构造期校验），故这里用一个真实但未映射的地址验证：
         // 若上面两条空地址被当成了合法映射，这里就不会走「未映射」分支
-        listener.onData(new PointValue(PointAddress.of("holding:2"), 1, Quality.GOOD,
-            Instant.now(), null));
+        listener.onData(PointValue.good(PointAddress.of("holding:2"), "1", Instant.now()));
 
         assertThat(readings).isEmpty();
         assertThat(listener.unmappedCount()).isEqualTo(1);
     }
 
     @Test
-    @DisplayName("byteOrder 对文本帧无影响（寄存器级大小端解码未实现，参数不足 ⇒ 不猜）")
-    void byteOrderMustNotAffectTextFrameDecoding() {
+    @DisplayName("byteOrder 对 key-value 文本值无影响（寄存器级大小端解码未实现，参数不足 ⇒ 不猜）")
+    void byteOrderMustNotAffectKeyValueNormalization() {
         List<AccessReading> readings = new ArrayList<>();
         AccessPointMappingDto littleEndian = point("TEMP", "temperature", "decimal", null, null);
         littleEndian.setByteOrder("little");
         PointMappingDataListener listener = listener(PROTOCOL_TCP, List.of(littleEndian), readings);
 
-        listener.onData(new PointValue(PointAddress.of("TEMP"), frame("TEMP=23.5"), Quality.GOOD,
-            Instant.now(), null));
+        listener.onData(PointValue.good(PointAddress.of("TEMP"), "23.5", Instant.now()));
 
         assertThat(readings).singleElement().satisfies(reading ->
             assertThat(String.valueOf(reading.value()))
-                .as("文本帧没有字节序语义；寄存器帧的大小端解码需先补位宽/符号参数")
+                .as("key-value 文本值没有字节序语义；寄存器帧的大小端解码需先补位宽/符号参数")
                 .isEqualTo("23.5"));
-    }
-
-    private static byte[] frame(String text) {
-        return text.getBytes(StandardCharsets.UTF_8);
     }
 
     private static PointMappingDataListener listener(String protocol,
                                                      List<AccessPointMappingDto> points,
                                                      List<AccessReading> readings) {
-        return new PointMappingDataListener("100", protocol, 5_000, points, readings::add, DECODERS,
+        return new PointMappingDataListener("100", protocol, 5_000, points, readings::add,
             new SimpleMeterRegistry());
     }
 
@@ -300,9 +384,9 @@ class AccessReadingMappingTest {
      * 构造一个点位映射：{@code identifier} 是上报坐标，{@code propertyId} 只作定位（刻意与标识不同，
      * 以便断言「上报用的是标识而不是主键字符串」）。
      *
-     * @param address    协议地址（TCP 文本帧下即 {@code KEY=VALUE} 的键）
+     * @param address    协议地址（TCP key-value 下即 selector）
      * @param identifier 属性标识（规范坐标；{@code null} 表示孤儿映射）
-     * @param dataType   物模型数据类型（解码按它决定规范值形态）
+     * @param dataType   物模型数据类型（宿主按它决定规范值形态）
      * @param scale      缩放系数
      * @param offset     偏移
      * @return 点位映射

@@ -9,7 +9,6 @@
  */
 package cn.ypbin.admin.access.link;
 
-import cn.ypbin.admin.access.decode.ValueDecoder;
 import cn.ypbin.admin.access.egress.AccessReadingSink;
 import cn.ypbin.admin.iot.device.AccessPointMappingDto;
 import cn.ypbin.admin.iot.enums.IotProtocol;
@@ -63,9 +62,6 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
     private final ObjectMapper objectMapper;
     private final AccessReadingSink readingSink;
 
-    /** 原始值解码器（按协议码命中；见 {@code docs/VALUE-DECODE-DESIGN.md}）。 */
-    private final List<ValueDecoder> valueDecoders;
-
     private final MeterRegistry meterRegistry;
 
     /**
@@ -113,12 +109,10 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
 
     public AccessSubscriptionPlanner(Supplier<Map<String, DeviceSession>> sessions,
                                      ObjectMapper objectMapper, AccessReadingSink readingSink,
-                                     List<ValueDecoder> valueDecoders, MeterRegistry meterRegistry,
-                                     Clock clock) {
+                                     MeterRegistry meterRegistry, Clock clock) {
         this.sessions = sessions;
         this.objectMapper = objectMapper;
         this.readingSink = readingSink;
-        this.valueDecoders = valueDecoders == null ? List.of() : List.copyOf(valueDecoders);
         this.meterRegistry = meterRegistry;
         this.clock = clock;
         // 指标前缀统一为 `iot.access.*`（与既有的 `iot.access.lease.*` 一致；
@@ -188,8 +182,7 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
                 : new SubscribeRequest(addresses, device.pollInterval(), device.pollInterval(), null,
                     Map.of());
             PointMappingDataListener listener = new PointMappingDataListener(device.deviceId(),
-                device.protocol().value(), pollIntervalMs(device), points, readingSink, valueDecoders,
-                meterRegistry);
+                device.protocol().value(), pollIntervalMs(device), points, readingSink, meterRegistry);
             // ⚠️ S5 修复：**订阅成功之后**才记录跟踪。
             //    此前是先写 `subscribedSessions` 再 subscribe ⇒ 异步失败时跟踪表已记上「已订阅」，
             //    对账会认为无需重试 ⇒ 该设备**永久停止采集**且只有一行 ERROR 日志。
@@ -263,17 +256,19 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
     /**
      * TCP 透传的**逐点位单订阅**（UP-4 契约对齐）。
      *
-     * <p><b>为什么必须逐点位</b>：starter 0.2.0 起 TCP 是「单点位流」——裸 TCP 帧没有寻址语义，
-     * {@code TcpSession#subscribe} 对 {@code addresses().size() > 1} 直接 fail-fast
-     * （{@code iot.tcp.subscribe.multi-address-unsupported}）。把全部点位塞进一次订阅会让
-     * **任何 >1 点位的 TCP 设备整机零采集**（此前 0.1.0 是「N 里只出 1」）。</p>
+     * <p><b>为什么保持逐点位单订阅（2026-10-13 复核）</b>：非 key-value 的 TCP 透传是「单点位流」
+     * ——裸 TCP 帧没有寻址语义，{@code TcpSession#subscribe} 对 {@code addresses().size() > 1}
+     * 直接 fail-fast（{@code iot.tcp.subscribe.multi-address-unsupported}）。本仓接入侧已切到
+     * starter 0.3.0 的 {@code payload-format=key-value}，该模式下多地址订阅**已被允许**；但本类
+     * <b>仍保持逐点位单订阅</b>（风险最小、语义与切换前一致），多地址单订阅（减少 N 倍帧解析）
+     * 登记为文档待办，见 {@code docs/VALUE-DECODE-DESIGN.md} §5。</p>
      *
-     * <p><b>为什么逐点位单订阅能恢复采集</b>：{@code TcpSession.subscribe} 每次订阅都会新建
+     * <p><b>逐点位单订阅在 key-value 下的语义</b>：{@code TcpSession.subscribe} 每次订阅都会新建
      * {@code TcpSubscription} 并向链路注册**独立的帧消费者**，帧内的 address 用该次订阅的地址
      * （{@code addresses().get(0)}）。因此 N 个单地址订阅 ⇒ 同一帧被派发 N 次，各自带自己的
      * {@code raw_address}；它们共享同一个 {@link PointMappingDataListener}（其 {@code pointByAddress}
-     * 含全部点位），于是每个点位都能按 {@code raw_address} 取到自己的帧键、走既有解码路径。
-     * 这**不**依赖上游 {@code valueSelector}：帧键选择仍由本仓 {@code TextFrameValueDecoder} 承担。</p>
+     * 含全部点位），于是每个点位都能按 {@code raw_address} 取到自己的值。**帧键选择现由 starter
+     * 0.3.0 的 {@code TcpValueSelector}（key-value 的 valueSelector）承担**，宿主不再做帧解析。</p>
      *
      * <p><b>语义保持</b>：① 成功后才计入设备跟踪（S5）；② 在途去重按「设备+地址」，部分成功后重试
      * 只补失败地址，**不会**给已成功地址重复挂监听（否则同一点位会出重复读数）；③ 失败仍走指数退避
@@ -321,8 +316,7 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
         // 退避 attempts 放大 N 倍（否则第一轮失败就直接冲到退避上限）
         state.failureArmedThisRound().set(false);
         PointMappingDataListener listener = new PointMappingDataListener(deviceId,
-            device.protocol().value(), pollIntervalMs(device), points, readingSink, valueDecoders,
-            meterRegistry);
+            device.protocol().value(), pollIntervalMs(device), points, readingSink, meterRegistry);
         boolean initiated = false;
         for (PointAddress address : pending) {
             String raw = address.raw();
