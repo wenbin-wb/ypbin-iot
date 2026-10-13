@@ -114,7 +114,7 @@ OPC UA `ByteString`（生产 access fat jar 不含这两个协议模块，属潜
 
 | 需求 | 为什么没做 | 建议落法（含验收） |
 |---|---|---|
-| Modbus 寄存器 16/32 位、有符号/无符号、大小端 | `iot_point_mapping` **没有位宽/符号列**；用「载荷长度猜位宽」或「默认无符号」都是猜，违反「不猜」 | 映射表增 `word_count`（1/2）、`signed`（0/1），与既有 `byte_order` 组合成寄存器解码；验收：`byte_order=big/little` × `word_count=1/2` × `signed` 的 8 组用例 + 长度不足用例 |
+| ~~Modbus 寄存器 16/32 位、有符号/无符号、字序~~ | **已由 §4.3 v1 落地（2026-10-13）**：`word_count`/`signed` 新增、`byte_order` 复用为字序；IEEE754 浮点与 BADC/DCBA 字节交换**仍不在 v1**（见 §4.3.6） | 见 §4.3；验收：8 组矩阵 + 长度不足 + 配对/陈旧 + 向后兼容 |
 | 位域（bit offset/length） | 同上，缺列 | 增 `bit_offset`/`bit_length`；验收：越界位宽报错、单 bit 取布尔 |
 | 字符串寄存器（多寄存器拼 UTF-8） | 同上，缺列 | 增 `word_count` + `encoding`；验收：中文/半角混合、奇数字节 |
 | 「整帧即值」（无键的裸值帧） | 需要一个**显式**的地址类型声明（否则只能靠「帧里没有 `=` 就拿整帧当值」这种猜测） | `AddressType` 增 `tcp-line`（或映射增 `decode_format` 列）；验收：裸值帧解出数值、且键值帧仍走键路径（互不串味） |
@@ -136,11 +136,11 @@ OPC UA `ByteString`（生产 access fat jar 不含这两个协议模块，属潜
 | 列 | 类型 | 语义 |
 |---|---|---|
 | `word_count` | `INT NOT NULL DEFAULT 1` | 连续寄存器个数；本版合法值 `1`\|`2`；默认 1 = 今天的行为 |
-| `signed` | `TINYINT NOT NULL DEFAULT 0` | `0`=无符号 / `1`=有符号（整型） |
+| `signed` | `TINYINT NOT NULL DEFAULT 0` | `0`=无符号 / `1`=有符号（整型）；**Java 侧用 `Boolean`**（与 `enabled` 同一约定） |
 | `byte_order`（复用） | `VARCHAR(16) NULL` | **字序（word order）**：`big`=高字在前（ABCD）/`little`=低字在前（CDAB）；仅 `word_count=2` 生效 |
 
-接口字段（camelCase，前端契约）：`wordCount`（1\|2）、`signed`（**0\|1 整数，不是 Boolean**——与 DDL `TINYINT` 一致）、
-`byteOrder`（已存在，`big`\|`little`）。`address_type` 保持既有取值，本版不改语义。
+接口字段（camelCase，前端契约）：`wordCount`（1\|2）、`signed`（**Boolean，JSON `true/false`**——与实体/`enabled` 同一约定；
+DB 列仍是 `TINYINT NOT NULL DEFAULT 0`）、`byteOrder`（已存在，`big`\|`little`）。`address_type` 保持既有取值，本版不改语义。
 
 #### 4.3.2 生效范围与校验（不猜、明显错配拦住）
 
@@ -149,10 +149,15 @@ OPC UA `ByteString`（生产 access fat jar 不含这两个协议模块，属潜
 | 仅 **Modbus**（`holding`/`input` 寄存器） | 三个字段生效 |
 | `word_count=2` | `address_type ∈ {holding,input}`；`raw_address` 必须是显式 `type:offset` 且 `type` 与 `address_type` 逐字一致；`byte_order` 为 null ⇒ 按 `big` |
 | `word_count=1` | `byte_order` 忽略（写 `big` 等价于不写）；`signed` 作用于 16 位值 |
-| `coil`/`discrete`（位类型） | `word_count≠1` 或 `signed≠0` ⇒ **拒绝**（位类型没有宽度/符号语义） |
-| 非 Modbus（tcp/mqtt/opcua） | 三字段必须为默认（`1/0/null`）⇒ 否则**拒绝**（明显错配）；默认值不改变行为 |
-| `dataType` | `word_count=2` 或 `signed=1` 时要求 `iot_property.data_type ∈ {int,long}`（v1 仅整型） |
-| `word_count=2` + 传统 5 位编号（如 `40001`） | **v1 拒绝**：主机侧算 `base+1` 需复刻 SDK 的段基址/1-based 规则（第二份真源）；显式 `type:offset` 无歧义 |
+| `coil`/`discrete`（位类型） | **新字段严格**：`word_count≠1` 或 `signed=true` ⇒ **拒绝**（位类型没有宽度/符号语义） |
+| 非 Modbus（tcp/mqtt/opcua） | **新字段严格**：`word_count≠1` 或 `signed=true` ⇒ **拒绝**（新字段任何非默认值必然是配错，fail-fast） |
+| `dataType` | `word_count=2` 或 `signed=true` 时要求 `iot_property.data_type ∈ {int,long}`（v1 仅整型） |
+| `word_count=2` + 传统 5 位编号（如 `40001`） | **v1 拒绝**并给出可执行报错：`word_count=2 需要显式 type:offset 形式（如 holding:0）；传统 5 位编号不支持多寄存器` |
+| **`byteOrder`（旧字段，宽容）** | 在「非 Modbus / 位类型 / `word_count≠2`」的点位上**忽略**（不拒绝）：它是既有自由文本列、历史上从未被消费；若因一个没人看过的旧值把编辑历史行拦下，是误伤 |
+
+> **新字段严格 / 旧字段宽容的不对称是有意的**：`wordCount`/`signed` 是本版新增、语义明确，任何非默认值都只可能出现在
+> 寄存器解码意图下 ⇒ 非适用场景一律 fail-fast；`byteOrder` 是历史遗留的自由文本，过去写入过什么值不可知，故仅在
+> 真正生效的场景（Modbus + `word_count=2`）校验取值（`big`/`little`），其余场景忽略。
 
 #### 4.3.3 解码矩阵（8 组 + 长度不足）
 
@@ -160,14 +165,14 @@ OPC UA `ByteString`（生产 access fat jar 不含这两个协议模块，属潜
 
 | word_count | signed | byte_order | 规则 | 输出类型/域 |
 |---|---|---|---|---|
-| 1 | 0 | 忽略 | `value = R0` | `Integer` 0..65535（**原样透传，与今天逐字节一致**） |
-| 1 | 1 | 忽略 | `signExtend16(R0)` | `Integer` -32768..32767 |
-| 2 | 0 | big | `(R0 << 16) \| R1` | `long` 0..4294967295 |
-| 2 | 0 | little | `(R1 << 16) \| R0` | `long` 0..4294967295 |
-| 2 | 1 | big | `signExtend32((R0 << 16) \| R1)` | `long` -2147483648..2147483647 |
-| 2 | 1 | little | `signExtend32((R1 << 16) \| R0)` | `long` -2147483648..2147483647 |
+| 1 | false | 忽略 | `value = R0` | `Integer` 0..65535（**原样透传，与今天逐字节一致**） |
+| 1 | true | 忽略 | `signExtend16(R0)` | `Integer` -32768..32767 |
+| 2 | false | big | `(R0 << 16) \| R1` | `long` 0..4294967295 |
+| 2 | false | little | `(R1 << 16) \| R0` | `long` 0..4294967295 |
+| 2 | true | big | `signExtend32((R0 << 16) \| R1)` | `long` -2147483648..2147483647 |
+| 2 | true | little | `signExtend32((R1 << 16) \| R0)` | `long` -2147483648..2147483647 |
 
-- 8 组用例 = `byte_order{big,little} × word_count{1,2} × signed{0,1}`（`word_count=1` 时 `byte_order` 两组同值，仍按 8 组覆盖）；
+- 8 组用例 = `byte_order{big,little} × word_count{1,2} × signed{false,true}`（`word_count=1` 时 `byte_order` 两组同值，仍按 8 组覆盖）；
 - 32 位无符号用 `long` 承载 `0..2^32-1`，**不截断、不溢出**；符号按 two's complement；
 - **长度不足**（任一寄存器缺失/响应短/BAD）⇒ 该点位 **BAD**，**不得用 0 充数**。
 
@@ -191,13 +196,18 @@ OPC UA `ByteString`（生产 access fat jar 不含这两个协议模块，属潜
 
 #### 4.3.6 未支持（保持登记，不在本版）
 
-IEEE754 浮点（需 `dataType=float` + 完整字节序枚举）；BADC/DCBA 字内字节交换（需扩 `byte_order` 枚举并单独评审）；
-`coil`/`discrete` 的宽度/符号；字符串寄存器（多寄存器 UTF-8）与位域（§4.2 各自单独立项）；
-`word_count=2` 的传统 5 位编号形式；一个点位跨不同寄存器区（base 与 base+1 必须同 `address_type`）。
+- IEEE754 浮点（需 `dataType=float` + 完整字序/字节序枚举，单独立项）；
+- **BADC / DCBA 字内字节交换**（`byte_order` 本版只表达**字序**，不支持字节序交换；要支持需扩枚举并单独评审）；
+- `coil`/`discrete` 的宽度/符号；
+- 字符串寄存器（多寄存器 UTF-8）与位域（§4.2 各自单独立项）；
+- `word_count=2` 的传统 5 位编号形式（见 §4.3.2 的明确报错）；
+- 一个点位跨不同寄存器区（base 与 base+1 必须同 `address_type`）。
 
 #### 4.3.7 向后兼容、DDL 与门禁
 
-- 默认 `word_count=1, signed=0` ⇒ 16 位无符号**原样透传**，现有点位行为逐字节不变（回归用例钉住）；
+- 默认 `word_count=1, signed=false` ⇒ 16 位无符号**原样透传**，现有点位行为逐字节不变（回归用例钉住）；
+- `word_count=1` 时**传统 5 位编号照常可用**（向后兼容不受影响，回归用例钉住）；
+- `byte_order` 列注释统一改为**字序**（big=高字在前 ABCD / little=低字在前 CDAB），并写明不支持 BADC/DCBA；006 与 M1 迁移双写、跑等价门禁；
 - DDL：ALTER **同时**写入 `007-iot-data.sql` 末尾与 `deploy/sql/migration/2026-10-13-iot-modbus-register-schema.sql`
   （排序最后）；更新 `iot-migrations.list`；登记 `ItSchema.EXTRA_SCHEMA_SCRIPTS`；跑 `tools/check-iot-sql-equivalence.sh`；
 - 新指标 `iot.access.modbus.pair.stale` 登记 `docs/METRICS.md`（`MetricsRegistryGateTest` 覆盖）；
