@@ -85,9 +85,9 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: ${{ env.ODC_DATA_DIR }}
-          key: odc-nvd-${{ runner.os }}-${{ steps.cachekey.outputs.week }}
+          key: odc-nvd-v2-${{ runner.os }}-${{ steps.cachekey.outputs.week }}
           restore-keys: |
-            odc-nvd-${{ runner.os }}-
+            odc-nvd-v2-${{ runner.os }}-
 
       - name: 更新 NVD 漏洞库（尽力而为；失败不判红，用缓存旧库继续离线扫描）
         id: update
@@ -111,12 +111,12 @@ jobs:
           mvn org.owasp:dependency-check-maven:${ODC_VERSION}:update-only "${args[@]}"
 
       - name: 保存 NVD 漏洞库缓存（即使上一步失败也保存已有副本）
-        if: always() && github.event_name != 'pull_request'
+        if: always() && github.event_name != 'pull_request' && steps.update.outcome == 'success'
         continue-on-error: true
         uses: actions/cache/save@v6
         with:
           path: ${{ env.ODC_DATA_DIR }}
-          key: odc-nvd-${{ runner.os }}-${{ steps.cachekey.outputs.week }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: odc-nvd-v2-${{ runner.os }}-${{ steps.cachekey.outputs.week }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: 断言漏洞库可用（防“空库静默放行”）
         id: assert-db
@@ -149,12 +149,17 @@ jobs:
           exit 0
 
       - name: 生成依赖漏洞报告（CVSS >= 7 判失败）
+        id: scan
         if: steps.assert-db.outputs.db == 'ok'
         run: |
-          set -euo pipefail
+          # 失败必须**自解释**：把 mvn 日志落盘、尾部写进 step summary 与 error 注解，
+          # 并区分「CVSS 命中判红」与「分析错误没产出报告」两种成因（否则只能看到 exit 1）。
+          set -uo pipefail
           scope_args=()
           scope="${{ inputs.scan_scope }}"
           if [ -n "$scope" ]; then scope_args=( -pl "$scope" ); fi
+          log=/tmp/odc-scan.log
+          set +e
           mvn -B -ntp "${scope_args[@]}" -DskipTests \
             org.owasp:dependency-check-maven:${ODC_VERSION}:aggregate \
             -DautoUpdate=false \
@@ -166,14 +171,48 @@ jobs:
             -DossIndexAnalyzerEnabled=false \
             -DretireJsAnalyzerEnabled=false \
             -Dformats=HTML,JSON,SARIF \
-            -DsuppressionFiles="$ODC_SUPPRESSIONS"
+            -DsuppressionFiles="$ODC_SUPPRESSIONS" 2>&1 | tee "$log"
+          rc=${PIPESTATUS[0]}
+          set -e
+          mkdir -p target/dependency-check-report
+          cp -f "$log" target/odc-scan.log
+          {
+            echo "### 依赖漏洞扫描结果"
+            echo ""
+            echo "- mvn 退出码：\`$rc\`"
+            echo "- 报告目录文件数：$(ls -1 target/dependency-check-report 2>/dev/null | wc -l)"
+            echo ""
+            echo '\`\`\`'
+            tail -30 "$log"
+            echo '\`\`\`'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$rc" -ne 0 ]; then
+            tail_msg=$(tail -12 "$log" | tr '\n' ' ' | tr -d '\r' | cut -c1-700)
+            if [ -s target/dependency-check-report/dependency-check-report.json ]; then
+              echo "::error::依赖漏洞门禁判红（CVSS>=7 命中）。详见 step summary 与上传的报告制品。日志尾部：$tail_msg"
+            elif grep -q 'NoDataException' "$log"; then
+              # 库文件存在但**没有任何文档**（更新失败却存了缓存）⇒ 等价于"库不可用"：
+              # 与缺库同一语义（schedule/手动 fail-closed，其余显式跳过），绝不当成"通过"。
+              if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+                echo "::error::NVD 漏洞库存在但为空（NoDataException）——schedule/手动触发 fail-closed。修复：配置 NVD_API_KEY 后手动触发并勾选 update_vulnerability_db=true 重建库。日志尾部：$tail_msg"
+                exit "$rc"
+              fi
+              echo "::warning::NVD 漏洞库存在但为空（NoDataException）：本次未执行依赖漏洞扫描（**不是通过**）。配置 NVD_API_KEY 并预热缓存后即生效。"
+              exit 0
+            else
+              echo "::error::依赖漏洞扫描**未产出报告**（分析错误，不是 CVSS 命中）。请查 step summary 与上传的 odc-scan.log。日志尾部：$tail_msg"
+            fi
+            exit "$rc"
+          fi
 
       - name: 上传报告（无论成败都上传，供定级与留痕）
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: dependency-check-report
-          path: target/dependency-check-report/
+          path: |
+            target/dependency-check-report/
+            target/odc-scan.log
           if-no-files-found: warn
           retention-days: 30
 
