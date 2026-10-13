@@ -77,7 +77,8 @@ class DeviceTraceControllerGateTest {
     @Test
     @DisplayName("控制器不写任何数据（一期只读聚合：不得出现 Post/Put/Delete 映射）")
     void mustStayReadOnly() {
-        for (Method method : DeviceTraceController.class.getDeclaredMethods()) {
+        for (Method method : ControllerGateMethods.businessMethodsOrFail(
+            DeviceTraceController.class, "只读聚合门禁")) {
             assertThat(method.getAnnotations())
                 .as("一期#8是只读聚合，不得引入写端点（改写入路径属二批，需单独评审）：%s",
                     method.getName())

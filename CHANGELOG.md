@@ -19,6 +19,29 @@
 
 ### 新增
 
+- **JaCoCo 覆盖率门禁接入 `ypbin-iot` / `ypbin-access`**（`mvn test`/`verify` 即生效，未达标直接失败）。
+  阈值口径 = **2026-10-13 实测基线 − 安全边际**：
+  `ypbin-iot` 指令 ≥ **0.78**（基线 0.8063）、分支 ≥ **0.68**（基线 0.7086）；
+  `ypbin-access` 指令 ≥ **0.84**（基线 0.8623）、分支 ≥ **0.73**（基线 0.7588）。
+  为什么"留边际而不是卡基线"：卡死基线会让正常迭代（加一个未测的小类）随机转红；留 2.5~3 个百分点的边际，
+  既能拦住"新增大块无测试代码"这类真实回退，又不制造噪音。只统计单元测试（IT 由 CI 的 `-Pit` 作业单独跑）。
+  **只在这两个模块的 pom 里声明**（fork 自有文件）：不动 admin 的根 pom，避免扩大与 upstream 的分歧面。
+  **有效性已自测**：把阈值临时抬到 0.99 ⇒ 构建真实转红并报 `Rule violated for bundle ypbin-iot`。
+  复算基线：`mvn clean verify` 后看 `<module>/target/site/jacoco/jacoco.csv` 汇总。
+
+### 修复
+
+- **控制器门禁测试改为「只扫业务方法」**（新增 `ControllerGateMethods` + 有效性自检）。
+  接入 JaCoCo 后 `IotCommandControllerGateTest#browserEndpointsMustKeepTheEnvelope` 立刻转红：该用例遍历
+  `getDeclaredMethods()` 要求「每个方法都返回 `R` 信封」，而 JaCoCo 的 `prepare-agent` 在**运行时**注入了合成方法
+  `$jacocoInit()`（返回 `boolean`）⇒ 门禁把"插桩产物"当成了"端点"。
+  修法：新增 `ControllerGateMethods.businessMethods*`（剔除 `isSynthetic()` 与 `isBridge()`），
+  `IotCommandControllerGateTest`/`DeviceTraceControllerGateTest`/`OpenApiFacadeGateTest` 改用它；
+  并补**自检**：合成/桥方法必须被剔除、普通方法必须保留、**扫不到任何方法时必须失败**（防门禁静默空跑）。
+  ⚠️ 自检初版用方法名判断桥方法 ⇒ 与业务方法 `compareTo(Fixture)` 同名而误判；已改为按签名判断
+  （这条也写进了代码注释）。
+
+
 - **制品化交付：`v*` tag 自动产出并挂载可执行 jar**（`.github/workflows/release-artifacts.yml`）。
   此前 admin 既有的 `release.yml` 只发 Release 说明、**不产任何制品**，而部署纪律要求「只能在能访问 GitHub 的构建机编 jar、禁止部署机跑 Maven」⇒ 生产交付长期靠手工编 + scp，没有可下载的制品，也没有「jar 来自哪个 commit」的机器可验证链条。现于每个 `v*` tag 上构建 6 个服务 jar，并附 `jars.manifest.sha256`（含 git sha 与构建时刻）；生产按 `docs/DEPLOY-BACKEND.md` §2.0 下载 + 校验后替换。**为什么是独立新工作流**：admin 的既有工作流（ci/codeql/release）按 `SYNC.md` 属「明确不动」，新增文件不产生同步冲突面。边界：只产 jar（不含镜像/SBOM）。
 
