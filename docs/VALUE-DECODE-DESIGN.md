@@ -220,6 +220,96 @@ DB 列仍是 `TINYINT NOT NULL DEFAULT 0`）、`byteOrder`（已存在，`big`\|
 
 ---
 
+### 4.4 Modbus 寄存器解码 v2（register_format + float32 + 位域）—— **设计定稿，实施前评审本小节**
+
+> 目标：在 §4.3 v1（`int`）之上新增 `float`（IEEE754 单精度，2 寄存器）与 `bits`（单寄存器位域）。
+> 契约 v2 已冻结；与前端 task-18 并行，命名不得各自发挥。字符串寄存器**不在本版**（issue #248）。
+
+#### 4.4.1 列契约（冻结）
+
+| 列 | 类型 | 语义 |
+|---|---|---|
+| `register_format` | `VARCHAR(16) NOT NULL DEFAULT 'int'` | 寄存器值形态：`int`\|`float`\|`bits` |
+| `bit_offset` | `INT NULL` | 仅 `bits`：起始位（0..15） |
+| `bit_length` | `INT NULL` | 仅 `bits`：位宽（1..16-`bit_offset`） |
+
+接口字段（camelCase）：`registerFormat`、`bitOffset`、`bitLength`（+ v1 的 `wordCount`/`signed`/`byteOrder`）。
+
+#### 4.4.2 形态校验矩阵（**新字段严格 / `byte_order` 历史宽容**）
+
+| register_format | 适用协议/地址类型 | word_count | signed | bit_offset/bit_length | byte_order | data_type（本设计建议，**待你确认**） |
+|---|---|---|---|---|---|---|
+| `int`（默认） | Modbus `holding`/`input`；v1 规则不变 | 1\|2 | v1 规则 | **必须为 null**（新字段严格） | v1（仅 `word_count=2` 生效） | v1（`word_count=2`/`signed=true` ⇒ int\|long） |
+| `float` | Modbus `holding`/`input` | **必须 2** | **必须 false**（true ⇒ 拒绝） | **必须为 null** | 生效：big=ABCD / little=CDAB（null⇒big） | **`decimal`** |
+| `bits` | Modbus `holding`/`input` | **必须 1** | **必须 false** | **必须同时给**；`0≤offset≤15`、`1≤length≤16-offset` | **忽略** | `length=1` ⇒ `bool`；`length>1` ⇒ `int`\|`long` |
+
+- **非 Modbus**（tcp/mqtt/opcua）与 **位类型**（coil/discrete）：`register_format≠int` 或 `bit_offset/bit_length` 非空 ⇒ **拒绝**（新字段严格）；
+- `register_format` 非法取值 ⇒ 拒绝（Req `@Pattern` + 服务层双保险）；
+- 所有拒绝都给**可执行文案**（说清该填什么/去掉什么），不许静默忽略；
+- `byte_order`：`bits` 形态忽略；`int`/`float` 按上表（它是历史自由文本列，沿用 v1 的宽容口径）。
+
+#### 4.4.3 IEEE754 组装与产出
+
+- 32 位组装与 v1 一致：`big` ⇒ `(R0<<16)|R1`、`little` ⇒ `(R1<<16)|R0`（`R0`=base、`R1`=base+1；null⇒big）；
+- `float f = Float.intBitsToFloat((int) raw32)`；
+- **NaN/±Inf ⇒ 该点位 BAD + 计数**（规则与理由见 §4.4.6），不产出值；
+- 有限值 ⇒ **`BigDecimal.valueOf((double) f)`**（口径与理由见 §4.4.7）；
+- 8 组必测：`big/little` × 正/负 × {`0.0`、`-0.0`、`1.5`、`3.4028235E38`、`NaN`、`+Inf`}；`-0.0` 经 `BigDecimal` 归一为 `0.0`（如实记录，IEEE 符号零对曲线无意义）；
+- 不支持 IEEE754 双精度（4 寄存器，后续）。
+
+#### 4.4.4 bits 取值语义
+
+- `raw` 是 SDK 交付的 16 位无符号 `Integer`（0..65535）：`bits = (raw >>> bit_offset) & ((1L << bit_length) - 1)`；
+- `bit_length=1` ⇒ 产出 **`Boolean`**（true/false）；`bit_length>1` ⇒ 产出 **无符号 `Integer`**（0..65535，**不**符号扩展、**不**做缩放前转换）；
+- 产出后仍走既有 `AccessReading.applyScale`：`length>1` 的整数可被 scale/offset 变换；`length=1` 的 Boolean 不是 Number ⇒ 原样（不缩放）；
+- `byte_order` 对 bits 无意义 ⇒ 忽略；越界（`offset+1>16` 等）由映射校验拒绝；直连 DB 的坏数据在 listener 里按 BAD + 日志暴露，不静默。
+
+#### 4.4.5 复用 v1 骨架（不另起一套）
+
+- `float` 强制 `word_count=2` ⇒ 自动复用 v1 的 `AccessSubscriptionPlanner.expandAddresses`（扩 base/base+1）与
+  `PointMappingDataListener.onMultiRegister`（半字配对/陈旧计数）；只在「两半齐了之后怎么解释」分流：
+  `int` → `decodePair`（v1 不变）、`float` → `decodeFloatBits`；
+- `bits` 强制 `word_count=1` ⇒ 走单寄存器路径，按 `register_format` 分流到 `decodeBits`；
+- 失败语义完全沿用 v1：任一寄存器 BAD/缺失/非数值 ⇒ 点位 BAD，绝不用 0/陈旧一半；`iot.access.modbus.pair.stale` 不变。
+
+#### 4.4.6 NaN/Inf 规则（最终，附理由）
+
+**规则**：`float` 解出 NaN/±Inf ⇒ 该点位 **BAD** 并计数，**不产出值、不落库**。
+
+**理由**：
+1. 它们不是有效测量；写进曲线/统计会污染均值/最值/告警阈值；
+2. iot 侧 `ReadingValueMapper.looksLikeDecimal` 会拒 `NaN`/`Infinity` ⇒ 只能落 `value_text`，成为文本垃圾（且 `Double.parseDouble` 语义特殊）；
+3. `AccessReading.applyScale` 的 `new BigDecimal(number.toString())` 对 NaN/Inf 不可表示（会抛）⇒ 不拦就会在缩放路径炸。
+
+**计数**：复用 **`iot.access.value.normalize.failure{reason=non-finite}`**（在 `NormalizeFailure` 增 `NON_FINITE`），
+**不新增指标**。理由：该指标已是「宿主侧值无法规范化」的有界原因集，NaN/Inf 正属此类，且 `MetricsRegistryGateTest` 已覆盖该名字。
+（若你要求独立指标如 `iot.access.modbus.float.non-finite`，请说；我按你的决定改。）
+
+#### 4.4.7 float → BigDecimal 精度口径（最终，附理由）
+
+**规则**：`BigDecimal.valueOf((double) f)`；**不做** `setScale`/四舍五入；不先转字符串再 parse；不用 `new BigDecimal(double)`。
+
+**理由**：
+1. float32 → double 是**精确**的（每个 float 都能被 double 精确表示）；
+2. `BigDecimal.valueOf(double)` 用 `Double.toString`（最短可回读十进制）⇒ 保留 float 的原值语义，且不引入 double 的二进制展开噪声（`new BigDecimal(double)` 会得到 `1.1000000238418579` 这类）；
+3. 若点位配了 `scale_factor`/`offset_value`，由既有 `applyScale` 统一 `setScale(6, HALF_UP)` —— 那是**配置的缩放语义**，不是解码精度损失；
+4. 与 v1 int 路径一致：无缩放时值以自然形态交付，有缩放时走同一 `applyScale`。
+
+#### 4.4.8 DDL/门禁与迁移文件名修正
+
+- 007 末尾追加 ALTER；**migration 文件名用 `2026-10-13-iot-modbus-v2-register-format-schema.sql`**（不是
+  `...register-format-schema.sql`）：等价脚本按**文件名字典序**拼接，`register-format...` 会排在 v1 的
+  `register-schema...` **之前**，与 007 的追加顺序（v1 后 v2）不一致 ⇒ 门禁必红；`v2-` 前缀保证排最后
+  （若你坚持原名，我改用 `2026-10-14-...` 以日期递增）；
+- 更新 `iot-migrations.list` + `ItSchema.EXTRA_SCHEMA_SCRIPTS`；跑 `bash tools/check-iot-sql-equivalence.sh`。
+
+#### 4.4.9 未支持（保持登记）
+
+IEEE754 双精度（4 寄存器）；BADC/DCBA 字内字节交换；有符号位域；字符串寄存器（issue #248，含 `encoding`/尾部 NUL/寄存器字节序）；
+`register_format` 的其它取值；`float` 的 `bit_*` 与 `bits` 的 `signed`/多寄存器。
+
+---
+
 ## 5. 职责切分、删除条件与 starter 反馈（**必读**）
 
 ### 5.1 删除条件如何被满足（2026-10-13）
