@@ -23,6 +23,8 @@ import cn.ypbin.iot.core.protocol.DeviceSession;
 import cn.ypbin.iot.core.spi.ConnectionSpecProvider;
 import cn.ypbin.iot.core.spi.DataSink;
 import cn.ypbin.iot.core.spi.DeviceRegistry;
+import cn.ypbin.iot.protocol.tcp.TcpPayloadFormat;
+import cn.ypbin.iot.protocol.tcp.autoconfigure.TcpProperties;
 import cn.ypbin.iot.spring.autoconfigure.IotLifecycle;
 import tools.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -123,10 +125,12 @@ public class AccessIotProtocolConfiguration {
     /**
      * 订阅规划器：会话从协议栈 {@code IotLifecycle.sessions()} 惰性取（避免构造期依赖顺序问题）。
      *
-     * @param lifecycleProvider 协议栈生命周期（由 iot-starter 装配）
-     * @param objectMapper      点位清单反序列化
-     * @param readingSink       映射后读数出口
-     * @param meterRegistry     指标
+     * @param lifecycleProvider    协议栈生命周期（由 iot-starter 装配）
+     * @param objectMapper         点位清单反序列化
+     * @param readingSink          映射后读数出口
+     * @param meterRegistry        指标
+     * @param tcpPropertiesProvider TCP 配置（可选：TCP 未启用时 {@code TcpAutoConfiguration} 的
+     *                             {@code @ConditionalOnProperty} 会让该 bean 缺失）
      * @return 订阅规划器
      */
     @Bean
@@ -134,14 +138,21 @@ public class AccessIotProtocolConfiguration {
     public SubscriptionPlanner accessSubscriptionPlanner(ObjectProvider<IotLifecycle> lifecycleProvider,
                                                         ObjectMapper objectMapper,
                                                         AccessReadingSink readingSink,
-                                                        MeterRegistry meterRegistry) {
+                                                        MeterRegistry meterRegistry,
+                                                        ObjectProvider<TcpProperties> tcpPropertiesProvider) {
         Supplier<Map<String, DeviceSession>> sessions = () -> {
             IotLifecycle lifecycle = lifecycleProvider.getIfAvailable();
             return lifecycle == null ? Map.of() : lifecycle.sessions();
         };
+        // 分流判据：payload-format=key-value ⇒ TCP 走一次多地址订阅；其它形态/配置不可得 ⇒
+        // 逐点位单订阅（保持今天行为，回退配置即回退订阅形态）。用 ObjectProvider 是因为
+        // TcpAutoConfiguration 带 @ConditionalOnProperty(enabled)，TCP 未启用时 TcpProperties 可能不是 bean。
+        TcpProperties tcpProperties = tcpPropertiesProvider.getIfAvailable();
+        boolean tcpKeyValuePayloadFormat = tcpProperties != null
+            && tcpProperties.payloadFormat() == TcpPayloadFormat.KEY_VALUE;
         // Clock 给系统时钟：订阅失败退避的时间基准，单测里注入可推进的假时钟
         return new AccessSubscriptionPlanner(sessions, objectMapper, readingSink,
-            meterRegistry, Clock.systemUTC());
+            meterRegistry, Clock.systemUTC(), tcpKeyValuePayloadFormat);
     }
 
     /**

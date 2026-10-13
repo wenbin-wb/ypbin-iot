@@ -470,14 +470,143 @@ class AccessSubscriptionPlannerTest {
         verify(healthy, times(4)).subscribe(any(SubscribeRequest.class), any());
     }
 
+    @Test
+    @DisplayName("★ key-value：4 点位 TCP 必须**一次**多地址订阅（1 个请求携带 4 个地址），不再 N 次单地址")
+    void tcpKeyValueWithMultiplePointsMustSubscribeOnceWithAllAddresses() {
+        DeviceSession session = mock(DeviceSession.class);
+        when(session.subscribe(any(SubscribeRequest.class), any()))
+            .thenReturn(CompletableFuture.completedFuture(null));
+        AtomicReference<Map<String, DeviceSession>> bound =
+            new AtomicReference<>(Map.of("d1", session));
+        AccessSubscriptionPlanner planner = plannerKeyValue(bound, new SimpleMeterRegistry());
+
+        assertThat(planner.subscribe(List.of(tcpDevice4Points("d1"))))
+            .as("key-value 下一设备本轮只发起 1 次订阅").isEqualTo(1);
+
+        ArgumentCaptor<SubscribeRequest> requests = ArgumentCaptor.forClass(SubscribeRequest.class);
+        verify(session, times(1)).subscribe(requests.capture(), any());
+        assertThat(requests.getValue().addresses().stream().map(PointAddress::raw).toList())
+            .as("一次请求必须携带全部 4 个去重地址")
+            .containsExactlyInAnyOrder("TEMP", "HUMI", "SN", "BAT");
+        assertThat(planner.tcpStartedAddressSubscriptionCount())
+            .as("key-value 不得走逐点位单订阅（该计数不增长）——这正是「1 次多地址」与「4 次单地址」的区分点")
+            .isZero();
+        assertThat(planner.trackedSessionCount()).as("成功后记设备级跟踪").isEqualTo(1);
+
+        // 已订阅设备不得重复发起
+        assertThat(planner.subscribe(List.of(tcpDevice4Points("d1")))).isZero();
+        verify(session, times(1)).subscribe(any(SubscribeRequest.class), any());
+    }
+
+    @Test
+    @DisplayName("★ key-value：订阅失败 ⇒ **设备级 1 次**失败计数 + 不写跟踪 + 退避后整体重试")
+    void tcpKeyValueFailureMustBackoffAndNotTrack() {
+        DeviceSession session = mock(DeviceSession.class);
+        List<SubscribeRequest> seen = new CopyOnWriteArrayList<>();
+        CompletableFuture<SubscriptionHandle> failed = new CompletableFuture<>();
+        failed.completeExceptionally(new IllegalStateException("拒绝订阅"));
+        when(session.subscribe(any(SubscribeRequest.class), any())).thenAnswer(inv -> {
+            seen.add(inv.getArgument(0));
+            return failed;
+        });
+        AtomicReference<Map<String, DeviceSession>> bound =
+            new AtomicReference<>(Map.of("d1", session));
+        SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+        AccessSubscriptionPlanner planner = plannerKeyValue(bound, meterRegistry);
+
+        assertThat(planner.subscribe(List.of(tcpDevice4Points("d1")))).isEqualTo(1);
+        assertThat(seen).hasSize(1);
+        assertThat(seen.getFirst().addresses()).hasSize(4);
+        assertThat(meterRegistry.get("iot.access.subscribe.failure").counter().count())
+            .as("多地址订阅失败是**设备级 1 次**失败（不是 4 次）").isEqualTo(1.0d);
+        assertThat(planner.trackedSessionCount())
+            .as("失败不写跟踪（S5：写了就永不重试）").isZero();
+
+        // 退避窗口内不重发
+        assertThat(planner.subscribe(List.of(tcpDevice4Points("d1")))).isZero();
+        assertThat(seen).hasSize(1);
+
+        // 退避到期 ⇒ 整体重试
+        clock.advance(AccessSubscriptionPlanner.SUBSCRIBE_BACKOFF_BASE.plusSeconds(1));
+        assertThat(planner.subscribe(List.of(tcpDevice4Points("d1")))).isEqualTo(1);
+        assertThat(seen).hasSize(2);
+    }
+
+    @Test
+    @DisplayName("★ key-value：单点位也只发 1 次（多地址路径的 N=1 退化）")
+    void tcpKeyValueSinglePointMustSubscribeOnce() {
+        DeviceSession session = mock(DeviceSession.class);
+        when(session.subscribe(any(SubscribeRequest.class), any()))
+            .thenReturn(CompletableFuture.completedFuture(null));
+        AtomicReference<Map<String, DeviceSession>> bound =
+            new AtomicReference<>(Map.of("d1", session));
+        AccessSubscriptionPlanner planner = plannerKeyValue(bound, new SimpleMeterRegistry());
+
+        String points = "[{\"propertyId\":\"1\",\"identifier\":\"temperature\","
+            + "\"address\":\"TEMP\",\"dataType\":\"decimal\"}]";
+        assertThat(planner.subscribe(List.of(tcpDevice("d1", points)))).isEqualTo(1);
+        verify(session, times(1)).subscribe(any(SubscribeRequest.class), any());
+        assertThat(planner.trackedSessionCount()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("★ key-value：会话实例变化 ⇒ 对新会话重新发起一次多地址订阅（B2）")
+    void tcpKeyValueResubscribeOnSessionChange() {
+        DeviceSession first = subscribeReturnsFuture();
+        AtomicReference<Map<String, DeviceSession>> bound =
+            new AtomicReference<>(Map.of("d1", first));
+        AccessSubscriptionPlanner planner = plannerKeyValue(bound, new SimpleMeterRegistry());
+
+        assertThat(planner.subscribe(List.of(tcpDevice4Points("d1")))).isEqualTo(1);
+        verify(first, times(1)).subscribe(any(SubscribeRequest.class), any());
+
+        DeviceSession reconnected = subscribeReturnsFuture();
+        bound.set(Map.of("d1", reconnected));
+        assertThat(planner.subscribe(List.of(tcpDevice4Points("d1"))))
+            .as("换会话后必须对新会话重新订阅").isEqualTo(1);
+        verify(reconnected, times(1)).subscribe(any(SubscribeRequest.class), any());
+    }
+
+    @Test
+    @DisplayName("★ key-value：重复 raw 地址必须去重（否则 SDK 逐地址条目产出 ⇒ 同一帧重复读数）")
+    void tcpKeyValueDuplicateRawAddressMustBeDeduped() {
+        DeviceSession session = mock(DeviceSession.class);
+        when(session.subscribe(any(SubscribeRequest.class), any()))
+            .thenReturn(CompletableFuture.completedFuture(null));
+        AtomicReference<Map<String, DeviceSession>> bound =
+            new AtomicReference<>(Map.of("d1", session));
+        AccessSubscriptionPlanner planner = plannerKeyValue(bound, new SimpleMeterRegistry());
+
+        // 4 条映射、3 个不同 raw（TEMP 出现两次）
+        String points = "[{\"propertyId\":\"1\",\"identifier\":\"t1\",\"address\":\"TEMP\"},"
+            + "{\"propertyId\":\"2\",\"identifier\":\"t2\",\"address\":\"TEMP\"},"
+            + "{\"propertyId\":\"3\",\"identifier\":\"h\",\"address\":\"HUMI\"},"
+            + "{\"propertyId\":\"4\",\"identifier\":\"s\",\"address\":\"SN\"}]";
+        assertThat(planner.subscribe(List.of(tcpDevice("d1", points)))).isEqualTo(1);
+
+        ArgumentCaptor<SubscribeRequest> requests = ArgumentCaptor.forClass(SubscribeRequest.class);
+        verify(session, times(1)).subscribe(requests.capture(), any());
+        assertThat(requests.getValue().addresses().stream().map(PointAddress::raw).toList())
+            .as("重复 raw 必须去重（否则 SDK 对每个地址条目各产出一个 PointValue ⇒ 重复读数）")
+            .containsExactly("TEMP", "HUMI", "SN");
+    }
+
     private AccessSubscriptionPlanner planner(AtomicReference<Map<String, DeviceSession>> bound) {
         return planner(bound, new SimpleMeterRegistry());
     }
 
+    /** **非 key-value** 形态（旧 UP-4 契约）：显式 false，避免用例意外走到多地址分支。 */
     private AccessSubscriptionPlanner planner(AtomicReference<Map<String, DeviceSession>> bound,
                                               SimpleMeterRegistry meterRegistry) {
         return new AccessSubscriptionPlanner(bound::get, objectMapper, reading -> { },
-            meterRegistry, clock);
+            meterRegistry, clock, false);
+    }
+
+    /** **key-value** 形态：TCP 走一次多地址订阅。 */
+    private AccessSubscriptionPlanner plannerKeyValue(
+            AtomicReference<Map<String, DeviceSession>> bound, SimpleMeterRegistry meterRegistry) {
+        return new AccessSubscriptionPlanner(bound::get, objectMapper, reading -> { },
+            meterRegistry, clock, true);
     }
 
     private static DeviceSession subscribeReturnsFuture() {
