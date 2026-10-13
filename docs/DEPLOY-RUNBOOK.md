@@ -436,13 +436,13 @@ deploy/restore.sh --mysql ... --iotdb ... --yes
 
 | 不覆盖项 | 现状 | 指向 |
 |---|---|---|
-| **EMQX 集群** | 当前单节点 standalone | `README.md`「未做」；`docs/EMQX-DEPLOY.md` |
-| **Prometheus / Grafana 大盘** | 无采集端；现有只有 Actuator metrics + 平台自告警 + feeder-watch | `docs/METRICS.md` §3「未做」；审计登记 issue **#222**（Prometheus/Grafana 大盘，编号来自审计登记 `/home/wenbin/projects/ypbin/review-20261012/FIXES.md`，本仓文档未内联） |
+| **EMQX 集群** | 生产仍单节点；**2 节点集群已在隔离实验床实测通过**（static 发现 + 跨节点路由），生产未落地 | `docs/OPS-EMQX-CLUSTER.md`（issue #219） |
+| **Prometheus / Grafana 大盘** | **dev 已落地**（Prometheus+Grafana+Alertmanager+桥接器；8 条规则过 promtool）；当前 jar 无 `micrometer-registry-prometheus`，故用桥接器过渡 | `docs/OPS-MONITORING.md`（issue #222） |
 | **镜像制品化（GHCR / tar）** | Release 已产 jar + sha256 + SBOM；镜像仍由部署机 `docker compose build` | `docs/DEPLOY-BACKEND.md` §2.0 边界；审计登记 issue **#234**（镜像制品化剩余） |
 | **K8s / HA / 多副本** | 仓内只有 docker compose 编排，无 K8s manifests；多实例告警评估分布式锁未做 | `deploy/docker-compose.yml`；`README.md`「未做」（多实例告警锁） |
 | **外部 EMQX / 隧道 / 入口中间件机** | 不在本 compose 内 | `deploy/emqx/*`；`docs/EMQX-INGRESS-DESIGN.md` |
 | **SBOM = 漏洞扫描？** | **不是**：SBOM 只是依赖清单；依赖漏洞门禁已另立（OWASP Dependency-Check，CVSS ≥ 7 判红） | `docs/DEPLOY-BACKEND.md` §2.0；`docs/OPS-DEPENDENCY-VULN-GATE.md` |
-| **明文 1883 收紧 / 限来源 / 限流** | 8883 已启用；1883 收回未做 | `README.md`「未做」 |
+| **明文 1883 收紧 / 限来源 / 限流** | **收紧能力已在隔离实验床实测**（access_rules 允许/拒绝、max_conn_rate、limiter.messages_rate、自签 TLS 8883）；生产未应用。⚠️ 生产 8883 **当前实际不可用**（容器读不到证书） | `docs/OPS-EMQX-HARDENING.md`（issue #218） |
 | **协议/解码未支持面** | IEEE754 双精度、BADC/DCBA、有符号位域、字符串寄存器跨区等 | `docs/VALUE-DECODE-DESIGN.md` §4.2/§4.3.6/§4.4.9/§4.5.5 |
 | **MySQL/IoTDB 恢复演练** | 脚本已具备，**真机恢复未验证** | `deploy/PROD-OPS-NOTES.md` §13.3/§13.4 |
 | **数据库结构变更（006/007/迁移）** | 由 `install.sh` / migration 导入，不属本手册的「单服务升级」流程 | `deploy/sql/`；`tools/check-iot-sql-equivalence.sh` |
