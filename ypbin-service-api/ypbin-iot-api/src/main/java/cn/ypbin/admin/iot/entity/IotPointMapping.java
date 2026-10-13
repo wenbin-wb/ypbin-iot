@@ -58,7 +58,7 @@ public class IotPointMapping extends TenantBaseEntity {
     /** 缩放偏移。 */
     private BigDecimal offsetValue;
 
-    /** 字序（word order）：big=高字在前 / little=低字在前。仅 Modbus word_count=2 生效。 */
+    /** 字序（word order）：big=高字在前 / little=低字在前。仅 Modbus int+word_count=2 或 float 生效。 */
     private String byteOrder;
 
     /** 连续寄存器个数（int/float: 1|2；bits: 1；string: 1..32；默认 1 = 旧行为）。仅 Modbus 寄存器点位生效。 */

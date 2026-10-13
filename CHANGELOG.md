@@ -6,6 +6,19 @@
 
 ## [未发布]
 
+### 变更
+
+- **TCP `data_type=string` 一律落 `value_text`（issue #253，行为变更）**（`ypbin-service/ypbin-access/**`、
+  `ypbin-service/ypbin-iot/**`、`ypbin-service-api/ypbin-iot-api/**`、`docs/**`）：
+  `PointValueNormalizer` 的 `data_type=string` 分支显式置 `forceText=true` ⇒ 纯数字序列号（如 `SN=123456`）
+  不再按词法落 `value_double`，与 Modbus `register_format=string` 统一为
+  **「物模型声明为 string ⇒ 一律落 `value_text`（TCP 与 Modbus 一致），不再按词法猜」**；非 string 类型
+  （int/long/decimal/bool/enum/date_time/json_object/array）行为**一字不变**。
+  依据用户 2026-10-13 决策（开发阶段不做向后兼容权衡，见 `docs/IOT-PLATFORM-DESIGN.md` D0.9）。
+- **`byte_order` 由「历史宽容」收紧为统一严格（行为变更）**：仅在 Modbus `int`+`word_count=2` 或 `float`
+  允许非空；`int`+`word_count=1`、`bits`、`string`、非 Modbus、位类型上**非空即拒绝**（此前被静默忽略）。
+  同步更新 `docs/VALUE-DECODE-DESIGN.md` §4.3/§4.4/§4.5 的旧不对称表述。同样依据 D0.9。
+
 ### 修复
 
 - **制品化交付加守卫：只给默认分支上的提交产出制品**（`.github/workflows/release-artifacts.yml`）。
@@ -62,14 +75,14 @@
     放宽为 **1..32**（≤64 字节，33+ 拒绝），int/float/bits 的既有范围与规则**逐字节不变**；
   - 填充/解码：按寄存器顺序、每寄存器高字节在前拼字节 → 去尾部连续 `0x00` → **严格 UTF-8**
     （`CharsetDecoder` REPORT，不替换字符）；不去空格、中间 NUL 保留；**全 NUL ⇒ GOOD + 空串**；
-    **非法 UTF-8 ⇒ 点位 BAD + `iot.access.value.normalize.failure{reason=not-utf8}`**；`byte_order` 对 string 忽略；
+    **非法 UTF-8 ⇒ 点位 BAD + `iot.access.value.normalize.failure{reason=not-utf8}`**；`byte_order` 对 string 必须为空（非空即拒绝）；
   - 宿主配对从「恰好两个 half」泛化为 `PendingWords`（按 `word_index` 收齐 N 个；同角色重复/超容差整组丢弃 +
     `iot.access.modbus.pair.stale`；任一 BAD ⇒ 点位 BAD + 清空）；订阅扩地址 `base..base+N-1`
     （大 N 由 SDK 分块，宿主仍按同一逻辑拼接）；
-  - **落列**：新增**可选** `forceText` 标记（缺省 = 既有词法落列，对现有数据零影响），**仅 Modbus string**
-    置位 ⇒ `ReadingValueMapper` 原样落 `value_text`（纯数字序列号不被数值化）；
-    TCP `data_type=string` 同类问题未纳入（另开 issue，需评估历史数据兼容）；
-  - 校验（新字段严格）：string ⇒ `signed=false`、`bit_*` 空、`data_type=string`、`word_count` 1..32、
+  - **落列**：新增**可选** `forceText` 标记（缺省 = 既有词法落列，对非 string 类型零影响），
+    **string 类型**置位（Modbus 与 TCP 一致）⇒ `ReadingValueMapper` 原样落 `value_text`（纯数字序列号不被数值化）；
+    TCP `data_type=string` 已按 D0.9 完整口径纳入（见上方「变更」）；
+  - 校验（新字段严格）：string ⇒ `signed=false`、`bit_*` 空、`byte_order` 空、`data_type=string`、`word_count` 1..32、
     `address_type ∈ {holding,input}`，`word_count>1` 时地址必须显式 `type:offset`；错误文案说清怎么改；
   - 未支持：BADC/DCBA、GBK/其它编码、IEEE754 双精度、有符号位域、跨寄存器区。
 

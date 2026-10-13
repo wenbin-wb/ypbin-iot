@@ -339,15 +339,66 @@ class IotPointMappingServiceImplTest {
     }
 
     @Test
-    @DisplayName("★ 旧字段宽容：非 Modbus 点位上的 byteOrder 被忽略（不拒绝）")
-    void byteOrderOnNonModbusIgnored() {
+    @DisplayName("★ byteOrder 统一严格：非 Modbus / int+word_count=1 / bits / string 上非空即拒绝")
+    void byteOrderInInapplicableScenesRejected() {
+        // 非 Modbus（tcp int，word_count=1 默认）
         stubProduct("tcp", "int");
-        IotPointMappingReq req = request(DEVICE_ID, PROPERTY_ID, "RW");
-        req.setByteOrder("big");
+        IotPointMappingReq nonModbus = request(DEVICE_ID, PROPERTY_ID, "RW");
+        nonModbus.setByteOrder("big");
+        assertThatThrownBy(() -> service.create(nonModbus))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("byte_order");
 
-        service.create(req);
+        // Modbus int + word_count=1
+        stubProduct("modbus", "int");
+        IotPointMappingReq wordCountOne = request(DEVICE_ID, PROPERTY_ID, "RW");
+        wordCountOne.setWordCount(1);
+        wordCountOne.setByteOrder("big");
+        assertThatThrownBy(() -> service.create(wordCountOne))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("byte_order");
 
-        verify(mappingMapper).insert(any(IotPointMapping.class));
+        // bits
+        stubProduct("modbus", "bool");
+        IotPointMappingReq bits = request(DEVICE_ID, PROPERTY_ID, "RW");
+        bits.setRegisterFormat("bits");
+        bits.setWordCount(1);
+        bits.setBitOffset(0);
+        bits.setBitLength(1);
+        bits.setByteOrder("big");
+        assertThatThrownBy(() -> service.create(bits))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("byte_order");
+
+        // string
+        stubProduct("modbus", "string");
+        IotPointMappingReq string = request(DEVICE_ID, PROPERTY_ID, "RW");
+        string.setRegisterFormat("string");
+        string.setWordCount(2);
+        string.setRawAddress("holding:0");
+        string.setByteOrder("big");
+        assertThatThrownBy(() -> service.create(string))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("byte_order");
+    }
+
+    @Test
+    @DisplayName("★ byteOrder 在生效场景仍允许：Modbus int+word_count=2 非空、float 为空均可")
+    void byteOrderInApplicableScenesAccepted() {
+        stubProduct("modbus", "int");
+        IotPointMappingReq intReq = request(DEVICE_ID, PROPERTY_ID, "RW");
+        intReq.setRawAddress("holding:0");
+        intReq.setWordCount(2);
+        intReq.setSigned(Boolean.FALSE);
+        intReq.setByteOrder("little");
+        service.create(intReq);
+
+        stubProduct("modbus", "decimal");
+        IotPointMappingReq floatReq = request(DEVICE_ID, PROPERTY_ID, "RW");
+        floatReq.setRawAddress("holding:0");
+        floatReq.setRegisterFormat("float");
+        floatReq.setWordCount(2);
+        floatReq.setSigned(Boolean.FALSE);
+        floatReq.setByteOrder(null);
+        service.create(floatReq);
+
+        verify(mappingMapper, times(2)).insert(any(IotPointMapping.class));
     }
 
     @Test
