@@ -36,6 +36,7 @@ import cn.ypbin.admin.iot.model.req.CommandQuery;
 import cn.ypbin.admin.iot.model.req.CommandSendReq;
 import cn.ypbin.admin.iot.model.resp.CommandInstanceResp;
 import cn.ypbin.admin.iot.service.CommandInstanceService;
+import cn.ypbin.admin.iot.service.IotShadowService;
 import cn.ypbin.starter.iot.validate.PropertyIdRules;
 import cn.ypbin.starter.iot.validate.RequestIdRules;
 import cn.ypbin.starter.core.exception.BusinessException;
@@ -61,15 +62,20 @@ import org.slf4j.LoggerFactory;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ObjectNode;
 
 /**
  * 运行期命令实例服务实现（设计 §7.1–§7.4，评审确认版）。
  *
- * <p><b>下发流水线（每一步都在 publish 之前）</b>：设备存在性 → 端点字段校验（含 {@code writeDesired}
- * 显式拒绝、params 体积）→ 物模型校验（标识在不在、属性可不可写）→ topic/payload 构造（标识过白名单）
+ * <p><b>下发流水线（校验都在 publish 之前）</b>：设备存在性 → 端点字段校验（{@code writeDesired} 范围、
+ * params 体积）→ 物模型校验（标识在不在、属性可不可写）→ topic/payload 构造（标识过白名单）
  * → 落 pending 实例 → 投递 → 推进状态。**任何校验失败都不发布**（否则会出现"发出去了但没人认"）。</p>
+ *
+ * <p><b>{@code writeDesired}</b>（设计 §7.3 ①/§7.5）：仅 {@code property_set} 支持；命令投递成功
+ * （{@code SENT}）后把该属性写进影子 {@code desired}，供设备上报 {@code reported} 后做 delta 比对。
+ * 设备离线（202 无订阅者）时**不写** desired——不制造"设备从未收到却永远待确认"的假期望。</p>
  *
  * <p><b>{@code 202 = 无订阅者}</b>：EMQX 的官方语义（F33）⇒ **立刻**判 {@code failed/NO_SUBSCRIBER}
  * （文案"设备未连接"），不等超时——这正是设计 §7.2 要消灭的"超时(未在线)"不可区分错误。</p>
@@ -139,6 +145,8 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
 
     private final ObjectMapper objectMapper;
 
+    private final IotShadowService shadowService;
+
     private final Counter sentCounter;
 
     private final Counter failedCounter;
@@ -155,7 +163,8 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
                                       IotPropertyMapper propertyMapper, IotCommandMapper commandMapper,
                                       IotCommandInstanceMapper instanceMapper,
                                       EmqxAdminClient emqxAdminClient, EmqxProperties emqxProperties,
-                                      ObjectMapper objectMapper, MeterRegistry meterRegistry) {
+                                      ObjectMapper objectMapper, IotShadowService shadowService,
+                                      MeterRegistry meterRegistry) {
         this.deviceMapper = deviceMapper;
         this.serviceMapper = serviceMapper;
         this.propertyMapper = propertyMapper;
@@ -164,6 +173,7 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
         this.emqxAdminClient = emqxAdminClient;
         this.emqxProperties = emqxProperties;
         this.objectMapper = objectMapper;
+        this.shadowService = shadowService;
         this.sentCounter = Counter.builder(METRIC_SENT).description("下行命令实例创建并投递成功")
             .register(meterRegistry);
         this.failedCounter = Counter.builder(METRIC_FAILED).description("下行命令投递即失败")
@@ -187,7 +197,7 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
                                     Long operatorUserId) {
         IotDevice device = requireDevice(deviceId);
         CommandKind kind = requireKind(req.getKind());
-        requireWriteDesiredUnsupported(req);
+        requireWriteDesiredScope(kind, req.getWriteDesired());
         String clientKey = normalizeClientKey(req.getClientRequestId());
         if (clientKey != null) {
             IotCommandInstance existing = instanceMapper.selectByClientKey(deviceId, clientKey);
@@ -201,9 +211,8 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
         // 体积与形态：params 必须在**构造 payload 之前**校验（评审核心要求：校验失败一律不发布）
         // DTO 里是 Object（客户端发的是 JSON 对象）；这里统一序列化成文本再走"必须是对象 + ≤64KB"的校验
         String paramsJson = toJsonText(req.getParams());
-        // 显式校验式调用：返回值故意丢弃 —— 只要"必须是对象 + ≤64KB"的拒绝语义，
-        // 解析出的树下游不用（payload 走文本重建）。写成赋值再弃读会被告警，且删掉会丢校验。
-        CommandPayloads.readObjectOrNull(paramsJson, objectMapper);
+        // 解析结果为「必须是对象 + ≤64KB」；payload 仍走文本重建，但 writeDesired 要用这棵树的 value。
+        JsonNode paramsNode = CommandPayloads.readObjectOrNull(paramsJson, objectMapper);
         ThingModel model = loadThingModel(device.getProductId());
         Target target = resolveTarget(kind, model, req.getIdentifier());
         int timeoutMs = req.getTimeoutMs() == null
@@ -247,6 +256,11 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
             throw ex;
         }
         publishAndPersist(row, topic, payload, false);
+        if (Boolean.TRUE.equals(req.getWriteDesired())
+            && CommandInstanceStatus.SENT.getCode().equals(row.getStatusCode())) {
+            // 只在真正投递到至少一个订阅者后写 desired（离线不写假期望；超时/被拒时 desired 已在此时写入）
+            writeDesiredAfterDelivery(row, paramsNode);
+        }
         log.info("[iot] 命令已下发：deviceId={} kind={} identifier={} requestId={} status={}",
             LogSanitizer.sanitize(deviceId), kind.getCode(), LogSanitizer.sanitize(target.identifier()),
             LogSanitizer.sanitize(requestId), row.getStatusCode());
@@ -549,14 +563,51 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
     }
 
     /**
-     * 端点字段校验：{@code writeDesired} 本轮**显式拒绝**（不静默忽略）。
+     * 端点字段校验：{@code writeDesired} 只对属性设置有意义（其它类型显式拒绝，不静默忽略）。
      *
-     * @param req 下发请求
+     * <p>影子 {@code desired} 的语义是「平台期望某属性变成什么值」；读属性没有期望值，服务调用对应的是
+     * 动作而不是属性，两者都不该写 desired。</p>
+     *
+     * @param kind         命令类型（已解析）
+     * @param writeDesired 是否同时写影子 desired（可空）
      */
-    private static void requireWriteDesiredUnsupported(CommandSendReq req) {
-        if (Boolean.TRUE.equals(req.getWriteDesired())) {
+    private static void requireWriteDesiredScope(CommandKind kind, Boolean writeDesired) {
+        if (Boolean.TRUE.equals(writeDesired) && kind != CommandKind.PROPERTY_SET) {
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
-                "命令下发时同时写影子 desired 本轮未实现（避免静默忽略）：请改用既有 PUT /devices/{id}/shadow");
+                "只有属性设置（property_set）支持同时写入影子 desired（当前 kind=" + kind.getCode() + "）");
+        }
+    }
+
+    /**
+     * 命令投递成功后写入影子 {@code desired}（供设备上报 {@code reported} 后做 delta 比对）。
+     *
+     * <p><b>为什么只在 {@code SENT} 后写</b>：设备离线（EMQX 202 无订阅者）⇒ 命令
+     * {@code failed/NO_SUBSCRIBER}，此时写 desired 会制造一个「设备从未收到、却永远待确认」的假期望；
+     * 不写更诚实——离线结果由实例状态明确表达，不存在"静默成功"。超时/被拒时命令已投递，desired 已在
+     * 投递成功那一刻写入，保持待设备上报确认。</p>
+     *
+     * <p><b>写失败不静默</b>：命令已经投递出去（设备侧可能已执行），desired 写失败不能当成功返回，
+     * 故抛业务错误并在消息里点名 requestId，提示"不要重复下发、改为补写期望值"。</p>
+     *
+     * @param row        已投递的命令实例（状态 {@code SENT}）
+     * @param paramsNode {@code property_set} 的入参对象（含 {@code value}）
+     */
+    private void writeDesiredAfterDelivery(IotCommandInstance row, JsonNode paramsNode) {
+        if (paramsNode == null || !paramsNode.hasNonNull(CommandPayloads.FIELD_VALUE)) {
+            // 理论不可达：property_set 的 payload 构造已要求 params 含 value；显式失败而不是静默跳过
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "属性设置缺少 value，无法写入影子 desired：" + LogSanitizer.sanitize(row.getIdentifier()));
+        }
+        Object value = objectMapper.convertValue(paramsNode.get(CommandPayloads.FIELD_VALUE), Object.class);
+        try {
+            shadowService.mergeDesired(row.getDeviceId(), Map.of(row.getIdentifier(), value));
+        } catch (RuntimeException ex) {
+            log.error("[iot] 命令已投递但影子 desired 写入失败：deviceId={} requestId={} identifier={}",
+                LogSanitizer.sanitize(row.getDeviceId()), LogSanitizer.sanitize(row.getRequestId()),
+                LogSanitizer.sanitize(row.getIdentifier()), ex);
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "命令已投递（requestId=" + LogSanitizer.sanitize(row.getRequestId())
+                    + "），但影子 desired 写入失败；请勿重复下发，改为重试写入期望值");
         }
     }
 

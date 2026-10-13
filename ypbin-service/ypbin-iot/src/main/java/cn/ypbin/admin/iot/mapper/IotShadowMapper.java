@@ -10,6 +10,7 @@
 package cn.ypbin.admin.iot.mapper;
 
 import cn.ypbin.admin.iot.entity.IotShadow;
+import cn.ypbin.admin.iot.shadow.ShadowDesiredRow;
 import cn.ypbin.admin.iot.shadow.ShadowReportedRow;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import java.util.List;
@@ -65,4 +66,34 @@ public interface IotShadowMapper extends BaseMapper<IotShadow> {
         + " update_time = NOW(), status = 1, is_deleted = 0"
         + "</script>")
     int mergeReported(@Param("rows") List<ShadowReportedRow> rows);
+
+    /**
+     * 把一条期望值**按 propertyId 合并**进影子 {@code desired}（命令携带 desired 的落库口径）。
+     *
+     * <p>与 {@link #mergeReported} 刻意分开：两列各写各的，{@code desired_ts} 与 {@code report_ts}
+     * 各自「只前进」，互不覆盖。合并（而不是整份覆盖）保证一次 {@code property_set} 只动它那一个点位，
+     * 不会把上一批量下去、仍未确认的其它期望键抹掉。</p>
+     *
+     * <p><b>为什么用 {@code VALUES(col)} 而不是行别名</b>：同 {@link #mergeReported}——MyBatis-Plus 的
+     * 租户拦截器经 JSqlParser 解析，行别名 {@code AS new} 会直接抛 {@code ParseException}。</p>
+     *
+     * <p><b>租户与逻辑删除</b>：{@code tenant_id} 由调用方（{@code IotShadowServiceImpl}，用服务端
+     * 从 {@code iot_device} 解析出的租户）显式写成插入值；命中唯一键时同时复位
+     * {@code is_deleted}/{@code status}，等价于既有「复活软删行」的语义。</p>
+     *
+     * @param row 待合并的期望行（非空）
+     * @return 受影响行数（MySQL 对 {@code ON DUPLICATE KEY UPDATE} 命中的行按 2 计数，仅供观测，不作判据）
+     */
+    @Insert("<script>"
+        + "INSERT INTO iot_shadow (id, tenant_id, device_id, desired, desired_ts, create_time, update_time,"
+        + " status, is_deleted) VALUES "
+        + "(#{row.id}, #{row.tenantId}, #{row.deviceId}, #{row.desiredJson},"
+        + " #{row.desiredTs,jdbcType=TIMESTAMP}, NOW(), NOW(), 1, 0)"
+        + " ON DUPLICATE KEY UPDATE"
+        + " desired = CAST(JSON_MERGE_PATCH(COALESCE(NULLIF(iot_shadow.desired, ''), '{}'),"
+        + " VALUES(desired)) AS CHAR),"
+        + " desired_ts = GREATEST(COALESCE(iot_shadow.desired_ts, VALUES(desired_ts)), VALUES(desired_ts)),"
+        + " update_time = NOW(), status = 1, is_deleted = 0"
+        + "</script>")
+    int mergeDesired(@Param("row") ShadowDesiredRow row);
 }
