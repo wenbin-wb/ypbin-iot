@@ -139,12 +139,14 @@ jobs:
             echo "修复：① 在仓库 Secrets 配置 \`NVD_API_KEY\`（NVD 官网免费申请）；② 手动触发本工作流并勾选 \`update_vulnerability_db=true\` 预热缓存；③ 之后 PR 会命中 main 上保存的缓存。"
           } >> "$GITHUB_STEP_SUMMARY"
           echo "db=missing" >> "$GITHUB_OUTPUT"
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "::warning::NVD 漏洞库不可用：本 PR 未执行依赖漏洞扫描（**不是通过**）。配置 NVD_API_KEY 并预热缓存后即生效。"
-            exit 0
+          # 强制点只有 schedule / 手动触发（这两种事件下"无库"必须判红）；push/PR 属机会性检查，
+          # 无库时显式跳过（warning + step summary），避免在未配置 NVD_API_KEY 的仓库里把 main/PR 永久卡红。
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "::error::未找到可用的 NVD 漏洞库（$db）——拒绝静默放行（schedule/手动触发 fail-closed）。"
+            exit 1
           fi
-          echo "::error::未找到可用的 NVD 漏洞库（$db）——拒绝静默放行（main/schedule 事件 fail-closed）。"
-          exit 1
+          echo "::warning::NVD 漏洞库不可用：本次（${{ github.event_name }}）未执行依赖漏洞扫描（**不是通过**）。配置 NVD_API_KEY 并预热缓存后即生效。"
+          exit 0
 
       - name: 生成依赖漏洞报告（CVSS >= 7 判失败）
         if: steps.assert-db.outputs.db == 'ok'
