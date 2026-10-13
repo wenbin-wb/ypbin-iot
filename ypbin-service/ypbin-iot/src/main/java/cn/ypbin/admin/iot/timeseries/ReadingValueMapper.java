@@ -9,18 +9,15 @@
  */
 package cn.ypbin.admin.iot.timeseries;
 
-import java.math.BigDecimal;
-
 /**
- * 读数 → 时序表的**列物化**（§4.6）：**只按给定列** materialize，不再决定列、不再按值形态猜。
+ * 读数 → 时序表的**列物化**（task-23 §4.6）：**只按给定列** materialize，不再决定列、不再按值形态猜。
  *
- * <p>列由 {@link ValueColumn#from(cn.ypbin.admin.iot.enums.ThingModelDataType)} 依物模型
- * {@code data_type} 唯一决定；本类只负责把字符串变成该列要写的东西：</p>
+ * <p>列由 {@link ValueColumn#from} 依物模型 {@code data_type} 唯一决定；本类只负责把字符串变成该列要写的东西：</p>
  * <ul>
  *   <li>{@link ValueColumn#TEXT}：原样落 {@code value_text}（不 trim、不按词法转换——
  *       值级规范化由生产方按物模型负责，见 §4.6.7）；</li>
- *   <li>{@link ValueColumn#NUMERIC}：严格十进制数值解析后落 {@code value_double}；不可解析属调用方
- *       必须在入站侧拦下的「声明数值但值不可解析」（{@code iot.timeseries.value.not_numeric}），
+ *   <li>{@link ValueColumn#NUMERIC}：经 {@link NumericValues#parse} 严格解析后落 {@code value_double}；不可解析
+ *       属调用方必须在入站侧拦下的「声明数值但值不可解析」（{@code iot.timeseries.value.not_numeric}），
  *       本类**不提供落文本列的兜底**。</li>
  * </ul>
  *
@@ -37,12 +34,6 @@ public final class ReadingValueMapper {
 
     /** 数值列名（§4.6.2）。 */
     public static final String COLUMN_DOUBLE = "value_double";
-
-    /**
-     * double 可精确表示的整数上界 2^53：绝对值**超过**它仍写数值列，但会丢整数精度 ⇒ 由写入侧
-     * 计数 {@code iot.timeseries.value.precision_lost} + WARN（§4.6.5，不改为文本列、不丢弃）。
-     */
-    public static final double MAX_EXACT_INTEGER_IN_DOUBLE = 9_007_199_254_740_992d;
 
     private ReadingValueMapper() {
     }
@@ -71,70 +62,17 @@ public final class ReadingValueMapper {
      * @param column 目标列（由 {@link ValueColumn#from} 依物模型类型决定）
      * @return 映射结果
      * @throws IllegalArgumentException 声明为 {@link ValueColumn#NUMERIC} 但值不可解析为十进制数值
-     *                                  （调用方应在入站侧先行校验并丢弃，见 {@link #parseNumeric(String)}）
+     *                                  （调用方应在入站侧先行校验并丢弃，见 {@link NumericValues#parse}）
      */
     public static MappedValue map(String raw, ValueColumn column) {
         if (column == ValueColumn.TEXT) {
             // 原样落文本列：不 trim（设备报的空白也是数据）、不按值形态数值化
             return new MappedValue(COLUMN_TEXT, null, raw);
         }
-        Double numeric = parseNumeric(raw);
+        Double numeric = NumericValues.parse(raw);
         if (numeric == null) {
             throw new IllegalArgumentException("声明为数值列但值不可解析为十进制数值（应在入站侧丢弃）");
         }
         return new MappedValue(COLUMN_DOUBLE, numeric, null);
-    }
-
-    /**
-     * 严格解析十进制数值：去首尾空白后用 {@link BigDecimal} 解析（它天然拒绝 {@code NaN}/{@code Infinity}、
-     * Java 专有后缀 {@code 1d}/{@code 1f} 等非协议形态），再转 {@code double}；非有限返回 {@code null}。
-     *
-     * <p>供入站侧在写库前判定 {@code iot.timeseries.value.not_numeric}；{@link #map} 也复用它。</p>
-     *
-     * @param raw 读数字符串（可空）
-     * @return 可表示的数值；不可解析/非有限返回 {@code null}
-     */
-    public static Double parseNumeric(String raw) {
-        if (raw == null) {
-            return null;
-        }
-        String value = raw.trim();
-        if (value.isEmpty()) {
-            return null;
-        }
-        BigDecimal decimal;
-        try {
-            decimal = new BigDecimal(value);
-        } catch (NumberFormatException ex) {
-            return null;
-        }
-        double parsed = decimal.doubleValue();
-        return Double.isFinite(parsed) ? parsed : null;
-    }
-
-    /**
-     * 是否超出 double 的整数精确表示范围（**声明值**绝对值 &gt; 2^53）。
-     *
-     * <p>必须在 {@link BigDecimal} 上比较、不能用已解析的 {@code double}：例如 {@code 2^53 + 1}
-     * 转 double 会先被四舍五入成 {@code 2^53}，用 double 判据会漏报。注意：这是**精度损失告警**的判据，
-     * 不是换列判据——仍写 {@code value_double} + 计数 + WARN（§4.6.5）。</p>
-     *
-     * @param raw 声明值字符串（可空/非法返回 {@code false}，非法值由 {@link #parseNumeric} 先行拦截）
-     * @return 丢整数精度返回 {@code true}
-     */
-    public static boolean isPrecisionLost(String raw) {
-        if (raw == null) {
-            return false;
-        }
-        String value = raw.trim();
-        if (value.isEmpty()) {
-            return false;
-        }
-        try {
-            return new BigDecimal(value).abs()
-                .compareTo(BigDecimal.valueOf(MAX_EXACT_INTEGER_IN_DOUBLE)) > 0;
-        } catch (NumberFormatException ex) {
-            return false;
-        }
     }
 }

@@ -21,7 +21,7 @@ import cn.ypbin.admin.iot.availability.ReadingIngestReq;
 import cn.ypbin.admin.iot.availability.ReadingObservationDto;
 import cn.ypbin.admin.iot.entity.DeviceLiveness;
 import cn.ypbin.starter.iot.validate.PropertyIdRules;
-import cn.ypbin.admin.iot.timeseries.ReadingValueMapper;
+import cn.ypbin.admin.iot.timeseries.NumericValues;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesPoint;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesProperties;
 import cn.ypbin.admin.iot.timeseries.ValueColumn;
@@ -622,13 +622,13 @@ public class AvailabilityServiceImpl implements AvailabilityService {
             }
             ValueColumn column = ValueColumn.from(type);
             if (column == ValueColumn.NUMERIC) {
-                Double numeric = ReadingValueMapper.parseNumeric(value);
+                Double numeric = NumericValues.parse(value);
                 if (numeric == null) {
                     // 数值声明但值不可解析（如 "abc" 送 int 点）⇒ 丢弃 + 计数（§4.6.5）。
                     notNumericCounter.increment();
                     continue;
                 }
-                if (ReadingValueMapper.isPrecisionLost(value)) {
+                if (NumericValues.isPrecisionLost(value)) {
                     // 2^53 边界：仍写数值列（保持同属性同一列），计数 + 按点位节流 WARN（§4.6.5）。
                     precisionLostCounter.increment();
                     warnPrecisionLost(deviceId, propertyId, value);

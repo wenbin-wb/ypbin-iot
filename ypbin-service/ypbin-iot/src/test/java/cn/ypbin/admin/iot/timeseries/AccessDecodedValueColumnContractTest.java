@@ -101,11 +101,11 @@ class AccessDecodedValueColumnContractTest {
     @Test
     @DisplayName("★ 2^53 边界：仍写 value_double，precision_lost 可判定（不换列、不丢弃）")
     void twoPower53MustStayNumericButFlagPrecisionLoss() {
-        assertThat(ReadingValueMapper.parseNumeric("9007199254740992")).isNotNull();
-        assertThat(ReadingValueMapper.isPrecisionLost("9007199254740992")).isFalse();
+        assertThat(NumericValues.parse("9007199254740992")).isNotNull();
+        assertThat(NumericValues.isPrecisionLost("9007199254740992")).isFalse();
 
-        assertThat(ReadingValueMapper.parseNumeric("9007199254740993"))
+        assertThat(NumericValues.parse("9007199254740993"))
             .as("超过 2^53 的整数仍可物化为 double（已丢精度）").isNotNull();
-        assertThat(ReadingValueMapper.isPrecisionLost("9007199254740993")).isTrue();
+        assertThat(NumericValues.isPrecisionLost("9007199254740993")).isTrue();
     }
 }

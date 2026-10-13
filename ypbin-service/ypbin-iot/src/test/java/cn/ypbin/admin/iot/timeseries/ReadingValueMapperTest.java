@@ -61,29 +61,5 @@ class ReadingValueMapperTest {
         }
     }
 
-    @Test
-    @DisplayName("★ parseNumeric：非法形态返回 null；非有限（如 1e400）也返回 null")
-    void parseNumericMustRejectMalformedAndNonFinite() {
-        assertThat(ReadingValueMapper.parseNumeric(null)).isNull();
-        assertThat(ReadingValueMapper.parseNumeric("")).isNull();
-        assertThat(ReadingValueMapper.parseNumeric("abc")).isNull();
-        assertThat(ReadingValueMapper.parseNumeric("NaN")).isNull();
-        assertThat(ReadingValueMapper.parseNumeric("1e400")).as("超出 double 有限范围").isNull();
-        assertThat(ReadingValueMapper.parseNumeric("23.5")).isEqualTo(23.5d);
-    }
 
-    @Test
-    @DisplayName("★ 2^53 边界：|v| ≤ 2^53 不丢精度；> 2^53 标记 precision_lost（判据在声明值上，不是 double）")
-    void precisionBoundaryMustFollowTwoPower53() {
-        assertThat(ReadingValueMapper.MAX_EXACT_INTEGER_IN_DOUBLE).isEqualTo(9_007_199_254_740_992d);
-        assertThat(ReadingValueMapper.isPrecisionLost("9007199254740992")).isFalse();
-        assertThat(ReadingValueMapper.isPrecisionLost("-9007199254740992")).isFalse();
-        // 2^53+1 转 double 会四舍五入成 2^53 ⇒ 必须先用 BigDecimal 判据，否则漏报
-        assertThat(ReadingValueMapper.isPrecisionLost("9007199254740993")).isTrue();
-        assertThat(ReadingValueMapper.isPrecisionLost("-9007199254740993")).isTrue();
-        assertThat(ReadingValueMapper.isPrecisionLost("1e20")).isTrue();
-        assertThat(ReadingValueMapper.isPrecisionLost("0")).isFalse();
-        assertThat(ReadingValueMapper.isPrecisionLost("abc")).isFalse();
-        assertThat(ReadingValueMapper.isPrecisionLost(null)).isFalse();
-    }
 }
