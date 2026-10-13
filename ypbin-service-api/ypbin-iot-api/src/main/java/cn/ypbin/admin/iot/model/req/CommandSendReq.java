@@ -62,10 +62,15 @@ public class CommandSendReq {
     private Integer timeoutMs;
 
     /**
-     * 是否同时写入影子 {@code desired}。
+     * 是否同时写入影子 {@code desired}（设计 §7.3 ①/§7.5）。
      *
-     * <p><b>本轮不支持</b>：置 {@code true} 会被**显式拒绝**（不是静默忽略），并指引改用既有
-     * {@code PUT /devices/{id}/shadow}（设计 §7.3 ① 已注明该能力既有）。</p>
+     * <p><b>只对 {@code property_set} 有效</b>：其它类型置 {@code true} 会被显式拒绝（读属性没有期望值、
+     * 服务调用对应动作而非属性），不静默忽略。</p>
+     *
+     * <p><b>生效时点</b>：命令**投递成功**后把 {@code {identifier: params.value}} 合并进影子 desired；
+     * 设备离线（无订阅者）时命令为 {@code failed/NO_SUBSCRIBER}，此时不写 desired（不制造假期望）。
+     * 超时/被设备拒绝时 desired 已写入并保持，delta（{@code GET /devices/{id}/shadow}）会显示
+     * 「期望未达成」。</p>
      */
     private Boolean writeDesired;
 

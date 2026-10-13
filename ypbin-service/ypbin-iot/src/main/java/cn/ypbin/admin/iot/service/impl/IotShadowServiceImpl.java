@@ -16,10 +16,14 @@ import cn.ypbin.admin.iot.mapper.IotShadowMapper;
 import cn.ypbin.admin.iot.model.req.IotShadowReq;
 import cn.ypbin.admin.iot.model.resp.IotShadowResp;
 import cn.ypbin.admin.iot.service.IotShadowService;
+import cn.ypbin.admin.iot.shadow.ShadowDesiredRow;
+import cn.ypbin.admin.iot.shadow.ShadowValueComparator;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.core.exception.GlobalErrorCode;
 import cn.ypbin.starter.crud.service.BaseServiceImpl;
+import cn.ypbin.starter.tenant.core.TenantContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.toolkit.IdWorker;
 import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.ObjectMapper;
 import java.time.LocalDateTime;
@@ -59,6 +63,7 @@ public class IotShadowServiceImpl extends BaseServiceImpl<IotShadowMapper, IotSh
             resp.setReported(Map.of());
             resp.setDesired(Map.of());
             resp.setMerged(Map.of());
+            resp.setDelta(Map.of());
             return resp;
         }
         Map<String, Object> reported = parse(shadow.getReported());
@@ -69,9 +74,32 @@ public class IotShadowServiceImpl extends BaseServiceImpl<IotShadowMapper, IotSh
         resp.setReported(reported);
         resp.setDesired(desired);
         resp.setMerged(merged);
+        resp.setDelta(delta(desired, reported));
         resp.setReportTs(shadow.getReportTs());
         resp.setDesiredTs(shadow.getDesiredTs());
         return resp;
+    }
+
+    /**
+     * 期望与上报的差异（{@code delta = desired \ reported}，类型宽容比较）。
+     *
+     * <p>只含「期望里有、但上报缺该键或值不等价」的键；值取期望值（页面据此展示「期望设备变成什么」）。
+     * 设备补齐上报后该键自动从 delta 消失（不需要任何后台任务）。</p>
+     *
+     * @param desired  期望值
+     * @param reported 上报值
+     * @return 差异（永不为 null）
+     */
+    private static Map<String, Object> delta(Map<String, Object> desired, Map<String, Object> reported) {
+        Map<String, Object> delta = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> entry : desired.entrySet()) {
+            String key = entry.getKey();
+            if (!reported.containsKey(key)
+                || !ShadowValueComparator.equal(entry.getValue(), reported.get(key))) {
+                delta.put(key, entry.getValue());
+            }
+        }
+        return delta;
     }
 
     @Override
@@ -90,6 +118,20 @@ public class IotShadowServiceImpl extends BaseServiceImpl<IotShadowMapper, IotSh
         shadow.setDesired(write(req.getDesired()));
         shadow.setDesiredTs(LocalDateTime.now());
         updateById(shadow);
+    }
+
+    @Override
+    public void mergeDesired(Long deviceId, Map<String, Object> desired) {
+        if (desired == null || desired.isEmpty()) {
+            // 空增量短路：没有键要合并，省一次往返（也避免把空对象写进影子）
+            return;
+        }
+        IotDevice device = requireDevice(deviceId);
+        // 与 DbShadowReportedWriter 同一做法：显式带租户 + runIgnore（该语句自带 tenant_id，
+        // 不交给租户插件注入；更关键的是命令链路已有租户上下文，这里不能反过来依赖它）。
+        ShadowDesiredRow row = new ShadowDesiredRow(IdWorker.getId(), device.getTenantId(), deviceId,
+            write(desired), LocalDateTime.now());
+        TenantContext.runIgnore(() -> baseMapper.mergeDesired(row));
     }
 
     private IotShadow findShadow(Long deviceId) {

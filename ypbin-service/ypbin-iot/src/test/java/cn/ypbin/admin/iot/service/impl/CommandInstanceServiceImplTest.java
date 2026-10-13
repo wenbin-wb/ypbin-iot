@@ -47,6 +47,7 @@ import cn.ypbin.admin.iot.mapper.IotPropertyMapper;
 import cn.ypbin.admin.iot.mapper.IotServiceMapper;
 import cn.ypbin.admin.iot.model.req.CommandSendReq;
 import cn.ypbin.admin.iot.model.resp.CommandInstanceResp;
+import cn.ypbin.admin.iot.service.IotShadowService;
 import cn.ypbin.starter.core.exception.BusinessException;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.conditions.Wrapper;
@@ -101,6 +102,8 @@ class CommandInstanceServiceImplTest {
 
     private EmqxAdminClient emqxAdminClient;
 
+    private IotShadowService shadowService;
+
     private SimpleMeterRegistry meterRegistry;
 
     private CommandInstanceServiceImpl service;
@@ -125,10 +128,11 @@ class CommandInstanceServiceImplTest {
         commandMapper = mock(IotCommandMapper.class);
         instanceMapper = mock(IotCommandInstanceMapper.class);
         emqxAdminClient = mock(EmqxAdminClient.class);
+        shadowService = mock(IotShadowService.class);
         meterRegistry = new SimpleMeterRegistry();
         service = new CommandInstanceServiceImpl(deviceMapper, serviceMapper, propertyMapper,
             commandMapper, instanceMapper, emqxAdminClient, new EmqxProperties(), new ObjectMapper(),
-            meterRegistry);
+            shadowService, meterRegistry);
     }
 
     @Test
@@ -222,15 +226,83 @@ class CommandInstanceServiceImplTest {
     }
 
     @Test
-    @DisplayName("writeDesired=true 显式拒绝（不静默忽略），且不发布")
-    void writeDesiredMustBeRejectedExplicitly() {
+    @DisplayName("writeDesired：属性设置投递成功后，把 {identifier: value} 合并进影子 desired")
+    void writeDesiredMustMergeShadowAfterDelivered() {
         stubDeviceAndThingModel();
+        when(emqxAdminClient.publish(any(), any(), anyInt(), anyBoolean()))
+            .thenReturn(new EmqxPublishOutcome(EmqxPublishResult.DELIVERED, "msg-1"));
+        CommandSendReq req = req("property_set", "temperature", Map.of("value", 25.0));
+        req.setWriteDesired(Boolean.TRUE);
+
+        CommandInstanceResp resp = service.send(DEVICE, req, CommandSource.CONSOLE, 1L);
+
+        assertThat(resp.getStatusCode()).isEqualTo(CommandInstanceStatus.SENT.getCode());
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(shadowService).mergeDesired(eq(DEVICE), captor.capture());
+        assertThat(captor.getValue()).containsEntry("temperature", 25.0);
+    }
+
+    @Test
+    @DisplayName("writeDesired：设备离线（无订阅者）⇒ 不写 desired（不制造假期望），实例明确 failed")
+    void writeDesiredMustNotWriteWhenOffline() {
+        stubDeviceAndThingModel();
+        when(emqxAdminClient.publish(any(), any(), anyInt(), anyBoolean()))
+            .thenReturn(new EmqxPublishOutcome(EmqxPublishResult.NO_SUBSCRIBER, null));
         CommandSendReq req = req("property_set", "temperature", Map.of("value", 1));
         req.setWriteDesired(Boolean.TRUE);
-        assertThatThrownBy(() -> service.send(DEVICE, req, CommandSource.CONSOLE, 1L))
-            .isInstanceOf(BusinessException.class)
-            .hasMessageContaining("shadow");
+
+        CommandInstanceResp resp = service.send(DEVICE, req, CommandSource.CONSOLE, 1L);
+
+        assertThat(resp.getStatusCode()).isEqualTo(CommandInstanceStatus.FAILED.getCode());
+        assertThat(resp.getErrorCode()).isEqualTo("NO_SUBSCRIBER");
+        verify(shadowService, never()).mergeDesired(any(), any());
+    }
+
+    @Test
+    @DisplayName("writeDesired：只允许 property_set；读属性/服务调用显式拒绝，且不发布、不写影子")
+    void writeDesiredOnlyAllowedForPropertySet() {
+        stubDeviceAndThingModel();
+        CommandSendReq get = req("property_get", "temperature", null);
+        get.setWriteDesired(Boolean.TRUE);
+        CommandSendReq call = req("service_call", "setTemp", Map.of());
+        call.setWriteDesired(Boolean.TRUE);
+
+        assertThatThrownBy(() -> service.send(DEVICE, get, CommandSource.CONSOLE, 1L))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("property_set");
+        assertThatThrownBy(() -> service.send(DEVICE, call, CommandSource.CONSOLE, 1L))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("property_set");
         verify(emqxAdminClient, never()).publish(any(), any(), anyInt(), anyBoolean());
+        verify(shadowService, never()).mergeDesired(any(), any());
+    }
+
+    @Test
+    @DisplayName("writeDesired：命令已投递但 desired 写失败 ⇒ 抛业务错误（不静默成功），命令确已发布")
+    void writeDesiredFailureAfterDeliveryMustSurface() {
+        stubDeviceAndThingModel();
+        when(emqxAdminClient.publish(any(), any(), anyInt(), anyBoolean()))
+            .thenReturn(new EmqxPublishOutcome(EmqxPublishResult.DELIVERED, "msg-1"));
+        doThrow(new IllegalStateException("影子写失败（模拟）")).when(shadowService)
+            .mergeDesired(any(), any());
+        CommandSendReq req = req("property_set", "temperature", Map.of("value", 1));
+        req.setWriteDesired(Boolean.TRUE);
+
+        assertThatThrownBy(() -> service.send(DEVICE, req, CommandSource.CONSOLE, 1L))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("已投递");
+        verify(emqxAdminClient).publish(any(), any(), anyInt(), anyBoolean());
+    }
+
+    @Test
+    @DisplayName("回执（含设备拒绝）与超时扫描都不触碰影子 desired —— 命令状态与影子比对是两条轴")
+    void replyAndTimeoutMustNotTouchShadow() {
+        stubInstanceLookup(instance(CommandInstanceStatus.SENT, 0));
+        when(instanceMapper.update(isNull(), any())).thenReturn(1);
+        replyFromAuthenticatedTopic(DEVICE, "cmd-1", 7, "阀位超限", null, null);
+
+        when(instanceMapper.selectTimeoutCandidates(any(), anyInt())).thenReturn(List.of());
+        service.scanTimeouts();
+
+        verifyNoInteractions(shadowService);
     }
 
     @Test

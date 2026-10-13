@@ -39,6 +39,9 @@ public class IotShadowResp {
     /** 合并视图（reported 优先，无则 desired）。 */
     private Map<String, Object> merged;
 
+    /** 期望值与上报值的差异（键=属性标识，值=期望值；仅含不一致或缺上报的键）。 */
+    private Map<String, Object> delta;
+
     /** 最近上报时刻。 */
     private LocalDateTime reportTs;
 
