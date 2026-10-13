@@ -61,4 +61,32 @@ class AccessDecodedValueColumnContractTest {
         assertThat(ReadingValueMapper.map("true").column())
             .isEqualTo(ReadingValueMapper.COLUMN_TEXT);
     }
+
+    @Test
+    @DisplayName("★ v3 窄口径：仅 Modbus string 强制落 value_text（纯数字也落文本）")
+    void modbusStringForcedTextMustLandInTextColumn() {
+        ReadingValueMapper.MappedValue numeric = ReadingValueMapper.map("123456", true);
+        assertThat(numeric.column()).isEqualTo(ReadingValueMapper.COLUMN_TEXT);
+        assertThat(numeric.text()).isEqualTo("123456");
+        assertThat(numeric.numericValue()).isNull();
+
+        // 典型序列号（含前导零/字母）本来就走 text；作为对照
+        assertThat(ReadingValueMapper.map("SN-0001", true).column())
+            .isEqualTo(ReadingValueMapper.COLUMN_TEXT);
+        assertThat(ReadingValueMapper.map("007", true).column())
+            .isEqualTo(ReadingValueMapper.COLUMN_TEXT);
+    }
+
+    @Test
+    @DisplayName("★ v3 回归：int/float/bits 与缺省标记仍按词法落列，逐字节不变")
+    void defaultLexicalMappingMustRemainUnchanged() {
+        assertThat(ReadingValueMapper.map("123456").column())
+            .as("int 点位（缺省 false）仍走数值列").isEqualTo(ReadingValueMapper.COLUMN_DOUBLE);
+        assertThat(ReadingValueMapper.map("23.5").column())
+            .as("float 点位（缺省 false）仍走数值列").isEqualTo(ReadingValueMapper.COLUMN_DOUBLE);
+        assertThat(ReadingValueMapper.map("1").column())
+            .as("bits length>1（缺省 false）仍走数值列").isEqualTo(ReadingValueMapper.COLUMN_DOUBLE);
+        assertThat(ReadingValueMapper.map("true").column())
+            .as("bits length=1 的布尔仍走文本列").isEqualTo(ReadingValueMapper.COLUMN_TEXT);
+    }
 }

@@ -148,6 +148,25 @@ class HttpAccessReadingSinkTest {
     }
 
     @Test
+    @DisplayName("★ v3：Modbus string 的 forceText 标记必须透传到上报 DTO（缺省 false 保持词法落列）")
+    void forceTextMustBeForwardedToObservation() {
+        when(client.ingest(any())).thenReturn(R.ok(2));
+        HttpAccessReadingSink sink = sink();
+        sink.accept(new AccessReading(DEVICE, "serial", "123456", "GOOD", TS, 5_000, true));
+        sink.accept(new AccessReading(DEVICE, "counter", 65538, "GOOD", TS, 5_000, false));
+
+        sink.flush();
+
+        ArgumentCaptor<ReadingIngestReq> captor = ArgumentCaptor.forClass(ReadingIngestReq.class);
+        verify(client).ingest(captor.capture());
+        assertThat(captor.getValue().getItems()).hasSize(2);
+        assertThat(captor.getValue().getItems().get(0).getForceText())
+            .as("Modbus string 必须带上强制文本标记").isTrue();
+        assertThat(captor.getValue().getItems().get(1).getForceText())
+            .as("int 点位缺省 false，词法落列不变").isFalse();
+    }
+
+    @Test
     @DisplayName("★ 值仍是未解码的原始字节：计数并丢弃（绝不让 [B@<hash> 这种无值语义的文本入库）")
     void rawByteValueMustBeDroppedNotStringified() {
         HttpAccessReadingSink sink = sink();

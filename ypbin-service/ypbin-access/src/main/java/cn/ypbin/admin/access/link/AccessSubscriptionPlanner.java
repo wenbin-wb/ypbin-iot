@@ -303,23 +303,29 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
     }
 
     /**
-     * 展开订阅地址：Modbus {@code word_count=2} 的点位额外订阅 {@code base+1}（同 {@code address_type}）。
+     * 展开订阅地址：Modbus {@code word_count>1} 的点位额外订阅 {@code base+1..base+N-1}
+     * （同 {@code address_type}；N = {@code word_count}，v3 string 可达 32）。
      *
-     * <p>{@code raw_address} 仍是**基址**；扩出的地址让 SDK 在一次读里同时取回两个字（相邻地址会被 SDK
-     * 合并成一次请求、逐地址回调），宿主再按点位配对。{@code word_count=1} 与非 Modbus 与今天完全一致。</p>
+     * <p>{@code raw_address} 仍是**基址**；扩出的地址让 SDK 在一次读里取回全部寄存器
+     * （相邻地址会被 SDK 合并成一次请求、逐地址回调；**大 N 会被 SDK 分块成多次读**，
+     * 宿主不复刻分块逻辑，仍按同一 {@code word_index} 配对/拼接）。{@code word_count=1} 与非 Modbus
+     * 与今天完全一致（传统 5 位编号照常）。</p>
      *
      * @param device 设备规格（取协议码）
      * @param points 点位映射
-     * @return 订阅地址（可能含 base+1）
-     * @throws IllegalArgumentException word_count=2 的地址不是显式 type:offset 或越界
+     * @return 订阅地址（可能含 base+1..base+N-1）
+     * @throws IllegalArgumentException {@code word_count>1} 的地址不是显式 type:offset 或越界
      */
     private static List<PointAddress> expandAddresses(DeviceSpec device, List<AccessPointMappingDto> points) {
         boolean modbus = IotProtocol.MODBUS.getCode().equals(device.protocol().value());
         List<PointAddress> addresses = new ArrayList<>(points.size());
         for (AccessPointMappingDto point : points) {
             addresses.add(PointAddress.of(point.getAddress()));
-            if (modbus && point.getWordCount() != null && point.getWordCount() == 2) {
-                addresses.add(PointAddress.of(ModbusRegisterAddress.next(point.getAddress())));
+            int wordCount = point.getWordCount() == null ? 1 : point.getWordCount();
+            if (modbus && wordCount > 1) {
+                for (int i = 1; i < wordCount; i++) {
+                    addresses.add(PointAddress.of(ModbusRegisterAddress.plus(point.getAddress(), i)));
+                }
             }
         }
         return addresses;

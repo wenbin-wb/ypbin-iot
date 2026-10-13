@@ -23,6 +23,7 @@ import cn.ypbin.iot.core.model.Quality;
 import cn.ypbin.starter.core.util.LogSanitizer;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.math.BigDecimal;
+import java.nio.charset.CharacterCodingException;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -42,9 +43,10 @@ import org.slf4j.LoggerFactory;
  *       （见 {@link PointValueNormalizer}）；</li>
  *   <li><b>Modbus 单寄存器</b>（{@code word_count=1}）：SDK 交付 16 位无符号 {@code Integer}；
  *       {@code signed=true} 时做符号扩展，否则**原样透传**（向后兼容锚点）；</li>
- *   <li><b>Modbus 多寄存器</b>（{@code word_count=2}）：SDK 对每个寄存器**逐值回调**（不是批量），
- *       本类按点位**配对**两个寄存器后再合成一条读数——任一寄存器 BAD/缺失 ⇒ 该点位 BAD，
- *       **绝不用陈旧一半拼值、绝不用 0 充数**（见 {@link #onMultiRegister}）。</li>
+ *   <li><b>Modbus 多寄存器</b>（{@code word_count>1}：int/float=2、string=1..32）：SDK 对每个寄存器
+ *       **逐值回调**（不是批量），本类按点位**按 word_index 收齐 N 个字**后再合成一条读数——
+ *       任一寄存器 BAD/缺失 ⇒ 该点位 BAD，**绝不用陈旧一半拼值、绝不用 0 充数**
+ *       （见 {@link #onMultiRegister}；string 的拼接/严格 UTF-8 规则见 §4.5）。</li>
  * </ol>
  *
  * <p><b>BAD 质量原样穿透</b>：SDK 的 BAD（TCP selector 未命中、Modbus 超时/响应短等）以 BAD 质量表达，
@@ -70,7 +72,7 @@ public class PointMappingDataListener implements DataListener {
     /** 设备级采集周期（毫秒，未知为 {@code null}）：随读数上报，并作为半字配对容差。 */
     private final Integer pollIntervalMs;
 
-    /** 寄存器地址 → (点位, 第几个字)。word_count=2 时 base→0、base+1→1。 */
+    /** 寄存器地址 → (点位, 第几个字)。word_count>1 时 base+i→i（i=0..N-1）。 */
     private final Map<String, RegisterTarget> registerByAddress;
 
     private final AccessReadingSink sink;
@@ -91,8 +93,8 @@ public class PointMappingDataListener implements DataListener {
     /** Modbus float 解出 NaN/±Inf 而按 BAD 上报的条数（与 Micrometer 计数器同源）。 */
     private final LongAdder nonFiniteFloatCount = new LongAdder();
 
-    /** 32 位点位的半字暂存：base 地址 → 已到达的一半。每设备至多「word_count=2 点位数」条。 */
-    private final Map<String, Half> pairBuffer = new ConcurrentHashMap<>();
+    /** 多寄存器点位的字暂存：base 地址 → 已到达的字槽（按 word_index 定位）。每设备至多「多寄存器点位数」组。 */
+    private final Map<String, PendingWords> pairBuffer = new ConcurrentHashMap<>();
 
     /** 半字配对的短临界区锁（配对/清空必须原子，避免并发回调把两半错配）。 */
     private final Object pairLock = new Object();
@@ -115,10 +117,16 @@ public class PointMappingDataListener implements DataListener {
                 }
                 if (modbus && isMultiRegister(point)) {
                     try {
+                        // i=0 用**原始 base**（订阅侧就是 PointAddress.of(raw_address)，SDK 回调原样带回）；
+                        // i>0 用 ModbusRegisterAddress.plus 归一化地址（与 expandAddresses 完全同源）。
                         byAddress.put(base, new RegisterTarget(point, 0));
-                        byAddress.put(ModbusRegisterAddress.next(base), new RegisterTarget(point, 1));
+                        int wordCount = wordCountOf(point);
+                        for (int i = 1; i < wordCount; i++) {
+                            byAddress.put(ModbusRegisterAddress.plus(base, i),
+                                new RegisterTarget(point, i));
+                        }
                     } catch (RuntimeException ex) {
-                        // 映射校验应已拦住（word_count=2 必须是显式 type:offset）；直连 DB 的坏数据在这里暴露
+                        // 映射校验应已拦住（word_count>1 必须是显式 type:offset）；直连 DB 的坏数据在这里暴露
                         log.error("[access] Modbus 多寄存器点位地址非法，跳过该点位：device={} address={}",
                             LogSanitizer.sanitize(deviceId), LogSanitizer.sanitize(base), ex);
                     }
@@ -157,10 +165,11 @@ public class PointMappingDataListener implements DataListener {
         }
         // 单寄存器 / 其它协议：BAD 原样穿透（不规范化、不计失败）
         if (!value.isGood()) {
-            emit(identifier, value, value.value());
+            emit(identifier, value, value.value(), false);
             return;
         }
         Object raw = value.value();
+        boolean forceText = false;
         if (IotProtocol.TCP.getCode().equals(protocol)) {
             // SDK key-value 只做字段选择、不做类型转换；这里按物模型 dataType 规范化，失败即丢弃 + 计数
             PointValueNormalizer.Outcome outcome = PointValueNormalizer.normalize(raw, point.getDataType());
@@ -169,6 +178,19 @@ public class PointMappingDataListener implements DataListener {
                 return;
             }
             raw = outcome.value();
+        } else if (modbus && isString(point)) {
+            // v3 单寄存器 string：一个字的严格 UTF-8（byte_order 忽略）
+            if (!(raw instanceof Number number)) {
+                emitBad(identifier, value, "modbus.register.non-numeric");
+                return;
+            }
+            try {
+                raw = ModbusRegisterDecoder.decodeStringUtf8(new int[] {number.intValue()});
+                forceText = true;
+            } catch (CharacterCodingException ex) {
+                onNotUtf8(point, value);
+                return;
+            }
         } else if (modbus && isBits(point) && raw instanceof Number number) {
             // bits 形态：单寄存器无符号位域（length=1 ⇒ Boolean，>1 ⇒ Integer）；
             // 区间非法（直连 DB 坏数据）按 BAD 上报，不把垃圾写进库
@@ -185,31 +207,32 @@ public class PointMappingDataListener implements DataListener {
             // word_count=1 + signed：16 位符号扩展；signed=false 原样透传（逐字节兼容）
             raw = ModbusRegisterDecoder.decodeSingle(number.intValue(), true);
         }
+        // string 的 applyScale 是 no-op（String 不是 Number/BigDecimal）；forceText 保证 iot 侧强制落文本列
         emit(identifier, value, AccessReading.applyScale(raw, point.getScaleFactor(),
-            point.getOffsetValue()));
+            point.getOffsetValue()), forceText);
     }
 
     /**
-     * 32 位点位的半字配对与合成。
+     * 多寄存器点位的**按 word_index 收齐 N 个字**与合成（v3 起 N=word_count，string 1..32）。
      *
      * <p><b>失败语义（不许猜）</b>：任一寄存器 BAD ⇒ 立即产出该点位 BAD 并清空暂存；
-     * <b>绝不</b>用陈旧的一半拼值、<b>绝不</b>用 0 充数。半字陈旧（同一 half 重复到达，或另一 half
-     * 与暂存 half 的时间差超过一个采集周期）⇒ 丢弃暂存 + 计数 {@code iot.access.modbus.pair.stale}
-     * 后再用新值暂存，不与新值混。</p>
+     * <b>绝不</b>用陈旧的字拼值、<b>绝不</b>用 0 充数。暂存组陈旧（同一 slot 重复到达，或组内最早到达的
+     * 字与本次时间差超过一个采集周期）⇒ 整组丢弃 + 计数 {@code iot.access.modbus.pair.stale}
+     * 后再用新值重建，不与新值混。N 个 slot 全齐才合成。</p>
      *
-     * @param value     本次回调（某一半）
+     * @param value     本次回调（某一个寄存器）
      * @param point     点位
-     * @param wordIndex 本次是第几个字（base=0、base+1=1）
+     * @param wordIndex 本次是第几个字（base=0、base+1=1、…）
      */
     private void onMultiRegister(PointValue value, AccessPointMappingDto point, int wordIndex) {
         String key = point.getAddress();
         if (!value.isGood()) {
             clearPair(key);
-            log.warn("[access] Modbus 多寄存器点位收到 BAD 寄存器，按点位 BAD 上报（不用陈旧一半拼值）："
+            log.warn("[access] Modbus 多寄存器点位收到 BAD 寄存器，按点位 BAD 上报（不用陈旧字拼值）："
                     + "device={} address={} wordIndex={} reason={}",
                 LogSanitizer.sanitize(deviceId), LogSanitizer.sanitize(value.address().raw()), wordIndex,
                 LogSanitizer.sanitize(value.qualityReason()));
-            emit(point.getIdentifier(), value, value.value());
+            emit(point.getIdentifier(), value, value.value(), false);
             return;
         }
         Object raw = value.value();
@@ -219,56 +242,98 @@ public class PointMappingDataListener implements DataListener {
             log.warn("[access] Modbus 多寄存器点位收到非数值寄存器值，按 BAD 上报：device={} address={}",
                 LogSanitizer.sanitize(deviceId), LogSanitizer.sanitize(value.address().raw()));
             emit(point.getIdentifier(), PointValue.bad(value.address(), Quality.BAD,
-                "modbus.register.non-numeric", value.timestamp()), null);
+                "modbus.register.non-numeric", value.timestamp()), null, false);
             return;
         }
+        int wordCount = wordCountOf(point);
         synchronized (pairLock) {
-            Half existing = pairBuffer.get(key);
-            if (existing != null && (isStale(existing, value.timestamp())
-                || existing.wordIndex() == wordIndex)) {
+            PendingWords pending = pairBuffer.get(key);
+            if (pending != null && (isStale(pending, value.timestamp())
+                || pending.halves()[wordIndex] != null)) {
                 pairStaleCount.increment();
                 ModbusRegisterMetrics.pairStaleCounter(meterRegistry).increment();
-                log.warn("[access] Modbus 半字配对陈旧/同角色重复，丢弃暂存的一半（不与新值混）："
-                        + "device={} address={} 暂存word={} 本次word={} 见 {} 指标",
-                    LogSanitizer.sanitize(deviceId), LogSanitizer.sanitize(key), existing.wordIndex(),
+                log.warn("[access] Modbus 多寄存器暂存陈旧/同角色重复，丢弃整组（不与新值混）："
+                        + "device={} address={} expected={} 本次word={} 见 {} 指标",
+                    LogSanitizer.sanitize(deviceId), LogSanitizer.sanitize(key), wordCount,
                     wordIndex, ModbusRegisterMetrics.METRIC_PAIR_STALE);
                 pairBuffer.remove(key);
-                existing = null;
+                pending = null;
             }
-            if (existing == null) {
-                pairBuffer.put(key, new Half(wordIndex, number.intValue(), value.timestamp()));
+            if (pending == null) {
+                pending = new PendingWords(wordCount, new Half[wordCount], value.timestamp());
+                pairBuffer.put(key, pending);
+            }
+            pending.halves()[wordIndex] = new Half(wordIndex, number.intValue(), value.timestamp());
+            if (!allFilled(pending)) {
                 return;
             }
-            int first = existing.wordIndex() == 0 ? existing.value() : number.intValue();
-            int second = existing.wordIndex() == 0 ? number.intValue() : existing.value();
             pairBuffer.remove(key);
-            if (isFloat(point)) {
-                // float 形态：两半齐后按 IEEE754 解释（NaN/Inf 按 BAD 上报 + 计数，见 §4.4.6）
-                float decoded = ModbusRegisterDecoder.decodeFloatBits(first, second, point.getByteOrder());
-                if (!Float.isFinite(decoded)) {
-                    onNonFiniteFloat(point, value);
-                    return;
-                }
-                // float32 的十进制表示取**最短可回读**形态：Float.toString 保证
-                // parseFloat(toString(f)) == f（round-trip 恒等），不声明超出 float32 精度的位数；
-                // 用 Double.toString 会给出 17 位精确值噪声（如 0.1f → 0.10000000149011612）。
-                BigDecimal floatValue = new BigDecimal(Float.toString(decoded));
-                emit(point.getIdentifier(), value, AccessReading.applyScale(floatValue,
-                    point.getScaleFactor(), point.getOffsetValue()));
-                return;
-            }
-            long decoded = ModbusRegisterDecoder.decodePair(first, second, point.getByteOrder(),
-                Boolean.TRUE.equals(point.getSigned()));
-            emit(point.getIdentifier(), value, AccessReading.applyScale(decoded,
-                point.getScaleFactor(), point.getOffsetValue()));
+            assembleAndEmit(point, pending, value);
         }
     }
 
-    /** 暂存的一半是否已陈旧（超过一个采集周期；周期未知用兜底值）。 */
-    private boolean isStale(Half existing, Instant currentTs) {
+    /** N 个 slot 全齐 ⇒ 按 word_index 升序合成一条读数；string 走严格 UTF-8，int/float 复用 v1/v2。 */
+    private void assembleAndEmit(AccessPointMappingDto point, PendingWords pending, PointValue value) {
+        int expected = pending.expected();
+        int[] words = new int[expected];
+        for (int i = 0; i < expected; i++) {
+            words[i] = pending.halves()[i].value();
+        }
+        if (isString(point)) {
+            try {
+                String decoded = ModbusRegisterDecoder.decodeStringUtf8(words);
+                // string 的 applyScale 是 no-op；forceText=true 保证 iot 侧强制落 value_text（§4.5.6）
+                emit(point.getIdentifier(), value, AccessReading.applyScale(decoded,
+                    point.getScaleFactor(), point.getOffsetValue()), true);
+            } catch (CharacterCodingException ex) {
+                onNotUtf8(point, value);
+            }
+            return;
+        }
+        if (expected != 2) {
+            // 直连 DB 的坏数据：int/float 只允许 2 个寄存器；按 BAD 暴露而不是只用前两个
+            log.warn("[access] Modbus int/float 形态的 word_count 必须是 2（直连 DB 坏数据），按 BAD 上报："
+                    + "device={} address={} word_count={}",
+                LogSanitizer.sanitize(deviceId), LogSanitizer.sanitize(point.getAddress()), expected);
+            emitBad(point.getIdentifier(), value, "modbus.register.word-count-invalid");
+            return;
+        }
+        int first = words[0];
+        int second = words[1];
+        if (isFloat(point)) {
+            // float 形态：两半齐后按 IEEE754 解释（NaN/Inf 按 BAD 上报 + 计数，见 §4.4.6）
+            float decoded = ModbusRegisterDecoder.decodeFloatBits(first, second, point.getByteOrder());
+            if (!Float.isFinite(decoded)) {
+                onNonFiniteFloat(point, value);
+                return;
+            }
+            // float32 的十进制表示取**最短可回读**形态（理由见 §4.4.7）
+            BigDecimal floatValue = new BigDecimal(Float.toString(decoded));
+            emit(point.getIdentifier(), value, AccessReading.applyScale(floatValue,
+                point.getScaleFactor(), point.getOffsetValue()), false);
+            return;
+        }
+        long decoded = ModbusRegisterDecoder.decodePair(first, second, point.getByteOrder(),
+            Boolean.TRUE.equals(point.getSigned()));
+        emit(point.getIdentifier(), value, AccessReading.applyScale(decoded,
+            point.getScaleFactor(), point.getOffsetValue()), false);
+    }
+
+    /** 暂存组是否已陈旧（组内最早到达的字距本次超过一个采集周期；周期未知用兜底值）。 */
+    private boolean isStale(PendingWords pending, Instant currentTs) {
         long tolerance = pollIntervalMs != null && pollIntervalMs > 0
             ? pollIntervalMs : DEFAULT_PAIR_TTL_MS;
-        return currentTs.toEpochMilli() - existing.ts().toEpochMilli() > tolerance;
+        return currentTs.toEpochMilli() - pending.oldestTs().toEpochMilli() > tolerance;
+    }
+
+    /** N 个 word_index 槽是否全部到达。 */
+    private static boolean allFilled(PendingWords pending) {
+        for (Half half : pending.halves()) {
+            if (half == null) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private void clearPair(String key) {
@@ -285,6 +350,16 @@ public class PointMappingDataListener implements DataListener {
     /** float 形态（register_format=float）。 */
     private static boolean isFloat(AccessPointMappingDto point) {
         return "float".equals(registerFormatOf(point));
+    }
+
+    /** string 形态（register_format=string）。 */
+    private static boolean isString(AccessPointMappingDto point) {
+        return "string".equals(registerFormatOf(point));
+    }
+
+    /** 生效字数（null ⇒ 1，兼容 v1 规格）。 */
+    private static int wordCountOf(AccessPointMappingDto point) {
+        return point.getWordCount() == null ? 1 : point.getWordCount();
     }
 
     /** 归一化 register_format（null/blank ⇒ int，兼容 v1 规格）。 */
@@ -308,20 +383,47 @@ public class PointMappingDataListener implements DataListener {
         emitBad(point.getIdentifier(), value, "modbus.float.non-finite");
     }
 
+    /**
+     * Modbus 多寄存器字符串不是合法 UTF-8：按 BAD 上报 + 计数（复用 {@code not-utf8} reason）。
+     *
+     * <p>严格解码、不替换字符、不静默：设备报的字节序列无法无歧义还原为文本时，
+     * 把「解析失败」伪装成一个带 U+FFFD 的字符串比 BAD 更糟（后者会被当有效数据参与断档/曲线）。</p>
+     */
+    private void onNotUtf8(AccessPointMappingDto point, PointValue value) {
+        normalizeFailureCount.increment();
+        PointValueNormalizeMetrics.counter(meterRegistry, NormalizeFailure.NOT_UTF8).increment();
+        log.warn("[access] Modbus 字符串不是合法 UTF-8，按 BAD 上报（不替换字符；见 {} 指标）："
+                + "device={} address={} word_count={}",
+            PointValueNormalizeMetrics.METRIC_NAME, LogSanitizer.sanitize(deviceId),
+            LogSanitizer.sanitize(point.getAddress()), wordCountOf(point));
+        emitBad(point.getIdentifier(), value, "modbus.string.not-utf8");
+    }
+
     /** 上报一条 BAD 读数（value=null；宿主侧解码失败用，不把垃圾写进库）。 */
     private void emitBad(String identifier, PointValue value, String reason) {
-        emit(identifier, PointValue.bad(value.address(), Quality.BAD, reason, value.timestamp()), null);
+        emit(identifier, PointValue.bad(value.address(), Quality.BAD, reason, value.timestamp()), null,
+            false);
     }
 
-    /** 是否 32 位点位（word_count=2）。 */
+    /**
+     * 是否多寄存器点位（word_count&gt;1：int/float=2、string 1..32）。
+     *
+     * <p>{@code word_count=1} 的 string 走单寄存器路径（无需配对）；传统 5 位编号的
+     * {@code word_count=1} 也照常（向后兼容）。</p>
+     */
     private static boolean isMultiRegister(AccessPointMappingDto point) {
-        return point.getWordCount() != null && point.getWordCount() == 2;
+        return wordCountOf(point) > 1;
     }
 
-    /** 上报一条读数（质量/时刻/周期随原始 PointValue 带出；BAD 的 value 可为 null）。 */
-    private void emit(String identifier, PointValue value, Object mapped) {
+    /**
+     * 上报一条读数（质量/时刻/周期随原始 PointValue 带出；BAD 的 value 可为 null）。
+     *
+     * @param forceText 是否强制 iot 侧落文本列（仅 Modbus {@code register_format=string} 置 true；
+     *                  见 docs/VALUE-DECODE-DESIGN.md §4.5.6）
+     */
+    private void emit(String identifier, PointValue value, Object mapped, boolean forceText) {
         sink.accept(new AccessReading(deviceId, identifier, mapped, value.quality().name(),
-            value.timestamp(), pollIntervalMs));
+            value.timestamp(), pollIntervalMs, forceText));
     }
 
     /**
@@ -376,18 +478,28 @@ public class PointMappingDataListener implements DataListener {
      * 寄存器地址 → 点位 + 第几个字。
      *
      * @param point     点位
-     * @param wordIndex 0=base、1=base+1
+     * @param wordIndex 0=base、1=base+1、…
      */
     private record RegisterTarget(AccessPointMappingDto point, int wordIndex) {
     }
 
     /**
-     * 已到达的一半。
+     * 已到达的一个字。
      *
      * @param wordIndex 第几个字
      * @param value     16 位无符号值
      * @param ts        到达时刻（配对容差用）
      */
     private record Half(int wordIndex, int value, Instant ts) {
+    }
+
+    /**
+     * 多寄存器点位已到达的字组。
+     *
+     * @param expected 期望字数（word_count）
+     * @param halves   按 word_index 定位的槽（未到达为 null）
+     * @param oldestTs 组内最早到达时刻（配对容差用）
+     */
+    private record PendingWords(int expected, Half[] halves, Instant oldestTs) {
     }
 }

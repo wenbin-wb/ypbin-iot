@@ -70,16 +70,23 @@ public class IotPointMappingReq {
     @Pattern(regexp = "big|little", message = "字序非法（应为 big|little）")
     private String byteOrder;
 
-    /** 连续寄存器个数（1|2；默认 1 = 旧行为）。仅 Modbus 寄存器点位生效。 */
-    @Min(value = 1, message = "寄存器个数只能是 1 或 2")
-    @Max(value = 2, message = "寄存器个数只能是 1 或 2")
+    /**
+     * 连续寄存器个数；默认 1 = 旧行为。仅 Modbus 寄存器点位生效。
+     *
+     * <p>合法范围按形态：{@code int}/{@code float} 为 1|2、{@code bits} 为 1、
+     * {@code string} 为 1..32（≤64 字节）。此处只做 1..32 的粗粒度下上界，
+     * 形态相关收窄由服务层校验（错误文案更具体）。</p>
+     */
+    @Min(value = 1, message = "寄存器个数必须在 1..32（int/float: 1|2；bits: 1；string: 1..32）")
+    @Max(value = 32, message = "寄存器个数必须在 1..32（int/float: 1|2；bits: 1；string: 1..32）")
     private Integer wordCount;
 
     /** 整型符号：true=有符号；默认 false（无符号）。仅 Modbus 寄存器点位生效。 */
     private Boolean signed;
 
-    /** 寄存器值形态：int|float|bits；默认 int（= v1 行为）。仅 Modbus 寄存器点位生效。 */
-    @Pattern(regexp = "int|float|bits", message = "寄存器值形态非法（应为 int|float|bits）")
+    /** 寄存器值形态：int|float|bits|string；默认 int（= v1 行为）。仅 Modbus 寄存器点位生效。 */
+    @Pattern(regexp = "int|float|bits|string",
+        message = "寄存器值形态非法（应为 int|float|bits|string）")
     private String registerFormat;
 
     /** 仅 bits：起始位（0..15）。 */

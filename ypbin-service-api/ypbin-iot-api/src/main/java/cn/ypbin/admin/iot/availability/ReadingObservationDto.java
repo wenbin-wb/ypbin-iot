@@ -68,6 +68,15 @@ public class ReadingObservationDto {
         message = "读数值过长（超过 " + ReadingObservationDto.MAX_VALUE_LENGTH + " 字符）")
     private String value;
 
+    /**
+     * 是否强制落文本列（v3，仅 Modbus {@code register_format=string} 上报 true）。
+     *
+     * <p><b>可选、缺省 null = 既有词法落列行为</b>：为 null/false 时 {@code ReadingValueMapper}
+     * 仍按值形态判定列（向后兼容、对现有数据零影响）；true 时忽略词法形态、原样落 {@code value_text}
+     * （纯数字序列号不会被数值化）。见 docs/VALUE-DECODE-DESIGN.md §4.5.6。</p>
+     */
+    private Boolean forceText;
+
     /** 质量码（与协议栈 Quality 的 name 对齐：GOOD | UNCERTAIN | BAD | STALE | NOT_CONNECTED | CONFIG_ERROR）。 */
     @NotBlank(message = "质量码不能为空")
     private String quality;

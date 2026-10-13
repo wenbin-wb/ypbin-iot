@@ -520,7 +520,7 @@ public class AvailabilityServiceImpl implements AvailabilityService {
                 continue;
             }
             points.add(new TimeSeriesPoint(tenantId, item.getDeviceId(), propertyId, value,
-                item.getQuality(), item.getTs()));
+                item.getQuality(), item.getTs(), Boolean.TRUE.equals(item.getForceText())));
         }
         return points;
     }

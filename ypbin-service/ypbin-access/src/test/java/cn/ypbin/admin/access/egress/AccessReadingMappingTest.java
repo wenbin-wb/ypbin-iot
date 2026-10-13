@@ -373,6 +373,59 @@ class AccessReadingMappingTest {
                 .isEqualTo("23.5"));
     }
 
+    @Test
+    @DisplayName("★ v3 Modbus string：单寄存器纯数字串 ⇒ 值原样 + forceText=true（交给 iot 强制落文本列）")
+    void modbusStringMustCarryForceText() {
+        AccessPointMappingDto point = new AccessPointMappingDto();
+        point.setAddress("holding:0");
+        point.setIdentifier("serialNo");
+        point.setDataType("string");
+        point.setPropertyId("pk-serialNo");
+        point.setRegisterFormat("string");
+        point.setWordCount(2);
+        point.setSigned(Boolean.FALSE);
+        List<AccessReading> readings = new ArrayList<>();
+        PointMappingDataListener listener = listener(PROTOCOL_MODBUS, List.of(point), readings);
+
+        // 0x3132 = "12"，0x3334 = "34" ⇒ 两个字拼出 "1234"（纯数字序列号）
+        listener.onData(PointValue.good(PointAddress.of("holding:0"), 0x3132, Instant.now()));
+        listener.onData(PointValue.good(PointAddress.of("holding:1"), 0x3334, Instant.now()));
+
+        assertThat(readings).singleElement().satisfies(reading -> {
+            assertThat(reading.value()).isEqualTo("1234");
+            assertThat(reading.forceText()).as("Modbus string 必须带强制文本标记，防纯数字被数值化").isTrue();
+        });
+    }
+
+    @Test
+    @DisplayName("★ 回归：Modbus int/float 与 TCP string 的 forceText 仍为 false（词法落列逐字节不变）")
+    void nonModbusStringMustNotForceText() {
+        AccessPointMappingDto modbusInt = new AccessPointMappingDto();
+        modbusInt.setAddress("holding:0");
+        modbusInt.setIdentifier("counter");
+        modbusInt.setDataType("int");
+        modbusInt.setPropertyId("pk-counter");
+        modbusInt.setRegisterFormat("int");
+        modbusInt.setWordCount(2);
+        modbusInt.setSigned(Boolean.FALSE);
+        List<AccessReading> modbusReadings = new ArrayList<>();
+        PointMappingDataListener modbusListener = listener(PROTOCOL_MODBUS, List.of(modbusInt),
+            modbusReadings);
+        modbusListener.onData(PointValue.good(PointAddress.of("holding:0"), 0x0001, Instant.now()));
+        modbusListener.onData(PointValue.good(PointAddress.of("holding:1"), 0x0002, Instant.now()));
+        assertThat(modbusReadings).singleElement()
+            .satisfies(reading -> assertThat(reading.forceText()).isFalse());
+
+        List<AccessReading> tcpReadings = new ArrayList<>();
+        PointMappingDataListener tcpListener = listener(PROTOCOL_TCP,
+            List.of(point("SN", "serialNo", "string", null, null)), tcpReadings);
+        tcpListener.onData(PointValue.good(PointAddress.of("SN"), "1234", Instant.now()));
+        assertThat(tcpReadings).singleElement().satisfies(reading -> {
+            assertThat(reading.value()).isEqualTo("1234");
+            assertThat(reading.forceText()).as("TCP string 不在本次窄口径范围（缺省词法落列）").isFalse();
+        });
+    }
+
     private static PointMappingDataListener listener(String protocol,
                                                      List<AccessPointMappingDto> points,
                                                      List<AccessReading> readings) {

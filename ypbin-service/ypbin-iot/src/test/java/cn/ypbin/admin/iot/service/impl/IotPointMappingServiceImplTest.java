@@ -575,6 +575,136 @@ class IotPointMappingServiceImplTest {
     }
 
     @Test
+    @DisplayName("★ v3 string：word_count=3 + 显式 holding:0 + data_type=string ⇒ 接受并搬运")
+    void stringFormatAccepted() {
+        stubProduct("modbus", "string");
+        IotPointMappingReq req = request(DEVICE_ID, PROPERTY_ID, "RW");
+        req.setRawAddress("holding:0");
+        req.setRegisterFormat("string");
+        req.setWordCount(3);
+        req.setSigned(Boolean.FALSE);
+
+        service.create(req);
+
+        ArgumentCaptor<IotPointMapping> captor = ArgumentCaptor.forClass(IotPointMapping.class);
+        verify(mappingMapper).insert(captor.capture());
+        assertThat(captor.getValue().getRegisterFormat()).isEqualTo("string");
+        assertThat(captor.getValue().getWordCount()).isEqualTo(3);
+    }
+
+    @Test
+    @DisplayName("★ v3 string：word_count=1 + 传统 5 位编号照常（向后兼容，无需扩地址）")
+    void stringWordCountOneTraditionalAccepted() {
+        stubProduct("modbus", "string");
+        IotPointMappingReq req = request(DEVICE_ID, PROPERTY_ID, "RW");
+        req.setRegisterFormat("string");
+        req.setWordCount(1);
+        req.setSigned(Boolean.FALSE);
+
+        service.create(req);
+
+        verify(mappingMapper).insert(any(IotPointMapping.class));
+    }
+
+    @Test
+    @DisplayName("★ v3 string：word_count=32 接受、33 拒绝（边界说清）")
+    void stringWordCountRangeEnforced() {
+        stubProduct("modbus", "string");
+        IotPointMappingReq max = request(DEVICE_ID, PROPERTY_ID, "RW");
+        max.setRawAddress("holding:0");
+        max.setRegisterFormat("string");
+        max.setWordCount(32);
+        max.setSigned(Boolean.FALSE);
+        service.create(max);
+        verify(mappingMapper).insert(any(IotPointMapping.class));
+
+        IotPointMappingReq tooMany = request(DEVICE_ID, PROPERTY_ID, "RW");
+        tooMany.setRawAddress("holding:0");
+        tooMany.setRegisterFormat("string");
+        tooMany.setWordCount(33);
+        tooMany.setSigned(Boolean.FALSE);
+        assertThatThrownBy(() -> service.create(tooMany))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("1..32");
+    }
+
+    @Test
+    @DisplayName("★ v3 string：signed=true / bit_* 非空 / data_type≠string ⇒ 拒绝")
+    void stringIncompatibleFieldsRejected() {
+        stubProduct("modbus", "string");
+        IotPointMappingReq signedReq = request(DEVICE_ID, PROPERTY_ID, "RW");
+        signedReq.setRawAddress("holding:0");
+        signedReq.setRegisterFormat("string");
+        signedReq.setWordCount(2);
+        signedReq.setSigned(Boolean.TRUE);
+        assertThatThrownBy(() -> service.create(signedReq))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("signed 必须为 false");
+
+        IotPointMappingReq bitsReq = request(DEVICE_ID, PROPERTY_ID, "RW");
+        bitsReq.setRawAddress("holding:0");
+        bitsReq.setRegisterFormat("string");
+        bitsReq.setWordCount(2);
+        bitsReq.setBitOffset(0);
+        bitsReq.setBitLength(1);
+        assertThatThrownBy(() -> service.create(bitsReq))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("不支持 bit_offset/bit_length");
+
+        stubProduct("modbus", "int");
+        IotPointMappingReq typeReq = request(DEVICE_ID, PROPERTY_ID, "RW");
+        typeReq.setRawAddress("holding:0");
+        typeReq.setRegisterFormat("string");
+        typeReq.setWordCount(2);
+        typeReq.setSigned(Boolean.FALSE);
+        assertThatThrownBy(() -> service.create(typeReq))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("要求属性类型是 string");
+    }
+
+    @Test
+    @DisplayName("★ v3 string：word_count>1 必须显式 type:offset；非 Modbus/位类型 ⇒ 拒绝")
+    void stringAddressAndApplicabilityRejected() {
+        stubProduct("modbus", "string");
+        IotPointMappingReq traditional = request(DEVICE_ID, PROPERTY_ID, "RW");
+        traditional.setRegisterFormat("string");
+        traditional.setWordCount(2);
+        traditional.setSigned(Boolean.FALSE);
+        assertThatThrownBy(() -> service.create(traditional))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("传统 5 位编号不支持多寄存器");
+
+        IotPointMappingReq nonModbus = request(DEVICE_ID, PROPERTY_ID, "RW");
+        stubProduct("tcp", "string");
+        nonModbus.setRegisterFormat("string");
+        nonModbus.setWordCount(2);
+        nonModbus.setSigned(Boolean.FALSE);
+        assertThatThrownBy(() -> service.create(nonModbus))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("仅 Modbus 寄存器点位支持 register_format=string");
+
+        stubProduct("modbus", "bool");
+        IotPointMappingReq coil = request(DEVICE_ID, PROPERTY_ID, "RW");
+        coil.setAddressType("coil");
+        coil.setRawAddress("coil:0");
+        coil.setRegisterFormat("string");
+        coil.setWordCount(2);
+        coil.setSigned(Boolean.FALSE);
+        assertThatThrownBy(() -> service.create(coil))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("位类型");
+    }
+
+    @Test
+    @DisplayName("★ v3 回归：int 的 word_count 仍只允许 1|2（3 必须拒绝）")
+    void intWordCountThreeStillRejected() {
+        stubProduct("modbus", "int");
+        IotPointMappingReq req = request(DEVICE_ID, PROPERTY_ID, "RW");
+        req.setRawAddress("holding:0");
+        req.setRegisterFormat("int");
+        req.setWordCount(3);
+        req.setSigned(Boolean.FALSE);
+
+        assertThatThrownBy(() -> service.create(req))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("只能是 1 或 2");
+    }
+
+    @Test
     @DisplayName("实体→响应：registerFormat/bitOffset/bitLength 必须搬运（前端表单契约）")
     void toRespShouldMapRegisterFormatAndBits() {
         IotPointMapping entity = new IotPointMapping();

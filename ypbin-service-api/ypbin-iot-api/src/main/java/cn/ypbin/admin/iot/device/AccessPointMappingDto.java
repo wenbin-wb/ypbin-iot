@@ -62,13 +62,13 @@ public class AccessPointMappingDto {
     /** 字序（word order）：big | little（可空）；仅 Modbus word_count=2 生效。 */
     private String byteOrder;
 
-    /** 连续寄存器个数（1|2；默认 1）。仅 Modbus 寄存器点位生效。 */
+    /** 连续寄存器个数（int/float: 1|2；bits: 1；string: 1..32；默认 1）。仅 Modbus 寄存器点位生效。 */
     private Integer wordCount;
 
     /** 整型符号：true=有符号（可空；null 按无符号）。仅 Modbus 寄存器点位生效。 */
     private Boolean signed;
 
-    /** 寄存器值形态：int|float|bits（可空；null 按 int）。仅 Modbus 寄存器点位生效。 */
+    /** 寄存器值形态：int|float|bits|string（可空；null 按 int）。仅 Modbus 寄存器点位生效。 */
     private String registerFormat;
 
     /** 仅 bits：起始位（0..15）。 */

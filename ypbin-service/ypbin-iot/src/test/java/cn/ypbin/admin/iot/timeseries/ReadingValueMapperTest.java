@@ -85,4 +85,30 @@ class ReadingValueMapperTest {
         assertThat(ReadingValueMapper.map(" meter-01 ").text()).isEqualTo("meter-01");
         assertThat(ReadingValueMapper.map("   ").text()).as("空白串返回 trim 后的值（与其它文本分支一致）").isEmpty();
     }
+
+    @Test
+    @DisplayName("★ v3 强制文本标记：纯数字序列号也必须落 value_text（不猜、不 trim）")
+    void forcedTextMustStayTextEvenForNumeric() {
+        ReadingValueMapper.MappedValue numeric = ReadingValueMapper.map("123456", true);
+        assertThat(numeric.column()).as("IMEI/表号这类纯数字序列号不能被数值化").isEqualTo(ReadingValueMapper.COLUMN_TEXT);
+        assertThat(numeric.numericValue()).isNull();
+        assertThat(numeric.text()).isEqualTo("123456");
+
+        ReadingValueMapper.MappedValue serial = ReadingValueMapper.map("SN-0001", true);
+        assertThat(serial.column()).isEqualTo(ReadingValueMapper.COLUMN_TEXT);
+        assertThat(serial.text()).isEqualTo("SN-0001");
+
+        ReadingValueMapper.MappedValue spaced = ReadingValueMapper.map(" 123 ", true);
+        assertThat(spaced.text()).as("原样落文本：不 trim（空白也是数据）").isEqualTo(" 123 ");
+    }
+
+    @Test
+    @DisplayName("★ v3 缺省（false / 单参）行为逐字节不变：纯数字仍走词法数值列")
+    void defaultBehaviorMustRemainLexical() {
+        assertThat(ReadingValueMapper.map("123456").column())
+            .as("缺省 = 既有词法落列，对现有数据零影响").isEqualTo(ReadingValueMapper.COLUMN_DOUBLE);
+        assertThat(ReadingValueMapper.map("123456", false).column())
+            .isEqualTo(ReadingValueMapper.COLUMN_DOUBLE);
+        assertThat(ReadingValueMapper.map("007").column()).isEqualTo(ReadingValueMapper.COLUMN_TEXT);
+    }
 }

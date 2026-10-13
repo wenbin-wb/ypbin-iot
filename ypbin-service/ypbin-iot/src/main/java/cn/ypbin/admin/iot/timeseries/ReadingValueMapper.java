@@ -61,12 +61,31 @@ public final class ReadingValueMapper {
     }
 
     /**
-     * 按词的形态把读数映射到目标列。
+     * 按词的形态把读数映射到目标列（缺省 {@code forceText=false}）。
      *
      * @param raw 读数原值（字符串化；调用方保证非空）
      * @return 映射结果
      */
     public static MappedValue map(String raw) {
+        return map(raw, false);
+    }
+
+    /**
+     * 按词的形态把读数映射到目标列；{@code forceText=true} 时**不猜**、原样落文本列。
+     *
+     * <p><b>为什么需要显式标记</b>：按词法猜类型对纯数字序列号（IMEI/表号）会把「它是字符串」这一事实
+     * 丢掉（落 {@code value_double}）。仅 Modbus {@code register_format=string} 置位（见 §4.5.6）；
+     * 缺省 false 保持既有词法行为，对现有数据零影响。</p>
+     *
+     * @param raw       读数原值（字符串化；调用方保证非空）
+     * @param forceText 是否强制文本列
+     * @return 映射结果
+     */
+    public static MappedValue map(String raw, boolean forceText) {
+        if (forceText) {
+            // 原样落文本列：不 trim（设备报的空白也是数据）、不按词法数值化
+            return new MappedValue(COLUMN_TEXT, null, raw);
+        }
         String value = raw.trim();
         if (value.isEmpty()) {
             // 空串没有数值语义，落文本列（保持"每条读数都可见"），不猜 0

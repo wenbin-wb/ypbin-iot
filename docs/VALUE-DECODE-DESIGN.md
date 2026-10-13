@@ -116,7 +116,7 @@ OPC UA `ByteString`（生产 access fat jar 不含这两个协议模块，属潜
 |---|---|---|
 | ~~Modbus 寄存器 16/32 位、有符号/无符号、字序~~ | **已由 §4.3 v1 落地（2026-10-13）**：`word_count`/`signed` 新增、`byte_order` 复用为字序；IEEE754 浮点与 BADC/DCBA 字节交换**仍不在 v1**（见 §4.3.6） | 见 §4.3；验收：8 组矩阵 + 长度不足 + 配对/陈旧 + 向后兼容 |
 | 位域（bit offset/length） | 同上，缺列 | 增 `bit_offset`/`bit_length`；验收：越界位宽报错、单 bit 取布尔 |
-| 字符串寄存器（多寄存器拼 UTF-8） | 同上，缺列 | 增 `word_count` + `encoding`；验收：中文/半角混合、奇数字节 |
+| ~~字符串寄存器（多寄存器拼 UTF-8）~~ | **已由 §4.5 v3 落地（2026-10-13）**：扩 `register_format=string`、`word_count` 放宽 1..32、固定 UTF-8（**不加 `encoding` 列**） | 见 §4.5；验收：中文/ASCII 混合、尾部 NUL、全 NUL、非法 UTF-8、单寄存器、跨字边界 |
 | 「整帧即值」（无键的裸值帧） | 需要一个**显式**的地址类型声明（否则只能靠「帧里没有 `=` 就拿整帧当值」这种猜测） | `AddressType` 增 `tcp-line`（或映射增 `decode_format` 列）；验收：裸值帧解出数值、且键值帧仍走键路径（互不串味） |
 | 十六进制/JSON 负载 | 未涉及本次缺陷；且需要显式声明 | 同「整帧即值」：新增解码格式声明后再实现；**不建议**把 `byte[]` 转 hex 充数（无值语义、曲线仍画不出） |
 | **其余 `byte[]` 交付路径的宿主侧解码**：MQTT `payload-format=binary`、OPC UA `ByteString` 节点 | TCP 已由 starter `key-value` 承接帧解析；这两条仍交付原始 `byte[]`，宿主不认领 ⇒ 被出口闸门丢弃（见 §3） | 由对应协议模块的 `payload-format`（MQTT 可用 `text`/`number`）或宿主协议解码器处理；验收：负载能按业务协议解出值且不再被闸门丢弃。⚠️ OPC UA 这条**未实机验证**（无模块/设备） |
@@ -320,13 +320,133 @@ DB 列仍是 `TINYINT NOT NULL DEFAULT 0`）、`byteOrder`（已存在，`big`\|
 
 #### 4.4.9 未支持（保持登记）
 
-IEEE754 双精度（4 寄存器）；BADC/DCBA 字内字节交换；有符号位域；字符串寄存器（issue #248，含 `encoding`/尾部 NUL/寄存器字节序）；
+IEEE754 双精度（4 寄存器）；BADC/DCBA 字内字节交换；有符号位域；
+**字符串寄存器（issue #248）已由 §4.5 v3 落地**（固定 UTF-8，不含 `encoding`；BADC/DCBA 仍不支持）；
 `register_format` 的其它取值；`float` 的 `bit_*` 与 `bits` 的 `signed`/多寄存器。
 
 **落地清单（2026-10-13）**：`ModbusRegisterDecoder.decodeFloatBits/decodeBits`、`PointMappingDataListener`（float 复用 v1 配对、
 NaN/±Inf ⇒ BAD + `iot.access.value.normalize.failure{reason=non-finite}`、bits 单寄存器且布尔不缩放）、
 `IotPointMappingServiceImpl.validateFloatFormat/validateBitsFormat`（int 保持 v1）、实体/DTO/Req/Resp 新字段、
 DDL（007 + `migration/2026-10-13-iot-modbus-v2-register-format-schema.sql`）。
+
+---
+
+### 4.5 Modbus 寄存器解码 v3（`register_format=string`：多寄存器拼 UTF-8）—— **已实施，2026-10-13**
+
+> 目标：issue #248。契约 v3 的 4 条规则已由 Lead 冻结；与前端 task-18 并行，命名不得各自发挥。
+> 本版**不新增数据库列**：`register_format` 扩第 4 个取值 `string`，固定 **UTF-8**（不加 `encoding` 列）。
+
+#### 4.5.1 列 / 取值口径（冻结）
+
+| 列 | 类型 | 语义 |
+|---|---|---|
+| `register_format` | `VARCHAR(16) NOT NULL DEFAULT 'int'` | 取值扩为 `int`\|`float`\|`bits`\|`string`；`string` 本版固定 **UTF-8**，不新增 `encoding` 列 |
+| `word_count` | `INT NOT NULL DEFAULT 1` | `int`/`float`：`1`\|`2`；`bits`：`1`；`string`：**`1..32`**（≤64 字节）；**33+ 拒绝** |
+
+接口字段（camelCase）：`registerFormat` 增加 `string`；`wordCount` 对 string 放宽到 `1..32`
+（Req `@Max` 随之放宽，服务层按形态再收窄；`int`/`float`/`bits` 的既有范围与拒绝路径不变）。
+
+`string` 校验（新字段严格，与 v2 同风格）：
+- `signed` 必须 false（null/false 均可；true ⇒ 拒绝）；
+- `bit_offset`/`bit_length` 必须为 null；
+- `data_type` 必须 `string`；
+- `word_count` 必须 `1..32`；
+- `address_type ∈ {holding,input}`；**`word_count>1` 时** `raw_address` 必须是显式 `type:offset`
+  且 type 与 `address_type` 一致（复用 v1 多寄存器地址规则）；`word_count=1` 时传统 5 位编号照常
+  （无需扩地址，保持向后兼容）；
+- 非 Modbus / 位类型 ⇒ 拒绝；所有拒绝都给可执行文案（说清该填什么/去掉什么）。
+
+`int`/`float`/`bits` 的既有规则**一律不变**（含 int 不做 data_type 约束），必须有回归用例。
+
+#### 4.5.2 填充与解码（冻结）
+
+- **按寄存器顺序**：`word_index=0..N-1`（`base..base+N-1`），每寄存器**高字节在前**（Modbus 本体序）
+  拼成字节串：`bytes[2i] = (word[i] >> 8) & 0xFF`、`bytes[2i+1] = word[i] & 0xFF`；
+- **去掉尾部连续 `0x00`**；**不去空格**（空格可能是数据本身）；**中间 `0x00` 保留**（不截断）；
+- **严格 UTF-8**（`CharsetDecoder` + `CodingErrorAction.REPORT`）：非法即点位 **BAD**，不替换字符、不静默；
+- **全 NUL ⇒ GOOD + 空字符串**（设备确实报了「未填」；判 BAD 会把「没填」误报成「解析失败」）。
+  ⚠️ **显示歧义登记**：空串在页面上既可能表示「设备未填」，也可能表示「内容就是空」；本版按「设备未填」处理，
+  不做额外标记；
+- **非法 UTF-8 ⇒ 点位 BAD + 计数** `iot.access.value.normalize.failure{reason=not-utf8}`：
+  在 `NormalizeFailure` 增 `NOT_UTF8`，并在 `docs/METRICS.md` 的 reason 列表显式登记；
+- `byte_order` 对 `string` **忽略**；**不支持** BADC（寄存器内字节交换）与 DCBA（寄存器倒序）——
+  保持 §4.2/§4.3.6 登记，要支持须先扩枚举并单独评审。
+
+#### 4.5.3 泛化后的配对（宿主侧）
+
+**复核结论（v2 暂存结构是否够用）**：**不够**。v2 的 `pairBuffer` 是 `Map<String, Half>`，
+`Half(wordIndex, value, ts)` 只存**一个** half，配对分支按「已有 half + 本次 half」两两合成，**假设恰好两个 half**；
+string 要 `N` 个（1..32）⇒ 必须泛化为「按 `word_index` 收齐 N 个」。
+
+**设计（复用同一套路径，不另起一套）**：
+- `registerByAddress`：`word_count>1` 的点位把 `base+i` 映射到 `(point, i)`（`i=0..N-1`）；
+  `word_count=1` 仍只映射 base；
+- `pairBuffer` 值改为 `PendingWords(expected, Half[] slots, oldestTs)`（仍在同一 `pairLock` 短临界区内读写）；
+- 任一 half 到达：若暂存存在且（任一同角色 slot 已填 / `oldestTs` 超容差）⇒ 整组丢弃 +
+  `iot.access.modbus.pair.stale`，再以新值重建；否则填 slot；**N 个 slot 全齐** ⇒ 按 `word_index`
+  升序合成一条读数并清空；
+- 任一寄存器 **BAD** ⇒ 立即产出该点位 BAD + 清空暂存（沿用 v1/v2，绝不用陈旧一半/0 拼值）；
+- 暂存有界：每设备至多「`word_count>1` 点位数」组，每组 ≤32 个 `Half` 槽（上界 = 32 × 多寄存器点位数 条引用，不随回调次数增长）；未齐的组在会话重建时随旧 listener 失效；
+- `isMultiRegister` 从 `word_count==2` 泛化为 `word_count>1`；`string` 的 `word_count=1` 走单寄存器路径。
+
+**订阅扩地址**：`AccessSubscriptionPlanner.expandAddresses` 从只扩 `base`/`base+1` 泛化为 `base..base+N-1`
+（新增 `ModbusRegisterAddress.plus(raw, delta)`，`next` 委托它）；仍参与既有按 `raw` 去重。
+⚠️ **大 N 由 SDK 分块**：Modbus 单次读上限/分块由 `modbus4j` 侧处理，宿主**不复刻**分块逻辑；
+即便 SDK 把 `base..base+N-1` 拆成多次读，回调仍逐寄存器到达，宿主按同一 `word_index` 配对/拼接
+（顺序由 `word_index` 保证，与到达批次无关）。
+
+#### 4.5.4 值类型落地（**已定：方案 A 窄口径，仅 Modbus string**）
+
+**已查清（一手）**：
+1. `PointValueNormalizer` 只在 `protocol=tcp` 分支调用 ⇒ **Modbus `String` 不经过它**，不会被 TCP 类型规范化改动；
+2. `AccessReading.applyScale` 只变换 `Number`/`BigDecimal` ⇒ `String` 原样返回；
+3. `HttpAccessReadingSink.toObservation` 用 `String.valueOf(value)` 上报 ⇒ 文本原样发出；
+4. **但** iot 侧 `ReadingValueMapper` 按**词法形态**落列：含字母/前导零的串 ⇒ `value_text`；
+   **纯数字串**（如 `"123456"`）⇒ `value_double`（现有已登记限制见 `docs/IOT-PLATFORM-DESIGN.md:575`）。
+
+**决策（Lead，2026-10-13）**：采用方案 A，但**范围收窄到仅 Modbus `register_format=string`**：
+- 新增**可选**标记 `forceText`（缺省 null/false = 既有词法落列 ⇒ 对现有数据零影响）；
+- **仅** string 点位置位；int/float/bits 与缺省标记的其它读数**保持词法落列、逐字节不变**；
+- TCP `data_type=string` 的同类问题**不在本次范围**（可能有历史数据，改落列会让既有曲线/查询取不到值），
+  另开 issue 登记（见 §4.5.6）。
+
+#### 4.5.5 未支持（保持登记）
+
+- BADC/DCBA（寄存器内字节交换与寄存器倒序）；
+- GBK/其它编码（将来「先扩枚举再支持」）；
+- IEEE754 双精度（4 寄存器）；有符号位域；
+- 字符串寄存器跨不同寄存器区（`base..base+N-1` 必须同 `address_type`）；
+- **TCP `data_type=string` 的物模型类型覆盖**（同一词法落列缺陷；历史数据兼容需单独评估，见 §4.5.6）。
+
+#### 4.5.6 值类型落地的实现落点与理由（方案 A 窄口径）
+
+**交接点：access 的 `PointMappingDataListener.emit(..., forceText)`。**
+- 这里是**唯一**同时拿到「`register_format`」与「解码后值」的层：它知道该点位是不是 string，
+  且是所有取值路径（单/多寄存器）的汇聚点；
+- 透传链：`AccessReading` 加第 7 个组件 `forceText`（保留 6 参构造 = false，向后兼容）→
+  `HttpAccessReadingSink.toObservation` 写入 `ReadingObservationDto.forceText`（可选，缺省 null）→
+  iot 侧 `AvailabilityServiceImpl.collectSeriesPoints` 透传到 `TimeSeriesPoint.forceText` →
+  `IotDbTimeSeriesWriter` 调 `ReadingValueMapper.map(value, forceText)`；
+- `ReadingValueMapper.map(raw, true)` **不猜、不 trim**，原样落 `value_text`；
+  `map(raw)`/`map(raw,false)` 保持既有词法规则（回归用例钉住）；
+- **为什么不放 iot 侧按 `data_type` 查**：那需要在写入热路径逐批查物模型
+  （`IOT-PLATFORM-DESIGN.md:575` 明确登记的代价）；显式标记由 access 在已知形态时置位，零额外查询；
+- **为什么不改 `ReadingValueMapper` 的缺省行为**：缺省一变会影响所有来源（含 TCP string 历史数据）；
+  显式标记把影响面收窄到 Modbus string。
+
+**TCP `data_type=string` 同类问题（另开 issue 登记，不在本次范围）**：同一词法落列缺陷；
+影响面是 TCP string 点位**可能已有历史数据落 `value_double`**，改落列会让既有曲线/查询取不到值 ⇒
+需先评估数据兼容（迁移/双读/回填），单独立项。
+
+#### 4.5.7 落地清单（2026-10-13）
+
+`ModbusRegisterDecoder.decodeStringUtf8`（严格 UTF-8 + 去尾 NUL）、`ModbusRegisterAddress.plus`（`next` 委托）、
+`PointMappingDataListener`（`PendingWords` 泛化配对 + string 单/多寄存器 + `forceText`）、
+`AccessSubscriptionPlanner.expandAddresses`（base..base+N-1）、`NormalizeFailure.NOT_UTF8` +
+`PointValueNormalizeMetrics` 预注册、`IotPointMappingServiceImpl.validateStringFormat`、
+Req/实体/DTO 字段注释与 `@Pattern/@Max`、DDL 列注释（007 + v1/v2 迁移，SQL 等价门禁绿）、
+`AccessReading`/`ReadingObservationDto`/`TimeSeriesPoint`/`ReadingValueMapper`/`IotDbTimeSeriesWriter`
+的 `forceText` 透传。
 
 ---
 
