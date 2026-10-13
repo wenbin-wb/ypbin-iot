@@ -56,6 +56,23 @@
     **`int` 保持 v1 行为逐字节不变**；`byte_order` 在 bits 形态忽略；
   - 未支持：IEEE754 双精度、BADC/DCBA 字节交换、有符号位域、字符串寄存器（issue #248）。
 
+- **Modbus 寄存器解码 v3（`register_format=string`：多寄存器拼 UTF-8）**（`ypbin-service/ypbin-iot/**`、
+  `ypbin-service/ypbin-access/**`、`ypbin-service-api/ypbin-iot-api/**`、`deploy/sql/**`）：
+  - `register_format` 扩第 4 个取值 `string`（**不新增 `encoding` 列**，固定 UTF-8）；`word_count` 对 string
+    放宽为 **1..32**（≤64 字节，33+ 拒绝），int/float/bits 的既有范围与规则**逐字节不变**；
+  - 填充/解码：按寄存器顺序、每寄存器高字节在前拼字节 → 去尾部连续 `0x00` → **严格 UTF-8**
+    （`CharsetDecoder` REPORT，不替换字符）；不去空格、中间 NUL 保留；**全 NUL ⇒ GOOD + 空串**；
+    **非法 UTF-8 ⇒ 点位 BAD + `iot.access.value.normalize.failure{reason=not-utf8}`**；`byte_order` 对 string 忽略；
+  - 宿主配对从「恰好两个 half」泛化为 `PendingWords`（按 `word_index` 收齐 N 个；同角色重复/超容差整组丢弃 +
+    `iot.access.modbus.pair.stale`；任一 BAD ⇒ 点位 BAD + 清空）；订阅扩地址 `base..base+N-1`
+    （大 N 由 SDK 分块，宿主仍按同一逻辑拼接）；
+  - **落列**：新增**可选** `forceText` 标记（缺省 = 既有词法落列，对现有数据零影响），**仅 Modbus string**
+    置位 ⇒ `ReadingValueMapper` 原样落 `value_text`（纯数字序列号不被数值化）；
+    TCP `data_type=string` 同类问题未纳入（另开 issue，需评估历史数据兼容）；
+  - 校验（新字段严格）：string ⇒ `signed=false`、`bit_*` 空、`data_type=string`、`word_count` 1..32、
+    `address_type ∈ {holding,input}`，`word_count>1` 时地址必须显式 `type:offset`；错误文案说清怎么改；
+  - 未支持：BADC/DCBA、GBK/其它编码、IEEE754 双精度、有符号位域、跨寄存器区。
+
 - **JaCoCo 覆盖率门禁接入 `ypbin-iot` / `ypbin-access`**（`mvn test`/`verify` 即生效，未达标直接失败）。
   阈值口径 = **2026-10-13 实测基线 − 安全边际**：
   `ypbin-iot` 指令 ≥ **0.78**（基线 0.8063）、分支 ≥ **0.68**（基线 0.7086）；
