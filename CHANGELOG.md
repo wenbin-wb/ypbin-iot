@@ -7,6 +7,7 @@
 ## [未发布]
 
 ### 修复
+- **生产帧形态只读普查（部署前置的证据）**：切 `payload-format=key-value` 前对生产库做了一次只读普查 —— 13 台设备全是演示夹具；**唯一在采的 TCP 设备 `demo-dev-curve`(9300012) 的 4 个点位与帧键逐字对应**（切换后行为不变）；其余 9 台 TCP 夹具的 `holding:*` 是 #217 之前的历史错位残留、早已离线且挂未闭合断档，新旧行为等价（`key-not-found` → `selector-not-found`，都是 BAD）。结论与复现 SQL 见 `docs/VALUE-DECODE-DESIGN.md` §5.6。
 
 - **一键安装 IoT 断点：库表/菜单未装 + 迁移不幂等**（`deploy/install.sh`、`deploy/sql/migration/iot-migrations.list`）：
   - R1：`install.sh` 在 `$ROOT/ypbin-admin` 克隆的是 **upstream admin**，其 `deploy/sql` 只有 001–005 ⇒
