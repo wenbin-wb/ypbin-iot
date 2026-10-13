@@ -84,7 +84,11 @@
   与业务面；每条给「命令 + 期望 + 不满足说明什么」并注明取值方式与期望值来源。所有指标名/配置键/阈值均取自仓内文档或代码并给出出处；
   **显式写清「不可回退项」**（落列口径、`forceText` 已删除、IoTDB 热拷贝边界）与**「本手册不覆盖什么」**
   （EMQX 集群、Prometheus/Grafana、镜像制品化剩余、K8s/HA、外部 EMQX/隧道等），避免「照做就万事大吉」的错觉。
-  文档一致性核对中发现的 4 处不一致已列入手册附录 C（未在手册里静默改其它文档）。
+  文档一致性核对中发现的 4 处不一致已列入手册附录 C，并已在 PR #258（commit `0bd024e9`）修正。
+  **2026-10-13 按生产只读实测收紧核验判据**：业务接口判真伪改为看 body 的 `R.code`（实测 `/devices…`=HTTP 200+`code=401` 而 `/iot/devices…`=HTTP 200+`code=404`，状态码相同 ⇒ 只看状态码必误判）；
+  核验清单逐条标注服务归属（同一时刻实测 18084=144 条 / 18086=92 条，`iot.timeseries.db.rows` 在 18086 上 404）；
+  SDK `iot.tcp.*` 由「看指标」改为「探针制造一次已知失败再核」（18086 实测 0 条，惰性注册下无法区分「没失败过」与「桥没接上」）；
+  明确落列/Modbus/规范化等指标为**升级后新增的指标**，升级前 404 属正常，升级是否生效靠 jar md5 + 启动时间/重启计数判定。
 - **新增门禁「Central Resolution Build」**（`.github/workflows/central-resolution-build.yml`）：**只用 Maven Central 上已发布的制品**构建本仓（不 checkout starter 源码、不做本地 install）。
   为什么需要：admin 既有的 `ci.yml` 断言「pom 声明的 starter 版本 == 最新 Release」之后，却 checkout starter 的 **master** 源码本地 install 来编译 ⇒ 若 master 上已有而 Release 里还没有的 API 被用到，`ci.yml` 会**假绿**，而任何干净机器（外部使用者、我们的发布制品工作流）都会编译失败。
   为什么是独立新工作流：admin 的既有工作流按 `SYNC.md` 属「明确不动」；新增文件不产生同步冲突面。附带自检：恰好 6 个服务 jar 且每个都含 `BOOT-INF/`。

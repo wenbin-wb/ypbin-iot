@@ -206,51 +206,96 @@ docker inspect -f '{{.State.Status}} restarts={{.RestartCount}} oom={{.State.OOM
 ## C. 上线后核验清单
 
 > **用法**：逐条执行命令、比对期望值、读「不满足说明什么」。任一「期望 0」的计数在增长，先按 §E 定位，不要直接放行。
-> 指标取值方式：`iot.*` 在 **iot（18084）**，`iot.access.*` 在 **access（18086）**；
-> 两者都只绑回环（`docs/DEPLOY-BACKEND.md` §5.1/§5.7）。计数器惰性创建的已做**启动期预注册**的，`/actuator/metrics/<name>` 应返回 0 而非 404。
+> **先读 [§C.0](#c0-读法与判据约定先读这一节能避开三类误判)**：指标按服务分列、业务接口看 body 的 `R.code`、以及「指标 404」的两种正常情形。
+> 两台服务都只绑回环（`docs/DEPLOY-BACKEND.md` §5.1/§5.7）。
 >
 > **期望值来源**：本清单的期望值来自 ① 仓内文档记录的**生产实测**（如 `docs/ACCESS-ENABLE.md` §4、`deploy/PROD-OPS-NOTES.md` §12）、
 > ② **单测/契约测试**（如 `docs/VALUE-DECODE-DESIGN.md` §4.x 的落地清单与对应测试类）、或 ③ **代码常量/校验**（如 `MAX_FUTURE_SKEW_MS`、`2^53`）；
 > 每行末/正文给出具体出处。**本机无真机/真库、或当前生产无对应设备/组件的，逐条标 `[未核实]`**（如 Modbus 三项、SDK `iot.tcp.*` 暴露路径）。
 
+### C.0 读法与判据约定（先读这一节，能避开三类误判）
+
+**① 指标按服务分列——写错服务会 404，且与「指标不存在」无法区分。**
+2026-10-13 生产只读实测（同一时刻两台各查一次 `/actuator/metrics`）：
+
+| 服务 | `/actuator/metrics` 条数 | 前缀归属（实测） | 交叉验证 |
+|---|---|---|---|
+| iot `127.0.0.1:18084` | **144** | `iot.timeseries.*` **9** / `iot.ingest.*` **7** / `iot.alert.*` **31** 等 | `iot.timeseries.db.rows`、`iot.timeseries.write.rows`、`iot.alert.notify.given_up` 均 **200** |
+| access `127.0.0.1:18086` | **92** | `iot.access.*` **35** | `iot.timeseries.db.rows` 在 18086 上 **404**（这就是「查错服务」的形态） |
+
+⇒ 本手册 C.1–C.7 每条都在「核验项」上标了服务归属：`【iot 18084】` / `【access 18086】` / `【网关 18080 + 登录态】` / `【MySQL】` / `【systemd】`。
+
+**② 业务接口判真伪看 body 的 `R.code`，不要只看 HTTP 状态码。**
+本仓业务响应是 `R` 信封，**业务错误一律 HTTP 200 + `code`**。2026-10-13 生产只读实测（直连 iot 18084，GET）：
+
+```
+/devices/9300012/series?limit=1        -> HTTP 200, body {"code":401,...}   ← 路径正确，只是缺登录态
+/iot/devices/9300012/series?limit=1    -> HTTP 200, body {"code":404,...}   ← 路径错误（/iot 是网关路由前缀）
+```
+
+两者 **HTTP 状态码完全相同**（都是 200），只看状态码必然误判（这条也证实了：「直连 18084 去掉 `/iot` 前缀」才是对的）。可复制的判码命令：
+
+```bash
+# 判业务响应码（§C6 的业务面核验都用它；无登录态时以 401 表示"路径对、缺登录态"）
+code() { curl -s "$1" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("code"))'; }
+code 'http://127.0.0.1:18084/devices/9300012/series?limit=1'       # 2026-10-13 实测：401（路径对、缺登录态）
+code 'http://127.0.0.1:18084/iot/devices/9300012/series?limit=1'   # 2026-10-13 实测：404（路径错）
+
+# 带登录态（经网关 18080；T 为登录返回的 accessToken）：
+code_auth() { curl -s -H "Authorization: Bearer $T" "$1" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("code"))'; }
+```
+
+> ⚠️ **例外**：`/actuator/**` 是**原生 JSON**（没有 `R.code` 信封，如 `{"status":"UP"}`、`{"measurements":[...]}`）
+> ⇒ health/metrics 按各节写的字段判，**不要**套 `code()`。
+
+**③ 「指标 404」不一定是异常：分「升级前不存在」与「惰性注册」两种。**
+- **升级前不存在**：`iot.timeseries.value.type_missing` / `not_numeric` / `precision_lost`、`iot.access.modbus.pair.stale`、
+  `iot.access.value.normalize.failure` 是 **2026-10-13 那批变更引入的新指标**。2026-10-13 生产只读实测：两个容器已运行
+  **30 小时（旧 jar）**，上述指标在 18084/18086 上**全部 404** —— 这是「尚未升级到含这些指标的版本」，**不是故障**。
+  **升级是否生效靠 [§B.3](#b3-立即核对进入-c-之前的最低门槛) 的 jar md5 与 [§C1.4](#c1-制品与进程) 的容器启动时间/重启计数判断，不要靠这些指标是否 404。**
+- **惰性注册**：SDK 的 `iot.tcp.*` 计数器**首次递增才出现**；`/actuator/metrics` 里 0 条/404 **无法区分**「还没失败过」与「Micrometer 桥没接上」⇒ 见 C2.4 的探针判据。
+
 ### C.1 制品与进程
 
 | # | 核验项 | 命令 | 期望 | 不满足说明什么 |
 |---|---|---|---|---|
-| C1.1 | 容器内 jar == 制品 | `docker exec ypbin-iot md5sum /app/app.jar`；`docker exec ypbin-access md5sum /app/app.jar`；<br>或（与 Release 清单 `jars.manifest.sha256` 比对）：`docker exec ypbin-iot sha256sum /app/app.jar`（容器内无该命令时用 `docker cp ypbin-iot:/app/app.jar /tmp/ && sha256sum /tmp/app.jar`） | 与构建机 md5 / Release sha256 **一致** | 部署替换的是别的 jar / 镜像没重建（`docs/DEPLOY-BACKEND.md` §2、§2.0） |
-| C1.2 | iot 健康 | `curl -s http://127.0.0.1:18084/actuator/health` | `{"groups":["liveness","readiness"],"status":"UP"}` | 未就绪/崩溃；看 `docker logs --tail 100 ypbin-iot`（`docs/DEPLOY-BACKEND.md` §5.4） |
-| C1.3 | access 判活 | `curl -s http://127.0.0.1:18086/actuator/health/liveness`、`.../readiness` | `{"status":"UP"}` | 用聚合 `/actuator/health` 会被 Redis 健康项挂死（≥120s 不返回，`deploy/PROD-OPS-NOTES.md` 陷阱 5）⇒ **判活只用 liveness/readiness** |
-| C1.4 | 无异常重启/OOM | `docker inspect -f '{{.State.Status}} restarts={{.RestartCount}} oom={{.State.OOMKilled}}' ypbin-iot ypbin-access` | `running`、`restarts=0`、`oom=false` | access 常驻 ~580–780 MiB；`oom=true` ⇒ 立即停回（`docs/ACCESS-ENABLE.md` §2） |
+| C1.1 | 【两者】容器内 jar == 制品 | `docker exec ypbin-iot md5sum /app/app.jar`；`docker exec ypbin-access md5sum /app/app.jar`；<br>或（与 Release 清单 `jars.manifest.sha256` 比对）：`docker exec ypbin-iot sha256sum /app/app.jar`（容器内无该命令时用 `docker cp ypbin-iot:/app/app.jar /tmp/ && sha256sum /tmp/app.jar`） | 与构建机 md5 / Release sha256 **一致** | 部署替换的是别的 jar / 镜像没重建（`docs/DEPLOY-BACKEND.md` §2、§2.0） |
+| C1.2 | 【iot 18084】健康 | `curl -s http://127.0.0.1:18084/actuator/health` | `{"groups":["liveness","readiness"],"status":"UP"}` | 未就绪/崩溃；看 `docker logs --tail 100 ypbin-iot`（`docs/DEPLOY-BACKEND.md` §5.4） |
+| C1.3 | 【access 18086】判活 | `curl -s http://127.0.0.1:18086/actuator/health/liveness`、`.../readiness` | `{"status":"UP"}` | 用聚合 `/actuator/health` 会被 Redis 健康项挂死（≥120s 不返回，`deploy/PROD-OPS-NOTES.md` 陷阱 5）⇒ **判活只用 liveness/readiness** |
+| C1.4 | 【两者】无异常重启/OOM | `docker inspect -f '{{.State.Status}} restarts={{.RestartCount}} oom={{.State.OOMKilled}}' ypbin-iot ypbin-access` | `running`、`restarts=0`、`oom=false` | access 常驻 ~580–780 MiB；`oom=true` ⇒ 立即停回（`docs/ACCESS-ENABLE.md` §2） |
 
 ### C.2 订阅形态（key-value 一次多地址订阅）
 
 | # | 核验项 | 命令 | 期望 | 不满足说明什么 |
 |---|---|---|---|---|
-| C2.1 | 订阅成功**每设备一次**（不再是 N 次） | `curl -s http://127.0.0.1:18086/actuator/metrics/iot.access.subscribe.success` | 一次订阅动作后，**每设备增量 = 1**（按设备/按周期对齐） | 仍按 N 点位增长 ⇒ 配置没切到 `key-value`（走了逐点位单订阅）；`[文档] docs/VALUE-DECODE-DESIGN.md` §5.5 |
-| C2.2 | 订阅失败 | `curl -s http://127.0.0.1:18086/actuator/metrics/iot.access.subscribe.failure` | 期望 0（首启/变更后短时可容忍，随后不应持续增长） | 协议栈/设备侧问题；与 `.../iot.access.subscribe.backoff.skipped` 成对出现属预期（`docs/METRICS.md` §2.4） |
-| C2.3 | 在途去重 | `curl -s http://127.0.0.1:18086/actuator/metrics/iot.access.subscribe.inflight.skipped` | 少量正常；长期增长 = 订阅长时间不完成 | `docs/METRICS.md` §2.4 |
-| C2.4 | selector 未命中 | `curl -s "http://127.0.0.1:18086/actuator/metrics/iot.tcp.selector.not-found"` | 不增长 | 点位映射 `raw_address` 与帧里的键不一致（`docs/VALUE-DECODE-DESIGN.md` §6）。⚠️ 该指标是 **SDK 侧**（注册名见 `docs/METRICS.md` §2.6 / `docs/VALUE-DECODE-DESIGN.md` §5.5）；**是否在 18086 的 actuator 暴露未核实**——404 时不要据此判失败，改用 access 日志 + 点位 BAD 质量 |
+| C2.1 | 【access 18086】订阅成功**每设备一次**（不再是 N 次） | `curl -s http://127.0.0.1:18086/actuator/metrics/iot.access.subscribe.success` | 一次订阅动作后，**每设备增量 = 1**（按设备/按周期对齐） | 仍按 N 点位增长 ⇒ 配置没切到 `key-value`（走了逐点位单订阅）；`[文档] docs/VALUE-DECODE-DESIGN.md` §5.5 |
+| C2.2 | 【access 18086】订阅失败 | `curl -s http://127.0.0.1:18086/actuator/metrics/iot.access.subscribe.failure` | 期望 0（首启/变更后短时可容忍，随后不应持续增长） | 协议栈/设备侧问题；与 `.../iot.access.subscribe.backoff.skipped` 成对出现属预期（`docs/METRICS.md` §2.4） |
+| C2.3 | 【access 18086】在途去重 | `curl -s http://127.0.0.1:18086/actuator/metrics/iot.access.subscribe.inflight.skipped` | 少量正常；长期增长 = 订阅长时间不完成 | `docs/METRICS.md` §2.4 |
+| C2.4 | 【access 18086】selector 未命中（SDK 指标，**不能单看 404/0 条**） | 首选**探针制造一次已知失败**再核：用 `deploy/access-tcp-simulator`（或一台**专用探针** TCP 设备）发一个**故意不合格**的帧（键值形态但去掉 `=`，或非 UTF-8 字节），然后 `curl -s http://127.0.0.1:18086/actuator/metrics/iot.tcp.selector.not-found` | **指标出现且 +1** ⇒ SDK→Micrometer 桥接正常，该指标可继续用；**不出现** ⇒ 指标链路没接上（这才是真问题） | 2026-10-13 生产只读实测：18086 的 **92 条指标里 `iot.tcp.*` 为 0 条**（`selector.not-found` / `payload.not-key-value` / `payload.not-utf8` 全 404）⇒ 惰性注册下**无法区分**「还没失败过」与「桥没接上」。⚠️ **不要为探针去改生产设备配置**；没有可用探针设备时本条标 `[未核实]`，兜底用 access 日志 + 点位 BAD 质量 + `iot.access.egress.*`；指标名的文档出处 `docs/METRICS.md` §2.6 / `docs/VALUE-DECODE-DESIGN.md` §5.5 |
 
 ### C.3 落列（物模型 `data_type` 唯一决定）
 
 | # | 核验项 | 命令 | 期望 | 不满足说明什么 |
 |---|---|---|---|---|
-| C3.1 | 类型缺失/冲突 | `curl -s http://127.0.0.1:18084/actuator/metrics/iot.timeseries.value.type_missing` | **0** | `iot_property.data_type` 缺失/未知或同标识类型冲突 ⇒ 读数被丢弃（`docs/METRICS.md` §2.9；`docs/VALUE-DECODE-DESIGN.md` §4.6.4） |
-| C3.2 | 声明数值但不可解析 | `curl -s http://127.0.0.1:18084/actuator/metrics/iot.timeseries.value.not_numeric` | **0** | 非数值送到 int/long/decimal 点（建模或帧内容错），该读数被丢弃、不落文本兜底（同上） |
-| C3.3 | 整数精度丢失 | `curl -s http://127.0.0.1:18084/actuator/metrics/iot.timeseries.value.precision_lost` | **0** | 整数型值 `\|v\| > 2^53` ⇒ 仍写 `value_double` + 计数（应把该属性建模为 `string`）（同上） |
-| C3.4 | 同一属性列恒定 | `SELECT property_id, COUNT(DISTINCT ...)` 思路：确认某属性历史点只出现在 `value_double` 或 `value_text` 之一 | 同属性列恒定 | 落列口径没切/混用了新旧 iot（`docs/VALUE-DECODE-DESIGN.md` §4.6.6 不变量） |
-| C3.5 | float 最短表示 | 需要一个 `register_format=float` 的 Modbus 点位，读其最新值/落库值 | `23.4` 而非 `23.399999618530273` | 用了 `Double.toString`/`BigDecimal.valueOf((double) f)` ⇒ 17 位噪声（`docs/VALUE-DECODE-DESIGN.md` §4.4.7）。⚠️ **当前生产唯一 Modbus 设备已停用**（`docs/VALUE-DECODE-DESIGN.md` §5.6）⇒ 本条 `[未核实]`，需启用 Modbus 点位后执行 |
+| C3.1 | 【iot 18084】类型缺失/冲突 | `curl -s http://127.0.0.1:18084/actuator/metrics/iot.timeseries.value.type_missing` | **0** | `iot_property.data_type` 缺失/未知或同标识类型冲突 ⇒ 读数被丢弃（`docs/METRICS.md` §2.9；`docs/VALUE-DECODE-DESIGN.md` §4.6.4） |
+| C3.2 | 【iot 18084】声明数值但不可解析 | `curl -s http://127.0.0.1:18084/actuator/metrics/iot.timeseries.value.not_numeric` | **0** | 非数值送到 int/long/decimal 点（建模或帧内容错），该读数被丢弃、不落文本兜底（同上） |
+| C3.3 | 【iot 18084】整数精度丢失 | `curl -s http://127.0.0.1:18084/actuator/metrics/iot.timeseries.value.precision_lost` | **0** | 整数型值 `\|v\| > 2^53` ⇒ 仍写 `value_double` + 计数（应把该属性建模为 `string`）（同上） |
+| C3.4 | 【iot 落库】同一属性列恒定 `[未核实]` | 不变量核验（本手册未给单条可复制查询：IoTDB 表模型按属性聚合的精确语法未在仓内文档核到）：按属性统计 `value_double`/`value_text` 的非空行数，确认**只有一个列非空** | 同属性列恒定（不出现两列都有值） | 落列口径没切/混用了新旧 iot（`docs/VALUE-DECODE-DESIGN.md` §4.6.6 不变量）。⚠️ 本条查询语法 `[未核实]`，请按你环境里 IoTDB 表模型支持的聚合写法执行 |
+| C3.5 | 【Modbus 点位】float 最短表示 | 需要一个 `register_format=float` 的 Modbus 点位，读其最新值/落库值 | `23.4` 而非 `23.399999618530273` | 用了 `Double.toString`/`BigDecimal.valueOf((double) f)` ⇒ 17 位噪声（`docs/VALUE-DECODE-DESIGN.md` §4.4.7）。⚠️ **当前生产唯一 Modbus 设备已停用**（`docs/VALUE-DECODE-DESIGN.md` §5.6）⇒ 本条 `[未核实]`，需启用 Modbus 点位后执行 |
 
 > 取值方式补充：`type_missing`/`not_numeric`/`precision_lost` 是 **iot 侧** Counter（不带标签），`/actuator/metrics/<name>` 取 `measurements[0].value`；
 > 期望 0 的依据是「这三类都是显式失败/建模告警」——`docs/METRICS.md` §2.9、`docs/VALUE-DECODE-DESIGN.md` §4.6.5。
+>
+> ⚠️ **升级前不存在**：C3.1–C3.3 这三个指标是 **2026-10-13 变更引入的**。2026-10-13 生产只读实测（两个容器旧 jar 已跑 **30 小时**）：
+> 这三个指标在 18084 上**全部 404** —— **这不是异常**，是「尚未升级到含这些指标的版本」。**判断升级是否生效靠 §B.3 的 jar md5 + §C1.4 的启动时间/重启计数，不要靠这三个 404。**
 
 ### C.4 Modbus（多寄存器配对 / 字符串 / 无重复）
 
 | # | 核验项 | 命令 | 期望 | 不满足说明什么 |
 |---|---|---|---|---|
-| C4.1 | 半字配对陈旧 | `curl -s http://127.0.0.1:18086/actuator/metrics/iot.access.modbus.pair.stale` | **0** | 采集周期/寄存器地址配对异常或重复订阅 ⇒ 整组丢弃（`docs/METRICS.md` §2.6；`docs/VALUE-DECODE-DESIGN.md` §4.3.4/§4.5.3） |
-| C4.2 | 字符串点位 GOOD 且值正确 | 查该点位 latest/历史（见 C5） | 质量 `GOOD`、值等于设备上报文本（全 NUL ⇒ GOOD + 空串，不是 BAD） | 非法 UTF-8 ⇒ BAD + `iot.access.value.normalize.failure{reason=not-utf8}`（`docs/VALUE-DECODE-DESIGN.md` §4.5.2） |
-| C4.3 | 多寄存器**同周期只一条读数**（无重复） | 对 `word_count>1` 点位做同窗口查询/计数 | 每个周期**恰好 1 条** | 半字配对/去重异常（`docs/VALUE-DECODE-DESIGN.md` §4.3.4「不产生重复读数」、§4.5.3） |
+| C4.1 | 【access 18086】半字配对陈旧 | `curl -s http://127.0.0.1:18086/actuator/metrics/iot.access.modbus.pair.stale` | **0** | 采集周期/寄存器地址配对异常或重复订阅 ⇒ 整组丢弃（`docs/METRICS.md` §2.6；`docs/VALUE-DECODE-DESIGN.md` §4.3.4/§4.5.3） |
+| C4.2 | 【Modbus 点位】字符串点位 GOOD 且值正确 | 查该点位 latest/历史（见 §C6.1/C6.2） | 质量 `GOOD`、值等于设备上报文本（全 NUL ⇒ GOOD + 空串，不是 BAD） | 非法 UTF-8 ⇒ BAD + `iot.access.value.normalize.failure{reason=not-utf8}`（`docs/VALUE-DECODE-DESIGN.md` §4.5.2） |
+| C4.3 | 【Modbus 点位】多寄存器**同周期只一条读数**（无重复） | 对 `word_count>1` 点位做同窗口查询/计数 | 每个周期**恰好 1 条** | 半字配对/去重异常（`docs/VALUE-DECODE-DESIGN.md` §4.3.4「不产生重复读数」、§4.5.3） |
 
 > 注：`?tag=reason:<值>` 是 Spring Boot Actuator 的**标准 tag 过滤用法**（仓内文档只示范了 `/actuator/metrics/<name>` 这一级，见 `docs/DEPLOY-BACKEND.md` §5.2）；
 > 若不生效，以第 ① 步的 `availableTags` 为准。
@@ -258,24 +303,30 @@ docker inspect -f '{{.State.Status}} restarts={{.RestartCount}} oom={{.State.OOM
 > ⚠️ **可执行性**：C4.1–C4.3 需要**真实/启用的 Modbus 点位**；生产当前唯一的 Modbus 设备已停用
 > （`docs/VALUE-DECODE-DESIGN.md` §5.6）⇒ 这三条在生产**当前无法执行，标注 `[未核实]`**；
 > 启用 Modbus 演示/真实设备后再按本表执行。
+>
+> ⚠️ **升级前不存在**：C4.1 的 `iot.access.modbus.pair.stale` 是 **2026-10-13 新增指标**；2026-10-13 生产只读实测
+> （旧 jar 已跑 30 小时）在 18086 上 **404** —— 属「未升级」，不是「配对没失败」也不是故障。
 
 ### C.5 接入侧规范化（类型规范化失败 = 0）
 
 | # | 核验项 | 命令 | 期望 | 不满足说明什么 |
 |---|---|---|---|---|
-| C5.1 | 全部原因码（`reason` 标签） | ① `curl -s http://127.0.0.1:18086/actuator/metrics/iot.access.value.normalize.failure` 看 `availableTags`；② 再按 reason 逐个取值（Actuator 标准 tag 查询）：`curl -s "http://127.0.0.1:18086/actuator/metrics/iot.access.value.normalize.failure?tag=reason:not-numeric"`，另 4 个 reason：`not-boolean`、`unknown-data-type`、`non-finite`、`not-utf8` | **全 0** | 该 reason 对应「建模/帧内容/解码配置」问题（`docs/METRICS.md` §2.6；`docs/VALUE-DECODE-DESIGN.md` §6）。`non-finite`/`not-utf8` 仅 Modbus 形态，当前 Modbus 停用 ⇒ 这两条 `[未核实]` |
-| C5.2 | 出口 byte[] 闸门 | `curl -s http://127.0.0.1:18086/actuator/metrics/iot.access.egress.invalid` | **0 且不增长** | 有未解码 `byte[]` 交付到出口 ⇒ 配置没切到 `key-value` / 版本没对齐（`docs/DEPLOY-BACKEND.md` §5.8；`docs/METRICS.md` §2.5） |
+| C5.1 | 【access 18086】全部原因码（`reason` 标签） | ① `curl -s http://127.0.0.1:18086/actuator/metrics/iot.access.value.normalize.failure` 看 `availableTags`；② 再按 reason 逐个取值（Actuator 标准 tag 查询）：`curl -s "http://127.0.0.1:18086/actuator/metrics/iot.access.value.normalize.failure?tag=reason:not-numeric"`，另 4 个 reason：`not-boolean`、`unknown-data-type`、`non-finite`、`not-utf8` | **全 0** | 该 reason 对应「建模/帧内容/解码配置」问题（`docs/METRICS.md` §2.6；`docs/VALUE-DECODE-DESIGN.md` §6）。`non-finite`/`not-utf8` 仅 Modbus 形态，当前 Modbus 停用 ⇒ 这两条 `[未核实]` |
+| C5.2 | 【access 18086】出口 byte[] 闸门 | `curl -s http://127.0.0.1:18086/actuator/metrics/iot.access.egress.invalid` | **0 且不增长** | 有未解码 `byte[]` 交付到出口 ⇒ 配置没切到 `key-value` / 版本没对齐（`docs/DEPLOY-BACKEND.md` §5.8；`docs/METRICS.md` §2.5） |
+
+> ⚠️ **升级前不存在**：C5.1 的 `iot.access.value.normalize.failure` 是 **2026-10-13 新增指标**；2026-10-13 生产只读实测
+> （旧 jar 已跑 30 小时）在 18086 上 **404**。升级后它才出现；**升级前 404 不能判「升级没生效」**（判升级见 §B.3/§C1.4）。
 
 ### C.6 业务面（曲线 / 最新值 / 告警 / 菜单）
 
 | # | 核验项 | 命令 | 期望 | 不满足说明什么 |
 |---|---|---|---|---|
-| C6.1 | 演示设备曲线仍出点 | 经网关带登录态：<br>`GET http://127.0.0.1:18080/iot/devices/9300012/series?propertyId=temperature&limit=5`（权限 `iot:series:get`） | 返回**数值点**（非空、`propertyId=temperature`） | 空列表/业务错误：见 §E「曲线画不出」。⚠️ 直连 18084 的路径是 `/devices/...`（无 `/iot` 前缀；`/iot` 是网关路由前缀）——`docs/DEPLOY-BACKEND.md` §5.8 里的 `127.0.0.1:18084/iot/devices/...` 写法与控制器映射不符，见文末一致性清单 |
-| C6.2 | 最新值更新 | `GET http://127.0.0.1:18080/iot/devices/9300012/latest`（权限 `iot:device:latest`），或 `REDISCLI_AUTH="$REDIS_PASSWORD" docker exec -e REDISCLI_AUTH ypbin-redis redis-cli HGETALL iot:latest:1:9300012` | 有值且 `ts` 随采集前进 | 不更新 ⇒ 见 §E「最新值不更新」（`docs/ACCESS-ENABLE.md` §4-⑤ 的有效判据是 Redis 里 `temperature` 的 ts 前进） |
-| C6.3 | 断档/可用率不误报 | `GET .../iot/devices/9300012/availability`；或看 `feeder-watch` | 无「喂数正常却报停摆」 | 见 §E「断档误报」（`deploy/PROD-OPS-NOTES.md` §5.2.1：日志 dropped 是误报源，对账才是真判据） |
-| C6.4 | 告警规则不误报 | 平台表：<br>`MYSQL_PWD="$MYSQL_ROOT_PASSWORD" docker exec -e MYSQL_PWD ypbin-mysql mysql -uroot -N -e "use ypbin_admin; select rule_code,state,observed_rounds from iot_platform_alert order by id desc limit 8"` | 无 `FIRING` 且 `observed_rounds` 不持续增长 | 见 §E「平台自告警 FIRING」；阈值/规则名见 `deploy/PROD-OPS-NOTES.md` §12 |
-| C6.5 | 设备告警不误报 | `MYSQL_PWD="$MYSQL_ROOT_PASSWORD" docker exec -e MYSQL_PWD ypbin-mysql mysql -uroot -N -e "use ypbin_admin; select id,device_id,property_id,state,consecutive_count,start_ts from iot_alert_instance where is_deleted=0 order by id desc limit 10"` | 无异常 `FIRING`（演示环境不应出现） | 规则/阈值/数据质量见 `docs/ALERTING-DESIGN.md`；通知状态见 §E「GIVEN_UP」 |
-| C6.6 | 菜单/权限（007 导入） | `MYSQL_PWD="$MYSQL_ROOT_PASSWORD" docker exec -e MYSQL_PWD ypbin-mysql mysql -uroot -N -e "use ypbin_admin; select count(*) from sys_menu where auth_code like 'iot:%' and is_deleted=0; select count(*) from sys_role_menu rm join sys_menu m on m.id=rm.menu_id where rm.role_id=1 and m.auth_code like 'iot:%'"` | 两个计数都 > 0 | 菜单未导入/未授权 ⇒ 页面无 IoT 菜单、租户 403（`deploy/sql/007-iot-data.sql`；`docs/permission-rollout.md` §4.1 提醒：种子只给超管 role_id=1，租户角色需另配） |
+| C6.1 | 【网关 18080+登录态】演示设备曲线仍出点 | 用 §C.0 的判码函数（带 `-H "Authorization: Bearer $T"`，即 `code_auth`）核：`code_auth 'http://127.0.0.1:18080/iot/devices/9300012/series?propertyId=temperature&limit=5'`（权限 `iot:series:get`） | **`code==200`** 且 `data` 为**数值点**（非空、`propertyId=temperature`） | `code!=200`：401=登录态/权限、404=路径错，其余见 §E「曲线画不出」。⚠️ **不能只看 HTTP 状态码**：2026-10-13 生产只读实测，直连 18084 的 `/devices/...` = `HTTP 200 + code=401`（路径对、缺登录态），`/iot/devices/...` = `HTTP 200 + code=404`（路径错）——两者状态码相同 |
+| C6.2 | 【网关 18080+登录态】最新值更新 | 同 §C.0 判码：`code_auth 'http://127.0.0.1:18080/iot/devices/9300012/latest'`（权限 `iot:device:latest`）；或 `REDISCLI_AUTH="$REDIS_PASSWORD" docker exec -e REDISCLI_AUTH ypbin-redis redis-cli HGETALL iot:latest:1:9300012` | **`code==200`** 且有值、`ts` 随采集前进 | 不更新 ⇒ 见 §E「最新值不更新」（`docs/ACCESS-ENABLE.md` §4-⑤ 的有效判据是 Redis 里 `temperature` 的 ts 前进） |
+| C6.3 | 【网关 18080+登录态】断档/可用率不误报 | 同 §C.0 判码：`code_auth 'http://127.0.0.1:18080/iot/devices/9300012/availability'`；或看 `feeder-watch` | **`code==200`** 且无「喂数正常却报停摆」 | 见 §E「断档误报」（`deploy/PROD-OPS-NOTES.md` §5.2.1：日志 dropped 是误报源，对账才是真判据） |
+| C6.4 | 【MySQL】平台告警规则不误报 | 平台表：<br>`MYSQL_PWD="$MYSQL_ROOT_PASSWORD" docker exec -e MYSQL_PWD ypbin-mysql mysql -uroot -N -e "use ypbin_admin; select rule_code,state,observed_rounds from iot_platform_alert order by id desc limit 8"` | 无 `FIRING` 且 `observed_rounds` 不持续增长 | 见 §E「平台自告警 FIRING」；阈值/规则名见 `deploy/PROD-OPS-NOTES.md` §12 |
+| C6.5 | 【MySQL】设备告警不误报 | `MYSQL_PWD="$MYSQL_ROOT_PASSWORD" docker exec -e MYSQL_PWD ypbin-mysql mysql -uroot -N -e "use ypbin_admin; select id,device_id,property_id,state,consecutive_count,start_ts from iot_alert_instance where is_deleted=0 order by id desc limit 10"` | 无异常 `FIRING`（演示环境不应出现） | 规则/阈值/数据质量见 `docs/ALERTING-DESIGN.md`；通知状态见 §E「GIVEN_UP」 |
+| C6.6 | 【MySQL】菜单/权限（007 导入） | `MYSQL_PWD="$MYSQL_ROOT_PASSWORD" docker exec -e MYSQL_PWD ypbin-mysql mysql -uroot -N -e "use ypbin_admin; select count(*) from sys_menu where auth_code like 'iot:%' and is_deleted=0; select count(*) from sys_role_menu rm join sys_menu m on m.id=rm.menu_id where rm.role_id=1 and m.auth_code like 'iot:%'"` | 两个计数都 > 0 | 菜单未导入/未授权 ⇒ 页面无 IoT 菜单、租户 403（`deploy/sql/007-iot-data.sql`；`docs/permission-rollout.md` §4.1 提醒：种子只给超管 role_id=1，租户角色需另配） |
 
 > ⚠️ **凭据卫生（照做）**：上面 MySQL 命令用的是 `MYSQL_PWD`（宿主 env）+ `docker exec -e MYSQL_PWD`（**只写变量名、不写值**），
 > Redis 用 `REDISCLI_AUTH`（宿主 env）+ `docker exec -e REDISCLI_AUTH`——口令都不进 argv/进程列表。
@@ -286,9 +337,9 @@ docker inspect -f '{{.State.Status}} restarts={{.RestartCount}} oom={{.State.OOM
 
 | # | 核验项 | 命令 | 期望 | 不满足说明什么 |
 |---|---|---|---|---|
-| C7.1 | access→iot 指标上报 | `curl -s http://127.0.0.1:18084/actuator/metrics/iot.platform_alert.access.report.lag` | 稳态 ≈ 15000ms（一个上报周期）；`-1` = 从未收到 | ≥45s ⇒ `PLATFORM_INSTANCE_UNREACHABLE`（`deploy/PROD-OPS-NOTES.md` §12） |
-| C7.2 | 上报链路失败 | access：`curl -s http://127.0.0.1:18086/actuator/metrics/iot.access.metrics.report.failure` | 期望 0 | 增长 ⇒ 推送断、平台侧相关规则判「不可判定」（`docs/METRICS.md` §2.7） |
-| C7.3 | 喂数停摆看门狗 | `systemctl --failed`；`journalctl -u feeder-watch.service --since -30min --no-pager \| grep -E '判定: (ALERT\|无法求值)'` | 无输出 / 单元非 failed | 命中 ⇒ 停摆或判据不可求值（`deploy/PROD-OPS-NOTES.md` §5.1；注意实际周期 ≈17–20 分钟，§5.3） |
+| C7.1 | 【iot 18084】access→iot 指标上报 | `curl -s http://127.0.0.1:18084/actuator/metrics/iot.platform_alert.access.report.lag` | 稳态 ≈ 15000ms（一个上报周期）；`-1` = 从未收到 | ≥45s ⇒ `PLATFORM_INSTANCE_UNREACHABLE`（`deploy/PROD-OPS-NOTES.md` §12）。✅ **已核实存在**（2026-10-13 生产只读实测补测）：旧 jar 的 18084 指标名里有 **`iot.platform_alert.*` 7 条**（`access.report.lag` / `firing` / `notify.send` / `notify.succeeded` / `notify.failed` …）与 **`iot.lease.*` 3 条**（`expired` / `revoked` / `takeover`）⇒ 该指标**升级前后都存在**，所以**升级后若在此仍是 404/取不到，才是真信号**（不要再用「旧 jar 可能还没有这个指标」来解释）。 |
+| C7.2 | 【access 18086】上报链路失败 | access：`curl -s http://127.0.0.1:18086/actuator/metrics/iot.access.metrics.report.failure` | 期望 0 | 增长 ⇒ 推送断、平台侧相关规则判「不可判定」（`docs/METRICS.md` §2.7） |
+| C7.3 | 【systemd】喂数停摆看门狗 | `systemctl --failed`；`journalctl -u feeder-watch.service --since -30min --no-pager \| grep -E '判定: (ALERT\|无法求值)'` | 无输出 / 单元非 failed | 命中 ⇒ 停摆或判据不可求值（`deploy/PROD-OPS-NOTES.md` §5.1；注意实际周期 ≈17–20 分钟，§5.3） |
 
 ---
 
@@ -430,7 +481,10 @@ SDK 侧（本仓只登记名字，暴露路径未核实）：`iot.tcp.selector.n
 - 租户可分配：`PUT /iot/tenant-ledger/{id}/assignable`（`docs/ACCESS-ENABLE.md` §2.1）。
 - feeder-watch：`systemctl --failed`、`journalctl -u feeder-watch.service`（`deploy/PROD-OPS-NOTES.md` §5.1）。
 
-## 附录 C：文档一致性清单（发现的不一致，**未在本手册静默改**）
+## 附录 C：文档一致性清单（4 项均已由 PR #258 / commit `0bd024e9` 修正，保留记录）
+
+> 下列 4 项由 #257 手册转交；Lead 已在 **PR #258（commit `0bd024e9`）** 修正。此处保留原始记录与判定依据，避免「提过就忘」。
+> （本手册按 2026-10-13 生产只读实测收紧时复核：4 项当前**均已修正**。）
 
 1. `docs/DEPLOY-BACKEND.md` §5.8 步骤 ④ 写 `curl http://127.0.0.1:18084/iot/devices/9300012/series?...`；
    直连 18084 **没有 `/iot` 前缀**（`IotTimeSeriesController` 映射是 `/devices/{deviceId}/series`，`/iot` 是网关路由前缀、`StripPrefix=1`）。
