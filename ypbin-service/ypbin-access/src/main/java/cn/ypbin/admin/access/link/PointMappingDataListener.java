@@ -249,7 +249,10 @@ public class PointMappingDataListener implements DataListener {
                     onNonFiniteFloat(point, value);
                     return;
                 }
-                BigDecimal floatValue = BigDecimal.valueOf((double) decoded);
+                // float32 的十进制表示取**最短可回读**形态：Float.toString 保证
+                // parseFloat(toString(f)) == f（round-trip 恒等），不声明超出 float32 精度的位数；
+                // 用 Double.toString 会给出 17 位精确值噪声（如 0.1f → 0.10000000149011612）。
+                BigDecimal floatValue = new BigDecimal(Float.toString(decoded));
                 emit(point.getIdentifier(), value, AccessReading.applyScale(floatValue,
                     point.getScaleFactor(), point.getOffsetValue()));
                 return;

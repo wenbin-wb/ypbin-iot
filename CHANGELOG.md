@@ -48,7 +48,7 @@
   `ypbin-service/ypbin-access/**`、`ypbin-service-api/ypbin-iot-api/**`、`deploy/sql/**`）：
   - 新增 `register_format VARCHAR(16) NOT NULL DEFAULT 'int'`（int|float|bits）、`bit_offset`/`bit_length`（仅 bits）；
   - **float**：IEEE754 单精度（2 寄存器，复用 v1 半字配对/扩地址）；`byte_order` 字序生效；有限值产出
-    `BigDecimal.valueOf((double) f)`（float32→double 精确、不做位数四舍五入）；**NaN/±Inf ⇒ 点位 BAD + 计数**
+    `new BigDecimal(Float.toString(f))`（float32 **最短可回读**表示，round-trip 恒等；不做位数四舍五入）；**NaN/±Inf ⇒ 点位 BAD + 计数**
     `iot.access.value.normalize.failure{reason=non-finite}`（不落库）；
   - **bits**：单寄存器位域；`bit_length=1` ⇒ Boolean（**不参与缩放**）、`>1` ⇒ 无符号整数（可走既有缩放）；
   - 校验（新字段严格）：float 强制 `word_count=2`/`signed=false`/`bit_*` 空/`data_type=decimal`；bits 强制

@@ -259,7 +259,7 @@ DB 列仍是 `TINYINT NOT NULL DEFAULT 0`）、`byteOrder`（已存在，`big`\|
 - 32 位组装与 v1 一致：`big` ⇒ `(R0<<16)|R1`、`little` ⇒ `(R1<<16)|R0`（`R0`=base、`R1`=base+1；null⇒big）；
 - `float f = Float.intBitsToFloat((int) raw32)`；
 - **NaN/±Inf ⇒ 该点位 BAD + 计数**（规则与理由见 §4.4.6），不产出值；
-- 有限值 ⇒ **`BigDecimal.valueOf((double) f)`**（口径与理由见 §4.4.7）；
+- 有限值 ⇒ **`new BigDecimal(Float.toString(f))`**（float32 最短可回读形态；口径与理由见 §4.4.7）；
 - 8 组必测：`big/little` × 正/负 × {`0.0`、`-0.0`、`1.5`、`3.4028235E38`、`NaN`、`+Inf`}；`-0.0` 经 `BigDecimal` 归一为 `0.0`（如实记录，IEEE 符号零对曲线无意义）；
 - 不支持 IEEE754 双精度（4 寄存器，后续）。
 
@@ -294,13 +294,21 @@ DB 列仍是 `TINYINT NOT NULL DEFAULT 0`）、`byteOrder`（已存在，`big`\|
 
 #### 4.4.7 float → BigDecimal 精度口径（最终，附理由）
 
-**规则**：`BigDecimal.valueOf((double) f)`；**不做** `setScale`/四舍五入；不先转字符串再 parse；不用 `new BigDecimal(double)`。
+**规则**：`new BigDecimal(Float.toString(f))` —— 取 **float32 的十进制最短可回读表示**；
+**不做** `setScale`/四舍五入（配置了 `scale_factor`/`offset_value` 的仍由既有 `applyScale` 统一处理）。
 
-**理由**：
-1. float32 → double 是**精确**的（每个 float 都能被 double 精确表示）；
-2. `BigDecimal.valueOf(double)` 用 `Double.toString`（最短可回读十进制）⇒ 保留 float 的原值语义，且不引入 double 的二进制展开噪声（`new BigDecimal(double)` 会得到 `1.1000000238418579` 这类）；
-3. 若点位配了 `scale_factor`/`offset_value`，由既有 `applyScale` 统一 `setScale(6, HALF_UP)` —— 那是**配置的缩放语义**，不是解码精度损失；
-4. 与 v1 int 路径一致：无缩放时值以自然形态交付，有缩放时走同一 `applyScale`。
+**为什么用 `Float.toString` 而不是 `Double.toString`/`BigDecimal.valueOf((double) f)`**：
+1. `Float.toString(f)` 保证 **round-trip 恒等**：`Float.parseFloat(Float.toString(f)) == f`；
+   它给出**能唯一确定该 float32 的最短十进制**，不声明超出 float32 精度的位数。
+2. `BigDecimal.valueOf((double) f)` 走 `Double.toString` ⇒ 对 float32 会输出 **17 位精确值**：
+   `0.1f → 0.10000000149011612`、`23.4f → 23.399999618530273`、`3.4028235E38f → 3.4028234663852886E+38`。
+   这会把「float32 只能唯一确定到 ~7 位有效数字」伪装成「设备报了 17 位小数」，污染曲线/阈值/CSV 导出，
+   运维会误判成采集问题。`Float.toString` 给出 `0.1`/`23.4`/`3.4028235E+38`，是**不有损**的最短表示。
+3. 反面同样要避免：`new BigDecimal(double)` 会得到二进制展开噪声（`1.1000000238418579`）；也不做任何截断/四舍五入
+   （那才是有损）。
+4. 若点位配了 `scale_factor`/`offset_value`，由既有 `applyScale` 统一 `setScale(6, HALF_UP)` —— 那是**配置的缩放语义**，
+   不是解码精度损失；与 v1 int 路径一致（无缩放自然形态、有缩放走同一 `applyScale`）。
+5. `-0.0f`：`BigDecimal` **没有负零** ⇒ `new BigDecimal("-0.0")` 归一到 `0.0`（IEEE 符号零对曲线/统计无意义，如实记录）。
 
 #### 4.4.8 DDL/门禁与迁移文件名修正
 

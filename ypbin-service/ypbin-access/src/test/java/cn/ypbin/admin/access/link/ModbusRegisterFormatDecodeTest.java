@@ -43,6 +43,11 @@ class ModbusRegisterFormatDecodeTest {
     @Test
     @DisplayName("★ float 有限值矩阵：big/little × 正/负 × {0.0,-0.0,1.5,3.4028235E38} ⇒ GOOD + BigDecimal 精确")
     void floatFiniteMatrixMustBeExact() {
+        // 新口径：Float.toString 最短可回读 ⇒ 0.1f→0.1、23.4f→23.4（不是 Double.toString 的 17 位噪声）
+        assertThat(floatReading(0x3DCCCCCD, "big").value()).isEqualTo(new BigDecimal("0.1"));
+        assertThat(floatReading(0x3DCCCCCD, "little").value()).isEqualTo(new BigDecimal("0.1"));
+        assertThat(floatReading(0x41BB3333, "big").value()).isEqualTo(new BigDecimal("23.4"));
+        assertThat(floatReading(0x41BB3333, "little").value()).isEqualTo(new BigDecimal("23.4"));
         assertThat(floatReading(0x3FC00000, "big").value()).isEqualTo(new BigDecimal("1.5"));
         assertThat(floatReading(0x3FC00000, "little").value()).isEqualTo(new BigDecimal("1.5"));
         assertThat(floatReading(0xBFC00000, "big").value()).isEqualTo(new BigDecimal("-1.5"));
@@ -50,16 +55,36 @@ class ModbusRegisterFormatDecodeTest {
         assertThat((BigDecimal) floatReading(0x00000000, "big").value())
             .isEqualByComparingTo(BigDecimal.ZERO);
         assertThat((BigDecimal) floatReading(0x80000000, "big").value())
-            .as("-0.0 经 BigDecimal 归一为 0.0（IEEE 符号零对曲线无意义）")
+            .as("-0.0f：BigDecimal 无负零 ⇒ 归一到 0.0（IEEE 符号零对曲线无意义）")
             .isEqualByComparingTo(BigDecimal.ZERO);
-        // float32 → double 是精确的，BigDecimal.valueOf(double) 给出该 float 的**精确值**（不是 float 的最短十进制）
         assertThat((BigDecimal) floatReading(0x7F7FFFFF, "big").value())
-            .isEqualByComparingTo(new BigDecimal("3.4028234663852886E38"));
+            .isEqualByComparingTo(new BigDecimal("3.4028235E38"));
         assertThat((BigDecimal) floatReading(0x7F7FFFFF, "little").value())
-            .isEqualByComparingTo(new BigDecimal("3.4028234663852886E38"));
+            .isEqualByComparingTo(new BigDecimal("3.4028235E38"));
         // 字序必须真的生效：同一个 32 位模式在 big/little 下是不同的数
         assertThat(floatReading(0x00003FC0, "big").value())
             .as("0x00003FC0 按 big 解释是一个极小值，按 little 才是 1.5").isNotEqualTo(new BigDecimal("1.5"));
+    }
+
+    @Test
+    @DisplayName("★ float 精度口径：Float.toString 最短可回读（round-trip 恒等），不得换回 Double.toString")
+    void floatDecimalMustBeShortestRoundTrip() {
+        int[] patterns = {0x3DCCCCCD, 0x41BB3333, 0x3FC00000, 0xBFC00000, 0x7F7FFFFF};
+        for (int bits : patterns) {
+            float f = Float.intBitsToFloat(bits);
+            BigDecimal decoded = new BigDecimal(Float.toString(f));
+            // 按**数值**比较：`BigDecimal.toString()` 的指数带符号（E+38），`Float.toString()` 不带（E38）
+            // ——比字符串格式会把"格式差异"误报成"精度错误"（本用例初版就这么错过一次）。
+            assertThat(decoded).as("最短可回读（无 17 位噪声）：%s", Float.toString(f))
+                .isEqualByComparingTo(new BigDecimal(Float.toString(f)));
+            assertThat(decoded.floatValue()).as("round-trip 恒等：parseFloat(toString(f)) == f")
+                .isEqualTo(f);
+        }
+        assertThat(new BigDecimal(Float.toString(0.1f)).toString()).isEqualTo("0.1");
+        assertThat(new BigDecimal(Float.toString(23.4f)).toString()).isEqualTo("23.4");
+        assertThat(new BigDecimal(Float.toString(1.5f)).toString()).isEqualTo("1.5");
+        assertThat(new BigDecimal(Float.toString(3.4028235E38f)).toString()).isEqualTo("3.4028235E+38");
+        assertThat(new BigDecimal(Float.toString(-1.5f)).toString()).isEqualTo("-1.5");
     }
 
     @Test
