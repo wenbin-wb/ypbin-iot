@@ -31,3 +31,4 @@
 2026-10-04-iot-device-import-menu.sql
 2026-10-05-iot-platform-alert-schema.sql
 2026-10-06-iot-command-client-key.sql
+2026-10-13-iot-modbus-register-schema.sql

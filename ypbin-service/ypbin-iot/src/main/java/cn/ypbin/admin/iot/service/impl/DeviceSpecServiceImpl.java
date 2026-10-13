@@ -184,6 +184,8 @@ public class DeviceSpecServiceImpl implements DeviceSpecService {
         point.setScaleFactor(mapping.getScaleFactor());
         point.setOffsetValue(mapping.getOffsetValue());
         point.setByteOrder(mapping.getByteOrder());
+        point.setWordCount(mapping.getWordCount());
+        point.setSigned(mapping.getSigned());
         point.setRw(mapping.getRw());
         return point;
     }

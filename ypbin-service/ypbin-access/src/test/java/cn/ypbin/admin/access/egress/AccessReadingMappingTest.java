@@ -358,7 +358,7 @@ class AccessReadingMappingTest {
     }
 
     @Test
-    @DisplayName("byteOrder 对 key-value 文本值无影响（寄存器级大小端解码未实现，参数不足 ⇒ 不猜）")
+    @DisplayName("byteOrder 对 key-value 文本值无影响（字序只对 Modbus 寄存器 word_count=2 生效）")
     void byteOrderMustNotAffectKeyValueNormalization() {
         List<AccessReading> readings = new ArrayList<>();
         AccessPointMappingDto littleEndian = point("TEMP", "temperature", "decimal", null, null);
@@ -369,7 +369,7 @@ class AccessReadingMappingTest {
 
         assertThat(readings).singleElement().satisfies(reading ->
             assertThat(String.valueOf(reading.value()))
-                .as("key-value 文本值没有字节序语义；寄存器帧的大小端解码需先补位宽/符号参数")
+                .as("key-value 文本值没有字序语义；Modbus 寄存器帧的字序由 word_count/byte_order 承载")
                 .isEqualTo("23.5"));
     }
 

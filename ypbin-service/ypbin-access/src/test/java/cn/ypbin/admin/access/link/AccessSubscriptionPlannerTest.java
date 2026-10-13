@@ -591,6 +591,88 @@ class AccessSubscriptionPlannerTest {
             .containsExactly("TEMP", "HUMI", "SN");
     }
 
+    @Test
+    @DisplayName("★ Modbus word_count=2：一次订阅必须带 base 与 base+1 两个寄存器")
+    void modbusWordCountTwoMustSubscribeBaseAndNext() {
+        DeviceSession session = mock(DeviceSession.class);
+        when(session.subscribe(any(SubscribeRequest.class), any()))
+            .thenReturn(CompletableFuture.completedFuture(null));
+        AtomicReference<Map<String, DeviceSession>> bound =
+            new AtomicReference<>(Map.of("d1", session));
+        AccessSubscriptionPlanner planner = planner(bound);
+
+        String points = "[{\"propertyId\":\"1\",\"identifier\":\"counter\","
+            + "\"address\":\"holding:0\",\"wordCount\":2,\"signed\":false,"
+            + "\"byteOrder\":\"big\"}]";
+        assertThat(planner.subscribe(List.of(device("d1", points)))).isEqualTo(1);
+
+        ArgumentCaptor<SubscribeRequest> requests = ArgumentCaptor.forClass(SubscribeRequest.class);
+        verify(session, times(1)).subscribe(requests.capture(), any());
+        assertThat(requests.getValue().addresses().stream().map(PointAddress::raw).toList())
+            .as("32 位点位必须同时订阅基址与下一个寄存器（SDK 合并成一次读）")
+            .containsExactly("holding:0", "holding:1");
+    }
+
+    @Test
+    @DisplayName("★ Modbus word_count=1：订阅地址与今天完全一致（传统 5 位编号也照常）")
+    void modbusWordCountOneMustStaySingle() {
+        DeviceSession session = mock(DeviceSession.class);
+        when(session.subscribe(any(SubscribeRequest.class), any()))
+            .thenReturn(CompletableFuture.completedFuture(null));
+        AtomicReference<Map<String, DeviceSession>> bound =
+            new AtomicReference<>(Map.of("d1", session));
+        AccessSubscriptionPlanner planner = planner(bound);
+
+        String points = "[{\"propertyId\":\"1\",\"identifier\":\"temperature\","
+            + "\"address\":\"40001\"}]";
+        assertThat(planner.subscribe(List.of(device("d1", points)))).isEqualTo(1);
+
+        ArgumentCaptor<SubscribeRequest> requests = ArgumentCaptor.forClass(SubscribeRequest.class);
+        verify(session, times(1)).subscribe(requests.capture(), any());
+        assertThat(requests.getValue().addresses().stream().map(PointAddress::raw).toList())
+            .as("word_count=1 不做地址扩展（传统编号向后兼容）")
+            .containsExactly("40001");
+    }
+
+    @Test
+    @DisplayName("★ Modbus 寄存器重叠：扩出的 base+1 与其它点位地址重复 ⇒ 去重（不重复读数）")
+    void modbusWordCountTwoSharedRegisterMustDedupe() {
+        DeviceSession session = mock(DeviceSession.class);
+        when(session.subscribe(any(SubscribeRequest.class), any()))
+            .thenReturn(CompletableFuture.completedFuture(null));
+        AtomicReference<Map<String, DeviceSession>> bound =
+            new AtomicReference<>(Map.of("d1", session));
+        AccessSubscriptionPlanner planner = planner(bound);
+
+        // A 是 32 位（holding:0 + holding:1）；B 是 16 位 holding:1 ⇒ holding:1 必须只订阅一次
+        String points = "[{\"propertyId\":\"1\",\"identifier\":\"counter\","
+            + "\"address\":\"holding:0\",\"wordCount\":2},"
+            + "{\"propertyId\":\"2\",\"identifier\":\"other\",\"address\":\"holding:1\"}]";
+        assertThat(planner.subscribe(List.of(device("d1", points)))).isEqualTo(1);
+
+        ArgumentCaptor<SubscribeRequest> requests = ArgumentCaptor.forClass(SubscribeRequest.class);
+        verify(session, times(1)).subscribe(requests.capture(), any());
+        assertThat(requests.getValue().addresses().stream().map(PointAddress::raw).toList())
+            .containsExactly("holding:0", "holding:1");
+    }
+
+    @Test
+    @DisplayName("★ Modbus word_count=2 但地址非法（传统 5 位编号）⇒ 跳过该设备、不抛断整轮")
+    void modbusWordCountTwoInvalidAddressMustSkipDeviceNotTick() {
+        DeviceSession session = mock(DeviceSession.class);
+        when(session.subscribe(any(SubscribeRequest.class), any()))
+            .thenReturn(CompletableFuture.completedFuture(null));
+        AtomicReference<Map<String, DeviceSession>> bound =
+            new AtomicReference<>(Map.of("d1", session));
+        AccessSubscriptionPlanner planner = planner(bound);
+
+        String points = "[{\"propertyId\":\"1\",\"identifier\":\"counter\","
+            + "\"address\":\"40001\",\"wordCount\":2}]";
+        assertThat(planner.subscribe(List.of(device("d1", points))))
+            .as("地址扩展失败 ⇒ 本设备本轮跳过（映射校验应已拦住，这里防直连 DB 的坏数据）").isZero();
+        verify(session, never()).subscribe(any(SubscribeRequest.class), any());
+    }
+
     private AccessSubscriptionPlanner planner(AtomicReference<Map<String, DeviceSession>> bound) {
         return planner(bound, new SimpleMeterRegistry());
     }

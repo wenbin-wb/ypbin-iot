@@ -10,6 +10,7 @@
 package cn.ypbin.admin.iot.entity;
 
 import cn.ypbin.starter.tenant.core.TenantBaseEntity;
+import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableName;
 import java.io.Serial;
 import java.math.BigDecimal;
@@ -57,8 +58,15 @@ public class IotPointMapping extends TenantBaseEntity {
     /** 缩放偏移。 */
     private BigDecimal offsetValue;
 
-    /** 字节序：big|little。 */
+    /** 字序（word order）：big=高字在前 / little=低字在前。仅 Modbus word_count=2 生效。 */
     private String byteOrder;
+
+    /** 连续寄存器个数（1|2；默认 1 = 旧行为）。仅 Modbus 寄存器点位生效。 */
+    private Integer wordCount;
+
+    /** 整型符号：false=无符号 / true=有符号（DB TINYINT 0/1；与 enabled 同一约定）。 */
+    @TableField("`signed`")
+    private Boolean signed;
 
     /** 读写权限（与属性 access_mode 联动校验）。 */
     private String rw;

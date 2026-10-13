@@ -12,8 +12,10 @@ package cn.ypbin.admin.iot.service.impl;
 import cn.ypbin.admin.iot.entity.IotDevice;
 import cn.ypbin.admin.iot.entity.IotPointMapping;
 import cn.ypbin.admin.iot.enums.AccessMode;
+import cn.ypbin.admin.iot.enums.IotProtocol;
 import cn.ypbin.admin.iot.enums.ModelStatus;
 import cn.ypbin.admin.iot.enums.PointRefType;
+import cn.ypbin.admin.iot.enums.ThingModelDataType;
 import cn.ypbin.admin.iot.entity.IotProduct;
 import cn.ypbin.admin.iot.entity.IotProperty;
 import cn.ypbin.admin.iot.entity.IotService;
@@ -23,6 +25,7 @@ import cn.ypbin.admin.iot.mapper.IotPointMappingMapper;
 import cn.ypbin.admin.iot.mapper.IotProductMapper;
 import cn.ypbin.admin.iot.mapper.IotPropertyMapper;
 import cn.ypbin.admin.iot.mapper.IotServiceMapper;
+import cn.ypbin.admin.iot.modbus.ModbusRegisterAddress;
 import cn.ypbin.admin.iot.model.req.IotPointMappingReq;
 import cn.ypbin.admin.iot.model.resp.IotPointMappingResp;
 import cn.ypbin.admin.iot.service.IotPointMappingService;
@@ -160,6 +163,63 @@ public class IotPointMappingServiceImpl extends BaseServiceImpl<IotPointMappingM
                 "映射读写权限与属性 access_mode 不一致：属性=" + property.getAccessMode()
                     + " 映射=" + req.getRw());
         }
+        validateRegisterDecode(device, property, req);
+    }
+
+    /**
+     * 寄存器解码 v1 的映射校验（{@code word_count}/{@code signed}）。
+     *
+     * <p><b>新字段严格 / 旧字段宽容</b>（有意的不对称，见 {@code docs/VALUE-DECODE-DESIGN.md} §4.3.2）：
+     * {@code word_count}/{@code signed} 是本版新增、语义明确 ⇒ 非适用场景（非 Modbus、位类型、非整型
+     * {@code dataType}、多寄存器非显式地址）一律 fail-fast；{@code byte_order} 是既有自由文本列、历史从未
+     * 被消费 ⇒ 只在真正生效的场景（Modbus + {@code word_count=2}）由 {@code @Pattern} 校验 {@code big|little}，
+     * 其余场景**忽略**（避免因一个没人看过的旧值把编辑历史行拦下）。</p>
+     *
+     * @param device   设备（提供协议码）
+     * @param property 属性（提供 dataType）
+     * @param req      映射请求
+     */
+    private void validateRegisterDecode(IotDevice device, IotProperty property, IotPointMappingReq req) {
+        int wordCount = req.getWordCount() == null ? 1 : req.getWordCount();
+        boolean signed = Boolean.TRUE.equals(req.getSigned());
+        if (wordCount != 1 && wordCount != 2) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "寄存器个数（word_count）只能是 1 或 2：" + wordCount);
+        }
+        if (wordCount == 1 && !signed) {
+            // 默认 = 旧行为：不触发任何新字段校验（传统 5 位编号照常可用）
+            return;
+        }
+        if (!IotProtocol.MODBUS.getCode().equals(device.getProtocol())) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "仅 Modbus 寄存器点位支持 word_count/signed（当前协议=" + device.getProtocol() + "）");
+        }
+        if (!ModbusRegisterAddress.REGISTER_TYPES.contains(req.getAddressType())) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "位类型（" + req.getAddressType() + "）不支持 word_count/signed（寄存器解码仅对 holding/input 生效）");
+        }
+        ThingModelDataType dataType = ThingModelDataType.of(property.getDataType());
+        if (dataType != ThingModelDataType.INT && dataType != ThingModelDataType.LONG) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "寄存器解码 v1 仅支持 int/long 数据类型（当前=" + property.getDataType() + "）");
+        }
+        if (wordCount == 2) {
+            if (!ModbusRegisterAddress.isExplicitForm(req.getRawAddress())) {
+                throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                    "word_count=2 需要显式 type:offset 形式（如 holding:0）；传统 5 位编号不支持多寄存器");
+            }
+            String typeCode = ModbusRegisterAddress.typeCode(req.getRawAddress());
+            if (!req.getAddressType().equalsIgnoreCase(typeCode)) {
+                throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                    "word_count=2 的 raw_address 寄存器区必须与 address_type 一致：address_type="
+                        + req.getAddressType() + " raw_address=" + req.getRawAddress());
+            }
+            if (ModbusRegisterAddress.offset(req.getRawAddress()) + 1 > ModbusRegisterAddress.MAX_OFFSET) {
+                throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                    "word_count=2 的寄存器基址越界（offset+1 > " + ModbusRegisterAddress.MAX_OFFSET
+                        + "）：" + req.getRawAddress());
+            }
+        }
     }
 
     private void apply(IotPointMapping mapping, IotPointMappingReq req) {
@@ -172,6 +232,8 @@ public class IotPointMappingServiceImpl extends BaseServiceImpl<IotPointMappingM
         mapping.setScaleFactor(req.getScaleFactor());
         mapping.setOffsetValue(req.getOffsetValue());
         mapping.setByteOrder(req.getByteOrder());
+        mapping.setWordCount(req.getWordCount() == null ? 1 : req.getWordCount());
+        mapping.setSigned(Boolean.TRUE.equals(req.getSigned()));
         mapping.setRw(req.getRw());
         mapping.setEnabled(req.getEnabled() == null ? Boolean.TRUE : req.getEnabled());
     }
@@ -210,6 +272,8 @@ public class IotPointMappingServiceImpl extends BaseServiceImpl<IotPointMappingM
         resp.setScaleFactor(entity.getScaleFactor());
         resp.setOffsetValue(entity.getOffsetValue());
         resp.setByteOrder(entity.getByteOrder());
+        resp.setWordCount(entity.getWordCount());
+        resp.setSigned(entity.getSigned());
         resp.setRw(entity.getRw());
         resp.setEnabled(entity.getEnabled());
         resp.setCreateTime(entity.getCreateTime());

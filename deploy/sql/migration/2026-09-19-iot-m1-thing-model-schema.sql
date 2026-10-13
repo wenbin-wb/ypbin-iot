@@ -169,7 +169,7 @@ CREATE TABLE iot_point_mapping
     poll_interval_ms INT             NOT NULL DEFAULT 0 COMMENT '采集周期（0=仅订阅不轮询，对齐 iot-starter pollInterval）',
     scale_factor     DECIMAL(20, 6)  NULL COMMENT '缩放系数：value = raw * scale + offset',
     offset_value     DECIMAL(20, 6)  NULL COMMENT '缩放偏移',
-    byte_order       VARCHAR(16)     NULL COMMENT '字节序：big|little',
+    byte_order       VARCHAR(16)     NULL COMMENT '字序（word order）：big=高字在前(ABCD)|little=低字在前(CDAB)；不支持 BADC/DCBA 字节交换',
     rw               VARCHAR(8)      NOT NULL DEFAULT 'R' COMMENT '读写权限（与属性 access_mode 联动校验）',
     enabled          TINYINT         NOT NULL DEFAULT 1 COMMENT '启用/停采',
     create_user      BIGINT          NULL COMMENT '创建人',

@@ -12,6 +12,7 @@ package cn.ypbin.admin.access.link;
 import cn.ypbin.admin.access.egress.AccessReadingSink;
 import cn.ypbin.admin.iot.device.AccessPointMappingDto;
 import cn.ypbin.admin.iot.enums.IotProtocol;
+import cn.ypbin.admin.iot.modbus.ModbusRegisterAddress;
 import cn.ypbin.iot.core.model.DeviceSpec;
 import cn.ypbin.iot.core.model.PointAddress;
 import cn.ypbin.iot.core.model.SubscribeRequest;
@@ -181,9 +182,16 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
                 log.debug("[access] 设备无点位映射，无需订阅：deviceId={}", device.deviceId());
                 continue;
             }
-            List<PointAddress> addresses = points.stream()
-                .map(point -> PointAddress.of(point.getAddress()))
-                .toList();
+            List<PointAddress> addresses;
+            try {
+                addresses = expandAddresses(device, points);
+            } catch (RuntimeException ex) {
+                // 映射校验应已拦住（word_count=2 必须是显式 type:offset）；直连 DB 的坏数据在这里暴露，
+                // 且只跳过本设备、不拖垮整轮 tick（其它设备照常订阅）
+                log.error("[access] 点位地址扩展失败（本设备本轮跳过订阅；请检查 word_count=2 的 raw_address）："
+                    + "deviceId={}", device.deviceId(), ex);
+                continue;
+            }
             if (requiresPerAddressSubscribe(device)) {
                 // 非 key-value 的 TCP 是「单点位流」：TcpSession#subscribe 对 >1 地址 fail-fast
                 // （TcpAdapter.MSG_MULTI_ADDRESS_UNSUPPORTED），必须逐点位单订阅（UP-4 契约）。
@@ -193,11 +201,11 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
                 }
                 continue;
             }
-            // key-value TCP 与非 TCP：一次多地址订阅。
-            // key-value 下 SDK 对**每个地址条目**各产出一个 PointValue ⇒ 重复 raw 会产生重复读数，
-            // 故按 raw 去重（与逐点位路径的 distinct 口径一致）；非 TCP 保持既有行为不动。
-            List<PointAddress> subscribeAddresses = isTcp(device)
-                ? distinctByRaw(addresses) : addresses;
+            // key-value TCP 与非 TCP（含 Modbus）：一次多地址订阅。
+            // 按 raw 去重是必需的：key-value 下 SDK 对每个地址条目各产出一个 PointValue；Modbus
+            // word_count=2 扩出的 base+1 也可能与其它点位的地址重叠 ⇒ 不去重会重复读数
+            // （listener 的 registerByAddress 是后者覆盖）。
+            List<PointAddress> subscribeAddresses = distinctByRaw(addresses);
             SubscribeRequest request = device.pollInterval().isZero()
                 ? SubscribeRequest.of(subscribeAddresses)
                 : new SubscribeRequest(subscribeAddresses, device.pollInterval(), device.pollInterval(),
@@ -292,6 +300,29 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
      */
     private boolean requiresPerAddressSubscribe(DeviceSpec device) {
         return isTcp(device) && !tcpKeyValuePayloadFormat;
+    }
+
+    /**
+     * 展开订阅地址：Modbus {@code word_count=2} 的点位额外订阅 {@code base+1}（同 {@code address_type}）。
+     *
+     * <p>{@code raw_address} 仍是**基址**；扩出的地址让 SDK 在一次读里同时取回两个字（相邻地址会被 SDK
+     * 合并成一次请求、逐地址回调），宿主再按点位配对。{@code word_count=1} 与非 Modbus 与今天完全一致。</p>
+     *
+     * @param device 设备规格（取协议码）
+     * @param points 点位映射
+     * @return 订阅地址（可能含 base+1）
+     * @throws IllegalArgumentException word_count=2 的地址不是显式 type:offset 或越界
+     */
+    private static List<PointAddress> expandAddresses(DeviceSpec device, List<AccessPointMappingDto> points) {
+        boolean modbus = IotProtocol.MODBUS.getCode().equals(device.protocol().value());
+        List<PointAddress> addresses = new ArrayList<>(points.size());
+        for (AccessPointMappingDto point : points) {
+            addresses.add(PointAddress.of(point.getAddress()));
+            if (modbus && point.getWordCount() != null && point.getWordCount() == 2) {
+                addresses.add(PointAddress.of(ModbusRegisterAddress.next(point.getAddress())));
+            }
+        }
+        return addresses;
     }
 
     /**

@@ -51,8 +51,14 @@ public class IotPointMappingResp {
     /** 缩放偏移。 */
     private BigDecimal offsetValue;
 
-    /** 字节序。 */
+    /** 字序（word order）。 */
     private String byteOrder;
+
+    /** 连续寄存器个数（1|2）。 */
+    private Integer wordCount;
+
+    /** 整型符号（true=有符号）。 */
+    private Boolean signed;
 
     /** 读写权限。 */
     private String rw;
