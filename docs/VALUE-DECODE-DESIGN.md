@@ -114,7 +114,7 @@ OPC UA `ByteString`（生产 access fat jar 不含这两个协议模块，属潜
 
 | 需求 | 为什么没做 | 建议落法（含验收） |
 |---|---|---|
-| ~~Modbus 寄存器 16/32 位、有符号/无符号、字序~~ | **已由 §4.3 v1 落地（2026-10-13）**：`word_count`/`signed` 新增、`byte_order` 复用为字序；IEEE754 浮点与 BADC/DCBA 字节交换**仍不在 v1**（见 §4.3.6） | 见 §4.3；验收：8 组矩阵 + 长度不足 + 配对/陈旧 + 向后兼容 |
+| ~~Modbus 寄存器 16/32 位、有符号/无符号、字序~~ | **已由 §4.3 v1 / §4.4 v2 / §4.7 v4 落地（2026-10-13）**：`word_count`/`signed`/`byte_order` + IEEE754 单精度（§4.4）与双精度（§4.7）；仅 **BADC/CDAB 之类字内字节交换的中间排列**仍不支持（见 §4.3.6/§4.7.5） | 见 §4.3/§4.4/§4.7；验收：矩阵 + 长度不足 + 配对/陈旧 + 向后兼容 |
 | 位域（bit offset/length） | 同上，缺列 | 增 `bit_offset`/`bit_length`；验收：越界位宽报错、单 bit 取布尔 |
 | ~~字符串寄存器（多寄存器拼 UTF-8）~~ | **已由 §4.5 v3 落地（2026-10-13）**：扩 `register_format=string`、`word_count` 放宽 1..32、固定 UTF-8（**不加 `encoding` 列**） | 见 §4.5；验收：中文/ASCII 混合、尾部 NUL、全 NUL、非法 UTF-8、单寄存器、跨字边界 |
 | 「整帧即值」（无键的裸值帧） | 需要一个**显式**的地址类型声明（否则只能靠「帧里没有 `=` 就拿整帧当值」这种猜测） | `AddressType` 增 `tcp-line`（或映射增 `decode_format` 列）；验收：裸值帧解出数值、且键值帧仍走键路径（互不串味） |
@@ -137,7 +137,7 @@ OPC UA `ByteString`（生产 access fat jar 不含这两个协议模块，属潜
 |---|---|---|
 | `word_count` | `INT NOT NULL DEFAULT 1` | 连续寄存器个数；本版合法值 `1`\|`2`；默认 1 = 今天的行为 |
 | `signed` | `TINYINT NOT NULL DEFAULT 0` | `0`=无符号 / `1`=有符号（整型）；**Java 侧用 `Boolean`**（与 `enabled` 同一约定） |
-| `byte_order`（复用） | `VARCHAR(16) NULL` | **字序（word order）**：`big`=高字在前（ABCD）/`little`=低字在前（CDAB）；仅 Modbus `int`+`word_count=2` 或 `float` 生效（其余场景非空即拒绝，见 §4.3.2） |
+| `byte_order`（复用） | `VARCHAR(16) NULL` | **字序（word order）**：`big`=高字在前（32 位 ABCD / 64 位 ABCD）/`little`=低字在前（32 位 CDAB / 64 位 **DCBA 整体翻转**）；仅 Modbus `int`+`word_count=2`、`float`、`double` 生效（其余场景非空即拒绝，见 §4.3.2/§4.7） |
 
 接口字段（camelCase，前端契约）：`wordCount`（1\|2）、`signed`（**Boolean，JSON `true/false`**——与实体/`enabled` 同一约定；
 DB 列仍是 `TINYINT NOT NULL DEFAULT 0`）、`byteOrder`（已存在，`big`\|`little`）。`address_type` 保持既有取值，本版不改语义。
@@ -153,7 +153,7 @@ DB 列仍是 `TINYINT NOT NULL DEFAULT 0`）、`byteOrder`（已存在，`big`\|
 | 非 Modbus（tcp/mqtt/opcua） | **新字段严格**：`word_count≠1` 或 `signed=true` ⇒ **拒绝**（新字段任何非默认值必然是配错，fail-fast） |
 | `dataType` | `word_count=2` 或 `signed=true` 时要求 `iot_property.data_type ∈ {int,long}`（v1 仅整型） |
 | `word_count=2` + 传统 5 位编号（如 `40001`） | **v1 拒绝**并给出可执行报错：`word_count=2 需要显式 type:offset 形式（如 holding:0）；传统 5 位编号不支持多寄存器` |
-| **`byteOrder`（统一严格，2026-10-13 收紧）** | 只在「Modbus `int`+`word_count=2」或「`float`」真正生效；其余场景（`int`+`word_count=1`、`bits`、`string`、非 Modbus、位类型）**非空即拒绝**，文案说明「字序仅在这些场景生效，请清空」 |
+| **`byteOrder`（统一严格，2026-10-13 收紧）** | 只在「Modbus `int`+`word_count=2」、「`float`」或「`double`」真正生效；其余场景（`int`+`word_count=1`、`bits`、`string`、非 Modbus、位类型）**非空即拒绝**，文案说明「字序仅在这些场景生效，请清空」 |
 
 > **统一严格（不再有「旧字段宽容」的不对称）**：`wordCount`/`signed`/`byteOrder` 在非适用场景一律 fail-fast。
 > 此前 `byteOrder` 的「历史宽容」理由是「可能有没人看过的旧值」；用户 2026-10-13 决策
@@ -196,8 +196,8 @@ DB 列仍是 `TINYINT NOT NULL DEFAULT 0`）、`byteOrder`（已存在，`big`\|
 
 #### 4.3.6 未支持（保持登记，不在本版）
 
-- IEEE754 浮点（需 `dataType=float` + 完整字序/字节序枚举，单独立项）；
-- **BADC / DCBA 字内字节交换**（`byte_order` 本版只表达**字序**，不支持字节序交换；要支持需扩枚举并单独评审）；
+- ~~IEEE754 浮点~~ **已由 §4.4（单精度）/§4.7（双精度）落地**；
+- **BADC / CDAB 字内字节交换的中间排列**（`byte_order` 只表达**字序**：32 位 ABCD/CDAB、64 位 ABCD/DCBA；要支持中间排列需扩枚举并单独评审）；
 - `coil`/`discrete` 的宽度/符号；
 - 字符串寄存器（多寄存器 UTF-8）与位域（§4.2 各自单独立项）；
 - `word_count=2` 的传统 5 位编号形式（见 §4.3.2 的明确报错）；
@@ -229,7 +229,7 @@ DB 列仍是 `TINYINT NOT NULL DEFAULT 0`）、`byteOrder`（已存在，`big`\|
 
 | 列 | 类型 | 语义 |
 |---|---|---|
-| `register_format` | `VARCHAR(16) NOT NULL DEFAULT 'int'` | 寄存器值形态：`int`\|`float`\|`bits` |
+| `register_format` | `VARCHAR(16) NOT NULL DEFAULT 'int'` | 寄存器值形态：`int`\|`float`\|`double`\|`bits`（`double` = IEEE754 双精度，4 寄存器，见 §4.7） |
 | `bit_offset` | `INT NULL` | 仅 `bits`：起始位（0..15） |
 | `bit_length` | `INT NULL` | 仅 `bits`：位宽（1..16-`bit_offset`） |
 
@@ -241,18 +241,19 @@ DB 列仍是 `TINYINT NOT NULL DEFAULT 0`）、`byteOrder`（已存在，`big`\|
 |---|---|---|---|---|---|---|
 | `int`（默认） | Modbus `holding`/`input`；v1 规则不变 | 1\|2 | v1 规则 | **必须为 null**（新字段严格） | **仅 `word_count=2` 允许非空**；`word_count=1` 非空即拒绝 | v1（`word_count=2`/`signed=true` ⇒ int\|long） |
 | `float` | Modbus `holding`/`input` | **必须 2** | **必须 false**（true ⇒ 拒绝） | **必须为 null** | 生效：big=ABCD / little=CDAB（null⇒big） | **`decimal`** |
+| `double`（v4） | Modbus `holding`/`input` | **必须 4** | **必须 false**（true ⇒ 拒绝） | **必须为 null** | 生效：big=ABCD / little=DCBA（整体翻转；null⇒big） | **`decimal`** |
 | `bits` | Modbus `holding`/`input` | **必须 1** | **必须 false** | **必须同时给**；`0≤offset≤15`、`1≤length≤16-offset` | **必须为空（非空即拒绝）** | `length=1` ⇒ `bool`；`length>1` ⇒ `int`\|`long` |
 
 > **形态与 `word_count` 不相容时是「拒绝」，不是「静默改成期望值」**：`float` 且 `word_count≠2` ⇒ 拒绝；
-> `bits` 且 `word_count≠1` ⇒ 拒绝。UI 会把它们置为固定值并禁用，但 API 直连调用必须 fail-fast——
-> 静默纠正会让人以为配置生效了。
+> `double` 且 `word_count≠4` ⇒ 拒绝；`bits` 且 `word_count≠1` ⇒ 拒绝。UI 会把它们置为固定值并禁用，
+> 但 API 直连调用必须 fail-fast——静默纠正会让人以为配置生效了。
 
 - **非 Modbus**（tcp/mqtt/opcua）与 **位类型**（coil/discrete）：`register_format≠int` 或 `bit_offset/bit_length` 非空 ⇒ **拒绝**（新字段严格）；
 - `register_format` 非法取值 ⇒ 拒绝（Req `@Pattern` + 服务层双保险）；
-- **`data_type` 约束只对 `float`/`bits` 两种新形态生效**；`int` 保持 v1 行为（不做新的 data_type 约束），
+- **`data_type` 约束对 `float`/`double`/`bits` 生效**；`int` 保持 v1 行为（不做新的 data_type 约束），
   否则会给现有点位引入新的拒绝路径 = 破坏向后兼容；错误文案写清「该形态要求属性类型是 X」；
 - 所有拒绝都给**可执行文案**（说清该填什么/去掉什么），不许静默忽略；
-- `byte_order`：统一严格——只在「Modbus `int`+`word_count=2」或「`float`」允许非空；`bits`/`string`/`int`+`word_count=1`/非 Modbus/位类型**非空即拒绝**（不再有「历史宽容」）。
+- `byte_order`：统一严格——只在「Modbus `int`+`word_count=2」或、「`float`」或「`double`」允许非空；`bits`/`string`/`int`+`word_count=1`/非 Modbus/位类型**非空即拒绝**（不再有「历史宽容」）。
 
 #### 4.4.3 IEEE754 组装与产出
 
@@ -261,7 +262,7 @@ DB 列仍是 `TINYINT NOT NULL DEFAULT 0`）、`byteOrder`（已存在，`big`\|
 - **NaN/±Inf ⇒ 该点位 BAD + 计数**（规则与理由见 §4.4.6），不产出值；
 - 有限值 ⇒ **`new BigDecimal(Float.toString(f))`**（float32 最短可回读形态；口径与理由见 §4.4.7）；
 - 8 组必测：`big/little` × 正/负 × {`0.0`、`-0.0`、`1.5`、`3.4028235E38`、`NaN`、`+Inf`}；`-0.0` 经 `BigDecimal` 归一为 `0.0`（如实记录，IEEE 符号零对曲线无意义）；
-- 不支持 IEEE754 双精度（4 寄存器，后续）。
+- IEEE754 双精度（4 寄存器）已由 §4.7 v4 落地；本节的 float32 路径保持不变（两者不互相影响）。
 
 #### 4.4.4 bits 取值语义
 
@@ -320,7 +321,7 @@ DB 列仍是 `TINYINT NOT NULL DEFAULT 0`）、`byteOrder`（已存在，`big`\|
 
 #### 4.4.9 未支持（保持登记）
 
-IEEE754 双精度（4 寄存器）；BADC/DCBA 字内字节交换；有符号位域；
+~~IEEE754 双精度（4 寄存器）~~ **已由 §4.7 v4 落地**；BADC/CDAB 字内字节交换的中间排列；有符号位域；
 **字符串寄存器（issue #248）已由 §4.5 v3 落地**（固定 UTF-8，不含 `encoding`；BADC/DCBA 仍不支持）；
 `register_format` 的其它取值；`float` 的 `bit_*` 与 `bits` 的 `signed`/多寄存器。
 
@@ -418,7 +419,7 @@ string 要 `N` 个（1..32）⇒ 必须泛化为「按 `word_index` 收齐 N 个
 
 - BADC/DCBA（寄存器内字节交换与寄存器倒序）；
 - GBK/其它编码（将来「先扩枚举再支持」）；
-- IEEE754 双精度（4 寄存器）；有符号位域；
+- ~~IEEE754 双精度（4 寄存器）~~ **已由 §4.7 v4 落地**；有符号位域；
 - 字符串寄存器跨不同寄存器区（`base..base+N-1` 必须同 `address_type`）。
 
 #### 4.5.6 值类型落地的实现落点与理由（完整口径：string ⇒ value_text）
@@ -551,6 +552,49 @@ Req/实体/DTO 字段注释与 `@Pattern/@Max`、DDL 列注释（007 + v1/v2 迁
 - **不改表结构**（仍 `value_double`/`value_text` 两列），不加第三列/编码列。
 - `enum/date_time/json_object/array` 的**值级规范化**不在本重构（列固定文本；值的规范化仍由生产方负责）。
 - 其它类型→列映射（如 `decimal`→text）不支持；要改须评审并更新 §4.6.2 唯一映射表。
+
+---
+
+### 4.7 Modbus 寄存器解码 v4（`register_format=double`：IEEE754 双精度，4 寄存器）—— **已实施，2026-10-13**
+
+> 契约 v4 冻结：**不新增数据库列**，`register_format` 只扩一个取值 `double`；复用 v1/v2 已泛化的
+> 「按 `word_index` 收齐 N 个」配对暂存（`PendingWords`/N slots），**不另起一套**。
+
+#### 4.7.1 声明与约束（冻结）
+
+- **声明**：`register_format=double`（不靠 `float` + `word_count=4` 推断精度——声明与宽度一一对应是"不猜"）；
+- `word_count` **必须 4**（不等于 4 ⇒ **拒绝**，不静默纠正）；
+- `signed` **必须 false**；`bit_offset`/`bit_length` **必须 null**；
+- `data_type` **必须 `decimal`**（落列仍由 §4.6 的 `ValueColumn.from` 决定 ⇒ `value_double`，不变量不变）；
+- 适用协议/地址类型：仅 Modbus `holding`/`input`（非 Modbus / `coil`/`discrete` ⇒ 拒绝）；
+- `raw_address` 必须是显式 `type:offset` 且与 `address_type` 一致（`word_count>1` 既有规则）。
+
+#### 4.7.2 字序（与 v1/v2 同口径）
+
+- `big` = 高字在前（4 个 16 位寄存器按 **A B C D** 交付，`A` 是最高 16 位）；
+- `little` = 低字在前（**D C B A**，即 4 个寄存器**整体翻转**）；
+- **明确不支持** BADC/CDAB 之类"字内字节交换"的中间排列（要支持须先扩枚举并单独评审）。
+
+#### 4.7.3 产出与失败语义
+
+- 有限值 ⇒ `BigDecimal`，取**最短可回读表示**：直接用 **`BigDecimal.valueOf(d)`**（即 `Double.toString` 的
+  最短表示，round-trip 恒等）；**不得**用 `new BigDecimal(double)`（会把 `0.1` 写成 17 位二进制展开噪声）；
+- `NaN`/`±Inf` ⇒ 该点位 **BAD** + 计数 **`iot.access.value.normalize.failure{reason=non-finite}`**
+  （与 float32 共用同一指标，不新增；消息键 `modbus.double.non-finite`），不落库；
+- 4 个寄存器中**任一 BAD/缺失** ⇒ 点位 BAD 并清空暂存（绝不用陈旧字拼值）；
+- 同角色重复 / 超容差 ⇒ 整组丢弃 + `iot.access.modbus.pair.stale`（复用既有语义，N=4 天然覆盖）；
+- 乱序到达按 `word_index` 收齐即可合成；
+- 直连 DB 的坏数据 `word_count≠4`（运行期）⇒ BAD + `modbus.register.word-count-invalid`。
+
+#### 4.7.4 与 float32 的边界
+
+两者**独立分流**（`isFloat`/`isDouble`），共用泛化配对与 non-finite 计数/指标；同一个监听器同时配置
+float32 与 double 点位时互不污染（各自按 base/word_index 收齐）。
+
+#### 4.7.5 未支持（保持登记）
+
+- BADC/CDAB 等字内字节交换中间排列；有符号浮点；`register_format` 的其它取值；
+- `double` 的 `bit_*`、非 `decimal` data_type、非 Modbus/位类型、传统 5 位编号地址（均按 §4.7.1 拒绝）。
 
 ---
 

@@ -6,6 +6,21 @@
 
 ## [未发布]
 
+### 新增
+
+- **Modbus 寄存器解码 v4：`register_format=double`（IEEE754 双精度，4 寄存器）**
+  （`ypbin-service/ypbin-access/**`、`ypbin-service/ypbin-iot/**`、`ypbin-service-api/ypbin-iot-api/**`、
+  `deploy/sql/**` 注释口径、`docs/VALUE-DECODE-DESIGN.md` §4.7）：
+  声明用**新取值 `double`**，不靠 `float` + `word_count=4` 推断精度（声明与宽度一一对应 = 不猜）；
+  `word_count` 必须 4、`signed` 必须 false、`bit_*` 必须 null、`data_type` 必须 `decimal`、
+  仅 Modbus `holding`/`input` 且需显式 `type:offset` 地址。
+  字序与 v1/v2 同口径：`big`=ABCD（高字在前）、`little`=DCBA（**整体翻转**）；不支持 BADC/CDAB 字内字节交换中间排列。
+  有限值产出 **`BigDecimal.valueOf(d)`**（最短可回读，round-trip 恒等；不用 `new BigDecimal(double)` 的 17 位噪声）；
+  `NaN`/`±Inf` ⇒ 点位 BAD + `iot.access.value.normalize.failure{reason=non-finite}`（与 float32 共用，不新增指标）；
+  复用 v1/v2 的泛化配对暂存（任一寄存器 BAD/缺失 ⇒ BAD 并清空；同角色重复/超容差 ⇒ `pair.stale`；乱序按 `word_index` 收齐）；
+  float32 与 double 独立分流、互不污染。**不动表结构**，仅把 `register_format`/`word_count` 的列注释口径补上 `double`
+  （`007` 与迁移脚本逐字双写，SQL 等价门禁绿）。
+
 ### 修复
 
 - **CI 门禁收口（issue #233 / #235）**：
