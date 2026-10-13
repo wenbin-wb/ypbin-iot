@@ -111,6 +111,7 @@ public class PointMappingIndex {
      * @param orphanForms            孤儿映射的形态（属性行缺失）；**不是**合法坐标，只用于区分计数
      * @param ambiguousForms         与其它点位的属性标识撞名的历史形态（判给标识，记此以便告警）
      * @param duplicateIdentifiers   同一设备上被两条映射共用的规范标识（坐标级撞名；记此以便告警）
+     * @param dataTypeByCanonical    规范标识 → 物模型类型 code（仅在类型唯一且非空时存在；缺失/冲突不出现在表里）
      * @author wenbin
      * @since 2026-09-26
      */
@@ -118,11 +119,43 @@ public class PointMappingIndex {
                                     Map<String, Set<String>> legacyFormsByCanonical,
                                     Set<String> orphanForms,
                                     Set<String> ambiguousForms,
-                                    Set<String> duplicateIdentifiers) {
+                                    Set<String> duplicateIdentifiers,
+                                    Map<String, String> dataTypeByCanonical) {
+
+        /**
+         * 五参构造（历史调用方/只关心坐标的测试用）：类型索引为空。
+         *
+         * @param canonicalByForm        任意被接受的形态 → 规范标识
+         * @param legacyFormsByCanonical 规范标识 → 全部历史主键字符串形态
+         * @param orphanForms            孤儿映射形态
+         * @param ambiguousForms         形态级撞名
+         * @param duplicateIdentifiers   坐标级撞名
+         */
+        public DeviceCoordinates(Map<String, String> canonicalByForm,
+                                 Map<String, Set<String>> legacyFormsByCanonical,
+                                 Set<String> orphanForms,
+                                 Set<String> ambiguousForms,
+                                 Set<String> duplicateIdentifiers) {
+            this(canonicalByForm, legacyFormsByCanonical, orphanForms, ambiguousForms,
+                duplicateIdentifiers, Map.of());
+        }
 
         /** 空索引（既无映射，也无孤儿）。 */
         public static DeviceCoordinates empty() {
-            return new DeviceCoordinates(Map.of(), Map.of(), Set.of(), Set.of(), Set.of());
+            return new DeviceCoordinates(Map.of(), Map.of(), Set.of(), Set.of(), Set.of(), Map.of());
+        }
+
+        /**
+         * 规范标识的物模型类型（{@code iot_property.data_type} 的 code）。
+         *
+         * <p>只在「同一规范标识的**所有**映射都给出同一个非空类型」时才存在；缺失或类型冲突的标识
+         * 不在此表里，由写入侧显式按「类型缺失」丢弃（不猜、不回落文本列）。</p>
+         *
+         * @param canonical 规范标识（属性标识）
+         * @return 类型 code；缺失/冲突/未知坐标返回 {@code null}
+         */
+        public String dataTypeOf(String canonical) {
+            return canonical == null ? null : dataTypeByCanonical.get(canonical);
         }
 
         /**
@@ -195,8 +228,8 @@ public class PointMappingIndex {
             .map(IotPointMapping::getPropertyId)
             .filter(Objects::nonNull)
             .collect(Collectors.toCollection(LinkedHashSet::new));
-        Map<Long, String> identifierByProperty = propertyIds.isEmpty()
-            ? Map.of() : loadIdentifiers(propertyIds);
+        Map<Long, PropertyMeta> propertyById = propertyIds.isEmpty()
+            ? Map.of() : loadPropertyMeta(propertyIds);
 
         Map<Long, MutableCoordinates> builders = new LinkedHashMap<>();
         for (IotPointMapping mapping : mappings) {
@@ -207,12 +240,13 @@ public class PointMappingIndex {
             MutableCoordinates coordinates = builders.computeIfAbsent(
                 mapping.getDeviceId(), deviceId -> new MutableCoordinates());
             String legacyForm = String.valueOf(mapping.getPropertyId());
-            String identifier = identifierByProperty.get(mapping.getPropertyId());
-            if (identifier == null || identifier.isBlank()) {
+            PropertyMeta property = propertyById.get(mapping.getPropertyId());
+            if (property == null || property.identifier() == null || property.identifier().isBlank()) {
                 // 孤儿映射：属性行缺失（或标识为空）⇒ 该映射不再产出合法坐标，只留形态供区分计数
                 coordinates.orphanForms.add(legacyForm);
                 continue;
             }
+            String identifier = property.identifier();
             // 顺序即规则：先登记历史形态，再登记规范形态 ⇒ 形态撞名时**标识胜出**（确定性）
             String previous = coordinates.canonicalByForm.putIfAbsent(legacyForm, identifier);
             if (previous != null && !previous.equals(identifier)) {
@@ -228,6 +262,20 @@ public class PointMappingIndex {
             String overwritten = coordinates.canonicalByForm.put(identifier, identifier);
             if (overwritten != null && !overwritten.equals(identifier)) {
                 coordinates.ambiguousForms.add(identifier);
+            }
+            // 类型 SSOT（task-23 §4.6.4）：同一次查询顺带取 data_type，产出 identifier → type。
+            // 规则：同一标识的所有映射必须给出**同一个非空**类型；缺失或冲突 ⇒ 该标识类型不可用
+            // （下游按「类型缺失」显式丢弃 + 计数，不猜、不回落文本列）。
+            if (property.dataType() == null || property.dataType().isBlank()) {
+                coordinates.typeUnavailableIdentifiers.add(identifier);
+                coordinates.dataTypeByCanonical.remove(identifier);
+            } else if (!coordinates.typeUnavailableIdentifiers.contains(identifier)) {
+                String existingType = coordinates.dataTypeByCanonical.putIfAbsent(identifier,
+                    property.dataType());
+                if (existingType != null && !existingType.equals(property.dataType())) {
+                    coordinates.dataTypeByCanonical.remove(identifier);
+                    coordinates.typeUnavailableIdentifiers.add(identifier);
+                }
             }
         }
         return build(builders);
@@ -246,16 +294,30 @@ public class PointMappingIndex {
         return result;
     }
 
-    /** 一次批量取回属性标识（属性行缺失时该主键就不在结果里 ⇒ 该映射被判为孤儿）。 */
-    private Map<Long, String> loadIdentifiers(Set<Long> propertyIds) {
+    /**
+     * 一次批量取回属性元信息（标识 + 类型）。属性行缺失时该主键不在结果里 ⇒ 该映射被判为孤儿。
+     *
+     * @param propertyIds 属性主键集合
+     * @return 属性主键 → 元信息；identifier 可能为 null（调用方按孤儿处理）
+     */
+    private Map<Long, PropertyMeta> loadPropertyMeta(Set<Long> propertyIds) {
         return propertyMapper.selectList(Wrappers.<IotProperty>lambdaQuery()
-                .select(IotProperty::getId, IotProperty::getIdentifier)
+                .select(IotProperty::getId, IotProperty::getIdentifier, IotProperty::getDataType)
                 .in(IotProperty::getId, propertyIds))
             .stream()
-            // 必须同时过滤 null 值的两种情况：Collectors.toMap 的 merge 不接受 null 值（会抛 NPE），
-            // 而 identifier 为 null 的属性行语义上等价于「属性行缺失」——由调用方按孤儿处理
-            .filter(property -> property.getId() != null && property.getIdentifier() != null)
-            .collect(Collectors.toMap(IotProperty::getId, IotProperty::getIdentifier, (left, right) -> left));
+            .filter(property -> property.getId() != null)
+            .collect(Collectors.toMap(IotProperty::getId,
+                property -> new PropertyMeta(property.getIdentifier(), property.getDataType()),
+                (left, right) -> left));
+    }
+
+    /**
+     * 属性元信息（坐标归一 + 类型 SSOT 的最小字段集）。
+     *
+     * @param identifier 属性标识（规范坐标；可空，表示属性行不可用）
+     * @param dataType   物模型数据类型 code（可空，由写入侧按「类型缺失」显式丢弃）
+     */
+    private record PropertyMeta(String identifier, String dataType) {
     }
 
     /** 构建期的可变累加器（构建完冻结成不可变记录，避免调用方拿到可改集合）。 */
@@ -271,13 +333,19 @@ public class PointMappingIndex {
 
         private final Set<String> duplicateIdentifiers = new LinkedHashSet<>();
 
+        private final Map<String, String> dataTypeByCanonical = new LinkedHashMap<>();
+
+        /** 类型不可用的规范标识（缺失或冲突）；一旦进入不再被后续映射「救回」，避免顺序相关的隐性选择。 */
+        private final Set<String> typeUnavailableIdentifiers = new LinkedHashSet<>();
+
         private DeviceCoordinates freeze() {
             Map<String, Set<String>> legacyForms = new LinkedHashMap<>(legacyFormsByCanonical.size());
             for (Map.Entry<String, Set<String>> entry : legacyFormsByCanonical.entrySet()) {
                 legacyForms.put(entry.getKey(), Collections.unmodifiableSet(new LinkedHashSet<>(entry.getValue())));
             }
             return new DeviceCoordinates(Map.copyOf(canonicalByForm), Map.copyOf(legacyForms),
-                Set.copyOf(orphanForms), Set.copyOf(ambiguousForms), Set.copyOf(duplicateIdentifiers));
+                Set.copyOf(orphanForms), Set.copyOf(ambiguousForms), Set.copyOf(duplicateIdentifiers),
+                Map.copyOf(dataTypeByCanonical));
         }
     }
 }
