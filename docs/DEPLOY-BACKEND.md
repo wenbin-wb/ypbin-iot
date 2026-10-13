@@ -82,8 +82,14 @@ git -C <repo> rev-parse HEAD      # 应与清单首部的 `# git:` 行一致
 > ⚠️ 经验保留：`git merge-base --is-ancestor HEAD origin/main` **单独用拦不住它**（该 tag 是 `main`
 > 的祖先、会被放行）——判据必须是"版本一致性"这条，不能只留"是否在 main 上"。
 
-⚠️ **边界（如实登记）**：本工作流**只产 jar**，不产 Docker 镜像与 SBOM；镜像仍由部署机
-`docker compose build`（Dockerfile 只 `COPY target/*.jar`、不编译源码，故安全）。镜像制品化与 SBOM 属后续增量。
+每个 Release 还附带一份 **CycloneDX SBOM（`bom-cyclonedx.json`，聚合全反应堆依赖）**：用于回答
+「这个版本里到底有哪些依赖、各自什么版本」——排查某个 CVE 影响面、或回答审计/合规提问时用它，
+不必再翻 pom。生成方式是**命令行调用插件**（版本 2.9.3，与母仓 `ypbin-starter` 的 `sbom` profile 一致），
+**不往 pom 里加配置**，因此不扩大与 upstream 的分歧面。
+
+⚠️ **边界（如实登记）**：SBOM 是**依赖清单**，**不是**漏洞扫描——「已知 CVE 门禁」是另一件事（见 issue #237）。
+镜像仍由部署机 `docker compose build`（Dockerfile 只 `COPY target/*.jar`、不编译源码，故安全）；
+镜像制品化属后续增量。
 
 ## 2.1 compose 必填变量（`${VAR:?}`）：EMQX 是**硬前置**，缺失时在「起任何容器之前」报错
 

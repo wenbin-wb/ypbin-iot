@@ -43,7 +43,7 @@
 
 
 - **制品化交付：`v*` tag 自动产出并挂载可执行 jar**（`.github/workflows/release-artifacts.yml`）。
-  此前 admin 既有的 `release.yml` 只发 Release 说明、**不产任何制品**，而部署纪律要求「只能在能访问 GitHub 的构建机编 jar、禁止部署机跑 Maven」⇒ 生产交付长期靠手工编 + scp，没有可下载的制品，也没有「jar 来自哪个 commit」的机器可验证链条。现于每个 `v*` tag 上构建 6 个服务 jar，并附 `jars.manifest.sha256`（含 git sha 与构建时刻）；生产按 `docs/DEPLOY-BACKEND.md` §2.0 下载 + 校验后替换。**为什么是独立新工作流**：admin 的既有工作流（ci/codeql/release）按 `SYNC.md` 属「明确不动」，新增文件不产生同步冲突面。边界：只产 jar（不含镜像/SBOM）。
+  此前 admin 既有的 `release.yml` 只发 Release 说明、**不产任何制品**，而部署纪律要求「只能在能访问 GitHub 的构建机编 jar、禁止部署机跑 Maven」⇒ 生产交付长期靠手工编 + scp，没有可下载的制品，也没有「jar 来自哪个 commit」的机器可验证链条。现于每个 `v*` tag 上构建 6 个服务 jar，并附 `jars.manifest.sha256`（含 git sha 与构建时刻）；生产按 `docs/DEPLOY-BACKEND.md` §2.0 下载 + 校验后替换。**为什么是独立新工作流**：admin 的既有工作流（ci/codeql/release）按 `SYNC.md` 属「明确不动」，新增文件不产生同步冲突面。每个 Release 同时附带 **CycloneDX SBOM**（`bom-cyclonedx.json`，聚合依赖清单；命令行调用插件 2.9.3、与母仓一致，**不往 pom 加配置**），并带「组件数/组件名」自检防挂空清单。边界：SBOM 是依赖清单、**不是**漏洞扫描（漏洞门禁见 issue #237）；镜像制品化属后续增量。
 
 ### 修复
 - **生产帧形态只读普查（部署前置的证据）**：切 `payload-format=key-value` 前对生产库做了一次只读普查 —— 13 台设备全是演示夹具；**唯一在采的 TCP 设备 `demo-dev-curve`(9300012) 的 4 个点位与帧键逐字对应**（切换后行为不变）；其余 9 台 TCP 夹具的 `holding:*` 是 #217 之前的历史错位残留、早已离线且挂未闭合断档，新旧行为等价（`key-not-found` → `selector-not-found`，都是 BAD）。结论与复现 SQL 见 `docs/VALUE-DECODE-DESIGN.md` §5.6。
