@@ -12,6 +12,7 @@ package cn.ypbin.admin.iot.entity;
 import cn.ypbin.starter.tenant.core.TenantBaseEntity;
 import com.baomidou.mybatisplus.annotation.TableName;
 import java.io.Serial;
+import java.time.LocalDateTime;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -30,6 +31,12 @@ import lombok.Setter;
  *
  * <p><b>回执只记「这批被受理了」</b>：{@code item_count} 是首次受理时通过校验的条数；重投时原样读回、
  * 不重算（重算会随时间漂移：点位映射可能在两次投递之间被改）。</p>
+ *
+ * <p><b>消息跟踪二批：一行现在有两种结局</b>（{@code receipt_status}）：{@code accepted}（受理，
+ * 记录 {@code received_count}/{@code persisted_rows}/{@code persisted_at} 与可选的部分丢弃原因）
+ * 与 {@code rejected}（整批被拒，{@code persisted_rows=0} + {@code discard_reason}/{@code discard_detail}）。
+ * <b>被拒行不阻塞重试</b>：预查只认 accepted，命中 rejected 行时**物理删除**后按新批次继续
+ * （见 {@code IotMqttIngestReceiptMapper#deleteRejectedByRequestId}）。</p>
  *
  * @author wenbin
  * @since 2026-10-01
@@ -50,4 +57,22 @@ public class IotMqttIngestReceipt extends TenantBaseEntity {
 
     /** 首次受理时通过校验的读数条数。 */
     private Integer itemCount;
+
+    /** 行性质：{@code accepted}（受理）/ {@code rejected}（整批被拒）。**避让既有 {@code status}（启用/停用）**。 */
+    private String receiptStatus;
+
+    /** 本批收到的读数条数（含被丢弃的）；rejected 行 = 被拒总数。 */
+    private Integer receivedCount;
+
+    /** 实际落库条数（accepted 行）；rejected 行为 0。 */
+    private Integer persistedRows;
+
+    /** 落库完成时刻（显式列，不依赖审计列；rejected 行为 {@code null}）。 */
+    private LocalDateTime persistedAt;
+
+    /** 丢弃原因码（复用 {@code MqttIngestRejectReason}；无丢弃为 {@code null}）。 */
+    private String discardReason;
+
+    /** 丢弃明细（未映射 pointId 前 8 个逗号连接，超出记 {@code ,...(+N)}）。 */
+    private String discardDetail;
 }

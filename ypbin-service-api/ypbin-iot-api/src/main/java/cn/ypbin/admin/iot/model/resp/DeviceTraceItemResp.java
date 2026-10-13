@@ -69,10 +69,28 @@ public class DeviceTraceItemResp {
     /** 是否发生过重发（前端据此提示"历史时刻已被覆盖"，见设计 §3.3.2c）。 */
     private boolean historyOverwritten;
 
-    /** 命令类的三个时刻（非命令类为 `null`）。 */
+    /** 命令类的三个时刻（非命令类为 null）。 */
     private LocalDateTime enqueuedAt;
 
     private LocalDateTime publishedAt;
 
     private LocalDateTime ackedAt;
+
+    /** 上行回执行性质（二批）：accepted / rejected；非上行条目为 null。 */
+    private String receiptStatus;
+
+    /** 上行本批收到的读数条数（含被丢弃的；二批）。 */
+    private Integer receivedCount;
+
+    /** 上行实际落库条数（二批；rejected 行为 0）。 */
+    private Integer persistedRows;
+
+    /** 上行落库完成时刻（二批；rejected 行为 null）。 */
+    private LocalDateTime persistedAt;
+
+    /** 丢弃原因码（二批；复用 MqttIngestRejectReason，无丢弃为 null）。 */
+    private String discardReason;
+
+    /** 丢弃明细（二批；后端已按"前 8 个 + ,...(+N)"截断，前端原样显示）。 */
+    private String discardDetail;
 }

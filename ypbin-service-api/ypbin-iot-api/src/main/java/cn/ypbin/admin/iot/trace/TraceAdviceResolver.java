@@ -48,9 +48,12 @@ public final class TraceAdviceResolver {
         }
         return switch (item.stage()) {
             case DOWN_ENQUEUED, DOWN_PUBLISHED, DOWN_ACK -> resolveCommand(item);
-            // 上行受理本身是"成功"的语义（能出现在时间线上就说明已受理）；
-            // 一期没有"被丢弃/未落库"的痕迹可用（设计 §3.3.1/§3.3.2）⇒ 不给建议，也不编。
+            // 上行受理本身是"成功"的语义（能出现在时间线上就说明已受理）；不给建议，也不编。
             case UP_RECEIVED -> null;
+            // 二批：UP_PERSISTED（已落库/部分丢弃）与 UP_DISCARDED（整批被拒）的结构化原因
+            // 由前端规则 UP_REJECTED_MAP / UP_PARTIAL / UP_DEVICE_NOT_FOUND 推导（二批契约：
+            // 后端只保证 discardReason/receivedCount/persistedRows 字段）⇒ 后端不重复一份建议口径。
+            case UP_PERSISTED, UP_DISCARDED -> null;
             case EVENT_REPORTED -> null;
             case DEVICE_OFFLINE -> offlineAdvice();
         };

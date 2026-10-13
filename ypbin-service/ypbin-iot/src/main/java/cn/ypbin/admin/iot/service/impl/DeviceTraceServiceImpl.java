@@ -16,6 +16,7 @@ import cn.ypbin.admin.iot.entity.IotMqttIngestReceipt;
 import cn.ypbin.admin.iot.entity.OutageEvent;
 import cn.ypbin.admin.iot.enums.CommandErrorCode;
 import cn.ypbin.admin.iot.enums.CommandInstanceStatus;
+import cn.ypbin.admin.iot.enums.MqttReceiptStatus;
 import cn.ypbin.admin.iot.mapper.IotCommandInstanceMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.IotEventLogMapper;
@@ -51,8 +52,8 @@ import org.springframework.stereotype.Service;
  *   <li><b>一行 = 一条目</b>（设计 §3.3.3）：一条 `iot_command_instance` 记录只产生**一个**
  *       {@link TraceStage} 条目，其三个时刻（`create_time`/`sent_at`/`finished_at`）
  *       都挂在这一条上。**不展开成三条**——展开会让同一件事在时间线上重复出现三次。</li>
- *   <li><b>只呈现可推导的阶段</b>（设计 §3.3）：不产出 `UP_PERSISTED`（语义不可区分）
- *       与 `UP_DISCARDED`（库中零痕迹）。要呈现必须走二批补写入侧字段。</li>
+ *   <li><b>阶段严格按回执行推导</b>（设计附二批）：`receipt_status=rejected` ⟶ `UP_DISCARDED`；
+ *       `persisted_at` 非空 ⟶ `UP_PERSISTED`；存量旧行（两者皆无）⟶ `UP_RECEIVED`。</li>
  *   <li><b>`DOWN_ACK` 的判据用是否有回执体，而不是 `status_code = failed`</b>
  *       （设计 §3.3.2b）：该状态值有"根本没送到"与"设备拒绝"两个来源。</li>
  *   <li><b>时间窗与条数是正确性闸门</b>（设计 §6 R5）：跨源合并在内存做，
@@ -70,8 +71,8 @@ public class DeviceTraceServiceImpl implements DeviceTraceService {
     /** 边界说明文案（前端直接展示；指明"看不到"的部分该怎么办）。 */
     static final String UPSTREAM_NOTE =
         "上行链路仅 MQTT 通道留有受理回执；经 HTTP 通道上报的设备不会出现在本时间线上。"
-            + "另外，『被整批拒绝的上报』与『是否已落库』当前不产生可查询的记录——"
-            + "若怀疑这两类问题，请查应用日志与 iot.ingest.propertyid.unmapped / orphan 指标。";
+            + "二批起，『整批被拒』与『是否已落库』已由 UP_DISCARDED / UP_PERSISTED 条目呈现；"
+            + "被拒行在重试受理时会被删除，拒绝历史只在应用日志与 iot.mqtt.ingest.rejected 指标里。";
 
     private final IotDeviceMapper deviceMapper;
     private final IotCommandInstanceMapper commandInstanceMapper;
@@ -268,21 +269,84 @@ public class DeviceTraceServiceImpl implements DeviceTraceService {
 
         List<DeviceTraceItemResp> items = new ArrayList<>(rows.size());
         for (IotMqttIngestReceipt row : rows) {
-            DeviceTraceItemResp item = new DeviceTraceItemResp();
-            item.setOccurredAt(row.getCreateTime());
-            item.setStage(TraceStage.UP_RECEIVED.getCode());
-            item.setStageDesc(TraceStage.UP_RECEIVED.getDesc());
-            item.setDirection(TraceDirection.UP.getCode());
-            // 🔴 不设 OK：一期无法区分"已受理"与"已落库"（设计 §3.3.2），
-            // 标成 OK 等于对用户断言"数据已经存好了"——那是我们不知道的事。
-            item.setOutcome(TraceOutcome.UNKNOWN.getCode());
-            item.setTitle("上行受理：" + (row.getItemCount() == null ? 0 : row.getItemCount()) + " 条");
-            item.setSource(SOURCE_RECEIPT);
-            item.setSourceId(row.getId());
-            item.setAdvice(TraceAdviceResolver.resolve(toTraceItem(item, TraceStage.UP_RECEIVED)));
-            items.add(item);
+            items.add(toReceiptItem(row));
         }
         return items;
+    }
+
+    /**
+     * 把一条回执映射为**单个**时间线条目（消息跟踪二批）。
+     *
+     * <p><b>阶段推导（唯一表达式）</b>：{@code receipt_status = rejected} ⟶
+     * {@link TraceStage#UP_DISCARDED}；否则 {@code persisted_at != null} ⟶
+     * {@link TraceStage#UP_PERSISTED}；否则（未回填 persisted_at 的存量旧行）⟶
+     * {@link TraceStage#UP_RECEIVED}。</p>
+     *
+     * <p><b>结果不许粉饰</b>：被整批拒 / 部分丢弃一律 {@link TraceOutcome#FAILED}
+     * （数据确实丢了）；只有"整批全部落库"才是 {@link TraceOutcome#OK}；存量旧行维持
+     * {@link TraceOutcome#UNKNOWN}——一期无法区分"已受理"与"已落库"的老口径不变。</p>
+     *
+     * @param row 回执行
+     * @return 条目
+     */
+    private DeviceTraceItemResp toReceiptItem(IotMqttIngestReceipt row) {
+        boolean rejected = MqttReceiptStatus.REJECTED.getCode().equals(row.getReceiptStatus());
+        boolean persisted = !rejected && row.getPersistedAt() != null;
+        int received = row.getReceivedCount() == null
+            ? (row.getItemCount() == null ? 0 : row.getItemCount()) : row.getReceivedCount();
+        int persistedRows = row.getPersistedRows() == null
+            ? (row.getItemCount() == null ? 0 : row.getItemCount()) : row.getPersistedRows();
+        boolean partial = persisted && persistedRows < received;
+
+        TraceStage stage = rejected ? TraceStage.UP_DISCARDED
+            : (persisted ? TraceStage.UP_PERSISTED : TraceStage.UP_RECEIVED);
+        TraceOutcome outcome = rejected || partial ? TraceOutcome.FAILED
+            : (persisted ? TraceOutcome.OK : TraceOutcome.UNKNOWN);
+
+        DeviceTraceItemResp item = new DeviceTraceItemResp();
+        item.setOccurredAt(persisted ? row.getPersistedAt() : row.getCreateTime());
+        item.setStage(stage.getCode());
+        item.setStageDesc(stage.getDesc());
+        item.setDirection(TraceDirection.UP.getCode());
+        item.setOutcome(outcome.getCode());
+        item.setTitle(buildReceiptTitle(row.getDiscardReason(), rejected, persisted, received, persistedRows));
+        item.setSource(SOURCE_RECEIPT);
+        item.setSourceId(row.getId());
+        item.setReceiptStatus(row.getReceiptStatus());
+        item.setReceivedCount(row.getReceivedCount());
+        item.setPersistedRows(row.getPersistedRows());
+        item.setPersistedAt(row.getPersistedAt());
+        item.setDiscardReason(row.getDiscardReason());
+        item.setDiscardDetail(row.getDiscardDetail());
+        if (rejected || partial) {
+            // 归因码/明细：即使规则不匹配也必须给原始码（规则不匹配时前端显示"暂无建议 + 原始码"）
+            item.setErrorCode(row.getDiscardReason());
+            item.setErrorMsg(row.getDiscardDetail());
+        }
+        item.setAdvice(TraceAdviceResolver.resolve(toTraceItem(item, stage)));
+        return item;
+    }
+
+    /**
+     * 回执条目的人话标题（不臆断，原样带原因码）。
+     *
+     * @param discardReason 丢弃原因码（可空）
+     * @param rejected      是否整批被拒
+     * @param persisted     是否已落库
+     * @param received      本批收到条数
+     * @param persistedRows 实际落库条数
+     * @return 标题
+     */
+    private String buildReceiptTitle(String discardReason, boolean rejected, boolean persisted,
+                                     int received, int persistedRows) {
+        if (rejected) {
+            return "上行被拒：" + (discardReason == null ? "未知原因" : discardReason)
+                + "（" + received + " 条）";
+        }
+        if (persisted) {
+            return "上行落库：" + persistedRows + "/" + received + " 条";
+        }
+        return "上行受理：" + received + " 条";
     }
 
     /**
