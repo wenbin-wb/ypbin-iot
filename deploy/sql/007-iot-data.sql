@@ -767,11 +767,11 @@ ALTER TABLE iot_command_instance
 
 -- Modbus 寄存器解码 v1（word_count/signed；与 migration/2026-10-13-iot-modbus-register-schema.sql 逐字等价）。
 ALTER TABLE iot_point_mapping
-    ADD COLUMN word_count INT NOT NULL DEFAULT 1 COMMENT '连续寄存器个数（int/float: 1|2；bits: 1；string: 1..32；默认 1 = 旧行为）',
+    ADD COLUMN word_count INT NOT NULL DEFAULT 1 COMMENT '连续寄存器个数（int/float: 1|2；double: 4；bits: 1；string: 1..32；默认 1 = 旧行为）',
     ADD COLUMN `signed`   TINYINT NOT NULL DEFAULT 0 COMMENT '整型符号：0=无符号 / 1=有符号（Java 侧 Boolean）';
 
 -- Modbus 寄存器解码 v2（register_format/bit_offset/bit_length；与 migration/2026-10-13-iot-modbus-v2-register-format-schema.sql 逐字等价）。
 ALTER TABLE iot_point_mapping
-    ADD COLUMN register_format VARCHAR(16) NOT NULL DEFAULT 'int' COMMENT '寄存器值形态：int|float|bits|string（默认 int = v1 行为）',
+    ADD COLUMN register_format VARCHAR(16) NOT NULL DEFAULT 'int' COMMENT '寄存器值形态：int|float|double|bits|string（默认 int = v1 行为）',
     ADD COLUMN bit_offset      INT          NULL COMMENT '仅 bits：起始位（0..15）',
     ADD COLUMN bit_length      INT          NULL COMMENT '仅 bits：位宽（1..16-bit_offset）';
