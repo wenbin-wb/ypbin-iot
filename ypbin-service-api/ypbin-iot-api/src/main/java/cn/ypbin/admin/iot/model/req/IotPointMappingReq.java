@@ -25,6 +25,9 @@ import lombok.Setter;
  *
  * <p>映射必须引用<b>已发布版本</b>的属性（或命令）；协议能力不支持时显式失败。</p>
  *
+ * <p><b>{@code refType=command}（M-3）</b>：是下行写点，{@code propertyId} 为 {@code iot_command.id}；
+ * 缩放/字序/多寄存器/有符号/位域/寄存器形态等**读侧解码字段不适用**，非默认即拒绝（不静默忽略）。</p>
+ *
  * @author wenbin
  * @since 2026-09-20
  */
@@ -35,7 +38,7 @@ public class IotPointMappingReq {
     /** 设备 ID（新增时必填；编辑时可空）。 */
     private Long deviceId;
 
-    /** 关联属性（或命令）ID。 */
+    /** 关联属性（{@code ref_type=property}）或命令（{@code ref_type=command}）ID。 */
     @NotNull(message = "关联属性 ID 不能为空")
     private Long propertyId;
 

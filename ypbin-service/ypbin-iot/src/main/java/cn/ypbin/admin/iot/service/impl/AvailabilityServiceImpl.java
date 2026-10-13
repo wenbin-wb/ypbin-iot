@@ -299,7 +299,8 @@ public class AvailabilityServiceImpl implements AvailabilityService {
      * 即**格式**校验；「未映射（物模型属性 × 该设备点位映射）被拒且计数」与「孤儿映射被拒且计数」那一半
      * 由紧随其后的 {@link #canonicalizePropertyIds} 承担（2026-09-26 落地并收紧）。<b>仍未做</b>（不要夸大）：
      * ① 不做「该属性是否属于该产品/服务」的二次校验（映射行本身就是那个声明）；
-     * ② {@code enabled=0}（停采）与 {@code ref_type=command} 的映射也会让属性读数通过。
+     * ② {@code enabled=0}（停采）的映射也会让属性读数通过；{@code ref_type=command} 已于 M-3 起由
+     *    {@link PointMappingIndex} 显式排除（命令点位不再产出读数坐标）。
      * （“坐标形态未统一”与“孤儿映射”两项已于 2026-09-26 闭环，见 {@link PointMappingIndex} 的类注释）</p>
      *
      * <p><b>落点与设计原文的差异（已由用户决策，如实登记）</b>：设计 §6.5 建议把校验放在**入站适配层**，

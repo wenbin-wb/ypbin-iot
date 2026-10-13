@@ -60,6 +60,18 @@ public final class CommandPayloads {
     /** 审计标签：{@code property_get} 未指定标识（= 全部可读属性）时写进实例的 {@code identifier} 列。 */
     public static final String ALL_PROPERTIES_LABEL = "all-properties";
 
+    /** 命令点位字段名（{@code service_call} 命中命令点位映射时附加；值为 {@code {rawAddress,addressType,rw}}）。 */
+    public static final String FIELD_POINT = "point";
+
+    /** 命令点位对象的地址键（与 {@code iot_point_mapping.raw_address} 同义）。 */
+    public static final String FIELD_RAW_ADDRESS = "rawAddress";
+
+    /** 命令点位对象的地址类型键。 */
+    public static final String FIELD_ADDRESS_TYPE = "addressType";
+
+    /** 命令点位对象的读写方向键。 */
+    public static final String FIELD_RW = "rw";
+
     private CommandPayloads() {
     }
 
@@ -95,6 +107,26 @@ public final class CommandPayloads {
      */
     public static String build(CommandKind kind, String requestId, String identifier,
                                String paramsJson, ObjectMapper mapper) {
+        return build(kind, requestId, identifier, paramsJson, null, mapper);
+    }
+
+    /**
+     * 构造下行 payload（可携带命令点位）。
+     *
+     * <p><b>命令点位（M-3）</b>：{@code service_call} 命中 {@code ref_type=command} 的点位映射时，
+     * 在 payload 里附加 {@code point:{rawAddress,addressType,rw}}，供接入侧/设备按物理地址写入；
+     * 未配映射时 {@code point} 不出现，报文与 §7.6 B2 逐字一致（不改变既有字段语义）。</p>
+     *
+     * @param kind       类型
+     * @param requestId  请求 ID
+     * @param identifier 目标标识（{@code property_get} 可为空 = 全部可读属性）
+     * @param paramsJson 端点入参（JSON 对象文本；{@code property_get} 忽略）
+     * @param point      命令点位解析结果（仅 {@code service_call} 使用；可空）
+     * @param mapper     JSON 序列化器
+     * @return payload 文本
+     */
+    public static String build(CommandKind kind, String requestId, String identifier,
+                               String paramsJson, ResolvedPoint point, ObjectMapper mapper) {
         JsonNode params = readObjectOrNull(paramsJson, mapper);
         ObjectNode payload = mapper.createObjectNode();
         payload.put(FIELD_REQUEST_ID, requestId);
@@ -120,6 +152,15 @@ public final class CommandPayloads {
             case SERVICE_CALL -> {
                 requireIdentifier(identifier, "服务调用");
                 payload.set(FIELD_PARAMS, params == null ? mapper.createObjectNode() : params);
+                if (point != null) {
+                    ObjectNode pointNode = mapper.createObjectNode();
+                    pointNode.put(FIELD_RAW_ADDRESS, point.rawAddress());
+                    pointNode.put(FIELD_ADDRESS_TYPE, point.addressType());
+                    if (point.rw() != null) {
+                        pointNode.put(FIELD_RW, point.rw());
+                    }
+                    payload.set(FIELD_POINT, pointNode);
+                }
             }
         }
         String text = mapper.writeValueAsString(payload);
@@ -168,6 +209,16 @@ public final class CommandPayloads {
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
                 scene + "的标识" + PropertyIdRules.INVALID_MESSAGE + "（含 /、+、# 等会污染主题，必须拒绝）");
         }
+    }
+
+    /**
+     * 命令点位解析结果（命令 → 协议物理点）。
+     *
+     * @param rawAddress  协议内地址（{@code iot_point_mapping.raw_address}）
+     * @param addressType 地址类型（holding|input|coil|discrete|nodeid|topic）
+     * @param rw          读写方向（R|W|RW；可空）
+     */
+    public record ResolvedPoint(String rawAddress, String addressType, String rw) {
     }
 
 }

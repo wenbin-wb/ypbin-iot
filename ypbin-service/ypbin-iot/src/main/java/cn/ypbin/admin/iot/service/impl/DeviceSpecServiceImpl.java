@@ -14,6 +14,7 @@ import cn.ypbin.admin.iot.device.AccessPointMappingDto;
 import cn.ypbin.admin.iot.entity.IotDevice;
 import cn.ypbin.admin.iot.entity.IotPointMapping;
 import cn.ypbin.admin.iot.entity.IotProperty;
+import cn.ypbin.admin.iot.enums.PointRefType;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.IotPointMappingMapper;
 import cn.ypbin.admin.iot.mapper.IotPropertyMapper;
@@ -97,6 +98,9 @@ public class DeviceSpecServiceImpl implements DeviceSpecService {
         Map<Long, List<IotPointMapping>> mappingsByDevice = iotPointMappingMapper.selectList(
                 new LambdaQueryWrapper<IotPointMapping>()
                     .in(IotPointMapping::getDeviceId, deviceIds)
+                    // M-3：只下发**属性点位**。命令点位（ref_type=command）是下行写点，采集侧不采它——
+                    // 混进 points 会让接入侧去轮询/订阅命令地址，得到一堆必被入站丢弃的读数。
+                    .eq(IotPointMapping::getRefType, PointRefType.PROPERTY.getCode())
                     .eq(IotPointMapping::getEnabled, Boolean.TRUE)
                     .orderByAsc(IotPointMapping::getId))
             .stream()
