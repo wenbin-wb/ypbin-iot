@@ -180,45 +180,156 @@ public class IotPointMappingServiceImpl extends BaseServiceImpl<IotPointMappingM
      * @param req      映射请求
      */
     private void validateRegisterDecode(IotDevice device, IotProperty property, IotPointMappingReq req) {
+        String format = req.getRegisterFormat() == null || req.getRegisterFormat().isBlank()
+            ? "int" : req.getRegisterFormat().trim();
+        if (!"int".equals(format) && !"float".equals(format) && !"bits".equals(format)) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "寄存器值形态（register_format）只能是 int|float|bits：" + format);
+        }
         int wordCount = req.getWordCount() == null ? 1 : req.getWordCount();
         boolean signed = Boolean.TRUE.equals(req.getSigned());
+        Integer bitOffset = req.getBitOffset();
+        Integer bitLength = req.getBitLength();
         if (wordCount != 1 && wordCount != 2) {
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
                 "寄存器个数（word_count）只能是 1 或 2：" + wordCount);
         }
+        boolean modbus = IotProtocol.MODBUS.getCode().equals(device.getProtocol());
+        boolean registerType = ModbusRegisterAddress.REGISTER_TYPES.contains(req.getAddressType());
+        ThingModelDataType dataType = ThingModelDataType.of(property.getDataType());
+        if ("int".equals(format)) {
+            // 新字段严格：int 形态不得携带 bit_offset/bit_length（仅 bits 使用）
+            if (bitOffset != null || bitLength != null) {
+                throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                    "register_format=int 不支持 bit_offset/bit_length（仅 bits 形态使用）：请清空这两个字段");
+            }
+            validateIntFormat(device, property, req, wordCount, signed, dataType, modbus, registerType);
+            return;
+        }
+        // float / bits 是新形态：先统一适用性（新字段严格：非 Modbus / 位类型一律拒绝）
+        if (!modbus) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "仅 Modbus 寄存器点位支持 register_format=" + format + "（当前协议=" + device.getProtocol() + "）");
+        }
+        if (!registerType) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "位类型（" + req.getAddressType() + "）不支持 register_format=" + format
+                    + "（寄存器解码仅对 holding/input 生效）");
+        }
+        if ("float".equals(format)) {
+            validateFloatFormat(req, wordCount, signed, bitOffset, bitLength, dataType, property);
+        } else {
+            validateBitsFormat(req, wordCount, signed, bitOffset, bitLength, dataType, property);
+        }
+    }
+
+    /**
+     * {@code int} 形态校验 = v1 规则（**行为逐字节不变**）。
+     *
+     * <p>只对 {@code word_count=2} 或 {@code signed=true} 触发 data_type 约束；{@code word_count=1/signed=false}
+     * 直接返回（不引入新的拒绝路径，传统 5 位编号照常）。</p>
+     */
+    private void validateIntFormat(IotDevice device, IotProperty property, IotPointMappingReq req,
+                                   int wordCount, boolean signed, ThingModelDataType dataType,
+                                   boolean modbus, boolean registerType) {
         if (wordCount == 1 && !signed) {
             // 默认 = 旧行为：不触发任何新字段校验（传统 5 位编号照常可用）
             return;
         }
-        if (!IotProtocol.MODBUS.getCode().equals(device.getProtocol())) {
+        if (!modbus) {
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
                 "仅 Modbus 寄存器点位支持 word_count/signed（当前协议=" + device.getProtocol() + "）");
         }
-        if (!ModbusRegisterAddress.REGISTER_TYPES.contains(req.getAddressType())) {
+        if (!registerType) {
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
                 "位类型（" + req.getAddressType() + "）不支持 word_count/signed（寄存器解码仅对 holding/input 生效）");
         }
-        ThingModelDataType dataType = ThingModelDataType.of(property.getDataType());
         if (dataType != ThingModelDataType.INT && dataType != ThingModelDataType.LONG) {
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
-                "寄存器解码 v1 仅支持 int/long 数据类型（当前=" + property.getDataType() + "）");
+                "寄存器解码 int 形态仅支持 int/long 数据类型（当前=" + property.getDataType() + "）");
         }
         if (wordCount == 2) {
-            if (!ModbusRegisterAddress.isExplicitForm(req.getRawAddress())) {
+            validateExplicitMultiRegisterAddress(req);
+        }
+    }
+
+    /** {@code float} 形态校验：IEEE754 单精度（32 位 ⟺ 2 寄存器）。 */
+    private void validateFloatFormat(IotPointMappingReq req, int wordCount, boolean signed,
+                                     Integer bitOffset, Integer bitLength, ThingModelDataType dataType,
+                                     IotProperty property) {
+        if (wordCount != 2) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "register_format=float 要求 word_count=2（32 位占 2 个寄存器），当前=" + wordCount
+                    + "；请把 word_count 改为 2");
+        }
+        if (signed) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "register_format=float 的 signed 必须为 false（浮点无符号语义）：请清空或置 false");
+        }
+        if (bitOffset != null || bitLength != null) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "register_format=float 不支持 bit_offset/bit_length：请清空这两个字段");
+        }
+        if (dataType != ThingModelDataType.DECIMAL) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "register_format=float 要求属性类型是 decimal（小数），当前=" + property.getDataType());
+        }
+        validateExplicitMultiRegisterAddress(req);
+    }
+
+    /** {@code bits} 形态校验：单寄存器无符号位域。 */
+    private void validateBitsFormat(IotPointMappingReq req, int wordCount, boolean signed,
+                                    Integer bitOffset, Integer bitLength, ThingModelDataType dataType,
+                                    IotProperty property) {
+        if (wordCount != 1) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "register_format=bits 要求 word_count=1（单寄存器位域），当前=" + wordCount
+                    + "；请把 word_count 改为 1");
+        }
+        if (signed) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "register_format=bits 仅支持无符号位域（signed 必须为 false）：请清空或置 false");
+        }
+        if (bitOffset == null || bitLength == null) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "register_format=bits 必须同时给出 bit_offset 与 bit_length");
+        }
+        if (bitOffset < 0 || bitOffset > 15) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "bit_offset 必须在 0..15：" + bitOffset);
+        }
+        if (bitLength < 1 || bitOffset + bitLength > 16) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "bit_length 必须在 1.." + (16 - bitOffset) + "（bit_offset+bit_length ≤ 16）："
+                    + "bit_offset=" + bitOffset + " bit_length=" + bitLength);
+        }
+        if (bitLength == 1) {
+            if (dataType != ThingModelDataType.BOOL) {
                 throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
-                    "word_count=2 需要显式 type:offset 形式（如 holding:0）；传统 5 位编号不支持多寄存器");
+                    "register_format=bits 且 bit_length=1 要求属性类型是 bool，当前=" + property.getDataType());
             }
-            String typeCode = ModbusRegisterAddress.typeCode(req.getRawAddress());
-            if (!req.getAddressType().equalsIgnoreCase(typeCode)) {
-                throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
-                    "word_count=2 的 raw_address 寄存器区必须与 address_type 一致：address_type="
-                        + req.getAddressType() + " raw_address=" + req.getRawAddress());
-            }
-            if (ModbusRegisterAddress.offset(req.getRawAddress()) + 1 > ModbusRegisterAddress.MAX_OFFSET) {
-                throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
-                    "word_count=2 的寄存器基址越界（offset+1 > " + ModbusRegisterAddress.MAX_OFFSET
-                        + "）：" + req.getRawAddress());
-            }
+        } else if (dataType != ThingModelDataType.INT && dataType != ThingModelDataType.LONG) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "register_format=bits 且 bit_length>1 要求属性类型是 int/long，当前=" + property.getDataType());
+        }
+    }
+
+    /** {@code word_count=2} 的地址规则（v1）：显式 {@code type:offset} 且与 address_type 一致、offset+1 不越界。 */
+    private void validateExplicitMultiRegisterAddress(IotPointMappingReq req) {
+        if (!ModbusRegisterAddress.isExplicitForm(req.getRawAddress())) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "word_count=2 需要显式 type:offset 形式（如 holding:0）；传统 5 位编号不支持多寄存器");
+        }
+        String typeCode = ModbusRegisterAddress.typeCode(req.getRawAddress());
+        if (!req.getAddressType().equalsIgnoreCase(typeCode)) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "word_count=2 的 raw_address 寄存器区必须与 address_type 一致：address_type="
+                    + req.getAddressType() + " raw_address=" + req.getRawAddress());
+        }
+        if (ModbusRegisterAddress.offset(req.getRawAddress()) + 1 > ModbusRegisterAddress.MAX_OFFSET) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "word_count=2 的寄存器基址越界（offset+1 > " + ModbusRegisterAddress.MAX_OFFSET
+                    + "）：" + req.getRawAddress());
         }
     }
 
@@ -234,6 +345,10 @@ public class IotPointMappingServiceImpl extends BaseServiceImpl<IotPointMappingM
         mapping.setByteOrder(req.getByteOrder());
         mapping.setWordCount(req.getWordCount() == null ? 1 : req.getWordCount());
         mapping.setSigned(Boolean.TRUE.equals(req.getSigned()));
+        mapping.setRegisterFormat(req.getRegisterFormat() == null || req.getRegisterFormat().isBlank()
+            ? "int" : req.getRegisterFormat().trim());
+        mapping.setBitOffset(req.getBitOffset());
+        mapping.setBitLength(req.getBitLength());
         mapping.setRw(req.getRw());
         mapping.setEnabled(req.getEnabled() == null ? Boolean.TRUE : req.getEnabled());
     }
@@ -274,6 +389,9 @@ public class IotPointMappingServiceImpl extends BaseServiceImpl<IotPointMappingM
         resp.setByteOrder(entity.getByteOrder());
         resp.setWordCount(entity.getWordCount());
         resp.setSigned(entity.getSigned());
+        resp.setRegisterFormat(entity.getRegisterFormat());
+        resp.setBitOffset(entity.getBitOffset());
+        resp.setBitLength(entity.getBitLength());
         resp.setRw(entity.getRw());
         resp.setEnabled(entity.getEnabled());
         resp.setCreateTime(entity.getCreateTime());

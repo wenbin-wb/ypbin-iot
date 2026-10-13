@@ -54,7 +54,10 @@ final class ItSchema {
         "deploy/sql/migration/2026-10-03-iot-alert-schema.sql",
         // Modbus 寄存器解码 v1（2026-10-13）：iot_point_mapping 新增 word_count/`signed`；
         // 不登记 ⇒ 任何按实体读 iot_point_mapping 的真库 IT 会撞 Unknown column。
-        "deploy/sql/migration/2026-10-13-iot-modbus-register-schema.sql");
+        "deploy/sql/migration/2026-10-13-iot-modbus-register-schema.sql",
+        // Modbus 寄存器解码 v2（2026-10-13）：新增 register_format/bit_offset/bit_length；
+        // 顺序与目录字典序一致（v1 之后），不登记 ⇒ 真库 IT 会撞 Unknown column。
+        "deploy/sql/migration/2026-10-13-iot-modbus-v2-register-format-schema.sql");
 
     private ItSchema() {
     }

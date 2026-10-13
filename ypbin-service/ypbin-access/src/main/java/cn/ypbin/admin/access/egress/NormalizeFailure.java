@@ -32,7 +32,10 @@ public enum NormalizeFailure {
     NOT_BOOLEAN("not-boolean", "值不是布尔形态"),
 
     /** 物模型属性数据类型缺失或不在已知 9 类之内 ⇒ 不猜，丢弃。 */
-    UNKNOWN_DATA_TYPE("unknown-data-type", "属性数据类型缺失或未知");
+    UNKNOWN_DATA_TYPE("unknown-data-type", "属性数据类型缺失或未知"),
+
+    /** 浮点值为 NaN/±Inf（不是有效测量，无法表示为规范读数；Modbus float 形态）。 */
+    NON_FINITE("non-finite", "浮点值为 NaN/Inf");
 
     private final String code;
 

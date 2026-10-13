@@ -90,7 +90,7 @@
 
 | 指标 | 类型 | 口径（何时变化） | 建议关注 / 阈值 | 注册文件 |
 |---|---|---|---|---|
-| `iot.access.value.normalize.failure` | Counter（按 `reason` 标签：`not-numeric` / `not-boolean` / `unknown-data-type`） | 宿主物模型类型规范化失败（SDK 只做字段选择、不做类型转换，故这三类只能由宿主发现） | **期望 0**；出现即按 `reason` 定位点位 `data_type` 与设备帧内容 | PointValueNormalizeMetrics.java |
+| `iot.access.value.normalize.failure` | Counter（按 `reason` 标签：`not-numeric` / `not-boolean` / `unknown-data-type` / `non-finite`） | 宿主物模型值规范化失败（TCP 类型规范化三类；`non-finite` = Modbus float 解出 NaN/±Inf，见 `VALUE-DECODE-DESIGN.md` §4.4.6） | **期望 0**；出现即按 `reason` 定位点位 `data_type` 与设备帧内容 | PointValueNormalizeMetrics.java |
 | `iot.access.modbus.pair.stale` | Counter | Modbus 32 位点位半字配对**陈旧**被丢弃的次数（同一 half 重复到达，或另一 half 与暂存 half 的时间差 > 一个采集周期） | **期望 0**；增长 ⇒ 采集周期/寄存器地址配对异常或重复订阅（见 `VALUE-DECODE-DESIGN.md` §4.3.4） | ModbusRegisterMetrics.java |
 
 ### 2.7 指标上报链路（access → iot 平台自告警）

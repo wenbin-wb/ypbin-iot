@@ -68,6 +68,15 @@ public class AccessPointMappingDto {
     /** 整型符号：true=有符号（可空；null 按无符号）。仅 Modbus 寄存器点位生效。 */
     private Boolean signed;
 
+    /** 寄存器值形态：int|float|bits（可空；null 按 int）。仅 Modbus 寄存器点位生效。 */
+    private String registerFormat;
+
+    /** 仅 bits：起始位（0..15）。 */
+    private Integer bitOffset;
+
+    /** 仅 bits：位宽（1..16-bit_offset）。 */
+    private Integer bitLength;
+
     /** 读写权限：R | W | RW（与属性 access_mode 联动校验后的结果）。 */
     private String rw;
 }

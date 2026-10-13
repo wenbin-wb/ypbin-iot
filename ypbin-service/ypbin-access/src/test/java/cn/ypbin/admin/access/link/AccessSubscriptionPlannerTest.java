@@ -614,6 +614,27 @@ class AccessSubscriptionPlannerTest {
     }
 
     @Test
+    @DisplayName("★ v2 float：word_count=2 一次订阅带 base 与 base+1（复用 v1 扩地址骨架）")
+    void modbusFloatMustSubscribeBaseAndNext() {
+        DeviceSession session = mock(DeviceSession.class);
+        when(session.subscribe(any(SubscribeRequest.class), any()))
+            .thenReturn(CompletableFuture.completedFuture(null));
+        AtomicReference<Map<String, DeviceSession>> bound =
+            new AtomicReference<>(Map.of("d1", session));
+        AccessSubscriptionPlanner planner = planner(bound);
+
+        String points = "[{\"propertyId\":\"1\",\"identifier\":\"temperature\","
+            + "\"address\":\"holding:0\",\"wordCount\":2,\"registerFormat\":\"float\","
+            + "\"byteOrder\":\"little\"}]";
+        assertThat(planner.subscribe(List.of(device("d1", points)))).isEqualTo(1);
+
+        ArgumentCaptor<SubscribeRequest> requests = ArgumentCaptor.forClass(SubscribeRequest.class);
+        verify(session, times(1)).subscribe(requests.capture(), any());
+        assertThat(requests.getValue().addresses().stream().map(PointAddress::raw).toList())
+            .containsExactly("holding:0", "holding:1");
+    }
+
+    @Test
     @DisplayName("★ Modbus word_count=1：订阅地址与今天完全一致（传统 5 位编号也照常）")
     void modbusWordCountOneMustStaySingle() {
         DeviceSession session = mock(DeviceSession.class);

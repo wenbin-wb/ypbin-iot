@@ -60,6 +60,15 @@ public class IotPointMappingResp {
     /** 整型符号（true=有符号）。 */
     private Boolean signed;
 
+    /** 寄存器值形态：int|float|bits。 */
+    private String registerFormat;
+
+    /** 仅 bits：起始位。 */
+    private Integer bitOffset;
+
+    /** 仅 bits：位宽。 */
+    private Integer bitLength;
+
     /** 读写权限。 */
     private String rw;
 

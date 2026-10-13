@@ -397,4 +397,195 @@ class IotPointMappingServiceImplTest {
         property.setDataType(dataType);
         when(propertyMapper.selectById(PROPERTY_ID)).thenReturn(property);
     }
+    @Test
+    @DisplayName("★ v2 float：word_count=2 + signed=false + bit_* 空 + decimal + 显式地址 ⇒ 接受")
+    void floatFormatAccepted() {
+        stubProduct("modbus", "decimal");
+        IotPointMappingReq req = request(DEVICE_ID, PROPERTY_ID, "RW");
+        req.setRawAddress("holding:0");
+        req.setAddressType("holding");
+        req.setRegisterFormat("float");
+        req.setWordCount(2);
+        req.setSigned(Boolean.FALSE);
+        req.setByteOrder("big");
+
+        service.create(req);
+
+        ArgumentCaptor<IotPointMapping> captor = ArgumentCaptor.forClass(IotPointMapping.class);
+        verify(mappingMapper).insert(captor.capture());
+        assertThat(captor.getValue().getRegisterFormat()).isEqualTo("float");
+        assertThat(captor.getValue().getWordCount()).isEqualTo(2);
+    }
+
+    @Test
+    @DisplayName("★ v2 float：word_count≠2 ⇒ 拒绝（不静默改成 2）")
+    void floatWordCountMustBeTwo() {
+        stubProduct("modbus", "decimal");
+        IotPointMappingReq req = request(DEVICE_ID, PROPERTY_ID, "RW");
+        req.setRegisterFormat("float");
+        req.setWordCount(1);
+
+        assertThatThrownBy(() -> service.create(req))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("要求 word_count=2");
+    }
+
+    @Test
+    @DisplayName("★ v2 float：signed=true ⇒ 拒绝；bit_* 非空 ⇒ 拒绝；data_type≠decimal ⇒ 拒绝")
+    void floatIncompatibleFieldsRejected() {
+        stubProduct("modbus", "decimal");
+        IotPointMappingReq signedReq = request(DEVICE_ID, PROPERTY_ID, "RW");
+        signedReq.setRawAddress("holding:0");
+        signedReq.setRegisterFormat("float");
+        signedReq.setWordCount(2);
+        signedReq.setSigned(Boolean.TRUE);
+        assertThatThrownBy(() -> service.create(signedReq))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("signed 必须为 false");
+
+        IotPointMappingReq bitsReq = request(DEVICE_ID, PROPERTY_ID, "RW");
+        bitsReq.setRawAddress("holding:0");
+        bitsReq.setRegisterFormat("float");
+        bitsReq.setWordCount(2);
+        bitsReq.setBitOffset(0);
+        bitsReq.setBitLength(1);
+        assertThatThrownBy(() -> service.create(bitsReq))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("不支持 bit_offset/bit_length");
+
+        stubProduct("modbus", "int");
+        IotPointMappingReq typeReq = request(DEVICE_ID, PROPERTY_ID, "RW");
+        typeReq.setRawAddress("holding:0");
+        typeReq.setRegisterFormat("float");
+        typeReq.setWordCount(2);
+        assertThatThrownBy(() -> service.create(typeReq))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("要求属性类型是 decimal");
+    }
+
+    @Test
+    @DisplayName("★ v2 float：非 Modbus ⇒ 拒绝")
+    void floatNonModbusRejected() {
+        stubProduct("tcp", "decimal");
+        IotPointMappingReq req = request(DEVICE_ID, PROPERTY_ID, "RW");
+        req.setRegisterFormat("float");
+        req.setWordCount(2);
+
+        assertThatThrownBy(() -> service.create(req))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("仅 Modbus 寄存器点位支持 register_format=float");
+    }
+
+    @Test
+    @DisplayName("★ v2 bits：word_count=1 + 合法 bit 区间 + data_type 匹配 ⇒ 接受（传统 5 位编号也可）")
+    void bitsFormatAccepted() {
+        stubProduct("modbus", "bool");
+        IotPointMappingReq req = request(DEVICE_ID, PROPERTY_ID, "RW");
+        req.setRawAddress("40001");
+        req.setAddressType("holding");
+        req.setRegisterFormat("bits");
+        req.setWordCount(1);
+        req.setSigned(Boolean.FALSE);
+        req.setBitOffset(0);
+        req.setBitLength(1);
+
+        service.create(req);
+
+        ArgumentCaptor<IotPointMapping> captor = ArgumentCaptor.forClass(IotPointMapping.class);
+        verify(mappingMapper).insert(captor.capture());
+        assertThat(captor.getValue().getRegisterFormat()).isEqualTo("bits");
+        assertThat(captor.getValue().getBitOffset()).isZero();
+        assertThat(captor.getValue().getBitLength()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("★ v2 bits：word_count≠1 / signed=true / 缺 bit_* ⇒ 拒绝")
+    void bitsIncompatibleFieldsRejected() {
+        stubProduct("modbus", "bool");
+        IotPointMappingReq wcReq = request(DEVICE_ID, PROPERTY_ID, "RW");
+        wcReq.setRegisterFormat("bits");
+        wcReq.setWordCount(2);
+        wcReq.setBitOffset(0);
+        wcReq.setBitLength(1);
+        assertThatThrownBy(() -> service.create(wcReq))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("要求 word_count=1");
+
+        IotPointMappingReq signedReq = request(DEVICE_ID, PROPERTY_ID, "RW");
+        signedReq.setRegisterFormat("bits");
+        signedReq.setSigned(Boolean.TRUE);
+        signedReq.setBitOffset(0);
+        signedReq.setBitLength(1);
+        assertThatThrownBy(() -> service.create(signedReq))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("无符号位域");
+
+        IotPointMappingReq missingReq = request(DEVICE_ID, PROPERTY_ID, "RW");
+        missingReq.setRegisterFormat("bits");
+        assertThatThrownBy(() -> service.create(missingReq))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("必须同时给出 bit_offset 与 bit_length");
+    }
+
+    @Test
+    @DisplayName("★ v2 bits：bit_offset/bit_length 越界 ⇒ 拒绝")
+    void bitsRangeRejected() {
+        stubProduct("modbus", "bool");
+        IotPointMappingReq offsetReq = request(DEVICE_ID, PROPERTY_ID, "RW");
+        offsetReq.setRegisterFormat("bits");
+        offsetReq.setBitOffset(16);
+        offsetReq.setBitLength(1);
+        assertThatThrownBy(() -> service.create(offsetReq))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("bit_offset 必须在 0..15");
+
+        IotPointMappingReq lengthReq = request(DEVICE_ID, PROPERTY_ID, "RW");
+        lengthReq.setRegisterFormat("bits");
+        lengthReq.setBitOffset(15);
+        lengthReq.setBitLength(2);
+        assertThatThrownBy(() -> service.create(lengthReq))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("bit_length 必须在 1..1");
+    }
+
+    @Test
+    @DisplayName("★ v2 bits：data_type 与 bit_length 不匹配 ⇒ 拒绝")
+    void bitsDataTypeMismatchRejected() {
+        stubProduct("modbus", "int");
+        IotPointMappingReq boolReq = request(DEVICE_ID, PROPERTY_ID, "RW");
+        boolReq.setRegisterFormat("bits");
+        boolReq.setBitOffset(0);
+        boolReq.setBitLength(1);
+        assertThatThrownBy(() -> service.create(boolReq))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("要求属性类型是 bool");
+
+        stubProduct("modbus", "bool");
+        IotPointMappingReq intReq = request(DEVICE_ID, PROPERTY_ID, "RW");
+        intReq.setRegisterFormat("bits");
+        intReq.setBitOffset(0);
+        intReq.setBitLength(4);
+        assertThatThrownBy(() -> service.create(intReq))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("要求属性类型是 int/long");
+    }
+
+    @Test
+    @DisplayName("★ v2：register_format=int 携带 bit_* ⇒ 拒绝（新字段严格）")
+    void intFormatWithBitFieldsRejected() {
+        stubProduct("modbus", "int");
+        IotPointMappingReq req = request(DEVICE_ID, PROPERTY_ID, "RW");
+        req.setRegisterFormat("int");
+        req.setBitOffset(0);
+        req.setBitLength(1);
+
+        assertThatThrownBy(() -> service.create(req))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("register_format=int 不支持 bit_offset/bit_length");
+    }
+
+    @Test
+    @DisplayName("实体→响应：registerFormat/bitOffset/bitLength 必须搬运（前端表单契约）")
+    void toRespShouldMapRegisterFormatAndBits() {
+        IotPointMapping entity = new IotPointMapping();
+        entity.setRegisterFormat("bits");
+        entity.setBitOffset(3);
+        entity.setBitLength(5);
+
+        IotPointMappingResp resp = service.toResp(entity);
+
+        assertThat(resp.getRegisterFormat()).isEqualTo("bits");
+        assertThat(resp.getBitOffset()).isEqualTo(3);
+        assertThat(resp.getBitLength()).isEqualTo(5);
+    }
 }
