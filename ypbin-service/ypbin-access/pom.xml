@@ -19,7 +19,7 @@
              交付了 TCP `payload-format=key-value`（帧内字段选择 / valueSelector）⇒ 接入侧可删除
              「UTF-8 + KEY=VALUE 拆分」的帧解析过渡层（宿主仍保留物模型类型规范化，见
              docs/VALUE-DECODE-DESIGN.md §5）。主 CI（ci.yml，admin 拥有、本仓不可改）可直接解析。 -->
-        <ypbin-iot.version>0.3.0</ypbin-iot.version>
+        <ypbin-iot.version>0.3.1</ypbin-iot.version>
     </properties>
 
     <dependencyManagement>
