@@ -67,6 +67,15 @@
 
 ### 新增
 
+- **新增上线运行手册 `docs/DEPLOY-RUNBOOK.md`（交付面单一入口）**：把散在 `DEPLOY-BACKEND` / `DEPLOY-TIMESERIES` /
+  `DEPLOY-CREDENTIAL-HYGIENE` / `ACCESS-ENABLE` / `METRICS` / `VALUE-DECODE-DESIGN` / `deploy/PROD-OPS-NOTES` 等
+  多份文档里的「上线前检查 → 升级步骤 → 上线后核验 → 回滚 → 故障速查」收拢成一份**可执行、可核对、可回滚**的手册。
+  核验清单覆盖订阅形态（`iot.access.subscribe.success` 每设备一次）、落列（`iot.timeseries.value.{type_missing,not_numeric,precision_lost}` 均为 0）、
+  Modbus（`iot.access.modbus.pair.stale`=0、字符串点位、无重复读数）、接入侧规范化（`iot.access.value.normalize.failure{reason=…}`=0）
+  与业务面；每条给「命令 + 期望 + 不满足说明什么」并注明取值方式与期望值来源。所有指标名/配置键/阈值均取自仓内文档或代码并给出出处；
+  **显式写清「不可回退项」**（落列口径、`forceText` 已删除、IoTDB 热拷贝边界）与**「本手册不覆盖什么」**
+  （EMQX 集群、Prometheus/Grafana、镜像制品化剩余、K8s/HA、外部 EMQX/隧道等），避免「照做就万事大吉」的错觉。
+  文档一致性核对中发现的 4 处不一致已列入手册附录 C（未在手册里静默改其它文档）。
 - **新增门禁「Central Resolution Build」**（`.github/workflows/central-resolution-build.yml`）：**只用 Maven Central 上已发布的制品**构建本仓（不 checkout starter 源码、不做本地 install）。
   为什么需要：admin 既有的 `ci.yml` 断言「pom 声明的 starter 版本 == 最新 Release」之后，却 checkout starter 的 **master** 源码本地 install 来编译 ⇒ 若 master 上已有而 Release 里还没有的 API 被用到，`ci.yml` 会**假绿**，而任何干净机器（外部使用者、我们的发布制品工作流）都会编译失败。
   为什么是独立新工作流：admin 的既有工作流按 `SYNC.md` 属「明确不动」；新增文件不产生同步冲突面。附带自检：恰好 6 个服务 jar 且每个都含 `BOOT-INF/`。
