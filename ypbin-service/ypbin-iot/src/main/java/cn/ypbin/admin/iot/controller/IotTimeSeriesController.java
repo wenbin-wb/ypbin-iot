@@ -28,8 +28,11 @@ import org.springframework.web.bind.annotation.RestController;
  * <p>网关路由 {@code /iot/**} 且 StripPrefix=1 ⇒ 前端调用路径为
  * {@code /iot/devices/{deviceId}/series}。</p>
  *
- * <p>当前后端存储（IoTDB）尚未接入：本端点会返回**业务错误**说明「未启用」，
- * 而不是返回空列表——空列表会被误读成「这段时间没数据」（见 {@code TimeSeriesQueryService}）。</p>
+ * <p>后端存储为 IoTDB（{@code ypbin.iot.timeseries.enabled=true} 时装配 {@code IotDbTimeSeriesStore}）；
+ * 未启用时装配「不可用」实现，此时本端点返回**业务错误**说明「未启用」，而不是返回空列表
+ * ——空列表会被误读成「这段时间没数据」（见 {@code TimeSeriesQueryService}）。</p>
+ *
+ * <p><b>2026-10-13 更正</b>：本段此前写「IoTDB 尚未接入」，与该类当时的实际实现相反（属文档漂移）。</p>
  *
  * @author wenbin
  * @since 2026-09-24

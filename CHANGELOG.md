@@ -16,6 +16,15 @@
     合并之后的 main **没有真库回归** —— 两个 PR 各自绿、叠加后互相影响时无人拦（成对代价：每次 main 合并多跑两个分钟级作业）；
   - **`Central Resolution Build` 也纳入 main 推送**：合并后的 main 必须仍是「只用已发布制品就能构建」的状态。
 
+### 修复
+
+- **更正 4 处「文档/注释与代码事实相反」**（由上线手册的核对过程发现，逐处给证据）：
+  - `docs/DEPLOY-BACKEND.md`：直连 `18084` 的 curl 多带了 `/iot` 前缀（`/iot/**` 是**网关**路由，`StripPrefix=1` 后服务侧无此前缀）；
+    同文件另两处写 `iot.access.value.normalize.failure` 有「3 个 reason 标签」，实际自 v2/v3 起为 **5 个**
+    （`not-numeric`/`not-boolean`/`unknown-data-type`/`non-finite`/`not-utf8`）；
+  - `IotTimeSeriesController` 类 Javadoc 仍写「IoTDB 尚未接入、端点返回未启用」，与该类实际实现（走的正是 IoTDB）相反；
+  - `docs/METRICS.md` 把 `iot.timeseries.value.precision_lost` 的判据写成 `|v| ≤ 2^53`，代码判的是 **`> 2^53`**。
+
 ### 变更
 
 - **落列改由物模型 `data_type` 唯一决定，彻底删除 `forceText` 通道（task-23，行为变更）**
