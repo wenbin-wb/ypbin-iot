@@ -149,12 +149,17 @@ jobs:
           exit 0
 
       - name: 生成依赖漏洞报告（CVSS >= 7 判失败）
+        id: scan
         if: steps.assert-db.outputs.db == 'ok'
         run: |
-          set -euo pipefail
+          # 失败必须**自解释**：把 mvn 日志落盘、尾部写进 step summary 与 error 注解，
+          # 并区分「CVSS 命中判红」与「分析错误没产出报告」两种成因（否则只能看到 exit 1）。
+          set -uo pipefail
           scope_args=()
           scope="${{ inputs.scan_scope }}"
           if [ -n "$scope" ]; then scope_args=( -pl "$scope" ); fi
+          log=/tmp/odc-scan.log
+          set +e
           mvn -B -ntp "${scope_args[@]}" -DskipTests \
             org.owasp:dependency-check-maven:${ODC_VERSION}:aggregate \
             -DautoUpdate=false \
@@ -166,14 +171,39 @@ jobs:
             -DossIndexAnalyzerEnabled=false \
             -DretireJsAnalyzerEnabled=false \
             -Dformats=HTML,JSON,SARIF \
-            -DsuppressionFiles="$ODC_SUPPRESSIONS"
+            -DsuppressionFiles="$ODC_SUPPRESSIONS" 2>&1 | tee "$log"
+          rc=${PIPESTATUS[0]}
+          set -e
+          mkdir -p target/dependency-check-report
+          cp -f "$log" target/odc-scan.log
+          {
+            echo "### 依赖漏洞扫描结果"
+            echo ""
+            echo "- mvn 退出码：\`$rc\`"
+            echo "- 报告目录文件数：$(ls -1 target/dependency-check-report 2>/dev/null | wc -l)"
+            echo ""
+            echo '\`\`\`'
+            tail -30 "$log"
+            echo '\`\`\`'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$rc" -ne 0 ]; then
+            tail_msg=$(tail -12 "$log" | tr '\n' ' ' | tr -d '\r' | cut -c1-900)
+            if [ -s target/dependency-check-report/dependency-check-report.json ]; then
+              echo "::error::依赖漏洞门禁判红（CVSS>=7 命中）。详见 step summary 与上传的报告制品。日志尾部：$tail_msg"
+            else
+              echo "::error::依赖漏洞扫描**未产出报告**（分析错误，不是 CVSS 命中）。请查 step summary 与上传的 odc-scan.log。日志尾部：$tail_msg"
+            fi
+            exit "$rc"
+          fi
 
       - name: 上传报告（无论成败都上传，供定级与留痕）
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: dependency-check-report
-          path: target/dependency-check-report/
+          path: |
+            target/dependency-check-report/
+            target/odc-scan.log
           if-no-files-found: warn
           retention-days: 30
 
