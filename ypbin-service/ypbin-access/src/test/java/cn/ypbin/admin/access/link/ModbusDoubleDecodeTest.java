@@ -11,6 +11,7 @@ package cn.ypbin.admin.access.link;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import cn.ypbin.admin.access.decode.BytePayloadDecoderRegistry;
 import cn.ypbin.admin.access.egress.AccessReading;
 import cn.ypbin.admin.access.egress.PointValueNormalizeMetrics;
 import cn.ypbin.admin.iot.device.AccessPointMappingDto;
@@ -275,7 +276,8 @@ class ModbusDoubleDecodeTest {
     private static PointMappingDataListener listener(List<AccessPointMappingDto> points,
                                                      List<AccessReading> readings,
                                                      SimpleMeterRegistry registry) {
-        return new PointMappingDataListener("100", PROTOCOL, 5_000, points, readings::add, registry);
+        return new PointMappingDataListener("100", PROTOCOL, 5_000, points, readings::add, registry,
+            BytePayloadDecoderRegistry.empty());
     }
 
     private static AccessPointMappingDto doublePoint(String byteOrder) {

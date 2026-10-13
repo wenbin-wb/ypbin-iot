@@ -15,6 +15,7 @@ import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+import cn.ypbin.admin.access.decode.BytePayloadDecoderRegistry;
 import cn.ypbin.admin.access.link.PointMappingDataListener;
 import cn.ypbin.admin.iot.device.AccessPointMappingDto;
 import cn.ypbin.iot.core.model.PointAddress;
@@ -196,7 +197,8 @@ class AccessReadingMappingTest {
         PointMappingDataListener listener = new PointMappingDataListener("100", PROTOCOL_TCP, 5_000,
             List.of(point("TEMP", "temperature", "decimal", null, null),
                 point("BIG", "big", "long", null, null)),
-            readings::add, meterRegistry);
+            readings::add, meterRegistry,
+            BytePayloadDecoderRegistry.empty());
         Logger listenerLogger = (Logger) LoggerFactory.getLogger(PointMappingDataListener.class);
         ListAppender<ILoggingEvent> appender = new ListAppender<>();
         appender.start();
@@ -233,7 +235,8 @@ class AccessReadingMappingTest {
         PointMappingDataListener listener = new PointMappingDataListener("100", PROTOCOL_TCP, 5_000,
             List.of(point("TEMP", "temperature", null, null, null),
                 point("HUM", "humidity", "not-a-type", null, null)),
-            readings::add, meterRegistry);
+            readings::add, meterRegistry,
+            BytePayloadDecoderRegistry.empty());
 
         listener.onData(PointValue.good(PointAddress.of("TEMP"), "23.5", Instant.now()));
         listener.onData(PointValue.good(PointAddress.of("HUM"), "45", Instant.now()));
@@ -251,7 +254,8 @@ class AccessReadingMappingTest {
         SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
         List<AccessReading> readings = new ArrayList<>();
         PointMappingDataListener listener = new PointMappingDataListener("100", PROTOCOL_TCP, 5_000,
-            List.of(point("SW", "switch1", "bool", null, null)), readings::add, meterRegistry);
+            List.of(point("SW", "switch1", "bool", null, null)), readings::add, meterRegistry,
+            BytePayloadDecoderRegistry.empty());
 
         listener.onData(PointValue.good(PointAddress.of("SW"), "maybe", Instant.now()));
 
@@ -268,7 +272,8 @@ class AccessReadingMappingTest {
         SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
         List<AccessReading> readings = new ArrayList<>();
         PointMappingDataListener listener = new PointMappingDataListener("100", PROTOCOL_TCP, 5_000,
-            List.of(point("TEMP", "temperature", "decimal", null, null)), readings::add, meterRegistry);
+            List.of(point("TEMP", "temperature", "decimal", null, null)), readings::add, meterRegistry,
+            BytePayloadDecoderRegistry.empty());
 
         listener.onData(PointValue.bad(PointAddress.of("TEMP"), Quality.BAD,
             "iot.tcp.selector.not-found", Instant.now()));
@@ -462,7 +467,7 @@ class AccessReadingMappingTest {
                                                      List<AccessPointMappingDto> points,
                                                      List<AccessReading> readings) {
         return new PointMappingDataListener("100", protocol, 5_000, points, readings::add,
-            new SimpleMeterRegistry());
+            new SimpleMeterRegistry(), BytePayloadDecoderRegistry.empty());
     }
 
     /**

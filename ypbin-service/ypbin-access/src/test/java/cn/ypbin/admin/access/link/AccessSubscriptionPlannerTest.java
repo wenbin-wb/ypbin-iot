@@ -18,6 +18,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import org.mockito.ArgumentCaptor;
 
+import cn.ypbin.admin.access.decode.BytePayloadDecoderRegistry;
 import cn.ypbin.iot.core.model.DeviceSpec;
 import cn.ypbin.iot.core.model.PointAddress;
 import cn.ypbin.iot.core.model.SubscribeRequest;
@@ -759,14 +760,14 @@ class AccessSubscriptionPlannerTest {
     private AccessSubscriptionPlanner planner(AtomicReference<Map<String, DeviceSession>> bound,
                                               SimpleMeterRegistry meterRegistry) {
         return new AccessSubscriptionPlanner(bound::get, objectMapper, reading -> { },
-            meterRegistry, clock, false);
+            meterRegistry, clock, false, BytePayloadDecoderRegistry.empty());
     }
 
     /** **key-value** 形态：TCP 走一次多地址订阅。 */
     private AccessSubscriptionPlanner plannerKeyValue(
             AtomicReference<Map<String, DeviceSession>> bound, SimpleMeterRegistry meterRegistry) {
         return new AccessSubscriptionPlanner(bound::get, objectMapper, reading -> { },
-            meterRegistry, clock, true);
+            meterRegistry, clock, true, BytePayloadDecoderRegistry.empty());
     }
 
     private static DeviceSession subscribeReturnsFuture() {

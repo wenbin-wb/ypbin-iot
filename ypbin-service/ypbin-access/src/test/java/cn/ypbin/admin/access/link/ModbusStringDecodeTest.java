@@ -12,6 +12,7 @@ package cn.ypbin.admin.access.link;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import cn.ypbin.admin.access.decode.BytePayloadDecoderRegistry;
 import cn.ypbin.admin.access.egress.AccessReading;
 import cn.ypbin.admin.access.egress.PointValueNormalizeMetrics;
 import cn.ypbin.admin.iot.device.AccessPointMappingDto;
@@ -226,7 +227,8 @@ class ModbusStringDecodeTest {
         List<AccessReading> readings = new ArrayList<>();
         // pollInterval=100ms ⇒ 容差 100ms；第二字晚到 1s 视为陈旧
         PointMappingDataListener listener = new PointMappingDataListener("100", PROTOCOL, 100,
-            List.of(stringPoint("holding:0", 2)), readings::add, new SimpleMeterRegistry());
+            List.of(stringPoint("holding:0", 2)), readings::add, new SimpleMeterRegistry(),
+            BytePayloadDecoderRegistry.empty());
 
         feed(listener, "holding:0", 0, 0x4142, T0);
         feed(listener, "holding:0", 1, 0x4344, T0.plusSeconds(1));
@@ -284,7 +286,8 @@ class ModbusStringDecodeTest {
     private static PointMappingDataListener listener(List<AccessPointMappingDto> points,
                                                      List<AccessReading> readings,
                                                      SimpleMeterRegistry registry) {
-        return new PointMappingDataListener("100", PROTOCOL, 5_000, points, readings::add, registry);
+        return new PointMappingDataListener("100", PROTOCOL, 5_000, points, readings::add, registry,
+            BytePayloadDecoderRegistry.empty());
     }
 
     private static AccessPointMappingDto stringPoint(String base, int wordCount) {

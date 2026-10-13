@@ -9,6 +9,7 @@
  */
 package cn.ypbin.admin.access.config;
 
+import cn.ypbin.admin.access.decode.BytePayloadDecoderRegistry;
 import cn.ypbin.admin.access.egress.AccessReadingSink;
 import cn.ypbin.admin.access.egress.LoggingDataSink;
 import cn.ypbin.admin.access.lease.AccessLeaseManager;
@@ -131,6 +132,7 @@ public class AccessIotProtocolConfiguration {
      * @param meterRegistry        指标
      * @param tcpPropertiesProvider TCP 配置（可选：TCP 未启用时 {@code TcpAutoConfiguration} 的
      *                             {@code @ConditionalOnProperty} 会让该 bean 缺失）
+     * @param decoderRegistry       宿主可插字节载荷解码器注册表（透传给每个设备 listener）
      * @return 订阅规划器
      */
     @Bean
@@ -139,7 +141,8 @@ public class AccessIotProtocolConfiguration {
                                                         ObjectMapper objectMapper,
                                                         AccessReadingSink readingSink,
                                                         MeterRegistry meterRegistry,
-                                                        ObjectProvider<TcpProperties> tcpPropertiesProvider) {
+                                                        ObjectProvider<TcpProperties> tcpPropertiesProvider,
+                                                        BytePayloadDecoderRegistry decoderRegistry) {
         Supplier<Map<String, DeviceSession>> sessions = () -> {
             IotLifecycle lifecycle = lifecycleProvider.getIfAvailable();
             return lifecycle == null ? Map.of() : lifecycle.sessions();
@@ -152,7 +155,7 @@ public class AccessIotProtocolConfiguration {
             && tcpProperties.payloadFormat() == TcpPayloadFormat.KEY_VALUE;
         // Clock 给系统时钟：订阅失败退避的时间基准，单测里注入可推进的假时钟
         return new AccessSubscriptionPlanner(sessions, objectMapper, readingSink,
-            meterRegistry, Clock.systemUTC(), tcpKeyValuePayloadFormat);
+            meterRegistry, Clock.systemUTC(), tcpKeyValuePayloadFormat, decoderRegistry);
     }
 
     /**
