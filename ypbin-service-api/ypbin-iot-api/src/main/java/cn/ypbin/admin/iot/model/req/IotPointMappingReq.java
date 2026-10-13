@@ -10,6 +10,7 @@
 package cn.ypbin.admin.iot.model.req;
 
 import jakarta.validation.constraints.Digits;
+import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
@@ -65,9 +66,17 @@ public class IotPointMappingReq {
     @Digits(integer = 14, fraction = 6, message = "缩放偏移超出精度范围")
     private BigDecimal offsetValue;
 
-    /** 字节序：big|little。 */
-    @Pattern(regexp = "big|little", message = "字节序非法（应为 big|little）")
+    /** 字序（word order）：big=高字在前 / little=低字在前；仅 Modbus word_count=2 生效。 */
+    @Pattern(regexp = "big|little", message = "字序非法（应为 big|little）")
     private String byteOrder;
+
+    /** 连续寄存器个数（1|2；默认 1 = 旧行为）。仅 Modbus 寄存器点位生效。 */
+    @Min(value = 1, message = "寄存器个数只能是 1 或 2")
+    @Max(value = 2, message = "寄存器个数只能是 1 或 2")
+    private Integer wordCount;
+
+    /** 整型符号：true=有符号；默认 false（无符号）。仅 Modbus 寄存器点位生效。 */
+    private Boolean signed;
 
     /** 读写权限（与属性 access_mode 联动校验）。 */
     @NotBlank(message = "读写权限不能为空")

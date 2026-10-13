@@ -354,7 +354,7 @@ business 变更台账（产品/设备/点位映射/凭据）
 | address_type | varchar(16) | `holding`/`input`/`coil`/`discrete`/`nodeid`/`topic`… |
 | poll_interval_ms | int | 采集周期（0=仅订阅不轮询，对齐 iot-starter `pollInterval`） |
 | scale_factor / offset | decimal | 缩放：`value = raw * scale + offset` |
-| byte_order | varchar(16) | 字节序（大端/小端） |
+| byte_order | varchar(16) | 字序（word order）：big=高字在前(ABCD) / little=低字在前(CDAB)；不支持 BADC/DCBA 字节交换 |
 | rw | varchar(8) | 读写权限（与属性 access_mode 联动校验） |
 | enabled | boolean | 启用/停采 |
 

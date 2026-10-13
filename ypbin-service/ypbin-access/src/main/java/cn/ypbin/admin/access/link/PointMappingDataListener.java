@@ -16,52 +16,40 @@ import cn.ypbin.admin.access.egress.PointValueNormalizeMetrics;
 import cn.ypbin.admin.access.egress.PointValueNormalizer;
 import cn.ypbin.admin.iot.device.AccessPointMappingDto;
 import cn.ypbin.admin.iot.enums.IotProtocol;
+import cn.ypbin.admin.iot.modbus.ModbusRegisterAddress;
 import cn.ypbin.iot.core.model.DataListener;
 import cn.ypbin.iot.core.model.PointValue;
+import cn.ypbin.iot.core.model.Quality;
 import cn.ypbin.starter.core.util.LogSanitizer;
 import io.micrometer.core.instrument.MeterRegistry;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.LongAdder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 订阅数据回调：把「协议地址」翻译成「平台点位」，做物模型类型规范化 + 线性缩放后交给出口。
+ * 订阅数据回调：把「协议地址」翻译成「平台点位」，做类型/寄存器解码与线性缩放后交给出口。
  *
- * <p><b>为什么需要显式适配</b>：协议栈讲的坐标是<b>地址</b>（holding:1 / topic / nodeId），
- * 平台讲的坐标是<b>属性标识</b>（{@code iot_property.identifier}，即规范坐标）。两者是不同模型，
- * 必须有一层翻译（§5.1 的「点位映射」），这不是「用改名掩盖分歧」。</p>
+ * <p><b>协议地址 → 点位</b>：协议栈按地址回调，平台按属性标识（{@code iot_property.identifier}）上报。
+ * 本类同时承担三条取值路径：</p>
+ * <ol>
+ *   <li><b>TCP key-value</b>：SDK 交付 {@code String}，按物模型 {@code data_type} 规范化
+ *       （见 {@link PointValueNormalizer}）；</li>
+ *   <li><b>Modbus 单寄存器</b>（{@code word_count=1}）：SDK 交付 16 位无符号 {@code Integer}；
+ *       {@code signed=true} 时做符号扩展，否则**原样透传**（向后兼容锚点）；</li>
+ *   <li><b>Modbus 多寄存器</b>（{@code word_count=2}）：SDK 对每个寄存器**逐值回调**（不是批量），
+ *       本类按点位**配对**两个寄存器后再合成一条读数——任一寄存器 BAD/缺失 ⇒ 该点位 BAD，
+ *       **绝不用陈旧一半拼值、绝不用 0 充数**（见 {@link #onMultiRegister}）。</li>
+ * </ol>
  *
- * <p><b>上报的是属性标识，不是属性主键字符串</b>（2026-09-26 统一）：统一之前这里上报
- * {@code AccessPointMappingDto.propertyId}（主键的字符串形式），导致同一个
- * {@code iot:latest:{租户}:{设备}} 哈希里出现两种 field（access 来源是主键、MQTT/前端是标识），
- * 读侧按标识查询**拿不到 access 来源的数据**。现在一律上报 {@code identifier}，
- * 并由 iot 侧入站再归一一次（滚动升级期间旧实例仍可能发主键字符串，入站两种都认）。
- * 该统一的口径见 {@code AccessReading} / {@link cn.ypbin.admin.iot.mapping.PointMappingIndex}。</p>
+ * <p><b>BAD 质量原样穿透</b>：SDK 的 BAD（TCP selector 未命中、Modbus 超时/响应短等）以 BAD 质量表达，
+ * 宿主不把它「洗白」成 GOOD；对应失败由 SDK 指标承接。</p>
  *
- * <p><b>帧解析已交给 SDK，类型规范化仍在宿主</b>（2026-10-13）：接入侧已切到 starter 0.3.0 的
- * {@code payload-format=key-value}，由 {@code TcpValueSelector} 完成「UTF-8 + KEY=VALUE 拆分 +
- * 按 {@code raw_address}（= selector）取键」，本类不再做帧解析。但 SDK <b>不做数据类型转换</b>
- * （其类注释明确：类型属于宿主物模型语义）⇒ 这里仍按 {@code iot_property.data_type} 调用
- * {@link PointValueNormalizer}：它是 {@link AccessReading#applyScale}（只吃 {@code Number}/{@code BigDecimal}）
- * 与 iot 侧 {@code ReadingValueMapper} 落列形态的前置。理由与边界见 {@code PointValueNormalizer} 类注释。</p>
- *
- * <p><b>BAD 质量原样穿透</b>：SDK 在 selector 未命中/非 UTF-8/无键值字段时给出 <b>BAD</b>
- * （{@code value=null}）。这类值<b>不进入规范化</b>、不计规范化失败，直接以 BAD 质量上报——
- * 「失败不得被画成有效值」由 quality 保证；对应的帧/选择失败由 SDK 的 {@code iot.tcp.*} 指标承接。</p>
- *
- * <p><b>属性标识缺失（孤儿映射）不静默</b>：映射行引用的 {@code iot_property} 行被物模型重导入
- * 物理删除后，设备规格里该点位的 {@code identifier} 为空。此时**必须丢弃该读数并计数 + WARN**，
- * 绝不能退回主键字符串（那等于把刚统一掉的形态又写回去），也不能静默丢掉。</p>
- *
- * <p><b>未映射的地址不静默</b>：记 WARN 且同时计数——采集到的点却没进平台，属配置缺口，
- * 必须能从日志/指标看见，否则会表现为「页面一直没数据、但没人知道为什么」。</p>
- *
- * <p>线程安全：规范化失败/未映射/孤儿映射三个自检计数用 {@link LongAdder}（多协议线程可能并发回调；
- * 普通 {@code long} 自增会丢更新）。它们<b>只用于自检与测试断言</b>，不参与业务判定；
- * 面向运维的告警计数以 {@code iot.access.value.normalize.failure} 与 SDK 的 {@code iot.tcp.*} 指标为准。</p>
+ * <p>线程安全：计数用 {@link LongAdder}；32 位点位的半字暂存用并发 Map + 短临界区保证「配对/清空」原子。</p>
  *
  * @author wenbin
  * @since 2026-09-21
@@ -70,15 +58,20 @@ public class PointMappingDataListener implements DataListener {
 
     private static final Logger log = LoggerFactory.getLogger(PointMappingDataListener.class);
 
+    /** 半字配对容差兜底（毫秒）：采集周期未知时使用（超过它即视为陈旧一半）。 */
+    static final long DEFAULT_PAIR_TTL_MS = 5_000L;
+
     private final String deviceId;
 
-    /** 接入协议码：只有 TCP 需要宿主类型规范化（其它协议模块已交付带类型的值）。 */
+    /** 接入协议码（决定取值路径：tcp 规范化 / modbus 寄存器解码）。 */
     private final String protocol;
 
-    /** 设备级采集周期（毫秒，未知为 {@code null}）：随读数一起上报，供断档判定用真周期。 */
+    /** 设备级采集周期（毫秒，未知为 {@code null}）：随读数上报，并作为半字配对容差。 */
     private final Integer pollIntervalMs;
 
-    private final Map<String, AccessPointMappingDto> pointByAddress;
+    /** 寄存器地址 → (点位, 第几个字)。word_count=2 时 base→0、base+1→1。 */
+    private final Map<String, RegisterTarget> registerByAddress;
+
     private final AccessReadingSink sink;
 
     private final MeterRegistry meterRegistry;
@@ -88,8 +81,17 @@ public class PointMappingDataListener implements DataListener {
     /** 因映射缺少属性标识（孤儿映射）而丢弃的读数条数（与「地址未映射」分开计）。 */
     private final LongAdder orphanCount = new LongAdder();
 
-    /** 因物模型类型规范化失败（非数值/非布尔/类型未知）而丢弃的读数条数（与上面两类原因分开计）。 */
+    /** 因物模型类型规范化失败（TCP）而丢弃的读数条数。 */
     private final LongAdder normalizeFailureCount = new LongAdder();
+
+    /** 32 位点位半字配对陈旧被丢弃的次数（与 Micrometer 计数器同源）。 */
+    private final LongAdder pairStaleCount = new LongAdder();
+
+    /** 32 位点位的半字暂存：base 地址 → 已到达的一半。每设备至多「word_count=2 点位数」条。 */
+    private final Map<String, Half> pairBuffer = new ConcurrentHashMap<>();
+
+    /** 半字配对的短临界区锁（配对/清空必须原子，避免并发回调把两半错配）。 */
+    private final Object pairLock = new Object();
 
     public PointMappingDataListener(String deviceId, String protocol, Integer pollIntervalMs,
                                     List<AccessPointMappingDto> points, AccessReadingSink sink,
@@ -99,28 +101,42 @@ public class PointMappingDataListener implements DataListener {
         this.pollIntervalMs = pollIntervalMs;
         this.sink = sink;
         this.meterRegistry = meterRegistry;
-        Map<String, AccessPointMappingDto> byAddress = new LinkedHashMap<>();
+        boolean modbus = IotProtocol.MODBUS.getCode().equals(protocol);
+        Map<String, RegisterTarget> byAddress = new LinkedHashMap<>();
         if (points != null) {
             for (AccessPointMappingDto point : points) {
-                if (point.getAddress() != null && !point.getAddress().isBlank()) {
-                    byAddress.put(point.getAddress(), point);
+                String base = point.getAddress();
+                if (base == null || base.isBlank()) {
+                    continue;
+                }
+                if (modbus && isMultiRegister(point)) {
+                    try {
+                        byAddress.put(base, new RegisterTarget(point, 0));
+                        byAddress.put(ModbusRegisterAddress.next(base), new RegisterTarget(point, 1));
+                    } catch (RuntimeException ex) {
+                        // 映射校验应已拦住（word_count=2 必须是显式 type:offset）；直连 DB 的坏数据在这里暴露
+                        log.error("[access] Modbus 多寄存器点位地址非法，跳过该点位：device={} address={}",
+                            LogSanitizer.sanitize(deviceId), LogSanitizer.sanitize(base), ex);
+                    }
+                } else {
+                    byAddress.put(base, new RegisterTarget(point, 0));
                 }
             }
         }
-        this.pointByAddress = byAddress;
+        this.registerByAddress = byAddress;
     }
 
     @Override
     public void onData(PointValue value) {
         String address = value.address().raw();
-        AccessPointMappingDto point = pointByAddress.get(address);
-        if (point == null) {
+        RegisterTarget target = registerByAddress.get(address);
+        if (target == null) {
             unmappedCount.increment();
             log.warn("[access] 采集到未映射的地址，已丢弃：device={} address={}（点位映射缺失？）",
                 LogSanitizer.sanitize(deviceId), LogSanitizer.sanitize(address));
             return;
         }
-        // 规范坐标：属性标识。缺标识说明该映射是孤儿（物模型属性行已被删除）⇒ 丢弃 + 计数 + WARN
+        AccessPointMappingDto point = target.point();
         String identifier = point.getIdentifier();
         if (identifier == null || identifier.isBlank()) {
             orphanCount.increment();
@@ -130,7 +146,12 @@ public class PointMappingDataListener implements DataListener {
                 LogSanitizer.sanitize(point.getPropertyId()));
             return;
         }
-        // SDK 的 BAD 原样穿透：不规范化、不计失败（失败由 quality=BAD 表达，SDK 侧另有 iot.tcp.* 指标）
+        boolean modbus = IotProtocol.MODBUS.getCode().equals(protocol);
+        if (modbus && isMultiRegister(point)) {
+            onMultiRegister(value, point, target.wordIndex());
+            return;
+        }
+        // 单寄存器 / 其它协议：BAD 原样穿透（不规范化、不计失败）
         if (!value.isGood()) {
             emit(identifier, value, value.value());
             return;
@@ -144,9 +165,90 @@ public class PointMappingDataListener implements DataListener {
                 return;
             }
             raw = outcome.value();
+        } else if (modbus && Boolean.TRUE.equals(point.getSigned()) && raw instanceof Number number) {
+            // word_count=1 + signed：16 位符号扩展；signed=false 原样透传（逐字节兼容）
+            raw = ModbusRegisterDecoder.decodeSingle(number.intValue(), true);
         }
         emit(identifier, value, AccessReading.applyScale(raw, point.getScaleFactor(),
             point.getOffsetValue()));
+    }
+
+    /**
+     * 32 位点位的半字配对与合成。
+     *
+     * <p><b>失败语义（不许猜）</b>：任一寄存器 BAD ⇒ 立即产出该点位 BAD 并清空暂存；
+     * <b>绝不</b>用陈旧的一半拼值、<b>绝不</b>用 0 充数。半字陈旧（同一 half 重复到达，或另一 half
+     * 与暂存 half 的时间差超过一个采集周期）⇒ 丢弃暂存 + 计数 {@code iot.access.modbus.pair.stale}
+     * 后再用新值暂存，不与新值混。</p>
+     *
+     * @param value     本次回调（某一半）
+     * @param point     点位
+     * @param wordIndex 本次是第几个字（base=0、base+1=1）
+     */
+    private void onMultiRegister(PointValue value, AccessPointMappingDto point, int wordIndex) {
+        String key = point.getAddress();
+        if (!value.isGood()) {
+            clearPair(key);
+            log.warn("[access] Modbus 多寄存器点位收到 BAD 寄存器，按点位 BAD 上报（不用陈旧一半拼值）："
+                    + "device={} address={} wordIndex={} reason={}",
+                LogSanitizer.sanitize(deviceId), LogSanitizer.sanitize(value.address().raw()), wordIndex,
+                LogSanitizer.sanitize(value.qualityReason()));
+            emit(point.getIdentifier(), value, value.value());
+            return;
+        }
+        Object raw = value.value();
+        if (!(raw instanceof Number number)) {
+            // 防御：SDK Modbus 必交付 Integer；非数值按 BAD 上报而不是把垃圾写进库
+            clearPair(key);
+            log.warn("[access] Modbus 多寄存器点位收到非数值寄存器值，按 BAD 上报：device={} address={}",
+                LogSanitizer.sanitize(deviceId), LogSanitizer.sanitize(value.address().raw()));
+            emit(point.getIdentifier(), PointValue.bad(value.address(), Quality.BAD,
+                "modbus.register.non-numeric", value.timestamp()), null);
+            return;
+        }
+        synchronized (pairLock) {
+            Half existing = pairBuffer.get(key);
+            if (existing != null && (isStale(existing, value.timestamp())
+                || existing.wordIndex() == wordIndex)) {
+                pairStaleCount.increment();
+                ModbusRegisterMetrics.pairStaleCounter(meterRegistry).increment();
+                log.warn("[access] Modbus 半字配对陈旧/同角色重复，丢弃暂存的一半（不与新值混）："
+                        + "device={} address={} 暂存word={} 本次word={} 见 {} 指标",
+                    LogSanitizer.sanitize(deviceId), LogSanitizer.sanitize(key), existing.wordIndex(),
+                    wordIndex, ModbusRegisterMetrics.METRIC_PAIR_STALE);
+                pairBuffer.remove(key);
+                existing = null;
+            }
+            if (existing == null) {
+                pairBuffer.put(key, new Half(wordIndex, number.intValue(), value.timestamp()));
+                return;
+            }
+            int first = existing.wordIndex() == 0 ? existing.value() : number.intValue();
+            int second = existing.wordIndex() == 0 ? number.intValue() : existing.value();
+            pairBuffer.remove(key);
+            long decoded = ModbusRegisterDecoder.decodePair(first, second, point.getByteOrder(),
+                Boolean.TRUE.equals(point.getSigned()));
+            emit(point.getIdentifier(), value, AccessReading.applyScale(decoded,
+                point.getScaleFactor(), point.getOffsetValue()));
+        }
+    }
+
+    /** 暂存的一半是否已陈旧（超过一个采集周期；周期未知用兜底值）。 */
+    private boolean isStale(Half existing, Instant currentTs) {
+        long tolerance = pollIntervalMs != null && pollIntervalMs > 0
+            ? pollIntervalMs : DEFAULT_PAIR_TTL_MS;
+        return currentTs.toEpochMilli() - existing.ts().toEpochMilli() > tolerance;
+    }
+
+    private void clearPair(String key) {
+        synchronized (pairLock) {
+            pairBuffer.remove(key);
+        }
+    }
+
+    /** 是否 32 位点位（word_count=2）。 */
+    private static boolean isMultiRegister(AccessPointMappingDto point) {
+        return point.getWordCount() != null && point.getWordCount() == 2;
     }
 
     /** 上报一条读数（质量/时刻/周期随原始 PointValue 带出；BAD 的 value 可为 null）。 */
@@ -157,9 +259,6 @@ public class PointMappingDataListener implements DataListener {
 
     /**
      * 记一次物模型类型规范化失败：丢弃该点 + 计数（按原因）+ WARN（脱敏：只记长度与配置，不 dump 值）。
-     *
-     * <p>为什么值内容不落日志：帧内容可能含序列号/凭据类字段，采集中转日志不该成为泄露面；
-     * 排障需要的「是哪类失败」由原因码与点位配置给出，长度足以区分空值与格式不符。</p>
      *
      * @param point   点位映射
      * @param failure 失败原因
@@ -194,5 +293,29 @@ public class PointMappingDataListener implements DataListener {
     /** 本设备因物模型类型规范化失败被丢弃的读数条数（供自检与测试断言）。 */
     public long normalizeFailureCount() {
         return normalizeFailureCount.sum();
+    }
+
+    /** 本设备因半字配对陈旧/同角色重复被丢弃的读数条数（供自检与测试断言）。 */
+    public long pairStaleCount() {
+        return pairStaleCount.sum();
+    }
+
+    /**
+     * 寄存器地址 → 点位 + 第几个字。
+     *
+     * @param point     点位
+     * @param wordIndex 0=base、1=base+1
+     */
+    private record RegisterTarget(AccessPointMappingDto point, int wordIndex) {
+    }
+
+    /**
+     * 已到达的一半。
+     *
+     * @param wordIndex 第几个字
+     * @param value     16 位无符号值
+     * @param ts        到达时刻（配对容差用）
+     */
+    private record Half(int wordIndex, int value, Instant ts) {
     }
 }

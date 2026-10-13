@@ -40,6 +40,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.test.util.ReflectionTestUtils;
 
 /**
@@ -236,5 +237,164 @@ class IotPointMappingServiceImplTest {
         req.setAddressType("holding");
         req.setRw(rw);
         return req;
+    }
+    @Test
+    @DisplayName("★ 寄存器解码：word_count=2 + 显式 holding:0 被接受，且实体搬运 wordCount/signed/byteOrder")
+    void modbusWordCountTwoExplicitFormAccepted() {
+        stubProduct("modbus", "int");
+        IotPointMappingReq req = request(DEVICE_ID, PROPERTY_ID, "RW");
+        req.setRawAddress("holding:0");
+        req.setAddressType("holding");
+        req.setWordCount(2);
+        req.setSigned(Boolean.FALSE);
+        req.setByteOrder("big");
+
+        service.create(req);
+
+        ArgumentCaptor<IotPointMapping> captor = ArgumentCaptor.forClass(IotPointMapping.class);
+        verify(mappingMapper).insert(captor.capture());
+        assertThat(captor.getValue().getWordCount()).isEqualTo(2);
+        assertThat(captor.getValue().getSigned()).isFalse();
+        assertThat(captor.getValue().getByteOrder()).isEqualTo("big");
+    }
+
+    @Test
+    @DisplayName("★ 寄存器解码：word_count=2 拒绝传统 5 位编号（报错说清怎么改）")
+    void modbusWordCountTwoTraditionalAddressRejected() {
+        stubProduct("modbus", "int");
+        IotPointMappingReq req = request(DEVICE_ID, PROPERTY_ID, "RW");
+        req.setWordCount(2);
+        req.setRawAddress("40001");
+
+        assertThatThrownBy(() -> service.create(req))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("传统 5 位编号不支持多寄存器");
+        verify(mappingMapper, never()).insert(any(IotPointMapping.class));
+    }
+
+    @Test
+    @DisplayName("★ 寄存器解码：word_count=2 的 raw_address 寄存器区必须与 address_type 一致")
+    void modbusWordCountTwoAddressTypeMismatchRejected() {
+        stubProduct("modbus", "int");
+        IotPointMappingReq req = request(DEVICE_ID, PROPERTY_ID, "RW");
+        req.setWordCount(2);
+        req.setRawAddress("holding:0");
+        req.setAddressType("input");
+
+        assertThatThrownBy(() -> service.create(req))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("必须与 address_type 一致");
+    }
+
+    @Test
+    @DisplayName("★ 寄存器解码：位类型（coil）不支持 word_count/signed")
+    void modbusWordCountOnCoilRejected() {
+        stubProduct("modbus", "bool");
+        IotPointMappingReq req = request(DEVICE_ID, PROPERTY_ID, "RW");
+        req.setAddressType("coil");
+        req.setRawAddress("coil:0");
+        req.setWordCount(2);
+
+        assertThatThrownBy(() -> service.create(req))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("位类型");
+    }
+
+    @Test
+    @DisplayName("★ 寄存器解码：非 Modbus 点位使用 word_count/signed ⇒ 拒绝（新字段严格）")
+    void wordCountOnNonModbusRejected() {
+        stubProduct("tcp", "int");
+        IotPointMappingReq req = request(DEVICE_ID, PROPERTY_ID, "RW");
+        req.setWordCount(2);
+
+        assertThatThrownBy(() -> service.create(req))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("仅 Modbus 寄存器点位支持");
+    }
+
+    @Test
+    @DisplayName("★ 寄存器解码：signed=true 要求 data_type ∈ {int,long}")
+    void signedOnNonIntegerDataTypeRejected() {
+        stubProduct("modbus", "string");
+        IotPointMappingReq req = request(DEVICE_ID, PROPERTY_ID, "RW");
+        req.setSigned(Boolean.TRUE);
+
+        assertThatThrownBy(() -> service.create(req))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("仅支持 int/long");
+    }
+
+    @Test
+    @DisplayName("★ 向后兼容：word_count=1（默认）+ 传统 5 位编号照常可用")
+    void wordCountOneTraditionalAddressAccepted() {
+        stubProduct("modbus", "int");
+        IotPointMappingReq req = request(DEVICE_ID, PROPERTY_ID, "RW");
+        req.setRawAddress("40001");
+        req.setWordCount(1);
+        req.setSigned(Boolean.FALSE);
+
+        service.create(req);
+
+        verify(mappingMapper).insert(any(IotPointMapping.class));
+    }
+
+    @Test
+    @DisplayName("★ 旧字段宽容：非 Modbus 点位上的 byteOrder 被忽略（不拒绝）")
+    void byteOrderOnNonModbusIgnored() {
+        stubProduct("tcp", "int");
+        IotPointMappingReq req = request(DEVICE_ID, PROPERTY_ID, "RW");
+        req.setByteOrder("big");
+
+        service.create(req);
+
+        verify(mappingMapper).insert(any(IotPointMapping.class));
+    }
+
+    @Test
+    @DisplayName("★ word_count 非法值（3）⇒ 拒绝（防御服务层直调）")
+    void invalidWordCountRejected() {
+        stubProduct("modbus", "int");
+        IotPointMappingReq req = request(DEVICE_ID, PROPERTY_ID, "RW");
+        req.setWordCount(3);
+
+        assertThatThrownBy(() -> service.create(req))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("只能是 1 或 2");
+    }
+
+    @Test
+    @DisplayName("实体→响应：wordCount/signed 必须搬运（前端表单契约）")
+    void toRespShouldMapWordCountAndSigned() {
+        IotPointMapping entity = new IotPointMapping();
+        entity.setWordCount(2);
+        entity.setSigned(Boolean.TRUE);
+
+        IotPointMappingResp resp = service.toResp(entity);
+
+        assertThat(resp.getWordCount()).isEqualTo(2);
+        assertThat(resp.getSigned()).isTrue();
+    }
+
+    /** 桩：设备协议 + 属性 dataType + 已发布产品（寄存器解码校验用）。 */
+    private void stubProduct(String protocol, String dataType) {
+        IotDevice device = new IotDevice();
+        device.setId(DEVICE_ID);
+        device.setProductId(PRODUCT_ID);
+        device.setProtocol(protocol);
+        when(deviceMapper.selectById(DEVICE_ID)).thenReturn(device);
+        IotProduct product = new IotProduct();
+        product.setId(PRODUCT_ID);
+        product.setModelStatus("published");
+        when(productMapper.selectById(PRODUCT_ID)).thenReturn(product);
+        IotService service = new IotService();
+        service.setId(SERVICE_ID);
+        service.setProductId(PRODUCT_ID);
+        when(serviceMapper.selectById(SERVICE_ID)).thenReturn(service);
+        IotProperty property = new IotProperty();
+        property.setId(PROPERTY_ID);
+        property.setServiceId(SERVICE_ID);
+        property.setAccessMode("RW");
+        property.setDataType(dataType);
+        when(propertyMapper.selectById(PROPERTY_ID)).thenReturn(property);
     }
 }

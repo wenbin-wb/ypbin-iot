@@ -51,7 +51,10 @@ final class ItSchema {
         "deploy/sql/migration/2026-09-30-iot-credential-schema.sql",
         // 告警与阈值（2026-10-03）：四张表只在 007 的追加段与这个 `-schema` 迁移里，
         // 不加入本清单 ⇒ 真库 IT 里这四张表根本不建（独立复核 2026-10-03 指出的覆盖真空）
-        "deploy/sql/migration/2026-10-03-iot-alert-schema.sql");
+        "deploy/sql/migration/2026-10-03-iot-alert-schema.sql",
+        // Modbus 寄存器解码 v1（2026-10-13）：iot_point_mapping 新增 word_count/`signed`；
+        // 不登记 ⇒ 任何按实体读 iot_point_mapping 的真库 IT 会撞 Unknown column。
+        "deploy/sql/migration/2026-10-13-iot-modbus-register-schema.sql");
 
     private ItSchema() {
     }

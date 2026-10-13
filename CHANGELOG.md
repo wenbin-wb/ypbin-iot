@@ -31,7 +31,18 @@
 - **新增门禁「Central Resolution Build」**（`.github/workflows/central-resolution-build.yml`）：**只用 Maven Central 上已发布的制品**构建本仓（不 checkout starter 源码、不做本地 install）。
   为什么需要：admin 既有的 `ci.yml` 断言「pom 声明的 starter 版本 == 最新 Release」之后，却 checkout starter 的 **master** 源码本地 install 来编译 ⇒ 若 master 上已有而 Release 里还没有的 API 被用到，`ci.yml` 会**假绿**，而任何干净机器（外部使用者、我们的发布制品工作流）都会编译失败。
   为什么是独立新工作流：admin 的既有工作流按 `SYNC.md` 属「明确不动」；新增文件不产生同步冲突面。附带自检：恰好 6 个服务 jar 且每个都含 `BOOT-INF/`。
-
+- **Modbus 寄存器解码 v1（16/32 位、有符号/无符号、字序）**（`ypbin-service/ypbin-iot/**`、
+  `ypbin-service/ypbin-access/**`、`ypbin-service-api/ypbin-iot-api/**`、`deploy/sql/**`）：
+  - `iot_point_mapping` 新增 `word_count INT NOT NULL DEFAULT 1`（1|2）与 `signed TINYINT NOT NULL DEFAULT 0`
+    （Java 侧 `Boolean`，与 `enabled` 同约定）；复用 `byte_order` 表达**字序**（big=高字在前 ABCD /
+    little=低字在前 CDAB），仅 `word_count=2` 生效；
+  - 8 组解码矩阵 + 宿主侧**半字配对**（32 位点位两次逐值回调合成一条；任一寄存器 BAD/缺失 ⇒ 点位 BAD，
+    **绝不用陈旧一半或 0 拼值**）；半字陈旧丢弃 + 计数 `iot.access.modbus.pair.stale`（已登记 METRICS.md）；
+  - 订阅侧 `word_count=2` 扩 `base`/`base+1`（`raw_address` 仍是基址）并去重；
+  - **向后兼容**：默认 `word_count=1/signed=false` ⇒ 16 位无符号原样透传，现有点位行为逐字节不变；
+    `word_count=1` 的传统 5 位编号照常；`word_count=2` 只接受显式 `type:offset`（传统编号明确报错拒绝）；
+  - `byte_order` 列注释由「字节序」更正为「字序」并写明不支持 BADC/DCBA（006 与 M1 迁移双写、SQL 等价门禁绿）；
+  - 未支持：IEEE754 浮点、BADC/DCBA 字内字节交换、coil/discrete 宽度/符号、字符串寄存器、位域。
 
 - **JaCoCo 覆盖率门禁接入 `ypbin-iot` / `ypbin-access`**（`mvn test`/`verify` 即生效，未达标直接失败）。
   阈值口径 = **2026-10-13 实测基线 − 安全边际**：

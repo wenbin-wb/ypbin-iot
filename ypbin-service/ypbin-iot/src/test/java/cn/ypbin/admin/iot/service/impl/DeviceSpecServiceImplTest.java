@@ -17,6 +17,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import cn.ypbin.admin.iot.device.AccessDeviceSpecResp;
+import cn.ypbin.admin.iot.device.AccessPointMappingDto;
 import cn.ypbin.admin.iot.entity.IotDevice;
 import cn.ypbin.admin.iot.entity.IotPointMapping;
 import cn.ypbin.admin.iot.entity.IotProperty;
@@ -226,6 +227,24 @@ class DeviceSpecServiceImplTest {
         device.setEndpoint("tcp://127.0.0.1:15002");
         device.setStatus(1);
         return device;
+    }
+
+    @Test
+    @DisplayName("★ Modbus 寄存器解码参数随点位下发：wordCount/signed/byteOrder（接入侧据此配对与合成）")
+    void shouldCarryModbusRegisterDecodeParams() {
+        when(deviceMapper.selectList(any())).thenReturn(List.of(device(100L)));
+        IotPointMapping mapping = mapping(100L, 900L, "holding:0", 1000);
+        mapping.setWordCount(2);
+        mapping.setSigned(Boolean.TRUE);
+        mapping.setByteOrder("little");
+        when(mappingMapper.selectList(any())).thenReturn(List.of(mapping));
+        when(propertyMapper.selectBatchIds(any())).thenReturn(List.of(property(900L, "counter")));
+
+        AccessPointMappingDto dto = service.listByTenant(TENANT).getFirst().getPoints().getFirst();
+
+        assertThat(dto.getWordCount()).isEqualTo(2);
+        assertThat(dto.getSigned()).isTrue();
+        assertThat(dto.getByteOrder()).isEqualTo("little");
     }
 
     private static IotPointMapping mapping(Long deviceId, Long propertyId, String address, int interval) {

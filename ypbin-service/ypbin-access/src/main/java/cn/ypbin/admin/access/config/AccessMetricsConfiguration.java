@@ -10,6 +10,7 @@
 package cn.ypbin.admin.access.config;
 
 import cn.ypbin.admin.access.egress.PointValueNormalizeMetrics;
+import cn.ypbin.admin.access.link.ModbusRegisterMetrics;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.context.annotation.Bean;
@@ -46,6 +47,10 @@ public class AccessMetricsConfiguration {
     @Order(Ordered.HIGHEST_PRECEDENCE)
     public ApplicationRunner accessValueNormalizeFailureMetricPreRegistration(
             MeterRegistry meterRegistry) {
-        return args -> PointValueNormalizeMetrics.registerAll(meterRegistry);
+        return args -> {
+            PointValueNormalizeMetrics.registerAll(meterRegistry);
+            // Modbus 半字配对陈旧计数：同样预注册为 0（零失败与「指标缺失」要能区分）
+            ModbusRegisterMetrics.pairStaleCounter(meterRegistry);
+        };
     }
 }
