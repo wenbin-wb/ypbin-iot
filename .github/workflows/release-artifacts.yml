@@ -100,6 +100,30 @@ jobs:
           echo "可执行归档数：$n"
           [ "$n" -eq 6 ] || { echo "::error::期望 6 个服务 jar（gateway/auth/system/ai/iot/access），实际 $n"; exit 1; }
 
+      # SBOM（软件物料清单）：供应链侧的"这个版本里到底有哪些依赖"清单。
+      # 为什么用**命令行调用插件**而不是往 pom 里加配置：admin 的根 pom 属既有文件（加插件会扩大与 upstream 的分歧面）；
+      # 命令行指定坐标即可，零分歧。版本 2.9.3 与母仓 `ypbin-starter` 的 `sbom` profile 保持一致
+      # （outputFormat=json / schemaVersion=1.6 / 不含测试作用域）。
+      # 边界：SBOM 是**依赖清单**，不是漏洞扫描（依赖漏洞门禁另见 issue #237）。
+      - name: 生成 CycloneDX SBOM（聚合）
+        run: >
+          mvn -B -DskipTests org.cyclonedx:cyclonedx-maven-plugin:2.9.3:makeAggregateBom
+          -DoutputFormat=json -DoutputName=bom-cyclonedx -DschemaVersion=1.6 -DincludeTestScope=false
+
+      - name: 自检 SBOM 可用（防挂上一个空/坏清单）
+        run: |
+          set -euo pipefail
+          f=target/bom-cyclonedx.json
+          [ -f "$f" ] || { echo "::error::未生成 $f"; exit 1; }
+          python3 -c "
+          import json,sys
+          d=json.load(open('$f'))
+          comps=d.get('components') or []
+          name=(d.get('metadata',{}).get('component',{}) or {}).get('name')
+          print('SBOM components:', len(comps), '| component name:', name, '| specVersion:', d.get('specVersion'))
+          assert len(comps) >= 100, 'SBOM 组件数异常少，疑似生成不完整'
+          assert name == 'ypbin-admin', 'SBOM 的 metadata.component.name 不是 ypbin-admin'
+          "
       - name: 生成 sha256 清单（含 git sha 与构建时刻）
         run: |
           set -euo pipefail
@@ -121,6 +145,7 @@ jobs:
           tag_name: ${{ inputs.tag || github.ref_name }}
           files: |
             jars.manifest.sha256
+            target/bom-cyclonedx.json
             ypbin-gateway/target/*.jar
             ypbin-auth/target/*.jar
             ypbin-service/*/target/*.jar
