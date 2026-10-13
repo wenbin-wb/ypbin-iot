@@ -237,6 +237,9 @@ class DeviceSpecServiceImplTest {
         mapping.setWordCount(2);
         mapping.setSigned(Boolean.TRUE);
         mapping.setByteOrder("little");
+        mapping.setRegisterFormat("bits");
+        mapping.setBitOffset(3);
+        mapping.setBitLength(5);
         when(mappingMapper.selectList(any())).thenReturn(List.of(mapping));
         when(propertyMapper.selectBatchIds(any())).thenReturn(List.of(property(900L, "counter")));
 
@@ -245,6 +248,9 @@ class DeviceSpecServiceImplTest {
         assertThat(dto.getWordCount()).isEqualTo(2);
         assertThat(dto.getSigned()).isTrue();
         assertThat(dto.getByteOrder()).isEqualTo("little");
+        assertThat(dto.getRegisterFormat()).isEqualTo("bits");
+        assertThat(dto.getBitOffset()).isEqualTo(3);
+        assertThat(dto.getBitLength()).isEqualTo(5);
     }
 
     private static IotPointMapping mapping(Long deviceId, Long propertyId, String address, int interval) {

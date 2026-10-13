@@ -186,6 +186,9 @@ public class DeviceSpecServiceImpl implements DeviceSpecService {
         point.setByteOrder(mapping.getByteOrder());
         point.setWordCount(mapping.getWordCount());
         point.setSigned(mapping.getSigned());
+        point.setRegisterFormat(mapping.getRegisterFormat());
+        point.setBitOffset(mapping.getBitOffset());
+        point.setBitLength(mapping.getBitLength());
         point.setRw(mapping.getRw());
         return point;
     }

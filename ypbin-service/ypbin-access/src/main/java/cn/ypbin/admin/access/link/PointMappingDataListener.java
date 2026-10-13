@@ -22,6 +22,7 @@ import cn.ypbin.iot.core.model.PointValue;
 import cn.ypbin.iot.core.model.Quality;
 import cn.ypbin.starter.core.util.LogSanitizer;
 import io.micrometer.core.instrument.MeterRegistry;
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -86,6 +87,9 @@ public class PointMappingDataListener implements DataListener {
 
     /** 32 位点位半字配对陈旧被丢弃的次数（与 Micrometer 计数器同源）。 */
     private final LongAdder pairStaleCount = new LongAdder();
+
+    /** Modbus float 解出 NaN/±Inf 而按 BAD 上报的条数（与 Micrometer 计数器同源）。 */
+    private final LongAdder nonFiniteFloatCount = new LongAdder();
 
     /** 32 位点位的半字暂存：base 地址 → 已到达的一半。每设备至多「word_count=2 点位数」条。 */
     private final Map<String, Half> pairBuffer = new ConcurrentHashMap<>();
@@ -165,6 +169,18 @@ public class PointMappingDataListener implements DataListener {
                 return;
             }
             raw = outcome.value();
+        } else if (modbus && isBits(point) && raw instanceof Number number) {
+            // bits 形态：单寄存器无符号位域（length=1 ⇒ Boolean，>1 ⇒ Integer）；
+            // 区间非法（直连 DB 坏数据）按 BAD 上报，不把垃圾写进库
+            try {
+                raw = ModbusRegisterDecoder.decodeBits(number.intValue(), point.getBitOffset(),
+                    point.getBitLength());
+            } catch (RuntimeException ex) {
+                log.warn("[access] Modbus 位域区间非法（直连 DB 坏数据），按 BAD 上报：device={} address={}",
+                    LogSanitizer.sanitize(deviceId), LogSanitizer.sanitize(point.getAddress()));
+                emitBad(identifier, value, "modbus.bits.range-invalid");
+                return;
+            }
         } else if (modbus && Boolean.TRUE.equals(point.getSigned()) && raw instanceof Number number) {
             // word_count=1 + signed：16 位符号扩展；signed=false 原样透传（逐字节兼容）
             raw = ModbusRegisterDecoder.decodeSingle(number.intValue(), true);
@@ -226,6 +242,21 @@ public class PointMappingDataListener implements DataListener {
             int first = existing.wordIndex() == 0 ? existing.value() : number.intValue();
             int second = existing.wordIndex() == 0 ? number.intValue() : existing.value();
             pairBuffer.remove(key);
+            if (isFloat(point)) {
+                // float 形态：两半齐后按 IEEE754 解释（NaN/Inf 按 BAD 上报 + 计数，见 §4.4.6）
+                float decoded = ModbusRegisterDecoder.decodeFloatBits(first, second, point.getByteOrder());
+                if (!Float.isFinite(decoded)) {
+                    onNonFiniteFloat(point, value);
+                    return;
+                }
+                // float32 的十进制表示取**最短可回读**形态：Float.toString 保证
+                // parseFloat(toString(f)) == f（round-trip 恒等），不声明超出 float32 精度的位数；
+                // 用 Double.toString 会给出 17 位精确值噪声（如 0.1f → 0.10000000149011612）。
+                BigDecimal floatValue = new BigDecimal(Float.toString(decoded));
+                emit(point.getIdentifier(), value, AccessReading.applyScale(floatValue,
+                    point.getScaleFactor(), point.getOffsetValue()));
+                return;
+            }
             long decoded = ModbusRegisterDecoder.decodePair(first, second, point.getByteOrder(),
                 Boolean.TRUE.equals(point.getSigned()));
             emit(point.getIdentifier(), value, AccessReading.applyScale(decoded,
@@ -244,6 +275,42 @@ public class PointMappingDataListener implements DataListener {
         synchronized (pairLock) {
             pairBuffer.remove(key);
         }
+    }
+
+    /** bits 形态（register_format=bits）。 */
+    private static boolean isBits(AccessPointMappingDto point) {
+        return "bits".equals(registerFormatOf(point));
+    }
+
+    /** float 形态（register_format=float）。 */
+    private static boolean isFloat(AccessPointMappingDto point) {
+        return "float".equals(registerFormatOf(point));
+    }
+
+    /** 归一化 register_format（null/blank ⇒ int，兼容 v1 规格）。 */
+    private static String registerFormatOf(AccessPointMappingDto point) {
+        String format = point.getRegisterFormat();
+        return format == null || format.isBlank() ? "int" : format.trim();
+    }
+
+    /**
+     * Modbus float 解出 NaN/±Inf：按 BAD 上报 + 计数（复用 {@code non-finite} reason，不新增指标）。
+     *
+     * <p>理由见 {@code docs/VALUE-DECODE-DESIGN.md} §4.4.6：NaN/Inf 不是有效测量、会被 iot 侧
+     * {@code ReadingValueMapper} 拒到文本列、且 {@code applyScale} 的 BigDecimal 不可表示。</p>
+     */
+    private void onNonFiniteFloat(AccessPointMappingDto point, PointValue value) {
+        nonFiniteFloatCount.increment();
+        PointValueNormalizeMetrics.counter(meterRegistry, NormalizeFailure.NON_FINITE).increment();
+        log.warn("[access] Modbus float 解出 NaN/Inf，按 BAD 上报（不落库；见 {} 指标）：device={} address={}",
+            PointValueNormalizeMetrics.METRIC_NAME, LogSanitizer.sanitize(deviceId),
+            LogSanitizer.sanitize(point.getAddress()));
+        emitBad(point.getIdentifier(), value, "modbus.float.non-finite");
+    }
+
+    /** 上报一条 BAD 读数（value=null；宿主侧解码失败用，不把垃圾写进库）。 */
+    private void emitBad(String identifier, PointValue value, String reason) {
+        emit(identifier, PointValue.bad(value.address(), Quality.BAD, reason, value.timestamp()), null);
     }
 
     /** 是否 32 位点位（word_count=2）。 */
@@ -298,6 +365,11 @@ public class PointMappingDataListener implements DataListener {
     /** 本设备因半字配对陈旧/同角色重复被丢弃的读数条数（供自检与测试断言）。 */
     public long pairStaleCount() {
         return pairStaleCount.sum();
+    }
+
+    /** 本设备因 Modbus float 解出 NaN/±Inf 而按 BAD 上报的条数（供自检与测试断言）。 */
+    public long nonFiniteFloatCount() {
+        return nonFiniteFloatCount.sum();
     }
 
     /**

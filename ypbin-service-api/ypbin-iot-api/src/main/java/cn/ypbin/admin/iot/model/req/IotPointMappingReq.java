@@ -78,6 +78,20 @@ public class IotPointMappingReq {
     /** 整型符号：true=有符号；默认 false（无符号）。仅 Modbus 寄存器点位生效。 */
     private Boolean signed;
 
+    /** 寄存器值形态：int|float|bits；默认 int（= v1 行为）。仅 Modbus 寄存器点位生效。 */
+    @Pattern(regexp = "int|float|bits", message = "寄存器值形态非法（应为 int|float|bits）")
+    private String registerFormat;
+
+    /** 仅 bits：起始位（0..15）。 */
+    @Min(value = 0, message = "bit_offset 必须在 0..15")
+    @Max(value = 15, message = "bit_offset 必须在 0..15")
+    private Integer bitOffset;
+
+    /** 仅 bits：位宽（1..16；与 bit_offset 的和不得超过 16，由服务层校验）。 */
+    @Min(value = 1, message = "bit_length 必须在 1..16")
+    @Max(value = 16, message = "bit_length 必须在 1..16")
+    private Integer bitLength;
+
     /** 读写权限（与属性 access_mode 联动校验）。 */
     @NotBlank(message = "读写权限不能为空")
     @Pattern(regexp = "R|W|RW", message = "读写权限非法（应为 R|W|RW）")

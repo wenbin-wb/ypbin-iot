@@ -68,6 +68,15 @@ public class IotPointMapping extends TenantBaseEntity {
     @TableField("`signed`")
     private Boolean signed;
 
+    /** 寄存器值形态：int|float|bits（默认 int = v1 行为）。仅 Modbus 寄存器点位生效。 */
+    private String registerFormat;
+
+    /** 仅 bits：起始位（0..15）。 */
+    private Integer bitOffset;
+
+    /** 仅 bits：位宽（1..16-bit_offset）。 */
+    private Integer bitLength;
+
     /** 读写权限（与属性 access_mode 联动校验）。 */
     private String rw;
 

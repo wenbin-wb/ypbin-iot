@@ -44,7 +44,7 @@ public final class ModbusRegisterDecoder {
     }
 
     /**
-     * 双寄存器（32 位）解码。
+     * 双寄存器（32 位）整型解码。
      *
      * @param first      基址寄存器值（0..65535）
      * @param second     base+1 寄存器值（0..65535）
@@ -53,10 +53,47 @@ public final class ModbusRegisterDecoder {
      * @return 无符号时 0..4294967295（long）；有符号时 -2147483648..2147483647（long）
      */
     public static long decodePair(int first, int second, String byteOrder, boolean signed) {
-        long high = first & 0xFFFFL;
-        long low = second & 0xFFFFL;
-        long raw32 = "little".equalsIgnoreCase(byteOrder) ? ((low << 16) | high) : ((high << 16) | low);
+        long raw32 = assembleRaw32(first, second, byteOrder);
         // 有符号：截到 32 位再按 int 符号扩展（(int) 截断后赋值给 long 会保留符号）
         return signed ? (int) raw32 : raw32;
+    }
+
+    /**
+     * IEEE754 单精度浮点（32 位 ⟺ 2 寄存器）解码。
+     *
+     * <p>先按字序组装 32 位，再 {@link Float#intBitsToFloat(int)}。NaN/±Inf 的处置**不在这里**：
+     * 调用方按 {@code docs/VALUE-DECODE-DESIGN.md} §4.4.6 判 BAD + 计数（本方法只如实返回位模式对应的 float）。</p>
+     *
+     * @param first     基址寄存器值（0..65535）
+     * @param second    base+1 寄存器值（0..65535）
+     * @param byteOrder 字序：{@code little}=低字在前；其它（含 null）=高字在前
+     * @return 该 32 位位模式对应的单精度浮点
+     */
+    public static float decodeFloatBits(int first, int second, String byteOrder) {
+        return Float.intBitsToFloat((int) assembleRaw32(first, second, byteOrder));
+    }
+
+    /**
+     * 单寄存器位域（无符号）解码。
+     *
+     * @param raw       16 位无符号寄存器值（0..65535）
+     * @param bitOffset 起始位（0..15）
+     * @param bitLength 位宽（1..16-bitOffset）
+     * @return {@code bitLength=1} 返回 {@link Boolean}（true/false）；{@code >1} 返回无符号 {@link Integer}（0..65535）
+     * @throws IllegalArgumentException bit 区间越界
+     */
+    public static Object decodeBits(int raw, int bitOffset, int bitLength) {
+        if (bitOffset < 0 || bitOffset > 15 || bitLength < 1 || bitOffset + bitLength > 16) {
+            throw new IllegalArgumentException("bit 区间非法：offset=" + bitOffset + " length=" + bitLength);
+        }
+        long field = ((raw & 0xFFFFL) >>> bitOffset) & ((1L << bitLength) - 1);
+        return bitLength == 1 ? Boolean.valueOf(field != 0) : Integer.valueOf((int) field);
+    }
+
+    /** 按字序组装 32 位原始字（big=高字在前 / little=低字在前）。 */
+    private static long assembleRaw32(int first, int second, String byteOrder) {
+        long high = first & 0xFFFFL;
+        long low = second & 0xFFFFL;
+        return "little".equalsIgnoreCase(byteOrder) ? ((low << 16) | high) : ((high << 16) | low);
     }
 }
