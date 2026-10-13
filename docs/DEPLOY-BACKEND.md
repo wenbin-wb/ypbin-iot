@@ -70,6 +70,8 @@ gh release download "$TAG" --repo wenbin-wb/ypbin-iot --pattern '*.jar' --patter
 # ② 校验（**必做**）：逐文件核对 sha256，并确认清单里的 git sha 就是你要部署的那个提交
 sha256sum -c <(grep '\.jar$' jars.manifest.sha256)
 git -C <repo> rev-parse HEAD      # 应与清单首部的 `# git:` 行一致
+# 或一键完成上面两步（并断言恰好 6 个 jar，见 §A.4）：
+#   deploy/verify-release-artifacts.sh --dir . --git "$(git -C <repo> rev-parse HEAD)"
 
 # ③ 之后的「替换 → 只重启该服务 → 核对容器内 md5/health」与第 2 节的 ②③④ 完全相同
 ```
@@ -87,7 +89,9 @@ git -C <repo> rev-parse HEAD      # 应与清单首部的 `# git:` 行一致
 不必再翻 pom。生成方式是**命令行调用插件**（版本 2.9.3，与母仓 `ypbin-starter` 的 `sbom` profile 一致），
 **不往 pom 里加配置**，因此不扩大与 upstream 的分歧面。
 
-⚠️ **边界（如实登记）**：SBOM 是**依赖清单**，**不是**漏洞扫描——「已知 CVE 门禁」是另一件事（见 issue #237）。
+⚠️ **边界（如实登记）**：SBOM 是**依赖清单**，**不是**漏洞扫描——「已知 CVE 门禁」是另一件事，
+已由独立工作流 `.github/workflows/dependency-vuln-gate.yml`（OWASP Dependency-Check，**CVSS ≥ 7 判红**）落地；
+数据源/缓存/抑制规则见 `docs/OPS-DEPENDENCY-VULN-GATE.md`。
 镜像仍由部署机 `docker compose build`（Dockerfile 只 `COPY target/*.jar`、不编译源码，故安全）；
 镜像制品化属后续增量。
 
