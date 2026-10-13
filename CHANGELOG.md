@@ -6,6 +6,16 @@
 
 ## [未发布]
 
+### 修复
+
+- **CI 门禁收口（issue #233 / #235）**：
+  - `ci.yml`「检出 ypbin-starter」由 `ref: master` 改为 **按声明的 Release tag**（`v<ypbin-starter.version>`）——
+    此前该步先断言「声明版本 == 最新 Release」却检出 master 编译，**声明与实际的代码是两回事**：master 上有而
+    Release 里没有的 API 会让 CI **假绿**（任何干净机器/外部使用者都会编译失败）；
+  - **真库 IT 纳入 main 推送触发**（`iot-integration-tests.yml` / `iot-iotdb-it.yml`）：此前只在 PR 与 `feat/**` 跑，
+    合并之后的 main **没有真库回归** —— 两个 PR 各自绿、叠加后互相影响时无人拦（成对代价：每次 main 合并多跑两个分钟级作业）；
+  - **`Central Resolution Build` 也纳入 main 推送**：合并后的 main 必须仍是「只用已发布制品就能构建」的状态。
+
 ### 变更
 
 - **落列改由物模型 `data_type` 唯一决定，彻底删除 `forceText` 通道（task-23，行为变更）**

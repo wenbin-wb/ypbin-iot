@@ -12,8 +12,12 @@ name: IoT Integration Tests
 on:
   pull_request:
     branches: [main]
+  # 2026-10-13 加 main：**合并之后**也要有真库回归。
+  # 为什么必须加：两个 PR 各自绿、叠加后互相影响（squash 合并出的 main 状态与任一 PR 分支都不同）时，
+  # 以前只有单测/架构门禁在 main 上跑，**真库层面的叠加回归没人拦**（审计 issue #235）。
+  # 代价如实登记：每次 main 合并多跑一次 Testcontainers 作业（分钟级）。
   push:
-    branches: ['feat/**']
+    branches: [main, 'feat/**']
   workflow_dispatch:
 
 permissions:

@@ -34,12 +34,18 @@ jobs:
             https://api.github.com/repos/wenbin-wb/ypbin-starter/releases/latest | grep -oP '"tag_name":\s*"v\K[^"]+')
           echo "admin 依赖 starter ${REQ}，最新 Release v${LATEST}"
           [ "$REQ" = "$LATEST" ] || { echo "依赖版本落后，请升级至最新 Release"; exit 1; }
+          # 供下一步检出用：**按声明的 Release tag**，而不是默认分支
+          echo "STARTER_TAG=v${REQ}" >> "$GITHUB_ENV"
 
-      - name: 检出 ypbin-starter（版本以 admin pom 的 ypbin-starter.version 为准）
+      - name: 检出 ypbin-starter（**按声明的 Release tag**，不取 master）
+        # 2026-10-13 更正：此前这一步取 `master`，与上一步刚断言过的"声明版本"是两回事 ——
+        # 若 master 上已有、而该 Release 里还没有的 API 被本仓使用，CI 会**假绿**
+        # （任何干净机器/外部使用者都会编译失败；审计 issue #233）。
+        # 现在按 `v<声明版本>` 检出 ⇒ CI 验证的就是"消费者真正拿到的那份 starter"。
         uses: actions/checkout@v4
         with:
           repository: wenbin-wb/ypbin-starter
-          ref: master
+          ref: ${{ env.STARTER_TAG }}
           path: ypbin-starter
 
       - name: 本地安装 ypbin-starter

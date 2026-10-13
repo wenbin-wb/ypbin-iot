@@ -17,6 +17,10 @@ name: Central Resolution Build
 on:
   pull_request:
     branches: [main]
+  # 2026-10-13 加 main：合并后的 main 也必须是"能只用已发布制品构建"的状态
+  # （两个 PR 各自可构建、叠加后未必可构建）。代价：每次 main 合并多一次完整编译（不跑测试）。
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
