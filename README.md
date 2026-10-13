@@ -118,6 +118,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/wenbin-wb/ypbin-iot/main/dep
 
 | 文档 | 覆盖 |
 |---|---|
+| [`docs/DEPLOY-RUNBOOK.md`](docs/DEPLOY-RUNBOOK.md) | **上线运行手册（单一入口）**：Pre-flight → 升级 → 上线后核验 → 回滚 → 故障速查 |
 | [`docs/DEPLOY-BACKEND.md`](docs/DEPLOY-BACKEND.md) | 后端：构建 jar → 上传 → 重建单个服务 → 逐字节核对产物 |
 | [`docs/DEPLOY-UI.md`](docs/DEPLOY-UI.md) | 前端：CI 真实产物覆盖 dist → 重启 → 核对 |
 | [`docs/DEPLOY-TIMESERIES.md`](docs/DEPLOY-TIMESERIES.md) | 时序库（IoTDB）部署与验通 |
