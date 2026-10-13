@@ -9,6 +9,7 @@
  */
 package cn.ypbin.admin.access.config;
 
+import cn.ypbin.admin.access.decode.ByteDecodeMetrics;
 import cn.ypbin.admin.access.egress.PointValueNormalizeMetrics;
 import cn.ypbin.admin.access.link.ModbusRegisterMetrics;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -49,6 +50,8 @@ public class AccessMetricsConfiguration {
             MeterRegistry meterRegistry) {
         return args -> {
             PointValueNormalizeMetrics.registerAll(meterRegistry);
+            // 宿主字节载荷解码失败：同样预注册为 0（零失败与「指标缺失」要能区分）
+            ByteDecodeMetrics.registerAll(meterRegistry);
             // Modbus 半字配对陈旧计数：同样预注册为 0（零失败与「指标缺失」要能区分）
             ModbusRegisterMetrics.pairStaleCounter(meterRegistry);
         };

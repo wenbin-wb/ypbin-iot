@@ -9,6 +9,12 @@
  */
 package cn.ypbin.admin.access.link;
 
+import cn.ypbin.admin.access.decode.ByteDecodeMetrics;
+import cn.ypbin.admin.access.decode.BytePayloadDecoder;
+import cn.ypbin.admin.access.decode.BytePayloadDecoderRegistry;
+import cn.ypbin.admin.access.decode.DecodeContext;
+import cn.ypbin.admin.access.decode.DecodeFailure;
+import cn.ypbin.admin.access.decode.DecodeOutcome;
 import cn.ypbin.admin.access.egress.AccessReading;
 import cn.ypbin.admin.access.egress.AccessReadingSink;
 import cn.ypbin.admin.access.egress.NormalizeFailure;
@@ -28,6 +34,7 @@ import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.LongAdder;
 import org.slf4j.Logger;
@@ -47,6 +54,10 @@ import org.slf4j.LoggerFactory;
  *       **逐值回调**（不是批量），本类按点位**按 word_index 收齐 N 个字**后再合成一条读数——
  *       任一寄存器 BAD/缺失 ⇒ 该点位 BAD，**绝不用陈旧一半拼值、绝不用 0 充数**
  *       （见 {@link #onMultiRegister}；string 的拼接/严格 UTF-8 规则见 §4.5）。</li>
+ *   <li><b>其余 {@code byte[]} 交付路径</b>（MQTT {@code binary}、OPC UA {@code ByteString} 等）：
+ *       交给宿主可插解码 SPI（{@link BytePayloadDecoderRegistry}）。**未注册解码器时不认领**，
+ *       原样透传到出口闸门丢弃（与今天逐字一致）；认领后解码失败以 BAD + 原因码指标显式表达
+ *       （见 {@link #onBytePayload}）。</li>
  * </ol>
  *
  * <p><b>BAD 质量原样穿透</b>：SDK 的 BAD（TCP selector 未命中、Modbus 超时/响应短等）以 BAD 质量表达，
@@ -77,6 +88,9 @@ public class PointMappingDataListener implements DataListener {
 
     private final AccessReadingSink sink;
 
+    /** 宿主可插字节载荷解码器注册表（空注册表 ⇒ 与「没有 SPI」行为一致）。 */
+    private final BytePayloadDecoderRegistry decoderRegistry;
+
     private final MeterRegistry meterRegistry;
 
     private final LongAdder unmappedCount = new LongAdder();
@@ -93,6 +107,9 @@ public class PointMappingDataListener implements DataListener {
     /** Modbus float 解出 NaN/±Inf 而按 BAD 上报的条数（与 Micrometer 计数器同源）。 */
     private final LongAdder nonFiniteFloatCount = new LongAdder();
 
+    /** 宿主字节载荷解码失败而按 BAD 上报的条数（与 Micrometer 计数器同源）。 */
+    private final LongAdder decodeFailureCount = new LongAdder();
+
     /** 多寄存器点位的字暂存：base 地址 → 已到达的字槽（按 word_index 定位）。每设备至多「多寄存器点位数」组。 */
     private final Map<String, PendingWords> pairBuffer = new ConcurrentHashMap<>();
 
@@ -101,12 +118,16 @@ public class PointMappingDataListener implements DataListener {
 
     public PointMappingDataListener(String deviceId, String protocol, Integer pollIntervalMs,
                                     List<AccessPointMappingDto> points, AccessReadingSink sink,
-                                    MeterRegistry meterRegistry) {
+                                    MeterRegistry meterRegistry,
+                                    BytePayloadDecoderRegistry decoderRegistry) {
         this.deviceId = deviceId;
         this.protocol = protocol;
         this.pollIntervalMs = pollIntervalMs;
         this.sink = sink;
         this.meterRegistry = meterRegistry;
+        // 空注册表与「未注册解码器」等价：byte[] 仍走出口闸门，不静默降级
+        this.decoderRegistry = decoderRegistry == null
+            ? BytePayloadDecoderRegistry.empty() : decoderRegistry;
         boolean modbus = IotProtocol.MODBUS.getCode().equals(protocol);
         Map<String, RegisterTarget> byAddress = new LinkedHashMap<>();
         if (points != null) {
@@ -169,6 +190,11 @@ public class PointMappingDataListener implements DataListener {
             return;
         }
         Object raw = value.value();
+        if (raw instanceof byte[] payload) {
+            // 其余 byte[] 交付路径（MQTT binary / OPC UA ByteString 等）：宿主可插解码 SPI
+            onBytePayload(identifier, value, point, payload);
+            return;
+        }
         if (IotProtocol.TCP.getCode().equals(protocol)) {
             // SDK key-value 只做字段选择、不做类型转换；这里按物模型 dataType 规范化，失败即丢弃 + 计数
             PointValueNormalizer.Outcome outcome = PointValueNormalizer.normalize(raw, point.getDataType());
@@ -431,6 +457,92 @@ public class PointMappingDataListener implements DataListener {
         emitBad(point.getIdentifier(), value, "modbus.string.not-utf8");
     }
 
+    /**
+     * 原始字节载荷的宿主可插解码路径（MQTT {@code binary} / OPC UA {@code ByteString} 等）。
+     *
+     * <p><b>行为矩阵（不静默降级）</b>：</p>
+     * <ol>
+     *   <li><b>没有解码器认领</b>（未注册 / 未配置 / 点位不匹配）⇒ 原样把 {@code byte[]} 交给出口，
+     *       由出口闸门丢弃并计 {@code iot.access.egress.invalid}——与引入本 SPI 之前逐字一致；</li>
+     *   <li><b>认领但解码失败</b>（长度不符、NaN/±Inf、实现抛异常）⇒ <b>BAD 质量</b> +
+     *       {@code iot.access.payload.decode.failure{reason}} 计数 + WARN/ERROR，不落库；</li>
+     *   <li><b>解码成功</b> ⇒ 仍走既有 {@link PointValueNormalizer}（物模型类型）与
+     *       {@link AccessReading#applyScale}（线性缩放）链路，落列由 iot 侧按 {@code data_type} 决定。</li>
+     * </ol>
+     *
+     * @param identifier 上报坐标（属性标识）
+     * @param value      原始 PointValue（提供质量/时刻）
+     * @param point      点位映射（提供物模型类型/地址/字序）
+     * @param payload    原始字节载荷
+     */
+    private void onBytePayload(String identifier, PointValue value, AccessPointMappingDto point,
+                               byte[] payload) {
+        DecodeContext context = new DecodeContext(deviceId, protocol, point.getAddress(),
+            point.getAddressType(), point.getDataType(), point.getByteOrder());
+        Optional<BytePayloadDecoder> selected = decoderRegistry.find(context);
+        if (selected.isEmpty()) {
+            // 未认领：保持今天的行为，交给出口闸门（iot.access.egress.invalid）——不猜、不降级
+            emit(identifier, value, AccessReading.applyScale(payload, point.getScaleFactor(),
+                point.getOffsetValue()));
+            return;
+        }
+        BytePayloadDecoder decoder = selected.get();
+        DecodeOutcome outcome;
+        try {
+            outcome = decoder.decode(payload, context);
+        } catch (RuntimeException ex) {
+            // 解码器实现缺陷：捕获后显式暴露（BAD + 计数 + ERROR 全堆栈），绝不吞
+            onDecodeFailure(decoder, point, value, payload.length, DecodeFailure.DECODER_ERROR, ex);
+            return;
+        }
+        if (!outcome.success()) {
+            onDecodeFailure(decoder, point, value, payload.length, outcome.failure(), null);
+            return;
+        }
+        // 解码后仍走既有物模型类型规范化（只对 String 生效）与缩放；落列由 iot 侧决定
+        PointValueNormalizer.Outcome normalized =
+            PointValueNormalizer.normalize(outcome.value(), point.getDataType());
+        if (!normalized.success()) {
+            onNormalizeFailure(point, normalized.failure(), outcome.value());
+            return;
+        }
+        emit(identifier, value, AccessReading.applyScale(normalized.value(),
+            point.getScaleFactor(), point.getOffsetValue()));
+    }
+
+    /**
+     * 记一次宿主字节载荷解码失败：**按 BAD 上报** + 计数（按原因）+ 脱敏日志（只记长度，不 dump 负载）。
+     *
+     * @param decoder     命中的解码器（日志/排障用）
+     * @param point       点位映射
+     * @param value       原始 PointValue（提供地址/时刻）
+     * @param payloadSize 载荷字节长度
+     * @param failure     失败原因
+     * @param ex          解码器抛出的异常（无则 {@code null}）
+     */
+    private void onDecodeFailure(BytePayloadDecoder decoder, AccessPointMappingDto point,
+                                 PointValue value, int payloadSize, DecodeFailure failure,
+                                 RuntimeException ex) {
+        decodeFailureCount.increment();
+        ByteDecodeMetrics.counter(meterRegistry, failure).increment();
+        if (ex == null) {
+            log.warn("[access] 宿主字节载荷解码失败，按 BAD 上报（不落库；见 {} 指标）：device={} property={} "
+                    + "address={} decoder={} 原因={}({}) 载荷长度={} 数据类型={}",
+                ByteDecodeMetrics.METRIC_NAME, LogSanitizer.sanitize(deviceId),
+                LogSanitizer.sanitize(point.getIdentifier()), LogSanitizer.sanitize(point.getAddress()),
+                LogSanitizer.sanitize(decoder.id()), failure.getCode(), failure.getDesc(),
+                payloadSize, LogSanitizer.sanitize(point.getDataType()));
+        } else {
+            log.error("[access] 宿主字节载荷解码器抛出异常（按 BAD 上报，不吞；见 {} 指标）：device={} "
+                    + "property={} address={} decoder={} 原因={}({}) 载荷长度={}",
+                ByteDecodeMetrics.METRIC_NAME, LogSanitizer.sanitize(deviceId),
+                LogSanitizer.sanitize(point.getIdentifier()), LogSanitizer.sanitize(point.getAddress()),
+                LogSanitizer.sanitize(decoder.id()), failure.getCode(), failure.getDesc(), payloadSize,
+                ex);
+        }
+        emitBad(point.getIdentifier(), value, "decode." + failure.getCode());
+    }
+
     /** 上报一条 BAD 读数（value=null；宿主侧解码失败用，不把垃圾写进库）。 */
     private void emitBad(String identifier, PointValue value, String reason) {
         emit(identifier, PointValue.bad(value.address(), Quality.BAD, reason, value.timestamp()), null);
@@ -503,6 +615,11 @@ public class PointMappingDataListener implements DataListener {
     /** 本设备因 Modbus float 解出 NaN/±Inf 而按 BAD 上报的条数（供自检与测试断言）。 */
     public long nonFiniteFloatCount() {
         return nonFiniteFloatCount.sum();
+    }
+
+    /** 本设备因宿主字节载荷解码失败而按 BAD 上报的条数（供自检与测试断言）。 */
+    public long decodeFailureCount() {
+        return decodeFailureCount.sum();
     }
 
     /**

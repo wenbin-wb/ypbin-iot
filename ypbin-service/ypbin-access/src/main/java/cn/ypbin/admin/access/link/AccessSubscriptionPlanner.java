@@ -9,6 +9,7 @@
  */
 package cn.ypbin.admin.access.link;
 
+import cn.ypbin.admin.access.decode.BytePayloadDecoderRegistry;
 import cn.ypbin.admin.access.egress.AccessReadingSink;
 import cn.ypbin.admin.iot.device.AccessPointMappingDto;
 import cn.ypbin.admin.iot.enums.IotProtocol;
@@ -63,6 +64,9 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
     private final Supplier<Map<String, DeviceSession>> sessions;
     private final ObjectMapper objectMapper;
     private final AccessReadingSink readingSink;
+
+    /** 宿主可插字节载荷解码器注册表（透传给每个设备 listener）。 */
+    private final BytePayloadDecoderRegistry decoderRegistry;
 
     private final MeterRegistry meterRegistry;
 
@@ -127,13 +131,16 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
     public AccessSubscriptionPlanner(Supplier<Map<String, DeviceSession>> sessions,
                                      ObjectMapper objectMapper, AccessReadingSink readingSink,
                                      MeterRegistry meterRegistry, Clock clock,
-                                     boolean tcpKeyValuePayloadFormat) {
+                                     boolean tcpKeyValuePayloadFormat,
+                                     BytePayloadDecoderRegistry decoderRegistry) {
         this.sessions = sessions;
         this.objectMapper = objectMapper;
         this.readingSink = readingSink;
         this.meterRegistry = meterRegistry;
         this.clock = clock;
         this.tcpKeyValuePayloadFormat = tcpKeyValuePayloadFormat;
+        this.decoderRegistry = decoderRegistry == null
+            ? BytePayloadDecoderRegistry.empty() : decoderRegistry;
         // 指标前缀统一为 `iot.access.*`（与既有的 `iot.access.lease.*` 一致；
         // S5 引入时用的 `ypbin.access.*` 是同一批 access 指标，混用会让大盘上出现两套前缀）
         this.subscribeSuccess = meterRegistry.counter("iot.access.subscribe.success");
@@ -211,7 +218,8 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
                 : new SubscribeRequest(subscribeAddresses, device.pollInterval(), device.pollInterval(),
                     null, Map.of());
             PointMappingDataListener listener = new PointMappingDataListener(device.deviceId(),
-                device.protocol().value(), pollIntervalMs(device), points, readingSink, meterRegistry);
+                device.protocol().value(), pollIntervalMs(device), points, readingSink, meterRegistry,
+                decoderRegistry);
             // ⚠️ S5 修复：**订阅成功之后**才记录跟踪。
             //    此前是先写 `subscribedSessions` 再 subscribe ⇒ 异步失败时跟踪表已记上「已订阅」，
             //    对账会认为无需重试 ⇒ 该设备**永久停止采集**且只有一行 ERROR 日志。
@@ -412,7 +420,8 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
         // 退避 attempts 放大 N 倍（否则第一轮失败就直接冲到退避上限）
         state.failureArmedThisRound().set(false);
         PointMappingDataListener listener = new PointMappingDataListener(deviceId,
-            device.protocol().value(), pollIntervalMs(device), points, readingSink, meterRegistry);
+            device.protocol().value(), pollIntervalMs(device), points, readingSink, meterRegistry,
+            decoderRegistry);
         boolean initiated = false;
         for (PointAddress address : pending) {
             String raw = address.raw();
