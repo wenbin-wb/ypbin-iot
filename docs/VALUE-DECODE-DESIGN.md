@@ -162,12 +162,26 @@ MQTT `payload-format=binary` 与 OPC UA `ByteString` 仍交付 `byte[]`，只能
 - **回头给 starter 提宿主可插解码 SPI**（原 §5 方案 B）：让协议模块解码前回调宿主，语义与本仓已删的
   `ValueDecoder` 对齐。建议按 starter 的版本列车另行评估。
 
-### 5.5 订阅形态（登记待办，本次不改）
+### 5.5 订阅形态：key-value 下已实施「一次多地址订阅」（2026-10-13）
 
-TCP 目前仍是**逐点位单地址订阅**（PR #212 的权宜）。`key-value` 已允许一次订阅多地址
-（`TcpSession#subscribe` 对 KEY_VALUE 不做多地址 fail-fast），可减少 N 倍帧解析；
-但本次**保持逐点位单订阅**（语义与切换前一致、风险最小），「多地址单订阅」登记为后续优化项：
-验收 = 多地址单订阅下每个 selector 都产出各自的值、且部分 selector 未命中只让该点位 BAD。
+- **key-value 形态**：TCP 走**一次多地址订阅**（`AccessSubscriptionPlanner.subscribe` 的通用多地址路径）：
+  一个 `SubscribeRequest` 携带全部**按 `raw` 去重**的地址、一个共享 `PointMappingDataListener`，
+  设备级跟踪/退避用既有 `inFlight` + `subscribedSessions` 机制。收益：N 点位从 N 次订阅降为 1 次，
+  同一帧只解析/派发一次。
+- **其它形态（binary/text/number）或配置不可得**：保持**逐点位单订阅**（UP-4 契约，
+  `subscribeTcpPerAddress`）——非 key-value 的 TCP 是「单点位流」，`TcpSession#subscribe` 对
+  `addresses().size() > 1` fail-fast。
+- **分流判据 = 配置形态**（`ypbin.iot.protocol.tcp.payload-format`）：由
+  `AccessIotProtocolConfiguration` 从 SDK `TcpProperties.payloadFormat()` 解析后传入 planner
+  （`ObjectProvider` 可选注入，缺失时按非 key-value）。**回退配置即回退订阅形态**：把
+  `payload-format` 改回 binary/text/number，订阅自动回到逐点位单订阅，无需第二个开关，
+  也天然是滚动回退手段。
+- **去重**：key-value 下 SDK 对**每个地址条目**各产出一个 `PointValue`，重复 `raw` 会产生重复读数
+  ⇒ 多地址请求按 `raw` 去重（非 TCP 路径保持既有行为不动）。
+- **仍未覆盖 / 未核实**：SDK「多地址单订阅、逐 selector 产出」目前只有 starter 侧单测证据，
+  本机无真实 TCP 设备 ⇒ **端到端未验**。上线后确认点：① `iot.access.subscribe.success` 每设备**一次**
+  （而非 N 次）；② `iot.tcp.selector.not-found` 不增长；③ 各点位仍 GOOD 且无重复读数；
+  ④ 订阅失败时 `iot.access.subscribe.failure` 按**设备级 1 次**（而非 N 次）。
 
 ### 5.6 生产帧形态普查（2026-10-13，只读；结论：本次切换对**在用设备**安全）
 

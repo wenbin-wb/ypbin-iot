@@ -17,6 +17,15 @@
   ⚠️ 经验保留：`merge-base --is-ancestor` **单独用拦不住它**（该 tag 是 `main` 的祖先会放行）——
   这条已写进工作流注释，免得后人只留那一条判据。
 
+### 性能
+
+- **TCP key-value 形态改为「一次多地址订阅」**（`ypbin-service/ypbin-access/**`、`docs/VALUE-DECODE-DESIGN.md` §5.5）：
+  `AccessSubscriptionPlanner` 按 `ypbin.iot.protocol.tcp.payload-format` 分流——`key-value` 时一个
+  `SubscribeRequest` 携带全部（按 `raw` 去重）地址、一个共享 listener，N 点位从 N 次订阅降为 1 次、
+  同一帧只解析/派发一次；其它形态（binary/text/number）或配置不可得时**保持逐点位单订阅**（UP-4 契约）。
+  **回退手段**：把 `payload-format` 改回非 key-value 即回到旧订阅形态（无需第二个开关）。
+  未改任何数据库/协议契约；SDK 多地址产出行为只有 starter 侧单测证据，真机端到端未验。
+
 ### 新增
 
 - **JaCoCo 覆盖率门禁接入 `ypbin-iot` / `ypbin-access`**（`mvn test`/`verify` 即生效，未达标直接失败）。
