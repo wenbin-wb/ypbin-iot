@@ -126,7 +126,7 @@ OPC UA `ByteString`（生产 access fat jar 不含这两个协议模块，属潜
 
 ---
 
-### 4.3 Modbus 寄存器解码 v1（**设计定稿，2026-10-13；实施前评审本小节**）
+### 4.3 Modbus 寄存器解码 v1（**已实施，2026-10-13**）
 
 > 目标：落地 §4.2 第一行「Modbus 寄存器 16/32 位、有符号/无符号、大小端」。字段契约已冻结
 > （`word_count`/`signed` 新增 + 复用 `byte_order`），本小节是实现口径；与前端并行，**命名不得各自发挥**。
@@ -212,6 +212,11 @@ DB 列仍是 `TINYINT NOT NULL DEFAULT 0`）、`byteOrder`（已存在，`big`\|
   （排序最后）；更新 `iot-migrations.list`；登记 `ItSchema.EXTRA_SCHEMA_SCRIPTS`；跑 `tools/check-iot-sql-equivalence.sh`；
 - 新指标 `iot.access.modbus.pair.stale` 登记 `docs/METRICS.md`（`MetricsRegistryGateTest` 覆盖）；
 - `AccessPointMappingDto` 带 `wordCount`/`signed`（`byteOrder` 已有），`DeviceSpecServiceImpl.toPoint` 复制。
+
+**落地清单（2026-10-13）**：`ModbusRegisterAddress`（显式地址规则，iot-api，校验与接入侧共用）、
+`ModbusRegisterDecoder`（8 组矩阵纯函数）、`PointMappingDataListener`（半字配对/失败语义）、
+`AccessSubscriptionPlanner`（`word_count=2` 扩 `base+1` + 按 raw 去重）、`ModbusRegisterMetrics`
+（`iot.access.modbus.pair.stale`）、`IotPointMappingServiceImpl.validateRegisterDecode`（校验）。
 
 ---
 
