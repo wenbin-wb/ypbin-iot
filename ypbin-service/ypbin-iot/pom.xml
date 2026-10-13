@@ -153,6 +153,72 @@
                     </execution>
                 </executions>
             </plugin>
+            <!--
+              JaCoCo 覆盖率报告/门禁（**只在本模块声明**，不动 admin 的根 pom）。
+              · 为什么写在本模块：本仓是 ypbin-admin 的 fork —— 根 `pom.xml` 属 admin 既有文件（改它会扩大与
+                upstream 的分歧面，白名单里那条只登记了「dependencyManagement 加 ypbin-iot-api 一行」）；
+                而本模块 pom 是 fork 自有文件 ⇒ 放这里零分歧。
+              · 为什么只在这两个模块：`ypbin-iot` 与 `ypbin-access` 是本仓的主战场（业务/接入的全部增量逻辑）；
+                其余模块是基座（system/ai/auth/common）或几乎无逻辑（gateway）。
+              · 插件版本与 `ypbin-starter` 保持一致（jacoco-maven-plugin 0.8.12）。
+                ⚠️ 若以后第三个模块也要覆盖率，先评估「上提到根 pom 的 pluginManagement」的分歧面，再决定。
+              · 只统计**单元测试**（surefire 已排除 `**/*IT.java`）：集成测试需真实 MySQL/IoTDB，由 CI 的
+                `-Pit` 作业单独跑，不并入本门禁。
+              · 已知且无害的噪音：日志里可能出现 `MethodTooLargeException ... net/sf/jsqlparser/...`
+                （JaCoCo 的 ASM 无法插桩该第三方巨型生成方法）——它是 **WARNING**，且该类**不会进入报告**
+                （报告里只有本仓 `cn.ypbin.*` 的类），故不影响覆盖率数值，不必追。
+            -->
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>0.8.12</version>
+                <executions>
+                    <execution>
+                        <id>jacoco-initialize</id>
+                        <goals>
+                            <goal>prepare-agent</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>jacoco-report</id>
+                        <phase>test</phase>
+                        <goals>
+                            <goal>report</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>jacoco-check</id>
+                        <phase>test</phase>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                        <configuration>
+                            <!-- 覆盖率门禁：未达下限直接失败（`mvn test`/`verify` 都会执行），禁止静默放行。
+                                 阈值口径 = **2026-10-13 实测基线（指令 0.8063 / 分支 0.7086）- 安全边际**（约低 2.5~3 个百分点），
+                                 既不因正常迭代抖动而误红，又能拦住"新增大块无测试代码"这类真实回退。
+                                 复算基线：mvn clean verify → 看 <module>/target/site/jacoco/jacoco.csv 汇总。 -->
+                            <haltOnFailure>true</haltOnFailure>
+                            <rules>
+                                <rule>
+                                    <element>BUNDLE</element>
+                                    <limits>
+                                        <limit>
+                                            <counter>INSTRUCTION</counter>
+                                            <value>COVEREDRATIO</value>
+                                            <minimum>0.78</minimum>
+                                        </limit>
+                                        <limit>
+                                            <counter>BRANCH</counter>
+                                            <value>COVEREDRATIO</value>
+                                            <minimum>0.68</minimum>
+                                        </limit>
+                                    </limits>
+                                </rule>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
         </plugins>
     </build>
 

@@ -49,7 +49,8 @@ class OpenApiFacadeGateTest {
     void onlySendCommandsMayBeWriteMapping() {
         List<String> posts = new ArrayList<>();
         for (Class<?> controller : FACADE) {
-            for (Method method : controller.getDeclaredMethods()) {
+            for (Method method : ControllerGateMethods.businessMethodsOrFail(
+                controller, "门面控制器的方法形态门禁")) {
                 if (method.getAnnotation(PostMapping.class) != null) {
                     posts.add(controller.getSimpleName() + "#" + method.getName());
                 }
@@ -123,7 +124,8 @@ class OpenApiFacadeGateTest {
     @DisplayName("active-counts 不得出现在门面（设计未盘点端点一律不开放）")
     void activeCountsMustNotBeExposed() {
         for (Class<?> controller : FACADE) {
-            for (Method method : controller.getDeclaredMethods()) {
+            for (Method method : ControllerGateMethods.businessMethodsOrFail(
+                controller, "门面控制器不得暴露 activeCounts")) {
                 assertThat(method.getName()).doesNotContain("activeCounts");
             }
         }

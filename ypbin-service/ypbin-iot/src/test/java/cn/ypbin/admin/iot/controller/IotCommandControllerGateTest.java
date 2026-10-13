@@ -59,7 +59,8 @@ class IotCommandControllerGateTest {
             .as("内部端点没有登录态，标权限码会让规则回流永远 403").isNull();
         assertThat(reply.getReturnType().getSimpleName())
             .as("回执端点也必须返回 R 信封（真状态码例外只在 /internal/mqtt/**）").isEqualTo("R");
-        for (Method method : InternalCommandReplyController.class.getDeclaredMethods()) {
+        for (Method method : ControllerGateMethods.businessMethodsOrFail(
+            InternalCommandReplyController.class, "内部回执端点的参数形态门禁")) {
             for (Class<?> type : method.getParameterTypes()) {
                 assertThat(type.getSimpleName())
                     .as("内部回执端点不得使用原始响应对象（真状态码破例只在 /internal/mqtt/**）")
@@ -71,7 +72,8 @@ class IotCommandControllerGateTest {
     @Test
     @DisplayName("下发/查询/重发都不得使用原始响应对象（浏览器端维持 HTTP 200 + R.code 惯例）")
     void browserEndpointsMustKeepTheEnvelope() {
-        for (Method method : IotCommandController.class.getDeclaredMethods()) {
+        for (Method method : ControllerGateMethods.businessMethodsOrFail(
+            IotCommandController.class, "浏览器端 R 信封门禁")) {
             for (Class<?> type : method.getParameterTypes()) {
                 assertThat(type.getSimpleName())
                     .as("%s 的参数不得是 HttpResponse/HttpServletResponse", method.getName())
