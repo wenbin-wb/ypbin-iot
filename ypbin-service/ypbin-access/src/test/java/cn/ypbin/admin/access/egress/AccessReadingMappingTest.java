@@ -374,8 +374,8 @@ class AccessReadingMappingTest {
     }
 
     @Test
-    @DisplayName("★ v3 Modbus string：单寄存器纯数字串 ⇒ 值原样 + forceText=true（交给 iot 强制落文本列）")
-    void modbusStringMustCarryForceText() {
+    @DisplayName("★ Modbus string：多寄存器拼出纯数字串 ⇒ 值原样（落列由 iot 侧按物模型类型决定）")
+    void modbusStringMustKeepDecodedValue() {
         AccessPointMappingDto point = new AccessPointMappingDto();
         point.setAddress("holding:0");
         point.setIdentifier("serialNo");
@@ -391,30 +391,26 @@ class AccessReadingMappingTest {
         listener.onData(PointValue.good(PointAddress.of("holding:0"), 0x3132, Instant.now()));
         listener.onData(PointValue.good(PointAddress.of("holding:1"), 0x3334, Instant.now()));
 
-        assertThat(readings).singleElement().satisfies(reading -> {
-            assertThat(reading.value()).isEqualTo("1234");
-            assertThat(reading.forceText()).as("Modbus string 必须带强制文本标记，防纯数字被数值化").isTrue();
-        });
+        assertThat(readings).singleElement().satisfies(reading ->
+            assertThat(reading.value()).isEqualTo("1234"));
     }
 
     @Test
-    @DisplayName("★ 对照①：TCP data_type=string + 纯数字 \"123456\" ⇒ forceText=true（交给 iot 落 value_text）")
-    void tcpStringNumericMustForceText() {
+    @DisplayName("★ 对照①：TCP data_type=string + 纯数字 \"123456\" ⇒ 值原样（落列交给 iot 按类型决定）")
+    void tcpStringNumericMustKeepRawValue() {
         List<AccessReading> readings = new ArrayList<>();
         PointMappingDataListener listener = listener(PROTOCOL_TCP,
             List.of(point("SN", "serialNo", "string", null, null)), readings);
 
         listener.onData(PointValue.good(PointAddress.of("SN"), "123456", Instant.now()));
 
-        assertThat(readings).singleElement().satisfies(reading -> {
-            assertThat(reading.value()).isEqualTo("123456");
-            assertThat(reading.forceText()).as("物模型声明为 string ⇒ 强制落 value_text，不按词法猜").isTrue();
-        });
+        assertThat(readings).singleElement().satisfies(reading ->
+            assertThat(reading.value()).isEqualTo("123456"));
     }
 
     @Test
-    @DisplayName("★ 对照②：TCP string 的典型序列号（007/SN-0001）同样 forceText=true")
-    void tcpStringSerialFormsMustForceText() {
+    @DisplayName("★ 对照②：TCP string 的典型序列号（007/SN-0001）值原样保留")
+    void tcpStringSerialFormsMustKeepRawValue() {
         List<AccessReading> readings = new ArrayList<>();
         PointMappingDataListener listener = listener(PROTOCOL_TCP,
             List.of(point("SN1", "serial1", "string", null, null),
@@ -423,31 +419,27 @@ class AccessReadingMappingTest {
         listener.onData(PointValue.good(PointAddress.of("SN1"), "007", Instant.now()));
         listener.onData(PointValue.good(PointAddress.of("SN2"), "SN-0001", Instant.now()));
 
-        assertThat(readings).hasSize(2).allSatisfy(reading -> {
-            assertThat(reading.forceText()).isTrue();
-        });
+        assertThat(readings).hasSize(2);
         assertThat(readings.get(0).value()).isEqualTo("007");
         assertThat(readings.get(1).value()).isEqualTo("SN-0001");
     }
 
     @Test
-    @DisplayName("★ 对照③：TCP data_type=long + 123456 ⇒ forceText=false（仍按词法落 value_double）")
-    void tcpLongMustNotForceText() {
+    @DisplayName("★ 对照③：TCP data_type=long + 123456 ⇒ 规范化为 Long（落列交给 iot 按类型决定）")
+    void tcpLongMustNormalizeToLong() {
         List<AccessReading> readings = new ArrayList<>();
         PointMappingDataListener listener = listener(PROTOCOL_TCP,
             List.of(point("CNT", "counter", "long", null, null)), readings);
 
         listener.onData(PointValue.good(PointAddress.of("CNT"), "123456", Instant.now()));
 
-        assertThat(readings).singleElement().satisfies(reading -> {
-            assertThat(reading.value()).isEqualTo(123456L);
-            assertThat(reading.forceText()).as("非 string 类型行为一字不变").isFalse();
-        });
+        assertThat(readings).singleElement().satisfies(reading ->
+            assertThat(reading.value()).isEqualTo(123456L));
     }
 
     @Test
-    @DisplayName("★ 对照④：Modbus int（非 string）forceText=false（回归，词法落列不变）")
-    void modbusIntMustNotForceText() {
+    @DisplayName("★ 对照④：Modbus int（非 string）两字合成数值（落列交给 iot 按类型决定）")
+    void modbusIntMustDecodePair() {
         AccessPointMappingDto modbusInt = new AccessPointMappingDto();
         modbusInt.setAddress("holding:0");
         modbusInt.setIdentifier("counter");
@@ -463,7 +455,7 @@ class AccessReadingMappingTest {
         listener.onData(PointValue.good(PointAddress.of("holding:1"), 0x0002, Instant.now()));
 
         assertThat(readings).singleElement()
-            .satisfies(reading -> assertThat(reading.forceText()).isFalse());
+            .satisfies(reading -> assertThat(reading.value()).isInstanceOf(Number.class));
     }
 
     private static PointMappingDataListener listener(String protocol,

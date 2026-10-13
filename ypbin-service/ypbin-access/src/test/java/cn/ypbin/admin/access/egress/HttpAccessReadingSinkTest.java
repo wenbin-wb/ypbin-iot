@@ -148,22 +148,21 @@ class HttpAccessReadingSinkTest {
     }
 
     @Test
-    @DisplayName("★ v3：Modbus string 的 forceText 标记必须透传到上报 DTO（缺省 false 保持词法落列）")
-    void forceTextMustBeForwardedToObservation() {
+    @DisplayName("★ 接入侧只交付字符串值：数值形态与文本形态都原样上报（落列由 iot 侧按物模型类型决定）")
+    void decodedStringsMustBeForwardedVerbatim() {
         when(client.ingest(any())).thenReturn(R.ok(2));
         HttpAccessReadingSink sink = sink();
-        sink.accept(new AccessReading(DEVICE, "serial", "123456", "GOOD", TS, 5_000, true));
-        sink.accept(new AccessReading(DEVICE, "counter", 65538, "GOOD", TS, 5_000, false));
+        sink.accept(new AccessReading(DEVICE, "serial", "123456", "GOOD", TS, 5_000));
+        sink.accept(new AccessReading(DEVICE, "counter", 65538, "GOOD", TS, 5_000));
 
         sink.flush();
 
         ArgumentCaptor<ReadingIngestReq> captor = ArgumentCaptor.forClass(ReadingIngestReq.class);
         verify(client).ingest(captor.capture());
         assertThat(captor.getValue().getItems()).hasSize(2);
-        assertThat(captor.getValue().getItems().get(0).getForceText())
-            .as("Modbus string 必须带上强制文本标记").isTrue();
-        assertThat(captor.getValue().getItems().get(1).getForceText())
-            .as("int 点位缺省 false，词法落列不变").isFalse();
+        assertThat(captor.getValue().getItems()).extracting(ReadingObservationDto::getValue)
+            .as("值字符串原样上报；列不由接入侧决定（DTO 无任何列/类型标记）")
+            .containsExactly("123456", "65538");
     }
 
     @Test

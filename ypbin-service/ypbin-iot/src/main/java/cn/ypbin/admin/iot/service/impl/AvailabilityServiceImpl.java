@@ -21,14 +21,17 @@ import cn.ypbin.admin.iot.availability.ReadingIngestReq;
 import cn.ypbin.admin.iot.availability.ReadingObservationDto;
 import cn.ypbin.admin.iot.entity.DeviceLiveness;
 import cn.ypbin.starter.iot.validate.PropertyIdRules;
+import cn.ypbin.admin.iot.timeseries.ReadingValueMapper;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesPoint;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesProperties;
+import cn.ypbin.admin.iot.timeseries.ValueColumn;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesWriter;
 import cn.ypbin.admin.iot.values.LatestValue;
 import cn.ypbin.admin.iot.values.LatestValueWriter;
 import cn.ypbin.admin.iot.entity.IotDevice;
 import cn.ypbin.admin.iot.entity.MaintenanceWindow;
 import cn.ypbin.admin.iot.entity.OutageEvent;
+import cn.ypbin.admin.iot.enums.ThingModelDataType;
 import cn.ypbin.admin.iot.mapper.DeviceLivenessMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
@@ -56,6 +59,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -111,6 +116,26 @@ public class AvailabilityServiceImpl implements AvailabilityService {
      */
     public static final String METRIC_SERIES_COLLECTED = "iot.timeseries.points.collected";
 
+    /**
+     * 读数的物模型类型缺失/未知（或同一规范坐标的类型冲突）被丢弃的条数（§4.6.4）。
+     *
+     * <p>类型是落列的唯一真源；拿不到类型时**不猜列、不落文本兜底**，显式丢弃并计数（+ 按点位节流 WARN）。</p>
+     */
+    public static final String METRIC_TYPE_MISSING = "iot.timeseries.value.type_missing";
+
+    /** 声明为数值类型但值不可解析（或超出 double 可表示范围）被丢弃的条数（§4.6.5）。 */
+    public static final String METRIC_NOT_NUMERIC = "iot.timeseries.value.not_numeric";
+
+    /**
+     * 数值绝对值超过 2^53 ⇒ 写 value_double 会丢整数精度的条数（§4.6.5）。
+     *
+     * <p>仍写数值列（保持「同属性同一列」不变量），计数 + 按点位节流 WARN 让精度损失可见可定位。</p>
+     */
+    public static final String METRIC_PRECISION_LOST = "iot.timeseries.value.precision_lost";
+
+    /** 读数落列告警的按点位节流窗口。 */
+    private static final long SERIES_VALUE_WARN_INTERVAL_NANOS = Duration.ofMinutes(1).toNanos();
+
     private final DeviceLivenessMapper livenessMapper;
     private final OutageEventMapper outageMapper;
 
@@ -158,6 +183,18 @@ public class AvailabilityServiceImpl implements AvailabilityService {
     /** 交给时序出口的待写点数（成功侧观测的一半，见 {@link #METRIC_SERIES_COLLECTED}）。 */
     private final Counter seriesCollectedCounter;
 
+    /** 类型缺失/冲突被丢弃的条数。 */
+    private final Counter typeMissingCounter;
+
+    /** 声明数值但值不可解析被丢弃的条数。 */
+    private final Counter notNumericCounter;
+
+    /** 超出 2^53 精度损失（仍写数值列）的条数。 */
+    private final Counter precisionLostCounter;
+
+    /** 时序落列告警的按点位节流（同一 deviceId+propertyId 每分钟最多一条，并报出被抑制条数）。 */
+    private final SeriesValueWarnThrottle seriesValueWarnThrottle = new SeriesValueWarnThrottle();
+
     /** 设备 → 点位坐标集合（P0-6c 成员校验用；一次批量查映射，见 {@link PointMappingIndex}）。 */
     private final PointMappingIndex pointMappingIndex;
 
@@ -189,6 +226,15 @@ public class AvailabilityServiceImpl implements AvailabilityService {
         this.seriesCollectedCounter = Counter.builder(METRIC_SERIES_COLLECTED)
             .description("交给时序出口的待写点数（与写入器的 attempted/rows 配对定位断点）")
             .register(meterRegistry);
+        this.typeMissingCounter = Counter.builder(METRIC_TYPE_MISSING)
+            .description("读数因物模型类型缺失/冲突被丢弃的条数（不猜列、不落文本兜底）")
+            .register(meterRegistry);
+        this.notNumericCounter = Counter.builder(METRIC_NOT_NUMERIC)
+            .description("声明为数值列但值不可解析被丢弃的条数")
+            .register(meterRegistry);
+        this.precisionLostCounter = Counter.builder(METRIC_PRECISION_LOST)
+            .description("数值绝对值超过 2^53、写 value_double 会丢整数精度的条数")
+            .register(meterRegistry);
     }
 
     @Override
@@ -202,9 +248,11 @@ public class AvailabilityServiceImpl implements AvailabilityService {
         // 先解析设备 → 租户：既拿到写活性所需的租户，也顺带把「设备不存在」的条目留给既有分支
         // warn + 丢弃（不应把它们报成「点位未映射」——两种原因必须可分辨）
         Map<Long, Long> tenantByDevice = resolveTenants(deviceIds(items));
+        // task-23 §4.6.4：坐标索引（含 data_type）一次取回，成员校验与落列共用，不引入第二次查询。
+        CoordinateSnapshot coordinates = loadCoordinatesForItems(items, tenantByDevice.keySet());
         // 第②道：点位**成员/存在性**校验 + **坐标归一**——读数点位必须是该设备已配置且属性行仍存在的
         // 映射点位；通过后一律改写成规范坐标（属性标识）再落库（P0-6c 后半 + 2026-09-26 坐标统一）
-        items = canonicalizePropertyIds(items, tenantByDevice.keySet());
+        items = canonicalizePropertyIds(items, tenantByDevice.keySet(), coordinates);
         if (items.isEmpty()) {
             return 0;
         }
@@ -230,7 +278,7 @@ public class AvailabilityServiceImpl implements AvailabilityService {
         }
         // 时序（历史曲线）与最新值同一时机写：只有启用时才收集，避免默认关闭时的无谓分配
         List<TimeSeriesPoint> seriesPoints = timeSeriesProperties.isEnabled()
-            ? collectSeriesPoints(items, tenantByDevice) : List.of();
+            ? collectSeriesPoints(items, tenantByDevice, coordinates) : List.of();
         writeDerivedAfterCommit(latestValues, seriesPoints, shadowUpdates);
         return processed;
     }
@@ -307,6 +355,51 @@ public class AvailabilityServiceImpl implements AvailabilityService {
     }
 
     /**
+     * 取本批读数涉及的坐标快照（坐标 + 物模型类型）——**一次批量**，供成员校验与落列共用。
+     *
+     * <p>与设备数/点位数无关（最多两条 SQL）；没有带点位的读数时先判空短路，一次查询都不发。
+     * 返回的 {@link CoordinateSnapshot} 同时保留「是否有点位读数」这一事实：设备确实没有任何映射时
+     * {@code byDevice} 为空，但仍要进入成员校验把它们判为「未映射」，不能与「纯时刻+质量批次」混淆。</p>
+     *
+     * @param items        本批上报项
+     * @param knownDevices 已解析出租户的设备 ID
+     * @return 坐标快照
+     */
+    private CoordinateSnapshot loadCoordinatesForItems(List<ReadingObservationDto> items,
+                                                       Set<Long> knownDevices) {
+        Set<Long> devicesToCheck = deviceIdsWithPointReadings(items).stream()
+            .filter(knownDevices::contains)
+            .collect(Collectors.toCollection(LinkedHashSet::new));
+        if (devicesToCheck.isEmpty()) {
+            return CoordinateSnapshot.empty();
+        }
+        return new CoordinateSnapshot(devicesToCheck, pointMappingIndex.loadCoordinates(devicesToCheck));
+    }
+
+    /**
+     * 本批坐标快照。
+     *
+     * @param devicesToCheck 需要做成员校验的（已解析出租户的）设备 ID
+     * @param byDevice       设备 → 坐标索引（含物模型类型）；查询不到映射的设备不在此表里
+     */
+    private record CoordinateSnapshot(Set<Long> devicesToCheck,
+                                      Map<Long, PointMappingIndex.DeviceCoordinates> byDevice) {
+
+        static CoordinateSnapshot empty() {
+            return new CoordinateSnapshot(Set.of(), Map.of());
+        }
+
+        /** 本批是否完全没有带点位的读数（与「有读数但设备无映射」是两回事）。 */
+        boolean noPointReadings() {
+            return devicesToCheck.isEmpty();
+        }
+
+        PointMappingIndex.DeviceCoordinates coordinatesOf(Long deviceId) {
+            return byDevice.getOrDefault(deviceId, PointMappingIndex.DeviceCoordinates.empty());
+        }
+    }
+
+    /**
      * **坐标归一 + 成员/存在性校验**（P0-6c 后半；2026-09-26 起同时承担坐标统一与孤儿映射收紧）。
      *
      * <p><b>规范坐标 = 属性标识</b>：本方法把通过校验的读数一律改写成
@@ -341,19 +434,15 @@ public class AvailabilityServiceImpl implements AvailabilityService {
      * @return 通过校验且坐标已归一为属性标识的上报项（保持原顺序）
      */
     private List<ReadingObservationDto> canonicalizePropertyIds(List<ReadingObservationDto> items,
-                                                                Set<Long> knownDevices) {
-        Set<Long> devicesToCheck = deviceIdsWithPointReadings(items).stream()
-            .filter(knownDevices::contains)
-            .collect(Collectors.toCollection(LinkedHashSet::new));
-        if (devicesToCheck.isEmpty()) {
+                                                                Set<Long> knownDevices,
+                                                                CoordinateSnapshot snapshot) {
+        if (snapshot.noPointReadings()) {
             // 没有带点位的读数（纯「只报时刻+质量」批次）⇒ 一次映射查询都不发
             return new ArrayList<>(items);
         }
-        Map<Long, PointMappingIndex.DeviceCoordinates> coordinatesByDevice =
-            pointMappingIndex.loadCoordinates(devicesToCheck);
         // 配置级异常（形态撞名 / 坐标级撞名）**每批每设备告警一次**，不放在下面的逐条循环里——
         // 500 条一批、每秒一批时逐条 WARN 会把日志打爆，而这两类问题都是**配置**问题，一条就够定位。
-        for (Map.Entry<Long, PointMappingIndex.DeviceCoordinates> entry : coordinatesByDevice.entrySet()) {
+        for (Map.Entry<Long, PointMappingIndex.DeviceCoordinates> entry : snapshot.byDevice().entrySet()) {
             warnCoordinateConflicts(entry.getKey(), entry.getValue());
         }
         List<ReadingObservationDto> accepted = new ArrayList<>(items.size());
@@ -370,16 +459,15 @@ public class AvailabilityServiceImpl implements AvailabilityService {
                 accepted.add(item);
                 continue;
             }
-            PointMappingIndex.DeviceCoordinates coordinates =
-                coordinatesByDevice.getOrDefault(deviceId, PointMappingIndex.DeviceCoordinates.empty());
-            String canonical = coordinates.canonicalize(propertyId);
+            PointMappingIndex.DeviceCoordinates deviceCoordinates = snapshot.coordinatesOf(deviceId);
+            String canonical = deviceCoordinates.canonicalize(propertyId);
             if (canonical != null) {
                 // 归一到规范坐标：下游（最新值/时序/影子）因此只见一种形态
                 item.setPropertyId(canonical);
                 accepted.add(item);
                 continue;
             }
-            if (coordinates.orphanForms().contains(propertyId)) {
+            if (deviceCoordinates.orphanForms().contains(propertyId)) {
                 // 孤儿映射：映射行在、属性行已缺失 ⇒ 与「未映射」分开计数
                 orphanPropertyIdCounter.increment();
                 log.warn("[iot] 读数上报的点位归属**孤儿映射**（物模型属性行已缺失），已丢弃该条"
@@ -503,8 +591,9 @@ public class AvailabilityServiceImpl implements AvailabilityService {
      * @param tenantByDevice 设备 → 租户
      * @return 待写时序点（可能为空）
      */
-    private static List<TimeSeriesPoint> collectSeriesPoints(List<ReadingObservationDto> items,
-                                                             Map<Long, Long> tenantByDevice) {
+    private List<TimeSeriesPoint> collectSeriesPoints(List<ReadingObservationDto> items,
+                                                      Map<Long, Long> tenantByDevice,
+                                                      CoordinateSnapshot coordinates) {
         List<TimeSeriesPoint> points = new ArrayList<>();
         for (ReadingObservationDto item : items) {
             if (item == null || item.getDeviceId() == null || item.getTs() == null) {
@@ -515,12 +604,38 @@ public class AvailabilityServiceImpl implements AvailabilityService {
             if (propertyId == null || propertyId.isBlank() || value == null) {
                 continue;
             }
-            Long tenantId = tenantByDevice.get(item.getDeviceId());
+            Long deviceId = item.getDeviceId();
+            Long tenantId = tenantByDevice.get(deviceId);
             if (tenantId == null) {
                 continue;
             }
-            points.add(new TimeSeriesPoint(tenantId, item.getDeviceId(), propertyId, value,
-                item.getQuality(), item.getTs(), Boolean.TRUE.equals(item.getForceText())));
+            // 落列 = f(物模型 data_type)，与值形态无关（§4.6.2 唯一映射表）。
+            PointMappingIndex.DeviceCoordinates deviceCoordinates = coordinates.coordinatesOf(deviceId);
+            String dataType = deviceCoordinates.dataTypeOf(propertyId);
+            ThingModelDataType type = ThingModelDataType.of(dataType);
+            if (type == null) {
+                // 类型缺失/未知/同标识冲突 ⇒ 丢弃 + 计数，不猜列、不落文本兜底（§4.6.4）。
+                typeMissingCounter.increment();
+                warnTypeMissing(deviceId, propertyId, dataType,
+                    deviceCoordinates.duplicateIdentifiers().contains(propertyId));
+                continue;
+            }
+            ValueColumn column = ValueColumn.from(type);
+            if (column == ValueColumn.NUMERIC) {
+                Double numeric = ReadingValueMapper.parseNumeric(value);
+                if (numeric == null) {
+                    // 数值声明但值不可解析（如 "abc" 送 int 点）⇒ 丢弃 + 计数（§4.6.5）。
+                    notNumericCounter.increment();
+                    continue;
+                }
+                if (ReadingValueMapper.isPrecisionLost(value)) {
+                    // 2^53 边界：仍写数值列（保持同属性同一列），计数 + 按点位节流 WARN（§4.6.5）。
+                    precisionLostCounter.increment();
+                    warnPrecisionLost(deviceId, propertyId, value);
+                }
+            }
+            points.add(new TimeSeriesPoint(tenantId, deviceId, propertyId, value,
+                item.getQuality(), item.getTs(), column));
         }
         return points;
     }
@@ -1089,5 +1204,67 @@ public class AvailabilityServiceImpl implements AvailabilityService {
      * @param propertyId 点位标识
      */
     private record DevicePropertyKey(Long deviceId, String propertyId) {
+    }
+
+    /** 类型缺失/冲突的按点位节流 WARN。 */
+    private void warnTypeMissing(Long deviceId, String propertyId, String dataType,
+                                 boolean duplicateIdentifier) {
+        long suppressed = seriesValueWarnThrottle.acquire(seriesWarnKey(deviceId, propertyId));
+        if (suppressed < 0) {
+            return;
+        }
+        log.warn("[iot] 读数无法落列，已丢弃（不猜列、不落文本兜底）：deviceId={} propertyId={} dataType={} "
+                + "原因={} 见 {} 指标（此前同类被抑制 {} 条）",
+            LogSanitizer.sanitize(deviceId), LogSanitizer.sanitize(propertyId),
+            LogSanitizer.sanitize(dataType),
+            duplicateIdentifier ? "同一规范坐标的类型冲突" : "类型缺失/未知",
+            METRIC_TYPE_MISSING, suppressed);
+    }
+
+    /** 2^53 精度损失的按点位节流 WARN（仍写数值列）。 */
+    private void warnPrecisionLost(Long deviceId, String propertyId, String rawValue) {
+        long suppressed = seriesValueWarnThrottle.acquire(seriesWarnKey(deviceId, propertyId));
+        if (suppressed < 0) {
+            return;
+        }
+        log.warn("[iot] 数值超出 double 精确整数范围（>2^53），仍写 value_double 并计数 {}："
+                + "deviceId={} propertyId={} 原值={}（此类数据应把属性建模为 string；"
+                + "此前同类被抑制 {} 条）",
+            METRIC_PRECISION_LOST, LogSanitizer.sanitize(deviceId), LogSanitizer.sanitize(propertyId),
+            LogSanitizer.sanitize(rawValue), suppressed);
+    }
+
+    private static String seriesWarnKey(Long deviceId, String propertyId) {
+        return String.valueOf(deviceId) + ':' + propertyId;
+    }
+
+    /**
+     * 时序落列告警的按点位节流：同一 deviceId+propertyId 每分钟最多放行一条，并累计被抑制条数
+     * （限流不等于静默——下一条放行的 WARN 会把被抑制条数一并报出）。
+     */
+    private static final class SeriesValueWarnThrottle {
+
+        private final Map<String, Window> windows = new ConcurrentHashMap<>();
+
+        /**
+         * @param key 点位键（deviceId:propertyId）
+         * @return 本次放行返回「此前被抑制条数」（&ge;0）；本次被抑制返回 {@code -1}
+         */
+        long acquire(String key) {
+            Window window = windows.computeIfAbsent(key, ignored -> new Window());
+            long now = System.nanoTime();
+            long next = window.nextAllowedNanos.get();
+            if (now >= next && window.nextAllowedNanos.compareAndSet(next,
+                    now + SERIES_VALUE_WARN_INTERVAL_NANOS)) {
+                return window.suppressed.getAndSet(0);
+            }
+            window.suppressed.incrementAndGet();
+            return -1L;
+        }
+
+        private static final class Window {
+            private final AtomicLong nextAllowedNanos = new AtomicLong(System.nanoTime());
+            private final AtomicLong suppressed = new AtomicLong();
+        }
     }
 }

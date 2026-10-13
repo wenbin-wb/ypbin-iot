@@ -165,11 +165,10 @@ public class PointMappingDataListener implements DataListener {
         }
         // 单寄存器 / 其它协议：BAD 原样穿透（不规范化、不计失败）
         if (!value.isGood()) {
-            emit(identifier, value, value.value(), false);
+            emit(identifier, value, value.value());
             return;
         }
         Object raw = value.value();
-        boolean forceText = false;
         if (IotProtocol.TCP.getCode().equals(protocol)) {
             // SDK key-value 只做字段选择、不做类型转换；这里按物模型 dataType 规范化，失败即丢弃 + 计数
             PointValueNormalizer.Outcome outcome = PointValueNormalizer.normalize(raw, point.getDataType());
@@ -178,8 +177,6 @@ public class PointMappingDataListener implements DataListener {
                 return;
             }
             raw = outcome.value();
-            // 物模型声明为 string ⇒ 强制落 value_text（TCP 与 Modbus 口径一致；见 §4.5.6）
-            forceText = outcome.forceText();
         } else if (modbus && isString(point)) {
             // v3 单寄存器 string：一个字的严格 UTF-8（byte_order 忽略）
             if (!(raw instanceof Number number)) {
@@ -188,7 +185,6 @@ public class PointMappingDataListener implements DataListener {
             }
             try {
                 raw = ModbusRegisterDecoder.decodeStringUtf8(new int[] {number.intValue()});
-                forceText = true;
             } catch (CharacterCodingException ex) {
                 onNotUtf8(point, value);
                 return;
@@ -209,9 +205,9 @@ public class PointMappingDataListener implements DataListener {
             // word_count=1 + signed：16 位符号扩展；signed=false 原样透传（逐字节兼容）
             raw = ModbusRegisterDecoder.decodeSingle(number.intValue(), true);
         }
-        // string 的 applyScale 是 no-op（String 不是 Number/BigDecimal）；forceText 保证 iot 侧强制落文本列
+        // 落列由 iot 侧按物模型类型决定；本层只做值规范化与缩放（string 的 applyScale 是 no-op）
         emit(identifier, value, AccessReading.applyScale(raw, point.getScaleFactor(),
-            point.getOffsetValue()), forceText);
+            point.getOffsetValue()));
     }
 
     /**
@@ -234,7 +230,7 @@ public class PointMappingDataListener implements DataListener {
                     + "device={} address={} wordIndex={} reason={}",
                 LogSanitizer.sanitize(deviceId), LogSanitizer.sanitize(value.address().raw()), wordIndex,
                 LogSanitizer.sanitize(value.qualityReason()));
-            emit(point.getIdentifier(), value, value.value(), false);
+            emit(point.getIdentifier(), value, value.value());
             return;
         }
         Object raw = value.value();
@@ -244,7 +240,7 @@ public class PointMappingDataListener implements DataListener {
             log.warn("[access] Modbus 多寄存器点位收到非数值寄存器值，按 BAD 上报：device={} address={}",
                 LogSanitizer.sanitize(deviceId), LogSanitizer.sanitize(value.address().raw()));
             emit(point.getIdentifier(), PointValue.bad(value.address(), Quality.BAD,
-                "modbus.register.non-numeric", value.timestamp()), null, false);
+                "modbus.register.non-numeric", value.timestamp()), null);
             return;
         }
         int wordCount = wordCountOf(point);
@@ -284,9 +280,9 @@ public class PointMappingDataListener implements DataListener {
         if (isString(point)) {
             try {
                 String decoded = ModbusRegisterDecoder.decodeStringUtf8(words);
-                // string 的 applyScale 是 no-op；forceText=true 保证 iot 侧强制落 value_text（§4.5.6）
+                // string 的 applyScale 是 no-op；落列由 iot 侧按物模型类型决定
                 emit(point.getIdentifier(), value, AccessReading.applyScale(decoded,
-                    point.getScaleFactor(), point.getOffsetValue()), true);
+                    point.getScaleFactor(), point.getOffsetValue()));
             } catch (CharacterCodingException ex) {
                 onNotUtf8(point, value);
             }
@@ -312,13 +308,13 @@ public class PointMappingDataListener implements DataListener {
             // float32 的十进制表示取**最短可回读**形态（理由见 §4.4.7）
             BigDecimal floatValue = new BigDecimal(Float.toString(decoded));
             emit(point.getIdentifier(), value, AccessReading.applyScale(floatValue,
-                point.getScaleFactor(), point.getOffsetValue()), false);
+                point.getScaleFactor(), point.getOffsetValue()));
             return;
         }
         long decoded = ModbusRegisterDecoder.decodePair(first, second, point.getByteOrder(),
             Boolean.TRUE.equals(point.getSigned()));
         emit(point.getIdentifier(), value, AccessReading.applyScale(decoded,
-            point.getScaleFactor(), point.getOffsetValue()), false);
+            point.getScaleFactor(), point.getOffsetValue()));
     }
 
     /** 暂存组是否已陈旧（组内最早到达的字距本次超过一个采集周期；周期未知用兜底值）。 */
@@ -403,8 +399,7 @@ public class PointMappingDataListener implements DataListener {
 
     /** 上报一条 BAD 读数（value=null；宿主侧解码失败用，不把垃圾写进库）。 */
     private void emitBad(String identifier, PointValue value, String reason) {
-        emit(identifier, PointValue.bad(value.address(), Quality.BAD, reason, value.timestamp()), null,
-            false);
+        emit(identifier, PointValue.bad(value.address(), Quality.BAD, reason, value.timestamp()), null);
     }
 
     /**
@@ -420,12 +415,12 @@ public class PointMappingDataListener implements DataListener {
     /**
      * 上报一条读数（质量/时刻/周期随原始 PointValue 带出；BAD 的 value 可为 null）。
      *
-     * @param forceText 是否强制 iot 侧落文本列（仅 Modbus {@code register_format=string} 置 true；
-     *                  见 docs/VALUE-DECODE-DESIGN.md §4.5.6）
+     * <p>落列由 iot 侧按 {@code iot_property.data_type} 决定；本层不携带任何列/类型标记
+     * （v3 {@code forceText} 通道已删除，见 docs/VALUE-DECODE-DESIGN.md §4.6）。</p>
      */
-    private void emit(String identifier, PointValue value, Object mapped, boolean forceText) {
+    private void emit(String identifier, PointValue value, Object mapped) {
         sink.accept(new AccessReading(deviceId, identifier, mapped, value.quality().name(),
-            value.timestamp(), pollIntervalMs, forceText));
+            value.timestamp(), pollIntervalMs));
     }
 
     /**

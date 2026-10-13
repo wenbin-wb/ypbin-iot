@@ -10,108 +10,102 @@
 package cn.ypbin.admin.iot.timeseries;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import cn.ypbin.admin.iot.enums.ThingModelDataType;
+import java.util.List;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
- * **跨模块契约**：接入侧（access）解码输出的字符串形态 → 时序表的列选择。
+ * **跨模块契约**（task-23 §4.6 重构后）：接入侧（access）交付的是**字符串值**，落列由 iot 侧按
+ * 物模型 {@code data_type} 唯一决定——**和字符串长什么样无关**。
  *
- * <p>为什么需要这个用例（而不是只靠各自的单测）：规范化在 access 模块、列选择在 iot 模块，
- * 两个模块**没有编译期依赖**，靠的是「字符串形态」这一个隐式契约。这里把契约钉死：
- * access 的 {@code PointValueNormalizer}（starter {@code payload-format=key-value} 交付文本后
- * 的宿主类型规范化）对数值点输出干净数值串（如 {@code "23.5"}），只有如此
- * {@link ReadingValueMapper} 才会把它写进 {@code value_double}（曲线才画得出来）；
- * 文本点（{@code serialNo} 这类，含前导零）必须仍然走 {@code value_text}。</p>
- *
- * <p>形态来源：access 单测 {@code PointValueNormalizerTest} / {@code AccessReadingMappingTest}
- * （那里断言了「规范化后 {@code String.valueOf(value)} 是纯数值串」）。</p>
+ * <p>旧契约（v3）是「解码串形态 → 词法猜列 + {@code forceText} 补丁」；那条链路已彻底删除。
+ * 本用例钉死新契约：同一条解码串（如 {@code "123456"}）在 {@code data_type=string} 下必须落
+ * {@code value_text}，在 {@code data_type=long} 下必须落 {@code value_double}——列只随类型变、不随值变。</p>
  *
  * @author wenbin
  * @since 2026-09-27
  */
 class AccessDecodedValueColumnContractTest {
 
+    /** 供 9 类型矩阵使用的多形态值。 */
+    private static final List<String> VALUE_FORMS =
+        List.of("123456", "007", "1.5", "true", "2026-10-13", "{\"a\":1}", "[1,2]", "");
+
     @Test
-    @DisplayName("★ 数值点解码形态 ⇒ value_double（曲线可画）")
-    void numericDecodedFormsMustLandInNumericColumn() {
-        // temperature（data_type=decimal）解出的形态
-        ReadingValueMapper.MappedValue temperature = ReadingValueMapper.map("23.5");
-        assertThat(temperature.column()).isEqualTo(ReadingValueMapper.COLUMN_DOUBLE);
-        assertThat(temperature.numericValue()).isEqualTo(23.5d);
-
-        // humidity（data_type=int）解出的形态
-        ReadingValueMapper.MappedValue humidity = ReadingValueMapper.map("45");
-        assertThat(humidity.column()).isEqualTo(ReadingValueMapper.COLUMN_DOUBLE);
-        assertThat(humidity.numericValue()).isEqualTo(45.0d);
-
-        // 缩放/偏移生效后的形态（applyScale 产出的 BigDecimal 字符串化形态）
-        assertThat(ReadingValueMapper.map("23.500000").column())
-            .isEqualTo(ReadingValueMapper.COLUMN_DOUBLE);
+    @DisplayName("★ 9 类 × 多形态值：声明类型决定列，同一类型多值列恒定")
+    void declaredTypeMustDecideColumnRegardlessOfValueForm() {
+        assertThat(ValueColumn.from(ThingModelDataType.INT)).isEqualTo(ValueColumn.NUMERIC);
+        assertThat(ValueColumn.from(ThingModelDataType.LONG)).isEqualTo(ValueColumn.NUMERIC);
+        assertThat(ValueColumn.from(ThingModelDataType.DECIMAL)).isEqualTo(ValueColumn.NUMERIC);
+        assertThat(ValueColumn.from(ThingModelDataType.BOOL)).isEqualTo(ValueColumn.TEXT);
+        assertThat(ValueColumn.from(ThingModelDataType.STRING)).isEqualTo(ValueColumn.TEXT);
+        assertThat(ValueColumn.from(ThingModelDataType.ENUM)).isEqualTo(ValueColumn.TEXT);
+        assertThat(ValueColumn.from(ThingModelDataType.DATE_TIME)).isEqualTo(ValueColumn.TEXT);
+        assertThat(ValueColumn.from(ThingModelDataType.JSON_OBJECT)).isEqualTo(ValueColumn.TEXT);
+        assertThat(ValueColumn.from(ThingModelDataType.ARRAY)).isEqualTo(ValueColumn.TEXT);
     }
 
     @Test
-    @DisplayName("★ 文本/布尔点解码形态 ⇒ value_text（serialNo 不许被数值化）")
-    void textDecodedFormsMustStayInTextColumn() {
-        assertThat(ReadingValueMapper.map("SN-0001").column())
-            .isEqualTo(ReadingValueMapper.COLUMN_TEXT);
-        assertThat(ReadingValueMapper.map("007").column())
-            .as("前导零编号：access 侧按 string 类型原样输出，列选择侧同样按文本落库")
-            .isEqualTo(ReadingValueMapper.COLUMN_TEXT);
-        assertThat(ReadingValueMapper.map("true").column())
-            .isEqualTo(ReadingValueMapper.COLUMN_TEXT);
+    @DisplayName("★ 文本类 6 型：任意值形态都落 value_text（含纯数字 123456 / 007）")
+    void allTextTypesMustAlwaysLandInTextColumn() {
+        List<ThingModelDataType> textTypes = List.of(ThingModelDataType.BOOL, ThingModelDataType.STRING,
+            ThingModelDataType.ENUM, ThingModelDataType.DATE_TIME, ThingModelDataType.JSON_OBJECT,
+            ThingModelDataType.ARRAY);
+        for (ThingModelDataType type : textTypes) {
+            for (String form : VALUE_FORMS) {
+                ReadingValueMapper.MappedValue mapped = ReadingValueMapper.map(form, ValueColumn.from(type));
+                assertThat(mapped.column())
+                    .as("类型 %s 的 %s 必须落 value_text", type, form)
+                    .isEqualTo(ReadingValueMapper.COLUMN_TEXT);
+                assertThat(mapped.numericValue()).isNull();
+            }
+        }
     }
 
     @Test
-    @DisplayName("★ v3 窄口径：仅 Modbus string 强制落 value_text（纯数字也落文本）")
-    void modbusStringForcedTextMustLandInTextColumn() {
-        ReadingValueMapper.MappedValue numeric = ReadingValueMapper.map("123456", true);
-        assertThat(numeric.column()).isEqualTo(ReadingValueMapper.COLUMN_TEXT);
-        assertThat(numeric.text()).isEqualTo("123456");
-        assertThat(numeric.numericValue()).isNull();
-
-        // 典型序列号（含前导零/字母）本来就走 text；作为对照
-        assertThat(ReadingValueMapper.map("SN-0001", true).column())
-            .isEqualTo(ReadingValueMapper.COLUMN_TEXT);
-        assertThat(ReadingValueMapper.map("007", true).column())
-            .isEqualTo(ReadingValueMapper.COLUMN_TEXT);
+    @DisplayName("★ 数值类 3 型：可解析形态落 value_double；不可解析形态显式拒绝（不落文本）")
+    void numericTypesMustMaterializeNumericFormsAndRejectOthers() {
+        List<ThingModelDataType> numericTypes =
+            List.of(ThingModelDataType.INT, ThingModelDataType.LONG, ThingModelDataType.DECIMAL);
+        for (ThingModelDataType type : numericTypes) {
+            for (String form : List.of("123456", "007", "1.5", "-7", "1e3")) {
+                ReadingValueMapper.MappedValue mapped = ReadingValueMapper.map(form, ValueColumn.from(type));
+                assertThat(mapped.column())
+                    .as("类型 %s 的可解析值 %s 必须落 value_double", type, form)
+                    .isEqualTo(ReadingValueMapper.COLUMN_DOUBLE);
+                assertThat(mapped.numericValue()).isNotNull();
+            }
+            for (String bad : List.of("true", "abc", "")) {
+                assertThatThrownBy(() -> ReadingValueMapper.map(bad, ValueColumn.from(type)))
+                    .as("类型 %s 的不可解析值 %s 必须显式失败（不落文本列）", type, bad)
+                    .isInstanceOf(IllegalArgumentException.class);
+            }
+        }
     }
 
     @Test
-    @DisplayName("★ 完整口径：物模型 string（TCP/Modbus 一致）⇒ 一律 value_text；非 string 仍词法落列")
-    void stringDataTypeMustAlwaysLandInTextColumn() {
-        // ① TCP string + 纯数字：access 侧 PointValueNormalizer 置 forceText=true ⇒ map(raw,true) 落文本
-        ReadingValueMapper.MappedValue tcpNumeric = ReadingValueMapper.map("123456", true);
-        assertThat(tcpNumeric.column()).isEqualTo(ReadingValueMapper.COLUMN_TEXT);
-        assertThat(tcpNumeric.numericValue()).isNull();
-        assertThat(tcpNumeric.text()).isEqualTo("123456");
+    @DisplayName("★ 同一解码串在 string 与 long 下分属不同列（类型权威，值形态无权）")
+    void sameDecodedStringMustFollowDeclaredType() {
+        ReadingValueMapper.MappedValue asString = ReadingValueMapper.map("123456", ValueColumn.TEXT);
+        assertThat(asString.column()).isEqualTo(ReadingValueMapper.COLUMN_TEXT);
+        assertThat(asString.numericValue()).isNull();
 
-        // ② TCP string 典型序列号（前导零/字母）
-        assertThat(ReadingValueMapper.map("007", true).column())
-            .isEqualTo(ReadingValueMapper.COLUMN_TEXT);
-        assertThat(ReadingValueMapper.map("SN-0001", true).column())
-            .isEqualTo(ReadingValueMapper.COLUMN_TEXT);
-
-        // ③ TCP long + 123456：forceText=false ⇒ 仍 value_double（不误伤非 string）
-        ReadingValueMapper.MappedValue tcpLong = ReadingValueMapper.map("123456", false);
-        assertThat(tcpLong.column()).isEqualTo(ReadingValueMapper.COLUMN_DOUBLE);
-        assertThat(tcpLong.numericValue()).isEqualTo(123456d);
-
-        // ④ Modbus string 走同一 forceText 路径（既有用例亦覆盖）
-        assertThat(ReadingValueMapper.map("1234", true).column())
-            .isEqualTo(ReadingValueMapper.COLUMN_TEXT);
+        ReadingValueMapper.MappedValue asLong = ReadingValueMapper.map("123456", ValueColumn.NUMERIC);
+        assertThat(asLong.column()).isEqualTo(ReadingValueMapper.COLUMN_DOUBLE);
+        assertThat(asLong.numericValue()).isEqualTo(123456d);
     }
 
     @Test
-    @DisplayName("★ v3 回归：int/float/bits 与缺省标记仍按词法落列，逐字节不变")
-    void defaultLexicalMappingMustRemainUnchanged() {
-        assertThat(ReadingValueMapper.map("123456").column())
-            .as("int 点位（缺省 false）仍走数值列").isEqualTo(ReadingValueMapper.COLUMN_DOUBLE);
-        assertThat(ReadingValueMapper.map("23.5").column())
-            .as("float 点位（缺省 false）仍走数值列").isEqualTo(ReadingValueMapper.COLUMN_DOUBLE);
-        assertThat(ReadingValueMapper.map("1").column())
-            .as("bits length>1（缺省 false）仍走数值列").isEqualTo(ReadingValueMapper.COLUMN_DOUBLE);
-        assertThat(ReadingValueMapper.map("true").column())
-            .as("bits length=1 的布尔仍走文本列").isEqualTo(ReadingValueMapper.COLUMN_TEXT);
+    @DisplayName("★ 2^53 边界：仍写 value_double，precision_lost 可判定（不换列、不丢弃）")
+    void twoPower53MustStayNumericButFlagPrecisionLoss() {
+        assertThat(ReadingValueMapper.parseNumeric("9007199254740992")).isNotNull();
+        assertThat(ReadingValueMapper.isPrecisionLost("9007199254740992")).isFalse();
+
+        assertThat(ReadingValueMapper.parseNumeric("9007199254740993"))
+            .as("超过 2^53 的整数仍可物化为 double（已丢精度）").isNotNull();
+        assertThat(ReadingValueMapper.isPrecisionLost("9007199254740993")).isTrue();
     }
 }

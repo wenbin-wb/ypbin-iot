@@ -137,7 +137,11 @@ class IotDbTimeSeriesWriterTest {
     }
 
     private static TimeSeriesPoint point(String value, long ts) {
-        return new TimeSeriesPoint(9L, 100L, "temp", value, "GOOD", ts);
+        return point(value, ValueColumn.NUMERIC, ts);
+    }
+
+    private static TimeSeriesPoint point(String value, ValueColumn column, long ts) {
+        return new TimeSeriesPoint(9L, 100L, "temp", value, "GOOD", ts, column);
     }
 
     private static List<TimeSeriesPoint> points(int count, String value) {
@@ -188,7 +192,7 @@ class IotDbTimeSeriesWriterTest {
             when(connection.prepareStatement(anyString())).thenReturn(statement);
 
             new IotDbTimeSeriesWriter(properties(10), new SimpleMeterRegistry())
-                .writeAll(List.of(point("COOL", TS)));
+                .writeAll(List.of(point("COOL", ValueColumn.TEXT, TS)));
 
             ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
             verify(connection).prepareStatement(sql.capture());
@@ -212,17 +216,17 @@ class IotDbTimeSeriesWriterTest {
         verify(numeric, never()).setNull(anyInt(), anyInt());
 
         PreparedStatement text = mock(PreparedStatement.class);
-        IotDbTimeSeriesWriter.bind(text, point("COOL", TS));
+        IotDbTimeSeriesWriter.bind(text, point("COOL", ValueColumn.TEXT, TS));
         verify(text).setString(5, "COOL");
         verify(text, never()).setDouble(eq(5), anyDouble());
         verify(text, never()).setNull(anyInt(), anyInt());
     }
 
     @Test
-    @DisplayName("★ v3 强制文本：数值形态 + forceText=true ⇒ setString(5)（不得 setDouble）")
-    void forcedTextMustBindTextColumn() throws SQLException {
+    @DisplayName("★ 声明文本列：数值形态 + column=TEXT ⇒ setString(5)（不得 setDouble）")
+    void declaredTextColumnMustBindTextColumn() throws SQLException {
         PreparedStatement text = mock(PreparedStatement.class);
-        TimeSeriesPoint forced = new TimeSeriesPoint(9L, 100L, "serial", "123456", "GOOD", TS, true);
+        TimeSeriesPoint forced = new TimeSeriesPoint(9L, 100L, "serial", "123456", "GOOD", TS, ValueColumn.TEXT);
         IotDbTimeSeriesWriter.bind(text, forced);
 
         verify(text).setString(5, "123456");
@@ -241,7 +245,7 @@ class IotDbTimeSeriesWriterTest {
             when(connection.prepareStatement(anyString())).thenReturn(statement);
 
             new IotDbTimeSeriesWriter(properties(10), new SimpleMeterRegistry())
-                .writeAll(List.of(point("23.5", TS), point("COOL", TS + 1)));
+                .writeAll(List.of(point("23.5", TS), point("COOL", ValueColumn.TEXT, TS + 1)));
 
             ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
             verify(connection, times(2)).prepareStatement(sql.capture());
@@ -303,7 +307,7 @@ class IotDbTimeSeriesWriterTest {
             when(connection.prepareStatement(anyString())).thenReturn(statement);
 
             new IotDbTimeSeriesWriter(properties(1), new SimpleMeterRegistry()).writeAll(List.of(
-                point("1", TS), point("COOL", TS + 1), point("2", TS + 2), point("HOT", TS + 3)));
+                point("1", TS), point("COOL", ValueColumn.TEXT, TS + 1), point("2", TS + 2), point("HOT", ValueColumn.TEXT, TS + 3)));
 
             verify(statement, times(4)).addBatch();
             verify(statement, times(4)).executeBatch();
@@ -403,7 +407,7 @@ class IotDbTimeSeriesWriterTest {
                 .when(statement).setString(anyInt(), anyString());
 
             assertThatCode(() -> new IotDbTimeSeriesWriter(properties(10), registry)
-                .writeAll(List.of(point("COOL", TS))))
+                .writeAll(List.of(point("COOL", ValueColumn.TEXT, TS))))
                 .doesNotThrowAnyException();
 
             assertThat(registry.get(IotDbTimeSeriesWriter.METRIC_FAILED).counter().count())

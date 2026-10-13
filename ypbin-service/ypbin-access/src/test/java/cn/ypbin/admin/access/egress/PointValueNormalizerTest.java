@@ -73,28 +73,14 @@ class PointValueNormalizerTest {
     }
 
     @Test
-    @DisplayName("★ string：文本原样且 forceText=true；enum/date_time/json_object/array 保持 false（词法落列）")
-    void stringMustForceTextOthersStayLexical() {
-        PointValueNormalizer.Outcome string = PointValueNormalizer.normalize("007", "string");
-        assertThat(string.value()).isEqualTo("007");
-        assertThat(string.forceText()).as("物模型声明为 string ⇒ 强制落 value_text").isTrue();
-
-        for (String dataType : new String[] {"enum", "date_time", "json_object", "array"}) {
+    @DisplayName("★ 文本类（string/enum/date_time/json_object/array）：值原样保留；落列不由本类决定")
+    void textTypesMustKeepRawValueWithoutDecidingColumn() {
+        for (String dataType : new String[] {"string", "enum", "date_time", "json_object", "array"}) {
             PointValueNormalizer.Outcome outcome = PointValueNormalizer.normalize("007", dataType);
             assertThat(outcome.value()).as("dataType=%s 必须原样保留前导零", dataType)
                 .isEqualTo("007");
-            assertThat(outcome.forceText()).as("dataType=%s 非 string，保持词法落列", dataType)
-                .isFalse();
+            assertThat(outcome.failure()).as("dataType=%s 合法文本类不得失败", dataType).isNull();
         }
-    }
-
-    @Test
-    @DisplayName("★ 非 string 成功结果 forceText=false（int/long/decimal/bool 不误伤）")
-    void nonStringMustNotForceText() {
-        assertThat(PointValueNormalizer.normalize("123456", "long").forceText()).isFalse();
-        assertThat(PointValueNormalizer.normalize("1", "int").forceText()).isFalse();
-        assertThat(PointValueNormalizer.normalize("23.5", "decimal").forceText()).isFalse();
-        assertThat(PointValueNormalizer.normalize("true", "bool").forceText()).isFalse();
     }
 
     @Test

@@ -31,8 +31,6 @@ import java.time.Instant;
  * @param quality    质量码（GOOD 才算「有效数据」，断档判定依赖它）
  * @param timestamp  采集时刻（设备时钟不可信，用框架给出的时刻）
  * @param pollIntervalMs 采集周期（毫秒；可空）
- * @param forceText  是否强制 iot 侧落文本列（仅 Modbus {@code register_format=string} 置 true；
- *                   缺省 false = 既有词法落列行为，见 docs/VALUE-DECODE-DESIGN.md §4.5.6）
  * @author wenbin
  * @since 2026-09-21
  */
@@ -42,23 +40,7 @@ public record AccessReading(
         Object value,
         String quality,
         Instant timestamp,
-        Integer pollIntervalMs,
-        boolean forceText) {
-
-    /**
-     * 六参构造：{@code forceText=false}（= 既有词法落列行为，向后兼容）。
-     *
-     * @param deviceId       设备主键
-     * @param propertyId     属性标识
-     * @param value          值
-     * @param quality        质量码
-     * @param timestamp      采集时刻
-     * @param pollIntervalMs 采集周期（可空）
-     */
-    public AccessReading(String deviceId, String propertyId, Object value, String quality,
-                         Instant timestamp, Integer pollIntervalMs) {
-        this(deviceId, propertyId, value, quality, timestamp, pollIntervalMs, false);
-    }
+        Integer pollIntervalMs) {
 
     /** 质量码 GOOD。 */
     public static final String QUALITY_GOOD = "GOOD";

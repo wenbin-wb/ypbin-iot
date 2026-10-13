@@ -25,10 +25,9 @@ import java.math.BigDecimal;
  *   <li><b>缩放的前置</b>：{@link AccessReading#applyScale} 只对 {@code Number}/{@code BigDecimal}
  *       生效；若直接把 SDK 的 {@code String} 交给它，{@code scaleFactor}/{@code offsetValue} 会
  *       <b>静默失效 ⇒ 读数错值</b>（不是格式问题）。</li>
- *   <li><b>落列形态的前置</b>：iot 侧 {@code ReadingValueMapper} 按**值的词法形态**决定写
- *       {@code value_double} 还是 {@code value_text}；布尔 {@code 1/0} 必须先规范成
- *       {@code true/false} 才会落文本列（与切换前一致）；而 {@code data_type=string} 的点位
- *       由本类显式置 {@code forceText=true} ⇒ **一律落 value_text**（纯数字序列号不再被数值化）。</li>
+ *   <li><b>落列不由本类决定</b>：列由 iot 侧按 {@code iot_property.data_type} 经唯一映射表
+ *       （iot 侧 {@code ValueColumn.from}）决定；本类只把值规范成物模型语义（整数/十进制/布尔文本/
+ *       原样文本），**不再向 iot 传递任何「强制文本列」标记**（v3 {@code forceText} 通道已删除）。</li>
  *   <li><b>拒绝语义</b>：{@code int}/{@code decimal} 收到非数值文本、{@code bool} 收到非法形态、
  *       {@code dataType} 缺失/未知时，切换前是「丢弃 + 计数 + WARN（不猜）」；这条纪律必须保留。</li>
  * </ol>
@@ -54,14 +53,12 @@ public final class PointValueNormalizer {
     /**
      * 规范化结果：成功时 {@code value} 为规范值；失败时 {@code failure} 非空（调用方据此丢弃 + 计数）。
      *
-     * @param value     规范值（失败时为 {@code null}）
-     * @param failure   失败原因（成功时为 {@code null}）
-     * @param forceText 是否强制 iot 侧落文本列（**仅物模型声明为 {@code data_type=string} 时为 true**；
-     *                  其余类型 false = 既有词法落列行为，见 docs/VALUE-DECODE-DESIGN.md §4.5.6）
+     * @param value   规范值（失败时为 {@code null}）
+     * @param failure 失败原因（成功时为 {@code null}）
      * @author wenbin
      * @since 2026-10-13
      */
-    public record Outcome(Object value, NormalizeFailure failure, boolean forceText) {
+    public record Outcome(Object value, NormalizeFailure failure) {
 
         /** 是否成功。 */
         public boolean success() {
@@ -69,16 +66,11 @@ public final class PointValueNormalizer {
         }
 
         static Outcome ok(Object value) {
-            return new Outcome(value, null, false);
-        }
-
-        /** 物模型声明为 string：值原样保留并**强制落 value_text**（不按词法猜）。 */
-        static Outcome okText(Object value) {
-            return new Outcome(value, null, true);
+            return new Outcome(value, null);
         }
 
         static Outcome failed(NormalizeFailure failure) {
-            return new Outcome(null, failure, false);
+            return new Outcome(null, failure);
         }
     }
 
@@ -88,8 +80,9 @@ public final class PointValueNormalizer {
      * <p>规则（与删除前的宿主解码层逐字一致）：{@code int}/{@code long} ⇒ 严格十进制整数（越界不截断，
      * 失败 {@link NormalizeFailure#NOT_NUMERIC}）；{@code decimal} ⇒ {@link BigDecimal}
      * （不经过 double，避免精度损失与 NaN/Infinity）；{@code bool} ⇒ {@code true/false} 文本
-     * （接受 {@code true/false/1/0}，忽略大小写）；**{@code string} ⇒ 文本原样且 {@code forceText=true}**；
-     * 其余 4 类（enum/date_time/json_object/array）⇒ 文本原样（**不做任何隐式转换**，保持词法落列）。</p>
+     * （接受 {@code true/false/1/0}，忽略大小写）；{@code string} 及其余文本类
+     * （enum/date_time/json_object/array）⇒ 文本原样（**不做任何隐式转换**）。落列由 iot 侧按类型决定，
+     * 本类不再传递列信息。</p>
      *
      * @param raw      原始值（TCP key-value 下是 SDK 交付的 {@code String}；非 String 原样透传）
      * @param dataType 物模型数据类型 code（可空）
@@ -109,10 +102,9 @@ public final class PointValueNormalizer {
             case INT, LONG -> toInteger(valueText);
             case DECIMAL -> toDecimal(valueText);
             case BOOL -> toBoolean(valueText);
-            // 物模型声明为 string ⇒ 一律落 value_text（判据是物模型类型，不是值长得像不像字符串）；
-            // 其余文本类（enum/date_time/json_object/array）保持既有词法落列。
-            case STRING -> Outcome.okText(valueText);
-            default -> Outcome.ok(valueText);
+            // 文本类：值原样（值级规范化不在本重构范围，见 §4.6.7）；开列由 iot 侧按类型决定。
+            // 穷举、无 default：新增物模型类型时这里也会编译失败，强制显式处置。
+            case STRING, ENUM, DATE_TIME, JSON_OBJECT, ARRAY -> Outcome.ok(valueText);
         };
     }
 

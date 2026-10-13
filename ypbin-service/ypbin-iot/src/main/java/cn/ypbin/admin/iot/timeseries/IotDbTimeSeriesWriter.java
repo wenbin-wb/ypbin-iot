@@ -229,8 +229,9 @@ public class IotDbTimeSeriesWriter implements TimeSeriesWriter {
         String sql = "INSERT INTO " + properties.getTableName() + columns + VALUES;
         int batchSize = effectiveBatchSize();
         List<TimeSeriesPoint> bucket = new ArrayList<>(batchSize);
+        ValueColumn expected = numeric ? ValueColumn.NUMERIC : ValueColumn.TEXT;
         for (TimeSeriesPoint point : points) {
-            if (ReadingValueMapper.map(point.value(), point.forceText()).numeric() != numeric) {
+            if (point.column() != expected) {
                 continue;
             }
             bucket.add(point);
@@ -361,7 +362,7 @@ public class IotDbTimeSeriesWriter implements TimeSeriesWriter {
      * @throws SQLException 绑定失败
      */
     static void bind(PreparedStatement statement, TimeSeriesPoint point) throws SQLException {
-        ReadingValueMapper.MappedValue mapped = ReadingValueMapper.map(point.value(), point.forceText());
+        ReadingValueMapper.MappedValue mapped = ReadingValueMapper.map(point.value(), point.column());
         statement.setString(1, String.valueOf(point.tenantId()));
         statement.setString(2, String.valueOf(point.deviceId()));
         statement.setString(3, point.propertyId());

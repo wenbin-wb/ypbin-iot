@@ -112,7 +112,6 @@ class ModbusStringDecodeTest {
         assertThat(readings).singleElement().satisfies(reading -> {
             assertThat(reading.quality()).isEqualTo("GOOD");
             assertThat(reading.value()).isEqualTo("AB中文");
-            assertThat(reading.forceText()).as("Modbus string 必须带强制文本标记").isTrue();
         });
     }
 
@@ -172,7 +171,7 @@ class ModbusStringDecodeTest {
     }
 
     @Test
-    @DisplayName("★ 单寄存器 string 走单寄存器路径（GOOD + forceText）")
+    @DisplayName("★ 单寄存器 string 走单寄存器路径（GOOD + 字符串值）")
     void singleRegisterStringReading() {
         List<AccessReading> readings = new ArrayList<>();
         PointMappingDataListener listener = listener(List.of(stringPoint("holding:0", 1)), readings,
@@ -183,7 +182,6 @@ class ModbusStringDecodeTest {
         assertThat(readings).singleElement().satisfies(reading -> {
             assertThat(reading.quality()).isEqualTo("GOOD");
             assertThat(reading.value()).isEqualTo("AB");
-            assertThat(reading.forceText()).isTrue();
         });
     }
 
@@ -260,7 +258,7 @@ class ModbusStringDecodeTest {
     }
 
     @Test
-    @DisplayName("★ 回归：word_count=2 的 int 走泛化后的配对路径，值与 forceText=false 逐字节不变")
+    @DisplayName("★ 回归：word_count=2 的 int 走泛化后的配对路径，值逐字节不变")
     void intWordCountTwoRegressionThroughGeneralizedPairing() {
         List<AccessReading> readings = new ArrayList<>();
         AccessPointMappingDto point = new AccessPointMappingDto();
@@ -277,10 +275,8 @@ class ModbusStringDecodeTest {
         feed(listener, "holding:0", 0, 0x0001, T0);
         feed(listener, "holding:0", 1, 0x0002, T0.plusMillis(1));
 
-        assertThat(readings).singleElement().satisfies(reading -> {
-            assertThat(reading.value()).isEqualTo(65538L);
-            assertThat(reading.forceText()).isFalse();
-        });
+        assertThat(readings).singleElement().satisfies(reading ->
+            assertThat(reading.value()).isEqualTo(65538L));
     }
 
     // ==================== helpers ====================
