@@ -9,6 +9,8 @@
  */
 package cn.ypbin.admin.iot.alert;
 
+import cn.ypbin.admin.iot.lock.LockNames;
+import cn.ypbin.admin.iot.lock.TaskLockGuard;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -37,14 +39,25 @@ public class AlertEvaluator {
 
     private final AlertEvaluatorService evaluatorService;
 
-    public AlertEvaluator(AlertEvaluatorService evaluatorService) {
+    private final TaskLockGuard taskLockGuard;
+
+    public AlertEvaluator(AlertEvaluatorService evaluatorService, TaskLockGuard taskLockGuard) {
         this.evaluatorService = evaluatorService;
+        this.taskLockGuard = taskLockGuard;
     }
 
-    /** 周期评估（间隔由 {@code ypbin.alert.evaluate-interval-ms} 控制，默认 15s）。 */
+    /**
+     * 周期评估（间隔由 {@code ypbin.alert.evaluate-interval-ms} 控制，默认 15s）。
+     *
+     * <p><b>多副本语义</b>（#220）：整轮评估包在分布式锁里，同一时刻只有一个副本在评估；
+     * 其它副本抢不到锁直接跳过本轮（下一个周期再来）。没有这一步时，N 个副本会把同一批规则各评估一遍，
+     * 重复推进状态、重复入队通知。</p>
+     */
     @Scheduled(fixedDelayString = "${ypbin.alert.evaluate-interval-ms:15000}",
         initialDelayString = "${ypbin.alert.evaluate-initial-delay-ms:10000}")
     public void evaluate() {
-        evaluatorService.evaluateOnce();
+        taskLockGuard.runExclusively(LockNames.ALERT_EVALUATE, () -> {
+            evaluatorService.evaluateOnce();
+        });
     }
 }

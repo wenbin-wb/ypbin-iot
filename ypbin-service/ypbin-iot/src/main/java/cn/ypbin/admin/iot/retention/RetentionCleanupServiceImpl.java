@@ -9,6 +9,9 @@
  */
 package cn.ypbin.admin.iot.retention;
 
+import cn.ypbin.admin.iot.lock.LockNames;
+import cn.ypbin.admin.iot.lock.LockOutcome;
+import cn.ypbin.admin.iot.lock.TaskLockGuard;
 import cn.ypbin.admin.iot.mapper.DeviceLivenessMapper;
 import cn.ypbin.admin.iot.mapper.IotPointMappingMapper;
 import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
@@ -21,7 +24,6 @@ import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.annotation.PostConstruct;
 import java.time.LocalDateTime;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -39,9 +41,10 @@ import org.springframework.scheduling.annotation.Scheduled;
  *   <li><b>不可逆动作的护栏</b>：天数必须为正（启动自检 + 每轮复核），否则拒绝执行并报错，绝不清空全表；</li>
  *   <li><b>孤儿映射巡检</b>（2026-09-26 新增，与清理同一节拍）：只**计数 + 告警**，绝不删除
  *       （见 {@link #inspectOrphanMappings()}）。</li>
- *   <li><b>防重入</b>（#227）：定时任务与手工触发端点共用 {@link #cleanupOnce()}，用 JVM 内
- *       {@link AtomicBoolean} 保证同一时刻只跑一轮。**边界如实登记**：该守卫只覆盖单实例；
- *       多副本部署下两个副本仍可能同时清理（本仓当前为单/少副本形态），需要分布式锁时应另立项。</li>
+ *   <li><b>防重入</b>（#227 → #220）：定时任务与手工触发端点共用 {@link #cleanupOnce()}。
+ *       #227 用 JVM 内 {@code AtomicBoolean}，只覆盖单实例；#220 已把它升级为
+ *       {@link TaskLockGuard} 包裹的**跨实例互斥锁**（Redis 租约；无 Redis 时退化为进程内，
+ *       并打 WARN 暴露边界），抢不到锁直接跳过本轮。</li>
  * </ol>
  *
  * @author wenbin
@@ -75,25 +78,26 @@ public class RetentionCleanupServiceImpl implements RetentionCleanupService {
     private final AtomicLong orphanMappings = new AtomicLong();
 
     /**
-     * 防重入闸门（#227）：定时任务与手工触发端点共用本服务，同一时刻只允许一轮清理在跑。
+     * 跨实例互斥守卫（#220）：定时任务与手工触发端点共用本服务，同一时刻全体副本只允许一轮清理在跑。
      *
-     * <p>选 {@code AtomicBoolean.compareAndSet} 的理由：① 与仓内既有并发原语用法一致
-     * （{@code IotDbTimeSeriesWriter}/{@code RedisLatestValueWriter} 等用 AtomicBoolean 做一次性/互斥标记）；
-     * ② 不引入新依赖（无 Redis 锁、无新表），符合「不改表结构」约束；③ 临界区是「一轮删除」，
-     * 用无阻塞 CAS 立即返回「已在执行」比让调用方排队更可控。代价是只覆盖单实例（见类注释边界）。</p>
+     * <p>#227 的 {@code AtomicBoolean} 只能挡住同一 JVM 内的并发；多副本部署下两个副本各持一个
+     * {@code AtomicBoolean}，谁也挡不住谁。这里换成 {@link TaskLockGuard}（Redis 租约 + 看门狗续期 +
+     * 异常必释放），抢不到锁直接返回 {@link RetentionSkipReason#LOCK_HELD_BY_OTHER}。</p>
      */
-    private final AtomicBoolean running = new AtomicBoolean(false);
+    private final TaskLockGuard taskLockGuard;
 
     public RetentionCleanupServiceImpl(OutageEventMapper outageEventMapper,
                                        MaintenanceWindowMapper maintenanceWindowMapper,
                                        DeviceLivenessMapper livenessMapper,
                                        IotPointMappingMapper pointMappingMapper,
-                                       RetentionProperties properties, MeterRegistry meterRegistry) {
+                                       RetentionProperties properties, MeterRegistry meterRegistry,
+                                       TaskLockGuard taskLockGuard) {
         this.outageEventMapper = outageEventMapper;
         this.maintenanceWindowMapper = maintenanceWindowMapper;
         this.livenessMapper = livenessMapper;
         this.pointMappingMapper = pointMappingMapper;
         this.properties = properties;
+        this.taskLockGuard = taskLockGuard;
         this.outageCounter = Counter.builder(METRIC_DELETED).tag("table", "outage_event")
             .description("保留清理删除的行数").register(meterRegistry);
         this.windowCounter = Counter.builder(METRIC_DELETED).tag("table", "maintenance_window")
@@ -122,50 +126,58 @@ public class RetentionCleanupServiceImpl implements RetentionCleanupService {
         initialDelayString = "${ypbin.retention.initial-delay-ms:300000}")
     public RetentionCleanupResult cleanupOnce() {
         long startedNanos = System.nanoTime();
-        // 防重入（#227）：定时任务与手工触发端点共用本方法；已在跑则**不跑第二轮**，如实返回原因。
-        if (!running.compareAndSet(false, true)) {
-            log.warn("[iot] 保留清理已在执行中，本次触发跳过（防重入：同一时刻只跑一轮）");
-            return RetentionCleanupResult.skipped(RetentionSkipReason.ALREADY_RUNNING, elapsedMs(startedNanos));
+        // 跨实例互斥（#220）：抢不到锁 = 另一副本正在清理，本轮**不跑**，如实返回原因。
+        LockOutcome<RetentionCleanupResult> outcome = taskLockGuard.callExclusively(
+            LockNames.RETENTION_CLEANUP, () -> runCleanupRound(startedNanos));
+        if (!outcome.executed()) {
+            log.warn("[iot] 保留清理未取得分布式锁（另一实例正在执行），本次触发跳过");
+            return RetentionCleanupResult.skipped(RetentionSkipReason.LOCK_HELD_BY_OTHER,
+                elapsedMs(startedNanos));
         }
-        try {
-            // 巡检先跑且**不受清理开关影响**：它是纯只读计数，关掉清理不代表不想看孤儿映射存量
-            inspectOrphanMappings();
-            if (!properties.isEnabled()) {
-                log.warn("[iot] 保留清理已关闭（{}.enabled=false）：断档事件与维护窗口会无限增长",
-                    RetentionProperties.PREFIX);
-                return RetentionCleanupResult.skipped(RetentionSkipReason.DISABLED, elapsedMs(startedNanos));
-            }
-            if (properties.getOutageEventDays() <= 0 || properties.getMaintenanceWindowDays() <= 0) {
-                // 不可逆动作的护栏：天数配置成 0/负数意味着"全部过期"，这里拒绝执行而不是照删
-                log.error("[iot] 保留天数非法（断档={} 天，维护窗口={} 天），本轮清理**拒绝执行**；"
-                        + "请修正 {}.outage-event-days / {}.maintenance-window-days",
-                    properties.getOutageEventDays(), properties.getMaintenanceWindowDays(),
-                    RetentionProperties.PREFIX, RetentionProperties.PREFIX);
-                return RetentionCleanupResult.skipped(RetentionSkipReason.INVALID_CONFIG, elapsedMs(startedNanos));
-            }
-            LocalDateTime now = livenessMapper.selectNow();
-            LocalDateTime outageCutoff = now.minusDays(properties.getOutageEventDays());
-            LocalDateTime windowCutoff = now.minusDays(properties.getMaintenanceWindowDays());
+        return outcome.result();
+    }
 
-            int deletedOutages = TenantContext.executeIgnore(
-                () -> outageEventMapper.deleteStartedBefore(outageCutoff));
-            int deletedWindows = TenantContext.executeIgnore(
-                () -> maintenanceWindowMapper.deleteStartedBefore(windowCutoff));
-            outageCounter.increment(deletedOutages);
-            windowCounter.increment(deletedWindows);
-
-            if (deletedOutages > 0 || deletedWindows > 0) {
-                log.info("[iot] 保留清理完成：断档事件 {} 行（截止 {}）、维护窗口 {} 行（截止 {}）",
-                    deletedOutages, outageCutoff, deletedWindows, windowCutoff);
-            } else {
-                log.info("[iot] 保留清理完成：无过期数据（断档截止 {}、维护窗口截止 {}）",
-                    LogSanitizer.sanitize(outageCutoff), LogSanitizer.sanitize(windowCutoff));
-            }
-            return RetentionCleanupResult.executed(deletedOutages, deletedWindows, elapsedMs(startedNanos));
-        } finally {
-            // 失败也必须释放闸门（否则一次异常会把后续所有清理永久挡在门外）
-            running.set(false);
+    /**
+     * 真正的一轮清理（调用方已持有分布式锁）。
+     *
+     * @param startedNanos 本轮起点（用于耗时统计）
+     * @return 清理结果
+     */
+    private RetentionCleanupResult runCleanupRound(long startedNanos) {
+        // 巡检先跑且**不受清理开关影响**：它是纯只读计数，关掉清理不代表不想看孤儿映射存量
+        inspectOrphanMappings();
+        if (!properties.isEnabled()) {
+            log.warn("[iot] 保留清理已关闭（{}.enabled=false）：断档事件与维护窗口会无限增长",
+                RetentionProperties.PREFIX);
+            return RetentionCleanupResult.skipped(RetentionSkipReason.DISABLED, elapsedMs(startedNanos));
         }
+        if (properties.getOutageEventDays() <= 0 || properties.getMaintenanceWindowDays() <= 0) {
+            // 不可逆动作的护栏：天数配置成 0/负数意味着"全部过期"，这里拒绝执行而不是照删
+            log.error("[iot] 保留天数非法（断档={} 天，维护窗口={} 天），本轮清理**拒绝执行**；"
+                    + "请修正 {}.outage-event-days / {}.maintenance-window-days",
+                properties.getOutageEventDays(), properties.getMaintenanceWindowDays(),
+                RetentionProperties.PREFIX, RetentionProperties.PREFIX);
+            return RetentionCleanupResult.skipped(RetentionSkipReason.INVALID_CONFIG, elapsedMs(startedNanos));
+        }
+        LocalDateTime now = livenessMapper.selectNow();
+        LocalDateTime outageCutoff = now.minusDays(properties.getOutageEventDays());
+        LocalDateTime windowCutoff = now.minusDays(properties.getMaintenanceWindowDays());
+
+        int deletedOutages = TenantContext.executeIgnore(
+            () -> outageEventMapper.deleteStartedBefore(outageCutoff));
+        int deletedWindows = TenantContext.executeIgnore(
+            () -> maintenanceWindowMapper.deleteStartedBefore(windowCutoff));
+        outageCounter.increment(deletedOutages);
+        windowCounter.increment(deletedWindows);
+
+        if (deletedOutages > 0 || deletedWindows > 0) {
+            log.info("[iot] 保留清理完成：断档事件 {} 行（截止 {}）、维护窗口 {} 行（截止 {}）",
+                deletedOutages, outageCutoff, deletedWindows, windowCutoff);
+        } else {
+            log.info("[iot] 保留清理完成：无过期数据（断档截止 {}、维护窗口截止 {}）",
+                LogSanitizer.sanitize(outageCutoff), LogSanitizer.sanitize(windowCutoff));
+        }
+        return RetentionCleanupResult.executed(deletedOutages, deletedWindows, elapsedMs(startedNanos));
     }
 
     /** 本轮耗时（毫秒）。 */

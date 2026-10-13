@@ -9,6 +9,9 @@
  */
 package cn.ypbin.admin.iot.alert;
 
+import cn.ypbin.admin.iot.lock.LockNames;
+import cn.ypbin.admin.iot.lock.LockOutcome;
+import cn.ypbin.admin.iot.lock.TaskLockGuard;
 import cn.ypbin.admin.iot.mapper.DeviceLivenessMapper;
 import cn.ypbin.admin.iot.mapper.IotAlertInstanceMapper;
 import cn.ypbin.admin.iot.mapper.IotAlertNotificationMapper;
@@ -51,22 +54,37 @@ public class AlertRetentionCleanupServiceImpl implements AlertRetentionCleanupSe
     private final DeviceLivenessMapper livenessMapper;
     private final AlertProperties properties;
     private final AlertMetrics metrics;
+    private final TaskLockGuard taskLockGuard;
 
     public AlertRetentionCleanupServiceImpl(IotAlertInstanceMapper instanceMapper,
                                             IotAlertNotificationMapper notificationMapper,
                                             DeviceLivenessMapper livenessMapper,
-                                            AlertProperties properties, AlertMetrics metrics) {
+                                            AlertProperties properties, AlertMetrics metrics,
+                                            TaskLockGuard taskLockGuard) {
         this.instanceMapper = instanceMapper;
         this.notificationMapper = notificationMapper;
         this.livenessMapper = livenessMapper;
         this.properties = properties;
         this.metrics = metrics;
+        this.taskLockGuard = taskLockGuard;
     }
 
     @Override
     @Scheduled(fixedDelayString = "${ypbin.alert.retention-cleanup-interval-ms:86400000}",
         initialDelayString = "${ypbin.alert.retention-initial-delay-ms:300000}")
     public CleanupResult cleanupOnce() {
+        // 跨实例互斥（#220）：抢不到锁 = 另一副本正在清理，本轮不跑（下一轮再来）
+        LockOutcome<CleanupResult> outcome = taskLockGuard.callExclusively(
+            LockNames.ALERT_RETENTION_CLEANUP, this::cleanupRound);
+        return outcome.executed() ? outcome.result() : CleanupResult.skippedResult();
+    }
+
+    /**
+     * 真正的一轮清理（调用方已持有分布式锁）。
+     *
+     * @return 清理结果
+     */
+    private CleanupResult cleanupRound() {
         if (!properties.isEnabled()) {
             log.warn("[iot] 告警保留清理已关闭（{}.enabled=false）：已恢复告警会无限增长",
                 AlertProperties.PREFIX);

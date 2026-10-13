@@ -9,6 +9,8 @@
  */
 package cn.ypbin.admin.iot.alert;
 
+import cn.ypbin.admin.iot.lock.LockNames;
+import cn.ypbin.admin.iot.lock.TaskLockGuard;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -29,14 +31,24 @@ public class AlertNotifyDispatcher {
 
     private final AlertNotifyDispatchService dispatchService;
 
-    public AlertNotifyDispatcher(AlertNotifyDispatchService dispatchService) {
+    private final TaskLockGuard taskLockGuard;
+
+    public AlertNotifyDispatcher(AlertNotifyDispatchService dispatchService, TaskLockGuard taskLockGuard) {
         this.dispatchService = dispatchService;
+        this.taskLockGuard = taskLockGuard;
     }
 
-    /** 周期投递（间隔由 {@code ypbin.alert.notify-dispatch-interval-ms} 控制，默认 10s）。 */
+    /**
+     * 周期投递（间隔由 {@code ypbin.alert.notify-dispatch-interval-ms} 控制，默认 10s）。
+     *
+     * <p><b>多副本语义</b>：单条通知本来就有认领 CAS（{@code claim}）兜底，但让 N 个副本同时扫同一批到期行
+     * 既浪费连接、又让实例内限流各自为政；加锁后「谁在投递」也是确定的，便于排障。</p>
+     */
     @Scheduled(fixedDelayString = "${ypbin.alert.notify-dispatch-interval-ms:10000}",
         initialDelayString = "${ypbin.alert.notify-initial-delay-ms:15000}")
     public void dispatch() {
-        dispatchService.dispatchOnce();
+        taskLockGuard.runExclusively(LockNames.ALERT_NOTIFY_DISPATCH, () -> {
+            dispatchService.dispatchOnce();
+        });
     }
 }
