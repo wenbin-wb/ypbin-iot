@@ -303,8 +303,13 @@ code_auth() { curl -s -H "Authorization: Bearer $T" "$1" | python3 -c 'import sy
 | C2.1 | 【access 18086】订阅成功**每设备一次**（不再是 N 次） | `curl -s http://127.0.0.1:18086/actuator/metrics/iot.access.subscribe.success` | 一次订阅动作后，**每设备增量 = 1**（按设备/按周期对齐） | 仍按 N 点位增长 ⇒ 配置没切到 `key-value`（走了逐点位单订阅）；`[文档] docs/VALUE-DECODE-DESIGN.md` §5.5 |
 | C2.2 | 【access 18086】订阅失败 | `curl -s http://127.0.0.1:18086/actuator/metrics/iot.access.subscribe.failure` | 期望 0（首启/变更后短时可容忍，随后不应持续增长） | 协议栈/设备侧问题；与 `.../iot.access.subscribe.backoff.skipped` 成对出现属预期（`docs/METRICS.md` §2.4） |
 | C2.3 | 【access 18086】在途去重 | `curl -s http://127.0.0.1:18086/actuator/metrics/iot.access.subscribe.inflight.skipped` | 少量正常；长期增长 = 订阅长时间不完成 | `docs/METRICS.md` §2.4 |
-| C2.4 | 【access 18086】selector 未命中（SDK 指标，**不能单看 404/0 条**） | 首选**探针制造一次已知失败**再核：用 `deploy/access-tcp-simulator`（或一台**专用探针** TCP 设备）发一个**故意不合格**的帧（键值形态但去掉 `=`，或非 UTF-8 字节），然后 `curl -s http://127.0.0.1:18086/actuator/metrics/iot.tcp.selector.not-found` | **指标出现且 +1** ⇒ SDK→Micrometer 桥接正常，该指标可继续用；**不出现** ⇒ 指标链路没接上（这才是真问题） | 2026-10-13 生产只读实测：18086 的 **92 条指标里 `iot.tcp.*` 为 0 条**（`selector.not-found` / `payload.not-key-value` / `payload.not-utf8` 全 404）⇒ 惰性注册下**无法区分**「还没失败过」与「桥没接上」。⚠️ **不要为探针去改生产设备配置**；没有可用探针设备时本条标 `[未核实]`，兜底用 access 日志 + 点位 BAD 质量 + `iot.access.egress.*`；指标名的文档出处 `docs/METRICS.md` §2.6 / `docs/VALUE-DECODE-DESIGN.md` §5.5 |
+| C2.4 | 【access 18086】selector 未命中（SDK 指标，**不能单看 404/0 条**） | 首选**探针制造一次已知失败**再核：用 `deploy/access-tcp-simulator`（或一台**专用探针** TCP 设备）发一个**故意不合格**的帧（键值形态但去掉 `=`，或非 UTF-8 字节），然后 `curl -s "http://127.0.0.1:18086/actuator/metrics/ypbin.iot.errors?tag=type:iot.tcp.selector.not-found"`（⚠️ **SDK 指标不是独立指标名**：`MicrometerMetricsRecorder` 把 `iot.tcp.*` 记进 **`ypbin.iot.errors`** 的 **`type`** 标签，故 `/actuator/metrics/iot.tcp.selector.not-found` **恒 404**） | **该 tag 的计数出现且 +1** ⇒ SDK→Micrometer 桥接正常，该指标可继续用；**不出现** ⇒ 指标链路没接上（这才是真问题） | 2026-10-13 生产只读实测：18086 的 **92 条指标里 `iot.tcp.*` 为 0 条**（`selector.not-found` / `payload.not-key-value` / `payload.not-utf8` 全 404）⇒ 惰性注册下**无法区分**「还没失败过」与「桥没接上」。⚠️ **不要为探针去改生产设备配置**；没有可用探针设备时本条标 `[未核实]`，兜底用 access 日志 + 点位 BAD 质量 + `iot.access.egress.*`；指标名的文档出处 `docs/METRICS.md` §2.6 / `docs/VALUE-DECODE-DESIGN.md` §5.5 |
 
+> ⚠️ **2026-10-14 dev 实测（新增，务必先读）**：`ypbin.iot.errors` 在宿主里**可能根本不存在** ——
+> `ypbin-access` 每次启动都会打 starter 的 WARN：`[ypbin-iot] micrometer 在 classpath 上但没有可用的 MeterRegistry bean ——
+> iotMetricsRecorder 回退到 no-op，框架指标（read/write/subscription/errors）全部丢弃`。此时 **93 条指标里没有任何 SDK 指标**，
+> 用探针制造 selector 未命中后 `ypbin.iot.errors` 仍 404 ⇒ **不是"还没失败过"，而是桥没接上**（starter 侧装配缺陷，已修复）。
+> 判据：先 `curl -s http://127.0.0.1:18086/actuator/metrics | grep ypbin`，**空 ⇒ 本条标 `[未验证]`**，改用 access 日志 + 点位 BAD 质量 + `iot.access.egress.*`。
 ### C.3 落列（物模型 `data_type` 唯一决定）
 
 | # | 核验项 | 命令 | 期望 | 不满足说明什么 |
