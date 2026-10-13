@@ -28,6 +28,11 @@
 
 ### 新增
 
+- **新增门禁「Central Resolution Build」**（`.github/workflows/central-resolution-build.yml`）：**只用 Maven Central 上已发布的制品**构建本仓（不 checkout starter 源码、不做本地 install）。
+  为什么需要：admin 既有的 `ci.yml` 断言「pom 声明的 starter 版本 == 最新 Release」之后，却 checkout starter 的 **master** 源码本地 install 来编译 ⇒ 若 master 上已有而 Release 里还没有的 API 被用到，`ci.yml` 会**假绿**，而任何干净机器（外部使用者、我们的发布制品工作流）都会编译失败。
+  为什么是独立新工作流：admin 的既有工作流按 `SYNC.md` 属「明确不动」；新增文件不产生同步冲突面。附带自检：恰好 6 个服务 jar 且每个都含 `BOOT-INF/`。
+
+
 - **JaCoCo 覆盖率门禁接入 `ypbin-iot` / `ypbin-access`**（`mvn test`/`verify` 即生效，未达标直接失败）。
   阈值口径 = **2026-10-13 实测基线 − 安全边际**：
   `ypbin-iot` 指令 ≥ **0.78**（基线 0.8063）、分支 ≥ **0.68**（基线 0.7086）；
