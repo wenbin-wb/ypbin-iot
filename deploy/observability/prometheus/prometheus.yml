@@ -1,0 +1,36 @@
+# =============================================================================
+# Prometheus 抓取配置 —— ypbin IoT 最小大盘（issue #222）
+# =============================================================================
+# 抓取目标说明（为什么是 127.0.0.1:9110 而不是直接抓服务）：
+#   · ypbin-iot(18084) / ypbin-access(18086) 只绑**回环**，且当前 jar 内**没有**
+#     micrometer-registry-prometheus ⇒ 不存在 /actuator/prometheus（实测应用层 404）。
+#   · 故先由 actuator-exporter（127.0.0.1:9110，systemd）把 /actuator/metrics 桥接成
+#     Prometheus 文本；Prometheus 以 host 网络跑，抓回环即可。
+#   · 业务侧补上 micrometer-registry-prometheus 后，可把下面 ypbin-actuator 换成直抓
+#     服务端的 /actuator/prometheus（见 docs/OPS-MONITORING.md §7「长期做法」）。
+# =============================================================================
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    env: dev
+    site: ypbin-iot
+
+rule_files:
+  - /etc/prometheus/rules/*.rules.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["127.0.0.1:9093"]
+
+scrape_configs:
+  - job_name: ypbin-actuator
+    honor_labels: false
+    static_configs:
+      - targets: ["127.0.0.1:9110"]
+        labels:
+          source: actuator-exporter
+  - job_name: prometheus
+    static_configs:
+      - targets: ["127.0.0.1:9090"]

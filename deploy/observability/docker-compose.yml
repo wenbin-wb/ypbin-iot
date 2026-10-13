@@ -1,0 +1,85 @@
+# =============================================================================
+# ypbin IoT 最小可观测栈（issue #222）—— Prometheus + Grafana (+ Alertmanager 可选)
+# =============================================================================
+# 为什么用 host 网络：
+#   ypbin-iot(18084) / ypbin-access(18086) 只绑**回环**，容器网络（含 host.docker.internal
+#   网关 IP）到不了 127.0.0.1 的监听；而 Prometheus 必须抓回环上的 actuator-exporter(9110)、
+#   Grafana 必须访问回环上的 Prometheus(9090)。故三个服务都用 `network_mode: host`，
+#   并且**各自只监听 127.0.0.1**（不对外暴露，公网打不到）。
+#
+# 用法：
+#   cp .env.example .env && vi .env          # 设 GRAFANA_ADMIN_PASSWORD
+#   docker compose up -d                     # prometheus + grafana
+#   docker compose --profile alerting up -d  # 再带 alertmanager
+#   docker compose down                      # 回滚（named volume 数据保留；加 -v 连数据一起删）
+# =============================================================================
+name: ypbin-observability
+
+services:
+  prometheus:
+    image: ${PROMETHEUS_IMAGE:-prom/prometheus:v2.55.1}
+    container_name: ypbin-prometheus
+    network_mode: host
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}
+      - --web.listen-address=127.0.0.1:9090
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  alertmanager:
+    image: ${ALERTMANAGER_IMAGE:-prom/alertmanager:v0.27.0}
+    container_name: ypbin-alertmanager
+    profiles: ["alerting"]
+    network_mode: host
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --web.listen-address=127.0.0.1:9093
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  grafana:
+    image: ${GRAFANA_IMAGE:-grafana/grafana:11.3.0}
+    container_name: ypbin-grafana
+    network_mode: host
+    environment:
+      GF_SERVER_HTTP_ADDR: 127.0.0.1
+      GF_SERVER_HTTP_PORT: "3000"
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?请在 deploy/observability/.env 设置 GRAFANA_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+volumes:
+  prometheus-data:
+  grafana-data:
+  alertmanager-data:
