@@ -42,6 +42,12 @@
 
 ### 变更
 
+- **删除继承自 upstream 的 `v1.0.0` tag，并确立本仓的发布 tag 政策**（细节见 `SYNC.md` §三·六）：
+  该 tag 指向 2026-08-28 的提交、落后 main **479** 个提交、其 pom 声明 `1.0.0-SNAPSHOT`，与本仓发版无关；
+  它占着 `v1.0.0` 这个名字会**直接挡住本仓首个真正的 1.0.0 发版**，而「Release 资产」这种形态又天然被当成可部署产物。
+  现在明确：**发布 tag 只打在本仓的 release 提交上**（制品工作流已有守卫：`project.version` 必须等于 tag 名且非 `SNAPSHOT`）；
+  upstream 的 tag 同步进来时不沿用。
+
 - **落列改由物模型 `data_type` 唯一决定，彻底删除 `forceText` 通道（task-23，行为变更）**
   （`ypbin-service/ypbin-iot/**`、`ypbin-service/ypbin-access/**`、`ypbin-service-api/ypbin-iot-api/**`、`docs/**`）：
   新增唯一映射表 `ValueColumn.from(data_type)`（穷举 switch、无 default：新增第 10 类物模型类型会**编译失败**）——
