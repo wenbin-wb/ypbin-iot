@@ -398,8 +398,56 @@ class AccessReadingMappingTest {
     }
 
     @Test
-    @DisplayName("★ 回归：Modbus int/float 与 TCP string 的 forceText 仍为 false（词法落列逐字节不变）")
-    void nonModbusStringMustNotForceText() {
+    @DisplayName("★ 对照①：TCP data_type=string + 纯数字 \"123456\" ⇒ forceText=true（交给 iot 落 value_text）")
+    void tcpStringNumericMustForceText() {
+        List<AccessReading> readings = new ArrayList<>();
+        PointMappingDataListener listener = listener(PROTOCOL_TCP,
+            List.of(point("SN", "serialNo", "string", null, null)), readings);
+
+        listener.onData(PointValue.good(PointAddress.of("SN"), "123456", Instant.now()));
+
+        assertThat(readings).singleElement().satisfies(reading -> {
+            assertThat(reading.value()).isEqualTo("123456");
+            assertThat(reading.forceText()).as("物模型声明为 string ⇒ 强制落 value_text，不按词法猜").isTrue();
+        });
+    }
+
+    @Test
+    @DisplayName("★ 对照②：TCP string 的典型序列号（007/SN-0001）同样 forceText=true")
+    void tcpStringSerialFormsMustForceText() {
+        List<AccessReading> readings = new ArrayList<>();
+        PointMappingDataListener listener = listener(PROTOCOL_TCP,
+            List.of(point("SN1", "serial1", "string", null, null),
+                point("SN2", "serial2", "string", null, null)), readings);
+
+        listener.onData(PointValue.good(PointAddress.of("SN1"), "007", Instant.now()));
+        listener.onData(PointValue.good(PointAddress.of("SN2"), "SN-0001", Instant.now()));
+
+        assertThat(readings).hasSize(2).allSatisfy(reading -> {
+            assertThat(reading.forceText()).isTrue();
+        });
+        assertThat(readings.get(0).value()).isEqualTo("007");
+        assertThat(readings.get(1).value()).isEqualTo("SN-0001");
+    }
+
+    @Test
+    @DisplayName("★ 对照③：TCP data_type=long + 123456 ⇒ forceText=false（仍按词法落 value_double）")
+    void tcpLongMustNotForceText() {
+        List<AccessReading> readings = new ArrayList<>();
+        PointMappingDataListener listener = listener(PROTOCOL_TCP,
+            List.of(point("CNT", "counter", "long", null, null)), readings);
+
+        listener.onData(PointValue.good(PointAddress.of("CNT"), "123456", Instant.now()));
+
+        assertThat(readings).singleElement().satisfies(reading -> {
+            assertThat(reading.value()).isEqualTo(123456L);
+            assertThat(reading.forceText()).as("非 string 类型行为一字不变").isFalse();
+        });
+    }
+
+    @Test
+    @DisplayName("★ 对照④：Modbus int（非 string）forceText=false（回归，词法落列不变）")
+    void modbusIntMustNotForceText() {
         AccessPointMappingDto modbusInt = new AccessPointMappingDto();
         modbusInt.setAddress("holding:0");
         modbusInt.setIdentifier("counter");
@@ -408,22 +456,14 @@ class AccessReadingMappingTest {
         modbusInt.setRegisterFormat("int");
         modbusInt.setWordCount(2);
         modbusInt.setSigned(Boolean.FALSE);
-        List<AccessReading> modbusReadings = new ArrayList<>();
-        PointMappingDataListener modbusListener = listener(PROTOCOL_MODBUS, List.of(modbusInt),
-            modbusReadings);
-        modbusListener.onData(PointValue.good(PointAddress.of("holding:0"), 0x0001, Instant.now()));
-        modbusListener.onData(PointValue.good(PointAddress.of("holding:1"), 0x0002, Instant.now()));
-        assertThat(modbusReadings).singleElement()
-            .satisfies(reading -> assertThat(reading.forceText()).isFalse());
+        List<AccessReading> readings = new ArrayList<>();
+        PointMappingDataListener listener = listener(PROTOCOL_MODBUS, List.of(modbusInt), readings);
 
-        List<AccessReading> tcpReadings = new ArrayList<>();
-        PointMappingDataListener tcpListener = listener(PROTOCOL_TCP,
-            List.of(point("SN", "serialNo", "string", null, null)), tcpReadings);
-        tcpListener.onData(PointValue.good(PointAddress.of("SN"), "1234", Instant.now()));
-        assertThat(tcpReadings).singleElement().satisfies(reading -> {
-            assertThat(reading.value()).isEqualTo("1234");
-            assertThat(reading.forceText()).as("TCP string 不在本次窄口径范围（缺省词法落列）").isFalse();
-        });
+        listener.onData(PointValue.good(PointAddress.of("holding:0"), 0x0001, Instant.now()));
+        listener.onData(PointValue.good(PointAddress.of("holding:1"), 0x0002, Instant.now()));
+
+        assertThat(readings).singleElement()
+            .satisfies(reading -> assertThat(reading.forceText()).isFalse());
     }
 
     private static PointMappingDataListener listener(String protocol,

@@ -78,6 +78,31 @@ class AccessDecodedValueColumnContractTest {
     }
 
     @Test
+    @DisplayName("★ 完整口径：物模型 string（TCP/Modbus 一致）⇒ 一律 value_text；非 string 仍词法落列")
+    void stringDataTypeMustAlwaysLandInTextColumn() {
+        // ① TCP string + 纯数字：access 侧 PointValueNormalizer 置 forceText=true ⇒ map(raw,true) 落文本
+        ReadingValueMapper.MappedValue tcpNumeric = ReadingValueMapper.map("123456", true);
+        assertThat(tcpNumeric.column()).isEqualTo(ReadingValueMapper.COLUMN_TEXT);
+        assertThat(tcpNumeric.numericValue()).isNull();
+        assertThat(tcpNumeric.text()).isEqualTo("123456");
+
+        // ② TCP string 典型序列号（前导零/字母）
+        assertThat(ReadingValueMapper.map("007", true).column())
+            .isEqualTo(ReadingValueMapper.COLUMN_TEXT);
+        assertThat(ReadingValueMapper.map("SN-0001", true).column())
+            .isEqualTo(ReadingValueMapper.COLUMN_TEXT);
+
+        // ③ TCP long + 123456：forceText=false ⇒ 仍 value_double（不误伤非 string）
+        ReadingValueMapper.MappedValue tcpLong = ReadingValueMapper.map("123456", false);
+        assertThat(tcpLong.column()).isEqualTo(ReadingValueMapper.COLUMN_DOUBLE);
+        assertThat(tcpLong.numericValue()).isEqualTo(123456d);
+
+        // ④ Modbus string 走同一 forceText 路径（既有用例亦覆盖）
+        assertThat(ReadingValueMapper.map("1234", true).column())
+            .isEqualTo(ReadingValueMapper.COLUMN_TEXT);
+    }
+
+    @Test
     @DisplayName("★ v3 回归：int/float/bits 与缺省标记仍按词法落列，逐字节不变")
     void defaultLexicalMappingMustRemainUnchanged() {
         assertThat(ReadingValueMapper.map("123456").column())
