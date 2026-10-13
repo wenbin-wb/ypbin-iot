@@ -8,6 +8,16 @@
 
 ### 新增
 
+- **数据保留清理：运维开关语义 + 手工触发内部端点（issue #227）**（`ypbin-service/ypbin-iot/**`、
+  `deploy/nacos/ypbin-iot.yaml` 注释、`docs/DEPLOY-BACKEND.md` §6、`docs/IOT-PLATFORM-DESIGN.md` 端点清单）：
+  新增 `POST /internal/retention/cleanup`（`/internal/**` 家族，沿用 `X-Internal-Token` 守卫，**不加权限码**）——
+  **只跑一轮、同步返回真实结果**：`executed` / `skipReason`（`none`/`disabled`/`invalid-config`/`already-running`）/
+  各表删除行数 / `durationMs`；删除阶段异常**直接上抛**（HTTP 200 + `R.code=500`，不吞）。
+  服务层用 JVM 内 `AtomicBoolean` 防重入（定时任务与手工触发共用同一 `cleanupOnce()`；并发触发后到者返回
+  `already-running`，**不并发删两轮**；失败也释放闸门）。该端点纳入既有 `ypbin.retention.enabled`：
+  关闭时**不执行**并如实返回 `skipReason=disabled`（不静默成功）。`RetentionCleanupResult` 增 `skipReason`/`durationMs`，
+  新增稳定原因码枚举 `RetentionSkipReason`。**边界如实登记**：防重入只覆盖单实例（多副本需分布式锁，本轮未做）；
+  清理不可回滚、只删已闭合行（`end_ts IS NOT NULL`）、跨界行保守留到下一轮；IoTDB 原始时序保留由 TTL 承担，不在本端点范围。
 - **Modbus 寄存器解码 v4：`register_format=double`（IEEE754 双精度，4 寄存器）**
   （`ypbin-service/ypbin-access/**`、`ypbin-service/ypbin-iot/**`、`ypbin-service-api/ypbin-iot-api/**`、
   `deploy/sql/**` 注释口径、`docs/VALUE-DECODE-DESIGN.md` §4.7）：
