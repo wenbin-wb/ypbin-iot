@@ -1,5 +1,12 @@
 # 更新日志
 
+> **维护纪律（2026-10-13 确立）**
+> 1. **行为变更与破坏性变更必须随 PR 写进 `## [未发布]`**（这是本文件的唯一用途：让升级的人不必读全部提交）。
+> 2. **发版时**把 `[未发布]` 折叠为 `[X.Y.Z] - 日期`，并在 GitHub Release 里引用该段。
+> 3. **历史积欠不回写**（本段此前长期未按批更新，导致与 git log 脱节）；更早的历史**以 `git log` 为准**，
+>    需要追溯能力引入时间时查提交，不要指望本文件覆盖全部历史。
+> 4. 条目要写清**动机与边界**（为什么这么做、不做什么），不只写"改了什么"。
+
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)：`主版本.次版本.修订号`。
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
@@ -41,6 +48,12 @@
   - `docs/METRICS.md` 把 `iot.timeseries.value.precision_lost` 的判据写成 `|v| ≤ 2^53`，代码判的是 **`> 2^53`**。
 
 ### 变更
+
+- **删除继承自 upstream 的 `v1.0.0` tag，并确立本仓的发布 tag 政策**（细节见 `SYNC.md` §三·六）：
+  该 tag 指向 2026-08-28 的提交、落后 main **479** 个提交、其 pom 声明 `1.0.0-SNAPSHOT`，与本仓发版无关；
+  它占着 `v1.0.0` 这个名字会**直接挡住本仓首个真正的 1.0.0 发版**，而「Release 资产」这种形态又天然被当成可部署产物。
+  现在明确：**发布 tag 只打在本仓的 release 提交上**（制品工作流已有守卫：`project.version` 必须等于 tag 名且非 `SNAPSHOT`）；
+  upstream 的 tag 同步进来时不沿用。
 
 - **落列改由物模型 `data_type` 唯一决定，彻底删除 `forceText` 通道（task-23，行为变更）**
   （`ypbin-service/ypbin-iot/**`、`ypbin-service/ypbin-access/**`、`ypbin-service-api/ypbin-iot-api/**`、`docs/**`）：

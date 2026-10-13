@@ -144,6 +144,17 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
    > 不再是「半个系统」。纯 admin 用户可用 `YPBIN_ADMIN_REPO` 恢复 upstream 语义。
 4. **同步后要重扫 CodeQL**：同步会把 admin 的新代码带进来，其新增/结案状态同样要按第 1 条镜像处置。
 
+### 三·六、本仓的发布 tag 政策（2026-10-13 定）
+
+- **只打本仓自己的发布 tag**：`vX.Y.Z` 必须打在**本仓的 release 提交**上（该提交把 `pom.xml` 的 `<revision>` 定成 `X.Y.Z`）。
+  制品工作流（`release-artifacts.yml`）有守卫：**`project.version` 必须等于 tag 名且不含 `SNAPSHOT`**，否则拒绝产出制品。
+- **不继承 upstream 的 tag**：本仓是从 `ypbin-admin` fork 的，`git tag` 里的 **`v1.0.0` 曾是继承来的 upstream tag**
+  （`git log -1 v1.0.0` = 2026-08-28、落后 main **479** 个提交、其 pom 声明 `1.0.0-SNAPSHOT`），与本仓发版无关。
+  它已于 **2026-10-13 删除** —— 理由：① 它占着 `v1.0.0` 这个名字，会**直接挡住本仓首个真正的 1.0.0 发版**；
+  ② 「Release 资产」这种形态天然被当成可部署产物，挂在 479 个提交之前的代码上是**误导**。
+- **upstream 的 tag 同步进来时**：不要沿用，按上一条处理（删除或改名）；`upstream-sync` 只处理分支合并，不处理 tag。
+- 已发布/待发布版本的唯一事实源：本仓 `CHANGELOG.md` + GitHub Release（不是 tag 列表）。
+
 ## 四、门禁
 
 - `mvn -B -ntp -fae clean verify`（架构约束 / 源码规范 / 覆盖率等；**admin 没有 spotless 插件**，
