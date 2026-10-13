@@ -10,6 +10,7 @@
 package cn.ypbin.admin.access.link;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import cn.ypbin.admin.access.egress.AccessReading;
 import cn.ypbin.admin.iot.device.AccessPointMappingDto;
@@ -63,6 +64,37 @@ class ModbusRegisterDecodeTest {
             .as("32 位有符号下界").isEqualTo(-2147483648L);
         assertThat(ModbusRegisterDecoder.decodePair(0x0001, 0xFFFF, "little", true))
             .as("little：raw32=0xFFFF0001 ⇒ -65535").isEqualTo(-65535L);
+    }
+
+    @Test
+    @DisplayName("★ v4 解码矩阵：IEEE754 双精度 4 寄存器 big=ABCD / little=DCBA（整体翻转）")
+    void doubleDecoderMatrixMustBeExact() {
+        long bits = Double.doubleToRawLongBits(1.5);
+        int[] big = {(int) (bits >>> 48) & 0xFFFF, (int) (bits >>> 32) & 0xFFFF,
+            (int) (bits >>> 16) & 0xFFFF, (int) bits & 0xFFFF};
+        assertThat(ModbusRegisterDecoder.decodeDoubleBits(big, "big")).isEqualTo(1.5d);
+
+        int[] little = {big[3], big[2], big[1], big[0]};
+        assertThat(ModbusRegisterDecoder.decodeDoubleBits(little, "little")).isEqualTo(1.5d);
+
+        // 字序必须真的生效：同一 4 字序列在 big/little 下是不同的 double
+        assertThat(ModbusRegisterDecoder.decodeDoubleBits(big, "little")).isNotEqualTo(1.5d);
+        assertThat(ModbusRegisterDecoder.decodeDoubleBits(big, null))
+            .as("byte_order 为 null ⇒ 按 big").isEqualTo(1.5d);
+
+        // 0.1 的位模式 round-trip；用 BigDecimal.valueOf 直接能取最短表示（在 listener 用例里断言）
+        assertThat(ModbusRegisterDecoder.decodeDoubleBits(
+            wordsOf(Double.doubleToRawLongBits(0.1), "big"), "big")).isEqualTo(0.1d);
+
+        assertThatThrownBy(() -> ModbusRegisterDecoder.decodeDoubleBits(new int[] {1, 2, 3}, "big"))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("必须恰好 4 个寄存器");
+    }
+
+    private static int[] wordsOf(long bits, String byteOrder) {
+        int[] big = {(int) (bits >>> 48) & 0xFFFF, (int) (bits >>> 32) & 0xFFFF,
+            (int) (bits >>> 16) & 0xFFFF, (int) bits & 0xFFFF};
+        return "little".equals(byteOrder) ? new int[] {big[3], big[2], big[1], big[0]} : big;
     }
 
     @Test

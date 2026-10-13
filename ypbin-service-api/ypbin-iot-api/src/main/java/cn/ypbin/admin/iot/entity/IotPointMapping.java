@@ -58,17 +58,17 @@ public class IotPointMapping extends TenantBaseEntity {
     /** 缩放偏移。 */
     private BigDecimal offsetValue;
 
-    /** 字序（word order）：big=高字在前 / little=低字在前。仅 Modbus int+word_count=2 或 float 生效。 */
+    /** 字序（word order）：big=高字在前 / little=低字在前。仅 Modbus int+word_count=2、float 或 double 生效。 */
     private String byteOrder;
 
-    /** 连续寄存器个数（int/float: 1|2；bits: 1；string: 1..32；默认 1 = 旧行为）。仅 Modbus 寄存器点位生效。 */
+    /** 连续寄存器个数（int/float: 1|2；double: 4；bits: 1；string: 1..32；默认 1 = 旧行为）。仅 Modbus 寄存器点位生效。 */
     private Integer wordCount;
 
     /** 整型符号：false=无符号 / true=有符号（DB TINYINT 0/1；与 enabled 同一约定）。 */
     @TableField("`signed`")
     private Boolean signed;
 
-    /** 寄存器值形态：int|float|bits|string（默认 int = v1 行为）。仅 Modbus 寄存器点位生效。 */
+    /** 寄存器值形态：int|float|double|bits|string（默认 int = v1 行为）。仅 Modbus 寄存器点位生效。 */
     private String registerFormat;
 
     /** 仅 bits：起始位（0..15）。 */

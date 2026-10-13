@@ -43,7 +43,7 @@ import org.slf4j.LoggerFactory;
  *       （见 {@link PointValueNormalizer}）；</li>
  *   <li><b>Modbus 单寄存器</b>（{@code word_count=1}）：SDK 交付 16 位无符号 {@code Integer}；
  *       {@code signed=true} 时做符号扩展，否则**原样透传**（向后兼容锚点）；</li>
- *   <li><b>Modbus 多寄存器</b>（{@code word_count>1}：int/float=2、string=1..32）：SDK 对每个寄存器
+ *   <li><b>Modbus 多寄存器</b>（{@code word_count>1}：int/float=2、double=4、string=1..32）：SDK 对每个寄存器
  *       **逐值回调**（不是批量），本类按点位**按 word_index 收齐 N 个字**后再合成一条读数——
  *       任一寄存器 BAD/缺失 ⇒ 该点位 BAD，**绝不用陈旧一半拼值、绝不用 0 充数**
  *       （见 {@link #onMultiRegister}；string 的拼接/严格 UTF-8 规则见 §4.5）。</li>
@@ -270,7 +270,7 @@ public class PointMappingDataListener implements DataListener {
         }
     }
 
-    /** N 个 slot 全齐 ⇒ 按 word_index 升序合成一条读数；string 走严格 UTF-8，int/float 复用 v1/v2。 */
+    /** N 个 slot 全齐 ⇒ 按 word_index 升序合成一条读数；string 走严格 UTF-8，int/float/float64 复用 v1/v2 的泛化配对。 */
     private void assembleAndEmit(AccessPointMappingDto point, PendingWords pending, PointValue value) {
         int expected = pending.expected();
         int[] words = new int[expected];
@@ -288,6 +288,28 @@ public class PointMappingDataListener implements DataListener {
             }
             return;
         }
+        if (isDouble(point)) {
+            // v4：4 寄存器走同一泛化配对路径（word_count=4），不另起一套
+            if (expected != 4) {
+                // 直连 DB 的坏数据：double 必须恰好 4 个寄存器；按 BAD 暴露而不是只用前两个/四个
+                log.warn("[access] Modbus register_format=double 的 word_count 必须是 4（直连 DB 坏数据），"
+                        + "按 BAD 上报：device={} address={} word_count={}",
+                    LogSanitizer.sanitize(deviceId), LogSanitizer.sanitize(point.getAddress()), expected);
+                emitBad(point.getIdentifier(), value, "modbus.register.word-count-invalid");
+                return;
+            }
+            double decoded = ModbusRegisterDecoder.decodeDoubleBits(words, point.getByteOrder());
+            if (!Double.isFinite(decoded)) {
+                onNonFinite(point, value, "double");
+                return;
+            }
+            // double 的十进制表示取**最短可回读**形态（BigDecimal.valueOf = Double.toString 最短表示；
+            // 绝不用 new BigDecimal(double) 的 17 位二进制展开，见 §4.4.7）
+            BigDecimal doubleValue = BigDecimal.valueOf(decoded);
+            emit(point.getIdentifier(), value, AccessReading.applyScale(doubleValue,
+                point.getScaleFactor(), point.getOffsetValue()));
+            return;
+        }
         if (expected != 2) {
             // 直连 DB 的坏数据：int/float 只允许 2 个寄存器；按 BAD 暴露而不是只用前两个
             log.warn("[access] Modbus int/float 形态的 word_count 必须是 2（直连 DB 坏数据），按 BAD 上报："
@@ -302,7 +324,7 @@ public class PointMappingDataListener implements DataListener {
             // float 形态：两半齐后按 IEEE754 解释（NaN/Inf 按 BAD 上报 + 计数，见 §4.4.6）
             float decoded = ModbusRegisterDecoder.decodeFloatBits(first, second, point.getByteOrder());
             if (!Float.isFinite(decoded)) {
-                onNonFiniteFloat(point, value);
+                onNonFinite(point, value, "float");
                 return;
             }
             // float32 的十进制表示取**最短可回读**形态（理由见 §4.4.7）
@@ -345,9 +367,14 @@ public class PointMappingDataListener implements DataListener {
         return "bits".equals(registerFormatOf(point));
     }
 
-    /** float 形态（register_format=float）。 */
+    /** float 形态（register_format=float，IEEE754 单精度，2 寄存器）。 */
     private static boolean isFloat(AccessPointMappingDto point) {
         return "float".equals(registerFormatOf(point));
+    }
+
+    /** double 形态（register_format=double，IEEE754 双精度，4 寄存器）。 */
+    private static boolean isDouble(AccessPointMappingDto point) {
+        return "double".equals(registerFormatOf(point));
     }
 
     /** string 形态（register_format=string）。 */
@@ -367,18 +394,25 @@ public class PointMappingDataListener implements DataListener {
     }
 
     /**
-     * Modbus float 解出 NaN/±Inf：按 BAD 上报 + 计数（复用 {@code non-finite} reason，不新增指标）。
+     * Modbus 浮点（float/double）解出 NaN/±Inf：按 BAD 上报 + 计数（复用 {@code non-finite} reason，
+     * 不新增指标）。
      *
-     * <p>理由见 {@code docs/VALUE-DECODE-DESIGN.md} §4.4.6：NaN/Inf 不是有效测量、会被 iot 侧
-     * {@code ReadingValueMapper} 拒到文本列、且 {@code applyScale} 的 BigDecimal 不可表示。</p>
+     * <p>理由见 {@code docs/VALUE-DECODE-DESIGN.md} §4.4.6：NaN/Inf 不是有效测量、且
+     * {@code applyScale} 的 BigDecimal 不可表示。float32 与 float64 共用同一计数与 reason，
+     * 用 {@code format} 区分日志/消息键（{@code modbus.float.non-finite} /
+     * {@code modbus.double.non-finite}）。</p>
+     *
+     * @param point  点位
+     * @param value  原始 PointValue（提供地址/时刻）
+     * @param format 形态标签（{@code float} / {@code double}）
      */
-    private void onNonFiniteFloat(AccessPointMappingDto point, PointValue value) {
+    private void onNonFinite(AccessPointMappingDto point, PointValue value, String format) {
         nonFiniteFloatCount.increment();
         PointValueNormalizeMetrics.counter(meterRegistry, NormalizeFailure.NON_FINITE).increment();
-        log.warn("[access] Modbus float 解出 NaN/Inf，按 BAD 上报（不落库；见 {} 指标）：device={} address={}",
-            PointValueNormalizeMetrics.METRIC_NAME, LogSanitizer.sanitize(deviceId),
+        log.warn("[access] Modbus {} 解出 NaN/±Inf，按 BAD 上报（不落库；见 {} 指标）：device={} address={}",
+            format, PointValueNormalizeMetrics.METRIC_NAME, LogSanitizer.sanitize(deviceId),
             LogSanitizer.sanitize(point.getAddress()));
-        emitBad(point.getIdentifier(), value, "modbus.float.non-finite");
+        emitBad(point.getIdentifier(), value, "modbus." + format + ".non-finite");
     }
 
     /**
@@ -403,7 +437,7 @@ public class PointMappingDataListener implements DataListener {
     }
 
     /**
-     * 是否多寄存器点位（word_count&gt;1：int/float=2、string 1..32）。
+     * 是否多寄存器点位（word_count&gt;1：int/float=2、double=4、string 1..32）。
      *
      * <p>{@code word_count=1} 的 string 走单寄存器路径（无需配对）；传统 5 位编号的
      * {@code word_count=1} 也照常（向后兼容）。</p>

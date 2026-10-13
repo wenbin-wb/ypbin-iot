@@ -172,7 +172,7 @@ public class IotPointMappingServiceImpl extends BaseServiceImpl<IotPointMappingM
      * <p><b>统一严格</b>（2026-10-13 收紧，见 {@code docs/VALUE-DECODE-DESIGN.md} §4.3.2）：
      * {@code word_count}/{@code signed} 非适用场景（非 Modbus、位类型、非整型 {@code dataType}、
      * 多寄存器非显式地址）一律 fail-fast；{@code byte_order} 也统一严格——只在「Modbus int+word_count=2」
-     * 或「float」真正生效，其余场景非空即拒绝（此前「历史宽容」的理由已不成立）。</p>
+     * 「float」或「double」真正生效，其余场景非空即拒绝（此前「历史宽容」的理由已不成立）。</p>
      *
      * @param device   设备（提供协议码）
      * @param property 属性（提供 dataType）
@@ -181,10 +181,10 @@ public class IotPointMappingServiceImpl extends BaseServiceImpl<IotPointMappingM
     private void validateRegisterDecode(IotDevice device, IotProperty property, IotPointMappingReq req) {
         String format = req.getRegisterFormat() == null || req.getRegisterFormat().isBlank()
             ? "int" : req.getRegisterFormat().trim();
-        if (!"int".equals(format) && !"float".equals(format) && !"bits".equals(format)
-            && !"string".equals(format)) {
+        if (!"int".equals(format) && !"float".equals(format) && !"double".equals(format)
+            && !"bits".equals(format) && !"string".equals(format)) {
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
-                "寄存器值形态（register_format）只能是 int|float|bits|string：" + format);
+                "寄存器值形态（register_format）只能是 int|float|double|bits|string：" + format);
         }
         int wordCount = req.getWordCount() == null ? 1 : req.getWordCount();
         boolean signed = Boolean.TRUE.equals(req.getSigned());
@@ -195,6 +195,13 @@ public class IotPointMappingServiceImpl extends BaseServiceImpl<IotPointMappingM
             if (wordCount < 1 || wordCount > 32) {
                 throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
                     "register_format=string 的 word_count 必须在 1..32（≤64 字节）：" + wordCount);
+            }
+        } else if ("double".equals(format)) {
+            // v4：double 必须 4（64 位占 4 个寄存器），声明与宽度一一对应（不靠 float+4 推断）
+            if (wordCount != 4) {
+                throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                    "register_format=double 要求 word_count=4（64 位占 4 个寄存器），当前=" + wordCount
+                        + "；请把 word_count 改为 4");
             }
         } else if (wordCount != 1 && wordCount != 2) {
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
@@ -224,6 +231,8 @@ public class IotPointMappingServiceImpl extends BaseServiceImpl<IotPointMappingM
         }
         if ("float".equals(format)) {
             validateFloatFormat(req, wordCount, signed, bitOffset, bitLength, dataType, property);
+        } else if ("double".equals(format)) {
+            validateDoubleFormat(req, wordCount, signed, bitOffset, bitLength, dataType, property);
         } else if ("string".equals(format)) {
             validateStringFormat(req, wordCount, signed, bitOffset, bitLength, dataType, property);
         } else {
@@ -317,6 +326,30 @@ public class IotPointMappingServiceImpl extends BaseServiceImpl<IotPointMappingM
         validateExplicitMultiRegisterAddress(req);
     }
 
+    /** {@code double} 形态校验：IEEE754 双精度（64 位 ⟺ 4 寄存器；字序生效 big=ABCD/little=DCBA）。 */
+    private void validateDoubleFormat(IotPointMappingReq req, int wordCount, boolean signed,
+                                      Integer bitOffset, Integer bitLength, ThingModelDataType dataType,
+                                      IotProperty property) {
+        if (wordCount != 4) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "register_format=double 要求 word_count=4（64 位占 4 个寄存器），当前=" + wordCount
+                    + "；请把 word_count 改为 4");
+        }
+        if (signed) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "register_format=double 的 signed 必须为 false（浮点无符号语义）：请清空或置 false");
+        }
+        if (bitOffset != null || bitLength != null) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "register_format=double 不支持 bit_offset/bit_length：请清空这两个字段");
+        }
+        if (dataType != ThingModelDataType.DECIMAL) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "register_format=double 要求属性类型是 decimal（小数），当前=" + property.getDataType());
+        }
+        validateExplicitMultiRegisterAddress(req);
+    }
+
     /** {@code bits} 形态校验：单寄存器无符号位域。 */
     private void validateBitsFormat(IotPointMappingReq req, int wordCount, boolean signed,
                                     Integer bitOffset, Integer bitLength, ThingModelDataType dataType,
@@ -368,7 +401,7 @@ public class IotPointMappingServiceImpl extends BaseServiceImpl<IotPointMappingM
         String byteOrder = req.getByteOrder();
         if (byteOrder != null && !byteOrder.isBlank()) {
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
-                "字序（byte_order）仅在 Modbus int+word_count=2 或 float 形态生效：请清空该字段"
+                "字序（byte_order）仅在 Modbus int+word_count=2、float 或 double 形态生效：请清空该字段"
                     + "（当前 register_format=" + req.getRegisterFormat() + " word_count="
                     + req.getWordCount() + "）");
         }
