@@ -219,6 +219,18 @@ class IotDbTimeSeriesWriterTest {
     }
 
     @Test
+    @DisplayName("★ v3 强制文本：数值形态 + forceText=true ⇒ setString(5)（不得 setDouble）")
+    void forcedTextMustBindTextColumn() throws SQLException {
+        PreparedStatement text = mock(PreparedStatement.class);
+        TimeSeriesPoint forced = new TimeSeriesPoint(9L, 100L, "serial", "123456", "GOOD", TS, true);
+        IotDbTimeSeriesWriter.bind(text, forced);
+
+        verify(text).setString(5, "123456");
+        verify(text, never()).setDouble(eq(5), anyDouble());
+        verify(text, never()).setNull(anyInt(), anyInt());
+    }
+
+    @Test
     @DisplayName("★ 混批：数值行与文本行各走各自的语句（顺序：先数值后文本），两次 executeBatch")
     void mustSplitMixedBatchIntoTwoStatements() throws SQLException {
         Connection connection = mock(Connection.class);

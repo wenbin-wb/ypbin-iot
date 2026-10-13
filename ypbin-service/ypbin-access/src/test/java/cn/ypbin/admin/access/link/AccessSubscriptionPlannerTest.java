@@ -614,6 +614,63 @@ class AccessSubscriptionPlannerTest {
     }
 
     @Test
+    @DisplayName("★ v3 string：word_count=3 一次订阅带 base..base+2（泛化扩地址）")
+    void modbusStringWordCountThreeMustSubscribeAllRegisters() {
+        DeviceSession session = subscribeReturnsFuture();
+        AtomicReference<Map<String, DeviceSession>> bound =
+            new AtomicReference<>(Map.of("d1", session));
+        AccessSubscriptionPlanner planner = planner(bound);
+
+        String points = "[{\"propertyId\":\"1\",\"identifier\":\"serial\","
+            + "\"address\":\"holding:0\",\"wordCount\":3,\"registerFormat\":\"string\","
+            + "\"signed\":false}]";
+        assertThat(planner.subscribe(List.of(device("d1", points)))).isEqualTo(1);
+
+        ArgumentCaptor<SubscribeRequest> requests = ArgumentCaptor.forClass(SubscribeRequest.class);
+        verify(session, times(1)).subscribe(requests.capture(), any());
+        assertThat(requests.getValue().addresses().stream().map(PointAddress::raw).toList())
+            .as("string 的 N 个寄存器必须全部订阅（SDK 分块由 SDK 处理）")
+            .containsExactly("holding:0", "holding:1", "holding:2");
+    }
+
+    @Test
+    @DisplayName("★ v3 string：word_count=1 + 传统 5 位编号不做地址扩展（向后兼容）")
+    void modbusStringWordCountOneTraditionalStaysSingle() {
+        DeviceSession session = subscribeReturnsFuture();
+        AtomicReference<Map<String, DeviceSession>> bound =
+            new AtomicReference<>(Map.of("d1", session));
+        AccessSubscriptionPlanner planner = planner(bound);
+
+        String points = "[{\"propertyId\":\"1\",\"identifier\":\"serial\","
+            + "\"address\":\"40001\",\"wordCount\":1,\"registerFormat\":\"string\"}]";
+        assertThat(planner.subscribe(List.of(device("d1", points)))).isEqualTo(1);
+
+        ArgumentCaptor<SubscribeRequest> requests = ArgumentCaptor.forClass(SubscribeRequest.class);
+        verify(session, times(1)).subscribe(requests.capture(), any());
+        assertThat(requests.getValue().addresses().stream().map(PointAddress::raw).toList())
+            .containsExactly("40001");
+    }
+
+    @Test
+    @DisplayName("★ v3 string：扩出的 base+1/base+2 与其它点位重叠 ⇒ 仍按 raw 去重")
+    void modbusStringSharedRegistersMustDedupe() {
+        DeviceSession session = subscribeReturnsFuture();
+        AtomicReference<Map<String, DeviceSession>> bound =
+            new AtomicReference<>(Map.of("d1", session));
+        AccessSubscriptionPlanner planner = planner(bound);
+
+        String points = "[{\"propertyId\":\"1\",\"identifier\":\"serial\","
+            + "\"address\":\"holding:0\",\"wordCount\":3,\"registerFormat\":\"string\"},"
+            + "{\"propertyId\":\"2\",\"identifier\":\"other\",\"address\":\"holding:1\"}]";
+        assertThat(planner.subscribe(List.of(device("d1", points)))).isEqualTo(1);
+
+        ArgumentCaptor<SubscribeRequest> requests = ArgumentCaptor.forClass(SubscribeRequest.class);
+        verify(session, times(1)).subscribe(requests.capture(), any());
+        assertThat(requests.getValue().addresses().stream().map(PointAddress::raw).toList())
+            .containsExactly("holding:0", "holding:1", "holding:2");
+    }
+
+    @Test
     @DisplayName("★ v2 float：word_count=2 一次订阅带 base 与 base+1（复用 v1 扩地址骨架）")
     void modbusFloatMustSubscribeBaseAndNext() {
         DeviceSession session = mock(DeviceSession.class);
