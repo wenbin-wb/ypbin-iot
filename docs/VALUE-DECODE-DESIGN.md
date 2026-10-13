@@ -220,7 +220,7 @@ DB 列仍是 `TINYINT NOT NULL DEFAULT 0`）、`byteOrder`（已存在，`big`\|
 
 ---
 
-### 4.4 Modbus 寄存器解码 v2（register_format + float32 + 位域）—— **设计定稿，实施前评审本小节**
+### 4.4 Modbus 寄存器解码 v2（register_format + float32 + 位域）—— **已实施，2026-10-13**
 
 > 目标：在 §4.3 v1（`int`）之上新增 `float`（IEEE754 单精度，2 寄存器）与 `bits`（单寄存器位域）。
 > 契约 v2 已冻结；与前端 task-18 并行，命名不得各自发挥。字符串寄存器**不在本版**（issue #248）。
@@ -243,8 +243,14 @@ DB 列仍是 `TINYINT NOT NULL DEFAULT 0`）、`byteOrder`（已存在，`big`\|
 | `float` | Modbus `holding`/`input` | **必须 2** | **必须 false**（true ⇒ 拒绝） | **必须为 null** | 生效：big=ABCD / little=CDAB（null⇒big） | **`decimal`** |
 | `bits` | Modbus `holding`/`input` | **必须 1** | **必须 false** | **必须同时给**；`0≤offset≤15`、`1≤length≤16-offset` | **忽略** | `length=1` ⇒ `bool`；`length>1` ⇒ `int`\|`long` |
 
+> **形态与 `word_count` 不相容时是「拒绝」，不是「静默改成期望值」**：`float` 且 `word_count≠2` ⇒ 拒绝；
+> `bits` 且 `word_count≠1` ⇒ 拒绝。UI 会把它们置为固定值并禁用，但 API 直连调用必须 fail-fast——
+> 静默纠正会让人以为配置生效了。
+
 - **非 Modbus**（tcp/mqtt/opcua）与 **位类型**（coil/discrete）：`register_format≠int` 或 `bit_offset/bit_length` 非空 ⇒ **拒绝**（新字段严格）；
 - `register_format` 非法取值 ⇒ 拒绝（Req `@Pattern` + 服务层双保险）；
+- **`data_type` 约束只对 `float`/`bits` 两种新形态生效**；`int` 保持 v1 行为（不做新的 data_type 约束），
+  否则会给现有点位引入新的拒绝路径 = 破坏向后兼容；错误文案写清「该形态要求属性类型是 X」；
 - 所有拒绝都给**可执行文案**（说清该填什么/去掉什么），不许静默忽略；
 - `byte_order`：`bits` 形态忽略；`int`/`float` 按上表（它是历史自由文本列，沿用 v1 的宽容口径）。
 
@@ -261,7 +267,8 @@ DB 列仍是 `TINYINT NOT NULL DEFAULT 0`）、`byteOrder`（已存在，`big`\|
 
 - `raw` 是 SDK 交付的 16 位无符号 `Integer`（0..65535）：`bits = (raw >>> bit_offset) & ((1L << bit_length) - 1)`；
 - `bit_length=1` ⇒ 产出 **`Boolean`**（true/false）；`bit_length>1` ⇒ 产出 **无符号 `Integer`**（0..65535，**不**符号扩展、**不**做缩放前转换）；
-- 产出后仍走既有 `AccessReading.applyScale`：`length>1` 的整数可被 scale/offset 变换；`length=1` 的 Boolean 不是 Number ⇒ 原样（不缩放）；
+- 产出后仍走既有 `AccessReading.applyScale`：`length>1` 的整数可被 scale/offset 变换；**`length=1` 的 Boolean 不参与 `applyScale`**
+  （它只吃 Number/BigDecimal）⇒ **布尔位域不缩放**（文档与测试都要体现，避免有人以为配了 scale 就生效）；
 - `byte_order` 对 bits 无意义 ⇒ 忽略；越界（`offset+1>16` 等）由映射校验拒绝；直连 DB 的坏数据在 listener 里按 BAD + 日志暴露，不静默。
 
 #### 4.4.5 复用 v1 骨架（不另起一套）
@@ -283,7 +290,7 @@ DB 列仍是 `TINYINT NOT NULL DEFAULT 0`）、`byteOrder`（已存在，`big`\|
 
 **计数**：复用 **`iot.access.value.normalize.failure{reason=non-finite}`**（在 `NormalizeFailure` 增 `NON_FINITE`），
 **不新增指标**。理由：该指标已是「宿主侧值无法规范化」的有界原因集，NaN/Inf 正属此类，且 `MetricsRegistryGateTest` 已覆盖该名字。
-（若你要求独立指标如 `iot.access.modbus.float.non-finite`，请说；我按你的决定改。）
+**`docs/METRICS.md` 必须把 `non-finite` 显式列进该指标的 `reason` 列表**（新 reason 必须登记，否则等于没登记）。
 
 #### 4.4.7 float → BigDecimal 精度口径（最终，附理由）
 
@@ -301,12 +308,17 @@ DB 列仍是 `TINYINT NOT NULL DEFAULT 0`）、`byteOrder`（已存在，`big`\|
   `...register-format-schema.sql`）：等价脚本按**文件名字典序**拼接，`register-format...` 会排在 v1 的
   `register-schema...` **之前**，与 007 的追加顺序（v1 后 v2）不一致 ⇒ 门禁必红；`v2-` 前缀保证排最后
   （若你坚持原名，我改用 `2026-10-14-...` 以日期递增）；
-- 更新 `iot-migrations.list` + `ItSchema.EXTRA_SCHEMA_SCRIPTS`；跑 `bash tools/check-iot-sql-equivalence.sh`。
+- 更新 `iot-migrations.list` + `ItSchema.EXTRA_SCHEMA_SCRIPTS`，**顺序与目录字典序一致**（v1 之后）；跑 `bash tools/check-iot-sql-equivalence.sh` 并贴结果。
 
 #### 4.4.9 未支持（保持登记）
 
 IEEE754 双精度（4 寄存器）；BADC/DCBA 字内字节交换；有符号位域；字符串寄存器（issue #248，含 `encoding`/尾部 NUL/寄存器字节序）；
 `register_format` 的其它取值；`float` 的 `bit_*` 与 `bits` 的 `signed`/多寄存器。
+
+**落地清单（2026-10-13）**：`ModbusRegisterDecoder.decodeFloatBits/decodeBits`、`PointMappingDataListener`（float 复用 v1 配对、
+NaN/±Inf ⇒ BAD + `iot.access.value.normalize.failure{reason=non-finite}`、bits 单寄存器且布尔不缩放）、
+`IotPointMappingServiceImpl.validateFloatFormat/validateBitsFormat`（int 保持 v1）、实体/DTO/Req/Resp 新字段、
+DDL（007 + `migration/2026-10-13-iot-modbus-v2-register-format-schema.sql`）。
 
 ---
 

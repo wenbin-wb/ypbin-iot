@@ -44,6 +44,18 @@
   - `byte_order` 列注释由「字节序」更正为「字序」并写明不支持 BADC/DCBA（006 与 M1 迁移双写、SQL 等价门禁绿）；
   - 未支持：IEEE754 浮点、BADC/DCBA 字内字节交换、coil/discrete 宽度/符号、字符串寄存器、位域。
 
+- **Modbus 寄存器解码 v2（`register_format` + IEEE754 单精度 + 位域）**（`ypbin-service/ypbin-iot/**`、
+  `ypbin-service/ypbin-access/**`、`ypbin-service-api/ypbin-iot-api/**`、`deploy/sql/**`）：
+  - 新增 `register_format VARCHAR(16) NOT NULL DEFAULT 'int'`（int|float|bits）、`bit_offset`/`bit_length`（仅 bits）；
+  - **float**：IEEE754 单精度（2 寄存器，复用 v1 半字配对/扩地址）；`byte_order` 字序生效；有限值产出
+    `BigDecimal.valueOf((double) f)`（float32→double 精确、不做位数四舍五入）；**NaN/±Inf ⇒ 点位 BAD + 计数**
+    `iot.access.value.normalize.failure{reason=non-finite}`（不落库）；
+  - **bits**：单寄存器位域；`bit_length=1` ⇒ Boolean（**不参与缩放**）、`>1` ⇒ 无符号整数（可走既有缩放）；
+  - 校验（新字段严格）：float 强制 `word_count=2`/`signed=false`/`bit_*` 空/`data_type=decimal`；bits 强制
+    `word_count=1`/`signed=false`/合法 bit 区间（0≤offset≤15、1≤length≤16-offset）/`data_type` 匹配（1 位 bool、多位 int|long）；
+    **`int` 保持 v1 行为逐字节不变**；`byte_order` 在 bits 形态忽略；
+  - 未支持：IEEE754 双精度、BADC/DCBA 字节交换、有符号位域、字符串寄存器（issue #248）。
+
 - **JaCoCo 覆盖率门禁接入 `ypbin-iot` / `ypbin-access`**（`mvn test`/`verify` 即生效，未达标直接失败）。
   阈值口径 = **2026-10-13 实测基线 − 安全边际**：
   `ypbin-iot` 指令 ≥ **0.78**（基线 0.8063）、分支 ≥ **0.68**（基线 0.7086）；
