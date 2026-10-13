@@ -50,9 +50,15 @@ class IotSeamConventionTest {
      * 端口下线时也必须同步摘除。宿主侧的物模型类型规范化（`PointValueNormalizer`）
      * **不是可替换端口**（它是宿主内部实现、不对外暴露装配接缝），故不进本清单。</p>
      *
+     * <p><b>2026-10-13 新增 {@code BytePayloadDecoder}</b>（宿主可插字节载荷解码 SPI，见
+     * `docs/VALUE-DECODE-DESIGN.md` §4.8）：它同样是「宿主可替换/可扩展端口」——参考实现
+     * `MqttBinaryNumberDecoder` 由 {@code AccessDecodeConfiguration} 的 {@code @Bean
+     * @ConditionalOnMissingBean} 装配（业务可整体替换）。故纳入本清单，实现类不得标 {@code @Component}。</p>
+     *
      * <p>自检仍由 {@code TenantLinkManager} 承担：`scanned` 必须为正，否则本规则是空跑（假绿）。</p>
      */
-    private static final List<String> REPLACEABLE_PORTS = List.of("TenantLinkManager");
+    private static final List<String> REPLACEABLE_PORTS =
+        List.of("TenantLinkManager", "BytePayloadDecoder");
 
     @Test
     @DisplayName("可替换端口的实现不得标 @Component（否则 @ConditionalOnMissingBean 会被静默顶掉）")
