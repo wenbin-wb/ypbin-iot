@@ -59,6 +59,7 @@ import cn.ypbin.starter.iot.validate.PropertyIdRules;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesPoint;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesProperties;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesWriter;
+import cn.ypbin.admin.iot.timeseries.ValueColumn;
 import cn.ypbin.admin.iot.values.LatestValue;
 import cn.ypbin.admin.iot.values.LatestValueWriter;
 import java.util.List;
@@ -283,6 +284,111 @@ class AvailabilityServiceImplTest {
         assertThat(meterRegistry.get(AvailabilityServiceImpl.METRIC_SERIES_COLLECTED).counter().count())
             .as("points.collected 必须等于交给出口的点数（否则「没收集」与「收集了没写」无法区分）")
             .isEqualTo(2d);
+    }
+
+    @Test
+    @DisplayName("★ task-23：物模型类型缺失/未知 ⇒ 丢弃 + iot.timeseries.value.type_missing，不猜列、不落文本兜底")
+    void missingDataTypeMustDropAndCountTypeMissing() {
+        timeSeriesProperties.setEnabled(true);
+        when(livenessMapper.selectList(any())).thenReturn(List.of());
+        // 坐标存在但类型表为空（data_type 缺失）
+        when(pointMappingIndex.loadCoordinates(any()))
+            .thenReturn(Map.of(DEVICE, coordinates(Set.of("temperature"), null)));
+
+        service.ingest(req(point(DEVICE, "temperature", "23.5", 1_700_000_000_000L)));
+
+        verify(timeSeriesWriter, never()).writeAll(any());
+        assertThat(meterRegistry.get(AvailabilityServiceImpl.METRIC_TYPE_MISSING).counter().count())
+            .as("缺类型 ⇒ type_missing 计数").isEqualTo(1.0d);
+        assertThat(meterRegistry.get(AvailabilityServiceImpl.METRIC_NOT_NUMERIC).counter().count())
+            .isZero();
+        // 读数本身仍进最新值/可用率：丢弃只影响时序落列，不让设备看起来断了
+        verify(latestValueWriter).writeAll(any());
+    }
+
+    @Test
+    @DisplayName("★ task-23：声明数值但值不可解析 ⇒ 丢弃 + iot.timeseries.value.not_numeric（不落文本列）")
+    void notNumericValueMustDropAndCount() {
+        timeSeriesProperties.setEnabled(true);
+        when(livenessMapper.selectList(any())).thenReturn(List.of());
+        when(pointMappingIndex.loadCoordinates(any()))
+            .thenReturn(Map.of(DEVICE, coordinates(Set.of("temperature"), "int")));
+
+        service.ingest(req(point(DEVICE, "temperature", "abc", 1_700_000_000_000L)));
+
+        verify(timeSeriesWriter, never()).writeAll(any());
+        assertThat(meterRegistry.get(AvailabilityServiceImpl.METRIC_NOT_NUMERIC).counter().count())
+            .isEqualTo(1.0d);
+        assertThat(meterRegistry.get(AvailabilityServiceImpl.METRIC_TYPE_MISSING).counter().count())
+            .isZero();
+    }
+
+    @Test
+    @DisplayName("★ task-23：数值绝对值 > 2^53 ⇒ 仍写 value_double + precision_lost 计数（不换列、不丢弃）")
+    void beyondTwoPower53MustStayNumericAndCountPrecisionLoss() {
+        timeSeriesProperties.setEnabled(true);
+        when(livenessMapper.selectList(any())).thenReturn(List.of());
+        when(pointMappingIndex.loadCoordinates(any()))
+            .thenReturn(Map.of(DEVICE, coordinates(Set.of("temperature"), "long")));
+
+        service.ingest(req(point(DEVICE, "temperature", "9007199254740993", 1_700_000_000_000L)));
+
+        List<TimeSeriesPoint> points = pointCaptorValues();
+        assertThat(points).singleElement()
+            .satisfies(point -> assertThat(point.column()).isEqualTo(ValueColumn.NUMERIC));
+        assertThat(meterRegistry.get(AvailabilityServiceImpl.METRIC_PRECISION_LOST).counter().count())
+            .isEqualTo(1.0d);
+        assertThat(meterRegistry.get(AvailabilityServiceImpl.METRIC_NOT_NUMERIC).counter().count())
+            .isZero();
+    }
+
+    @Test
+    @DisplayName("★ task-23 不变量：同一类型多形态值必落同一列（007 不再因前导零落文本）")
+    void sameTypeMustAlwaysLandInSameColumn() {
+        timeSeriesProperties.setEnabled(true);
+        when(livenessMapper.selectList(any())).thenReturn(List.of());
+        when(pointMappingIndex.loadCoordinates(any()))
+            .thenReturn(Map.of(DEVICE, coordinates(Set.of("temperature"), "long")));
+
+        service.ingest(req(
+            point(DEVICE, "temperature", "007", 1_700_000_000_000L),
+            point(DEVICE, "temperature", "42", 1_700_000_000_100L)));
+
+        assertThat(pointCaptorValues()).hasSize(2)
+            .allSatisfy(point -> assertThat(point.column()).isEqualTo(ValueColumn.NUMERIC));
+    }
+
+    @Test
+    @DisplayName("★ task-23：string 类型 + 纯数字值 ⇒ value_text（类型权威、值形态无权）")
+    void stringTypeWithNumericLookingValueMustLandText() {
+        timeSeriesProperties.setEnabled(true);
+        when(livenessMapper.selectList(any())).thenReturn(List.of());
+        when(pointMappingIndex.loadCoordinates(any()))
+            .thenReturn(Map.of(DEVICE, coordinates(Set.of("serial"), "string")));
+
+        service.ingest(req(point(DEVICE, "serial", "123456", 1_700_000_000_000L)));
+
+        assertThat(pointCaptorValues()).singleElement()
+            .satisfies(point -> assertThat(point.column()).isEqualTo(ValueColumn.TEXT));
+        assertThat(meterRegistry.get(AvailabilityServiceImpl.METRIC_TYPE_MISSING).counter().count())
+            .isZero();
+    }
+
+    @Test
+    @DisplayName("★ task-23：同标识类型冲突（坐标级撞名）⇒ 类型不可用，按 type_missing 丢弃")
+    void conflictingDuplicateTypeMustDropAsTypeMissing() {
+        timeSeriesProperties.setEnabled(true);
+        when(livenessMapper.selectList(any())).thenReturn(List.of());
+        // dataTypeByCanonical 为空 + duplicateIdentifiers 含该标识 = PointMappingIndex 对类型冲突的产出
+        when(pointMappingIndex.loadCoordinates(any())).thenReturn(Map.of(DEVICE,
+            new PointMappingIndex.DeviceCoordinates(Map.of("temperature", "temperature"), Map.of(),
+                Set.of(), Set.of(), Set.of("temperature"), Map.of())));
+
+        service.ingest(req(point(DEVICE, "temperature", "23.5", 1_700_000_000_000L)));
+
+        verify(timeSeriesWriter, never()).writeAll(any());
+        assertThat(meterRegistry.get(AvailabilityServiceImpl.METRIC_TYPE_MISSING).counter().count())
+            .isEqualTo(1.0d);
     }
 
     @Test
@@ -1108,9 +1214,26 @@ class AvailabilityServiceImplTest {
      * @return 坐标索引（每个标识都是自身的形态）
      */
     private static PointMappingIndex.DeviceCoordinates coordinates(Set<String> identifiers) {
+        return coordinates(identifiers, "decimal");
+    }
+
+    /**
+     * 带物模型类型的坐标索引（task-23：落列由类型决定）。
+     *
+     * @param identifiers 标识集合
+     * @param dataType   这些标识的物模型类型 code；{@code null} = 类型缺失
+     * @return 坐标索引
+     */
+    private static PointMappingIndex.DeviceCoordinates coordinates(Set<String> identifiers, String dataType) {
         Map<String, String> canonicalByForm = new LinkedHashMap<>();
-        identifiers.forEach(identifier -> canonicalByForm.put(identifier, identifier));
+        Map<String, String> dataTypeByCanonical = new LinkedHashMap<>();
+        identifiers.forEach(identifier -> {
+            canonicalByForm.put(identifier, identifier);
+            if (dataType != null) {
+                dataTypeByCanonical.put(identifier, dataType);
+            }
+        });
         return new PointMappingIndex.DeviceCoordinates(canonicalByForm, Map.of(), Set.of(), Set.of(),
-            Set.of());
+            Set.of(), dataTypeByCanonical);
     }
 }

@@ -21,6 +21,7 @@ import cn.ypbin.admin.iot.timeseries.TimeSeriesPointResp;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesProperties;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesStore;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesWriter;
+import cn.ypbin.admin.iot.timeseries.ValueColumn;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -159,8 +160,8 @@ class IotDbTimeSeriesIT {
         long deviceId = 900001L;
         long ts = System.currentTimeMillis();
         writer.writeAll(List.of(
-            new TimeSeriesPoint(TENANT_ID, deviceId, PROPERTY_NUMERIC, "23.5", QUALITY, ts),
-            new TimeSeriesPoint(TENANT_ID, deviceId, PROPERTY_TEXT, "COOL", QUALITY, ts)));
+            new TimeSeriesPoint(TENANT_ID, deviceId, PROPERTY_NUMERIC, "23.5", QUALITY, ts, ValueColumn.NUMERIC),
+            new TimeSeriesPoint(TENANT_ID, deviceId, PROPERTY_TEXT, "COOL", QUALITY, ts, ValueColumn.TEXT)));
         assertThat(meterRegistry.get(IotDbTimeSeriesWriter.METRIC_FAILED).counter().count())
             .as("写入器失败是「只计数不抛」，故必须显式核对计数为 0，否则失败会伪装成「查询为空」")
             .isZero();
@@ -188,8 +189,8 @@ class IotDbTimeSeriesIT {
     void mustOverwriteValueAtSameTimestamp() {
         long deviceId = 900002L;
         long ts = System.currentTimeMillis();
-        writer.writeAll(List.of(new TimeSeriesPoint(TENANT_ID, deviceId, PROPERTY_NUMERIC, "1", QUALITY, ts)));
-        writer.writeAll(List.of(new TimeSeriesPoint(TENANT_ID, deviceId, PROPERTY_NUMERIC, "42", QUALITY, ts)));
+        writer.writeAll(List.of(new TimeSeriesPoint(TENANT_ID, deviceId, PROPERTY_NUMERIC, "1", QUALITY, ts, ValueColumn.NUMERIC)));
+        writer.writeAll(List.of(new TimeSeriesPoint(TENANT_ID, deviceId, PROPERTY_NUMERIC, "42", QUALITY, ts, ValueColumn.NUMERIC)));
 
         List<TimeSeriesPointResp> points = store.query(TENANT_ID, deviceId, PROPERTY_NUMERIC, ts, ts, LIMIT);
         assertThat(points).as("同刻重写是更新而不是追加：必须只有一行").hasSize(1);
@@ -203,8 +204,8 @@ class IotDbTimeSeriesIT {
         long ts = System.currentTimeMillis();
         // 坐标统一前写下的历史行：TAG 列是属性主键字符串（不是标识）
         writer.writeAll(List.of(
-            new TimeSeriesPoint(TENANT_ID, deviceId, LEGACY_PROPERTY, "1", QUALITY, ts),
-            new TimeSeriesPoint(TENANT_ID, deviceId, PROPERTY_NUMERIC, "2", QUALITY, ts + 1)));
+            new TimeSeriesPoint(TENANT_ID, deviceId, LEGACY_PROPERTY, "1", QUALITY, ts, ValueColumn.NUMERIC),
+            new TimeSeriesPoint(TENANT_ID, deviceId, PROPERTY_NUMERIC, "2", QUALITY, ts + 1, ValueColumn.NUMERIC)));
         assertThat(meterRegistry.get(IotDbTimeSeriesWriter.METRIC_FAILED).counter().count()).isZero();
 
         List<TimeSeriesPointResp> identifierOnly =
@@ -228,7 +229,7 @@ class IotDbTimeSeriesIT {
     void mustQueryWithSentinelRange() {
         long deviceId = 900003L;
         long ts = System.currentTimeMillis();
-        writer.writeAll(List.of(new TimeSeriesPoint(TENANT_ID, deviceId, PROPERTY_NUMERIC, "7", QUALITY, ts)));
+        writer.writeAll(List.of(new TimeSeriesPoint(TENANT_ID, deviceId, PROPERTY_NUMERIC, "7", QUALITY, ts, ValueColumn.NUMERIC)));
 
         List<TimeSeriesPointResp> points = store.query(TENANT_ID, deviceId, PROPERTY_NUMERIC, null, null, LIMIT);
         assertThat(points).as("哨兵区间必须能读回刚写入的点").hasSize(1);

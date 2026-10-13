@@ -85,9 +85,14 @@ class PointMappingIndexTest {
     }
 
     private static IotProperty property(Long id, String identifier) {
+        return property(id, identifier, null);
+    }
+
+    private static IotProperty property(Long id, String identifier, String dataType) {
         IotProperty row = new IotProperty();
         row.setId(id);
         row.setIdentifier(identifier);
+        row.setDataType(dataType);
         return row;
     }
 
@@ -248,6 +253,60 @@ class PointMappingIndexTest {
 
         assertThat(a.ambiguousForms()).contains(String.valueOf(PROP_HUMIDITY));
         assertThat(a.duplicateIdentifiers()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("★ task-23：同一次属性查询顺带取 data_type，产出 identifier → 类型（列 SSOT 的输入）")
+    void dataTypeMustBeLoadedInSamePropertyQuery() {
+        when(pointMappingMapper.selectList(any())).thenReturn(List.of(
+            mapping(DEVICE_A, PROP_TEMPERATURE), mapping(DEVICE_A, PROP_HUMIDITY)));
+        when(propertyMapper.selectList(any())).thenReturn(List.of(
+            property(PROP_TEMPERATURE, "temperature", "decimal"),
+            property(PROP_HUMIDITY, "humidity", "string")));
+
+        DeviceCoordinates a = index.loadCoordinates(Set.of(DEVICE_A)).get(DEVICE_A);
+
+        assertThat(a.dataTypeOf("temperature")).isEqualTo("decimal");
+        assertThat(a.dataTypeOf("humidity")).isEqualTo("string");
+        assertThat(a.dataTypeOf("unknown")).isNull();
+        // 属性查询只允许一次（与标识同一批取回）；若将来漏 select data_type，上面的 dataTypeOf 断言会先转红。
+        verify(propertyMapper, times(1)).selectList(any());
+    }
+
+    @Test
+    @DisplayName("★ task-23：同一标识的类型必须唯一且非空；缺失或冲突 ⇒ 类型不可用（不猜、不回落）")
+    void missingOrConflictingDataTypeMustBeUnavailable() {
+        when(pointMappingMapper.selectList(any())).thenReturn(List.of(
+            mapping(DEVICE_A, PROP_TEMPERATURE), mapping(DEVICE_A, PROP_HUMIDITY),
+            mapping(DEVICE_A, 9130099L)));
+        when(propertyMapper.selectList(any())).thenReturn(List.of(
+            // 同一标识 temperature：一条 decimal、一条 string ⇒ 冲突
+            property(PROP_TEMPERATURE, "temperature", "decimal"),
+            property(PROP_HUMIDITY, "temperature", "string"),
+            // 单条但 data_type 缺失 ⇒ 不可用
+            property(9130099L, "pressure", null)));
+
+        DeviceCoordinates a = index.loadCoordinates(Set.of(DEVICE_A)).get(DEVICE_A);
+
+        assertThat(a.dataTypeOf("temperature")).as("类型冲突 ⇒ 整体不可用").isNull();
+        assertThat(a.dataTypeOf("pressure")).as("类型缺失 ⇒ 不可用").isNull();
+        assertThat(a.canonicalize("pressure")).as("类型不影响坐标归一").isEqualTo("pressure");
+    }
+
+    @Test
+    @DisplayName("★ task-23：重复标识但类型一致 ⇒ 类型可用（不是所有撞名都要丢弃）")
+    void duplicateIdentifierWithSameTypeMustKeepType() {
+        when(pointMappingMapper.selectList(any())).thenReturn(List.of(
+            mapping(DEVICE_A, PROP_TEMPERATURE), mapping(DEVICE_A, PROP_HUMIDITY)));
+        when(propertyMapper.selectList(any())).thenReturn(List.of(
+            property(PROP_TEMPERATURE, "temperature", "decimal"),
+            property(PROP_HUMIDITY, "temperature", "decimal")));
+
+        DeviceCoordinates a = index.loadCoordinates(Set.of(DEVICE_A)).get(DEVICE_A);
+
+        assertThat(a.duplicateIdentifiers()).containsExactly("temperature");
+        assertThat(a.dataTypeOf("temperature")).as("类型一致 ⇒ 可继续写入（坐标撞名仍告警）")
+            .isEqualTo("decimal");
     }
 
     @Test

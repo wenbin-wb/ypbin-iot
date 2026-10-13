@@ -76,13 +76,13 @@ TCP 帧 byte[] ──► starter TcpSession（payload-format=key-value）
 | UTF-8 校验、`KEY=VALUE` 拆分、按 `raw_address`（= selector）取键 | **starter 0.3.0** `TcpValueSelector` | 由 `ypbin.iot.protocol.tcp.payload-format=key-value` 启用；失败以 BAD 质量 + `iot.tcp.*` 指标显式表达 |
 | **物模型类型规范化**（`int`/`long`/`decimal`/`bool`/文本） | **宿主** `cn.ypbin.admin.access.egress.PointValueNormalizer` | SDK 类注释明确「不做数据类型转换，类型属于宿主物模型语义」；见下「为什么不能删」 |
 | 线性缩放/偏移 | **宿主** `AccessReading.applyScale` | 只对 `Number`/`BigDecimal` 生效 ⇒ **依赖上一步** |
-| 落 `value_double` / `value_text` | iot 侧 `ReadingValueMapper` | 默认按值的**词法形态**判定（如 bool `1` 必须先变 `true/false`）；**物模型声明为 `string` ⇒ `forceText=true` 强制 `value_text`**（TCP 由 `PointValueNormalizer.Outcome` 置位、Modbus 由 `PointMappingDataListener` 置位，见 §4.5.6） |
+| 落 `value_double` / `value_text` | iot 侧 `ValueColumn.from(iot_property.data_type)` + `ReadingValueMapper` | **只由物模型 `data_type` 唯一决定**（task-23 §4.6）：int/long/decimal ⇒ `value_double`，其余 6 类 ⇒ `value_text`；**不再看值形态、不再有 `forceText`** |
 
 **🔴 为什么「类型规范化」不能随帧解析层一起删**（2026-10-13 复核，独立纠正）：
 
 1. `AccessReading.applyScale` 只吃 `Number`/`BigDecimal`。SDK 交付 `String` ⇒ 直接删会让
    `scaleFactor`/`offsetValue` **静默失效、读数错值**（不是格式问题）；
-2. `ReadingValueMapper` 按词法落列：bool `1/0` 必须先规范成 `true/false` 才落 `value_text`（与切换前一致）；
+2. **落列只由 `iot_property.data_type` 决定**（task-23 §4.6）：bool 无论值形态如何都落 `value_text`；数值类型落 `value_double`（不可解析 ⇒ 丢弃 + 计数，不落文本）；
 3. `int`/`decimal` 收到非数值、`bool` 收到非法形态、`dataType` 缺失/未知时，切换前是
    「丢弃 + 计数 + WARN（不猜）」；这条纪律必须保留。
 
@@ -423,6 +423,10 @@ string 要 `N` 个（1..32）⇒ 必须泛化为「按 `word_index` 收齐 N 个
 
 #### 4.5.6 值类型落地的实现落点与理由（完整口径：string ⇒ value_text）
 
+> ⚠️ **历史归档（task-23，2026-10-13）**：本节描述的 v3 `forceText` 透传通道（`Outcome.forceText` →
+> `AccessReading` → `ReadingObservationDto` → `TimeSeriesPoint` → `map(raw, forceText)`）**已整体删除**。
+> 落列现由 §4.6 的 `ValueColumn.from(data_type)` 唯一决定；本节仅保留当时的决策记录。
+
 **判据是物模型类型，不是值形态**：物模型声明为 `string` ⇒ **一律落 `value_text`**（TCP 与 Modbus 一致，
 不再按词法猜）。
 
@@ -458,6 +462,98 @@ Req/实体/DTO 字段注释与 `@Pattern/@Max`、DDL 列注释（007 + v1/v2 迁
 
 ---
 
+### 4.6 落列由物模型类型唯一决定（task-23，**已实现 2026-10-13**）
+
+> 目标：**替掉** §3/§4.5.6 的「按值形态猜列 + `forceText` 布尔补丁」。落列 `= f(iot_property.data_type)`，
+> **不再看值形态**；用户决策 D0.9（开发阶段不做向后兼容权衡、按最完美做法）。
+>
+> **实现状态（2026-10-13）**：`ValueColumn`（穷举 switch）· `ReadingValueMapper.map(raw, ValueColumn)` ·
+> `TimeSeriesPoint.column` 必填 · `PointMappingIndex` 同批取 `data_type` · `AvailabilityServiceImpl`
+> 类型解析与三个丢弃/精度指标（`type_missing`/`not_numeric`/`precision_lost`）· access/API 侧
+> `forceText` 通道全删。落地与验收见 `CHANGELOG.md`「未发布」。
+
+#### 4.6.1 缺陷（比"纯数字序列号被数值化"更根本）
+
+- 时序表只有 `value_double` / `value_text` 两列（`deploy/iotdb-init.sql`）。
+- 现 `ReadingValueMapper` 逐条按值形态猜列（trim / bool 文本 / 前导零→文本 / 整数超 2^53→文本 / 小数→double…）：
+  1. **同一属性的不同值可能落进不同列**（今天 `007`→text、明天 `42`→double）⇒ **按单列查询会静默漏数据**
+     （曲线/聚合/告警统计都中招）；
+  2. 判据是"值长得像什么"而不是"物模型说它是什么" ⇒ 违反本仓"不猜"纪律；v3 的 `forceText` 只对 string 生效，是补丁不是根治。
+
+#### 4.6.2 类型 → 列映射表（唯一真源 SSOT）
+
+| `data_type` | `value_double` | `value_text` |
+|---|---|---|
+| `int` / `long` / `decimal` | ✓ | |
+| `bool` / `string` / `enum` / `date_time` / `json_object` / `array` | | ✓ |
+
+- 实现：新增枚举 `ValueColumn`（`NUMERIC` / `TEXT`），`ValueColumn.from(ThingModelDataType)` 用**穷举 switch（无 default）**
+  ⇒ 将来新增第 10 类物模型类型时**编译失败**，强制更新本表。**这个穷举 switch 就是 SSOT 的守卫方式**：
+  它是"机器守着的映射表"，绝不允许退化成 `default -> 某个列` 的猜测。映射表只此一处，
+  `ReadingValueMapper`/写入器都不再持有第二份。
+- `bool` 落文本与本仓既有决定一致（`IOT-PLATFORM-DESIGN.md` §5.2.1「布尔存文本」）。
+
+#### 4.6.3 载体（强制、完全取代 `forceText`）
+
+- `TimeSeriesPoint` 的 `boolean forceText` → **必填 `ValueColumn column`**；删除 6 参构造（调用方必须给出类型）。
+- **删除** `AccessReading.forceText`、`ReadingObservationDto.forceText`、`PointValueNormalizer.Outcome.forceText`、
+  `HttpAccessReadingSink.setForceText`；`PointMappingDataListener.emit` 回到 3 参。**不并存两套**。
+- **删除** `ReadingValueMapper.map(raw)` 旧签名（不留"缺省按值猜"后门）；只保留
+  `map(raw, ValueColumn)`，且它只按给定列 materialize，不再决定列。
+
+#### 4.6.4 生产方枚举与类型来源（**必做复核**）
+
+**写 `iot.reading` 的唯一路径**：`AvailabilityServiceImpl.collectSeriesPoints` → `TimeSeriesWriter.writeAll`
+（唯一实现 `IotDbTimeSeriesWriter`）。`TimeSeriesPoint` 只在 `collectSeriesPoints` 一处构造。
+
+输入 `ReadingObservationDto` 有两个来源，**都汇聚到 `AvailabilityServiceImpl.ingest`**：
+1. access HTTP 上报（`HttpAccessReadingSink.toObservation`）；
+2. MQTT 入站（`MqttReadingIngestServiceImpl.apply` → `availabilityService.ingest`）。
+
+`ingest` 已经调用 `PointMappingIndex.loadCoordinates` 做**坐标归一 + 成员校验**；该索引已批量取
+`iot_property`（`id`+`identifier`）⇒ 本次在**同一次查询**里多取 `data_type`，产出
+`dataTypeByCanonical`（identifier → `iot_property.data_type`）。`collectSeriesPoints` 用归一后的 propertyId 查到类型，
+⇒ **所有生产方都拿得到权威类型**（SSOT = `iot_property.data_type`，**不**在 access→iot wire 上带类型，避免第二个不可信来源）。
+
+**不写 reading 的写者（澄清，不算生产方）**：`IotEventServiceImpl`（事件表）、`ShadowReportedWriter`（影子 JSON）、
+`RedisLatestValueWriter`（最新值 hash，字符串存储、无列）。它们不经过 `TimeSeriesWriter`。
+
+**结论：都拿得到 ⇒ 载体必填、彻底删除"按值猜"分支。** 若某坐标是重复标识且**类型冲突**、或 `data_type` 缺失/未知
+⇒ **显式失败**（丢弃 + 计数 `iot.timeseries.value.type_missing` + **按点位节流的 WARN**（带 `deviceId`/`propertyId`），
+不猜、不落文本兜底）。
+
+#### 4.6.5 ±2^53 边界处置建议（请 Lead 拍板）
+
+`int`/`long`/`decimal` 的整数绝对值超过 2^53 时，`value_double` 无法精确表示。**已拍板（Lead，2026-10-13）：**
+
+- 仍写 `value_double` + 计数 **`iot.timeseries.value.precision_lost`** + **按点位节流的 WARN 日志**
+  （带 `deviceId`/`propertyId` 与**原始值字符串**，让人能定位到是哪条；同一点位不刷屏）；
+- **文档处置指引**：这类值应把属性建模为 `string`（而不是把 long 当 ID 用）；
+- **为什么选"近似 + 计数 + WARN"而不是 BAD/丢弃**：`value_double` 是 `int`/`long`/`decimal` 的声明列，
+  丢弃会同时被**断档与可用率统计**吃进去——把一个"建模问题"变成"设备看起来断了"，那是更坏的误导；
+  近似 + 计数 + WARN 既保住"同一属性同一列"，又让精度损失**可见可定位**。
+- 对照：`enum/date_time/json_object/array` 一律文本，不涉及该问题；
+- 明确拒绝的替代（登记）：BAD/丢弃会造成上述缺口，本版不采用。
+
+同时统一"值不可表示"的显式失败：数值声明但值不可解析（如 `"abc"` 送到 `int` 点）⇒ **丢弃 + 计数
+`iot.timeseries.value.not_numeric`**（不猜、不落文本列）。
+
+#### 4.6.6 不变量与门禁
+
+- **不变量**：同一个属性的所有值必然落**同一列**（列只依赖 `data_type`，与值无关）。
+- 测试：9 类 × 多形态值（`123456`/`007`/`1.5`/`true`/`2026-10-13`/`{"a":1}`/`[1,2]`/``）的**目标列矩阵**；
+  **同类型多值列恒定**（含 2^53 边界）；`ValueColumn.from` 穷举自检（无 default，新增类型编译失败）。
+- 读侧：`IotDbTimeSeriesStore` 已同时 `SELECT value_double, value_text`（:50/:164/:166），
+  两种列的历史行仍可读；本重构**只改写入侧不变量、不动结构**。
+
+#### 4.6.7 未支持 / 边界
+
+- **不改表结构**（仍 `value_double`/`value_text` 两列），不加第三列/编码列。
+- `enum/date_time/json_object/array` 的**值级规范化**不在本重构（列固定文本；值的规范化仍由生产方负责）。
+- 其它类型→列映射（如 `decimal`→text）不支持；要改须评审并更新 §4.6.2 唯一映射表。
+
+---
+
 ## 5. 职责切分、删除条件与 starter 反馈（**必读**）
 
 ### 5.1 删除条件如何被满足（2026-10-13）
@@ -475,7 +571,8 @@ starter **v0.3.0（2026-10-12）**交付了 `ypbin.iot.protocol.tcp.payload-form
 
 `TcpValueSelector` 的类注释原文：**「本类不做数据类型转换，帧里的值以 `String` 交付——类型属于宿主物模型语义。」**
 这是 starter 的**有意边界**，不是缺口。于是「文本 → 物模型类型」必须留在宿主，理由见 §3 的四点
-（`applyScale` 只吃 `Number`/`BigDecimal`、`ReadingValueMapper` 词法落列、`NOT_NUMERIC` 拒绝语义）。
+（`applyScale` 只吃 `Number`/`BigDecimal`、值级规范化/拒绝语义）。**落列不在这里**：它由 iot 侧
+`ValueColumn.from(iot_property.data_type)` 唯一决定（task-23 §4.6），宿主不再传递任何列标记。
 落地为 `cn.ypbin.admin.access.egress.PointValueNormalizer`（与删除前的 `canonicalize` 逐字等价）。
 
 ### 5.3 保留的契约

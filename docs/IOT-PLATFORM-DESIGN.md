@@ -585,12 +585,13 @@ CREATE TABLE reading (
 （表级 TTL 优先于库级，且表级改法有两条一致的一手来源）。清理副作用（TTL 过期是**异步**删除，物理回收等 compaction）
 要在监控里看（写失败/查询失败/表大小）。
 
-**类型映射的两条限制（登记）**：① **前导零整数**（如 `007`）与**全角数字**按文本列处理——前者是编码/序列号，
-落数值列会丢形态；后者不是协议侧的数据形态，且与数值解析路径口径不一致（实现只认 ASCII `0-9`）；
-② **物模型类型覆盖**（类型判定与词法形态冲突时以物模型为准）：**已按完整口径实现（2026-10-13）——
-物模型声明为 `string` ⇒ 一律落 `value_text`（TCP 与 Modbus 一致，不再按词法猜）**：显式 `forceText`
-标记由 access 在已知 `data_type`/`register_format` 时置位，原样落文本列、不逐批查库，见
-`VALUE-DECODE-DESIGN.md` §4.5.6。其余类型的物模型覆盖仍待后续增量（当前仍按词法形态落列）。
+**类型映射（2026-10-13 起：落列由物模型类型唯一决定）**：落列 `= f(iot_property.data_type)`，
+不再看值形态——`int`/`long`/`decimal` ⇒ `value_double`，其余 6 类 ⇒ `value_text`；唯一映射表见
+`VALUE-DECODE-DESIGN.md` §4.6.2，且由穷举 switch 做编译期守卫。由此：前导零整数（如 `007`）在
+**声明为数值**时落 `value_double`（旧词法启发式已删除）；要保留 `007` 形态应把属性建模为 `string`。
+声明数值但值不可解析（含全角数字）⇒ 丢弃 + 计数 `iot.timeseries.value.not_numeric`，不落文本兜底；
+类型缺失/冲突 ⇒ 丢弃 + `iot.timeseries.value.type_missing`；整数绝对值 > 2^53 ⇒ 仍写 `value_double`
++ 计数 `iot.timeseries.value.precision_lost` + 按点位节流 WARN。
 
 **写入语句（已核实）**：`INSERT INTO <表> [(列...)] VALUES (值...)`，支持**多行 VALUES**（官方同一文档 §1.4）；
 未指定的列自动填 `null`；不存在的列会报 `COLUMN_NOT_EXIST(616)`，类型不匹配报 `DATA_TYPE_MISMATCH(614)`。

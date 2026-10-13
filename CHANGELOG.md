@@ -8,6 +8,22 @@
 
 ### 变更
 
+- **落列改由物模型 `data_type` 唯一决定，彻底删除 `forceText` 通道（task-23，行为变更）**
+  （`ypbin-service/ypbin-iot/**`、`ypbin-service/ypbin-access/**`、`ypbin-service-api/ypbin-iot-api/**`、`docs/**`）：
+  新增唯一映射表 `ValueColumn.from(data_type)`（穷举 switch、无 default：新增第 10 类物模型类型会**编译失败**）——
+  `int`/`long`/`decimal` ⇒ `value_double`，`bool`/`string`/`enum`/`date_time`/`json_object`/`array` ⇒ `value_text`。
+  `ReadingValueMapper` 只按给定列物化，`map(raw)`/`map(raw, forceText)` 旧签名与全部按值形态猜列
+  （前导零、bool 文本、整数 > 2^53 转文本等）删除；`TimeSeriesPoint.column` 必填，`AccessReading`/
+  `ReadingObservationDto`/`PointValueNormalizer.Outcome`/`PointMappingDataListener.emit` 的 `forceText` 全部删除。
+  类型来源 = `iot_property.data_type`，由 `PointMappingIndex` 与坐标**同一批查询**取回（不在 access→iot wire
+  上重复带类型，避免第二个不可信来源）。
+  **显式失败口径**：类型缺失/未知或同标识类型冲突 ⇒ 丢弃 + `iot.timeseries.value.type_missing` + 按点位节流 WARN；
+  声明数值但值不可解析 ⇒ 丢弃 + `iot.timeseries.value.not_numeric`（不落文本兜底）；整数绝对值 > 2^53 ⇒
+  **仍写 `value_double`** + `iot.timeseries.value.precision_lost` + 按点位节流 WARN（带 `deviceId`/`propertyId`/
+  原始值字符串；此类数据应把属性建模为 `string`；**不采用 BAD/丢弃**，避免把建模问题算成「设备看起来断了」）。
+  **不变量**：同一属性的所有值必然落同一列（判据只依赖类型）。
+  本条目**取代**下方「TCP `data_type=string` 一律落 `value_text`（issue #253）」的窄口径实现——其行为被
+  「按声明类型落列」完整覆盖，`forceText` 补丁不再存在。
 - **TCP `data_type=string` 一律落 `value_text`（issue #253，行为变更）**（`ypbin-service/ypbin-access/**`、
   `ypbin-service/ypbin-iot/**`、`ypbin-service-api/ypbin-iot-api/**`、`docs/**`）：
   `PointValueNormalizer` 的 `data_type=string` 分支显式置 `forceText=true` ⇒ 纯数字序列号（如 `SN=123456`）

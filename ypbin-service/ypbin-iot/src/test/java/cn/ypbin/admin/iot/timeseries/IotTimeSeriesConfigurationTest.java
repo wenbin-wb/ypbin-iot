@@ -84,8 +84,8 @@ class IotTimeSeriesConfigurationTest {
     void loggingWriterMustWarnOnce() {
         LoggingTimeSeriesWriter writer = new LoggingTimeSeriesWriter("未启用");
         writer.writeAll(List.of());
-        writer.writeAll(List.of(new TimeSeriesPoint(1L, 2L, "p", "1", "GOOD", 1L)));
-        writer.writeAll(List.of(new TimeSeriesPoint(1L, 2L, "p", "2", "GOOD", 2L)));
+        writer.writeAll(List.of(new TimeSeriesPoint(1L, 2L, "p", "1", "GOOD", 1L, ValueColumn.NUMERIC)));
+        writer.writeAll(List.of(new TimeSeriesPoint(1L, 2L, "p", "2", "GOOD", 2L, ValueColumn.NUMERIC)));
         // 断言点是「不抛异常且可重复调用」——告警频率由 AtomicBoolean 保证（日志内容不便断言）
         assertThatCode(() -> writer.writeAll(List.of())).doesNotThrowAnyException();
     }
