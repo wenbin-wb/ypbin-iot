@@ -20,12 +20,14 @@ import cn.ypbin.admin.iot.entity.IotDevice;
 import cn.ypbin.admin.iot.entity.IotEventLog;
 import cn.ypbin.admin.iot.entity.IotMqttIngestReceipt;
 import cn.ypbin.admin.iot.entity.OutageEvent;
+import cn.ypbin.admin.iot.enums.MqttReceiptStatus;
 import cn.ypbin.admin.iot.mapper.IotCommandInstanceMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.IotEventLogMapper;
 import cn.ypbin.admin.iot.mapper.IotMqttIngestReceiptMapper;
 import cn.ypbin.admin.iot.mapper.OutageEventMapper;
 import cn.ypbin.admin.iot.model.query.DeviceTraceQuery;
+import cn.ypbin.admin.iot.mqtt.MqttIngestRejectReason;
 import cn.ypbin.admin.iot.model.resp.DeviceTraceItemResp;
 import cn.ypbin.admin.iot.model.resp.DeviceTraceResp;
 import cn.ypbin.admin.iot.trace.DeviceTraceLimits;
@@ -47,7 +49,8 @@ import org.junit.jupiter.api.Test;
  * 的硬约束</b>：</p>
  * <ol>
  *   <li>**一行 = 一条目**（§3.3.3）——一条命令实例**不得**展开成三个 DOWN 条目；</li>
- *   <li>**不造不可得的阶段**（§3.3）——时间线里**不得**出现 `UP_PERSISTED`/`UP_DISCARDED`；</li>
+ *   <li>**阶段严格按二批回执行字段推导**——`receipt_status=rejected` ⟶ `UP_DISCARDED`、
+ *       `persisted_at` 非空 ⟶ `UP_PERSISTED`、存量旧行 ⟶ `UP_RECEIVED`；</li>
  *   <li>**上行受理不标 OK**（§3.3.2）——一期不能区分"已受理"与"已落库"，标 OK 等于对用户断言；</li>
  *   <li>**超窗显式报错、超量显式标记**（§7.2 判据 6）——都不静默；</li>
  *   <li>**空结果返回空集合**（仓内红线）。</li>
@@ -176,8 +179,8 @@ class DeviceTraceServiceImplTest {
     }
 
     @Test
-    @DisplayName("🔴 时间线里绝不出现一期不可得的阶段（UP_PERSISTED / UP_DISCARDED）")
-    void unimplementableStagesMustNeverAppear() {
+    @DisplayName("🔴 存量旧行（无 receipt_status/persisted_at）回落 UP_RECEIVED 且不标 OK（老口径不变）")
+    void legacyReceiptMustFallBackToUpReceived() {
         LocalDateTime t = LocalDateTime.now().minusMinutes(1);
         IotMqttIngestReceipt receipt = new IotMqttIngestReceipt();
         receipt.setId(7L);
@@ -190,14 +193,96 @@ class DeviceTraceServiceImplTest {
 
         assertThat(resp.getItems()).hasSize(1);
         assertThat(resp.getItems().get(0).getStage()).isEqualTo(TraceStage.UP_RECEIVED.getCode());
-        assertThat(TraceStage.values())
-            .as("枚举里就不该有这两个阶段——没有取值就没有地方塞假数据")
-            .noneMatch(stage -> stage.getCode().contains("persisted")
-                || stage.getCode().contains("discarded"));
+        assertThat(resp.getItems().get(0).getOutcome())
+            .as("存量旧行无法区分已受理与已落库，不得标 OK")
+            .isEqualTo(TraceOutcome.UNKNOWN.getCode());
         assertThat(resp.isUpstreamTraceUnavailable())
-            .as("必须如实告知上行链路有看不到的断点")
+            .as("HTTP 通道没有回执，这条能力边界必须如实告知")
             .isTrue();
         assertThat(resp.getUpstreamTraceNote()).isNotBlank();
+    }
+
+    @Test
+    @DisplayName("二批：accepted 且已落库 ⟶ UP_PERSISTED / OK，并带回 6 列")
+    void persistedReceiptMustExposeBatchFields() {
+        when(receiptMapper.selectList(any())).thenReturn(List.of(
+            receipt(MqttReceiptStatus.ACCEPTED.getCode(), 3, 3, LocalDateTime.now().minusSeconds(30),
+                null, null)));
+
+        DeviceTraceResp resp = service.timeline(1L, new DeviceTraceQuery());
+
+        DeviceTraceItemResp item = resp.getItems().get(0);
+        assertThat(item.getStage()).isEqualTo(TraceStage.UP_PERSISTED.getCode());
+        assertThat(item.getOutcome()).isEqualTo(TraceOutcome.OK.getCode());
+        assertThat(item.getReceiptStatus()).isEqualTo(MqttReceiptStatus.ACCEPTED.getCode());
+        assertThat(item.getReceivedCount()).isEqualTo(3);
+        assertThat(item.getPersistedRows()).isEqualTo(3);
+        assertThat(item.getPersistedAt()).isNotNull();
+        assertThat(item.getAdvice()).as("二批定位规则由前端推导，后端不重复一份口径").isNull();
+    }
+
+    @Test
+    @DisplayName("二批：accepted 但部分丢弃 ⟶ UP_PERSISTED / FAILED，带原因码与明细")
+    void partialReceiptMustBeFailed() {
+        when(receiptMapper.selectList(any())).thenReturn(List.of(
+            receipt(MqttReceiptStatus.ACCEPTED.getCode(), 5, 3, LocalDateTime.now().minusSeconds(30),
+                MqttIngestRejectReason.NO_ACCEPTED_ITEM.getCode(), "p4,p5")));
+
+        DeviceTraceResp resp = service.timeline(1L, new DeviceTraceQuery());
+
+        DeviceTraceItemResp item = resp.getItems().get(0);
+        assertThat(item.getStage()).isEqualTo(TraceStage.UP_PERSISTED.getCode());
+        assertThat(item.getOutcome()).isEqualTo(TraceOutcome.FAILED.getCode());
+        assertThat(item.getErrorCode()).isEqualTo(MqttIngestRejectReason.NO_ACCEPTED_ITEM.getCode());
+        assertThat(item.getDiscardDetail()).isEqualTo("p4,p5");
+    }
+
+    @Test
+    @DisplayName("二批：rejected ⟶ UP_DISCARDED / FAILED（原因码进 errorCode，供前端规则与展示）")
+    void rejectedReceiptMustBeDiscardedStage() {
+        when(receiptMapper.selectList(any())).thenReturn(List.of(
+            receipt(MqttReceiptStatus.REJECTED.getCode(), 4, 0, null,
+                MqttIngestRejectReason.NO_ACCEPTED_ITEM.getCode(), "p1,p2,p3,p4")));
+
+        DeviceTraceResp resp = service.timeline(1L, new DeviceTraceQuery());
+
+        DeviceTraceItemResp item = resp.getItems().get(0);
+        assertThat(item.getStage()).isEqualTo(TraceStage.UP_DISCARDED.getCode());
+        assertThat(item.getDirection()).isEqualTo(TraceDirection.UP.getCode());
+        assertThat(item.getOutcome()).isEqualTo(TraceOutcome.FAILED.getCode());
+        assertThat(item.getReceiptStatus()).isEqualTo(MqttReceiptStatus.REJECTED.getCode());
+        assertThat(item.getPersistedRows()).isZero();
+        assertThat(item.getPersistedAt()).as("整批被拒没有落库时刻").isNull();
+        assertThat(item.getErrorCode()).isEqualTo(MqttIngestRejectReason.NO_ACCEPTED_ITEM.getCode());
+        assertThat(item.getDiscardDetail()).isEqualTo("p1,p2,p3,p4");
+    }
+
+    /**
+     * 构造一条二批回执行。
+     *
+     * @param status       receipt_status
+     * @param receivedCount 本批收到条数
+     * @param persistedRows 实际落库条数
+     * @param persistedAt  落库时刻（可空）
+     * @param discardReason 丢弃原因码（可空）
+     * @param discardDetail 丢弃明细（可空）
+     * @return 回执行
+     */
+    private static IotMqttIngestReceipt receipt(String status, Integer receivedCount,
+                                                Integer persistedRows, LocalDateTime persistedAt,
+                                                String discardReason, String discardDetail) {
+        IotMqttIngestReceipt row = new IotMqttIngestReceipt();
+        row.setId(7L);
+        row.setDeviceId(1L);
+        row.setItemCount(persistedRows);
+        row.setReceiptStatus(status);
+        row.setReceivedCount(receivedCount);
+        row.setPersistedRows(persistedRows);
+        row.setPersistedAt(persistedAt);
+        row.setDiscardReason(discardReason);
+        row.setDiscardDetail(discardDetail);
+        row.setCreateTime(LocalDateTime.now().minusMinutes(1));
+        return row;
     }
 
     @Test
