@@ -1,0 +1,165 @@
+name: Dependency Vulnerability Gate
+
+# ── 为什么需要本工作流（issue #237）──────────────────────────────────────────
+# 本仓此前没有任何依赖漏洞门禁：Dependabot 只负责“开 PR 升级”，不阻断“已含已知 CVE 的依赖”被合并。
+# 本仓已实测 GitHub Dependency Review **不可用**（issue #237：dependency-graph compare 恒 403，
+# 即便 PATCH security_and_analysis 打开依赖图仍 403），故不采用 dependency-review-action（方案 A），
+# 改采自包含的 OWASP Dependency-Check（方案 B）——它不依赖任何 GitHub 安全特性。
+#
+# 为什么是**独立新工作流**而不是改 ci.yml：按 SYNC.md 第二节，admin 的既有工作流（ci/codeql/release）
+# 属“明确不动”，新增独立文件零同步冲突面（本仓既有做法）。
+#
+# 判定：CVSS >= 7 即判红（-DfailBuildOnCVSS=7）。
+# 防“随机红”的核心设计（离线 / NVD 限流下仍可给出结论）：
+#   1) 漏洞库（NVD）单独缓存：actions/cache 按 ISO 周缓存 dataDirectory，跨 run 复用；
+#   2) 更新与扫描分离：更新步骤 best-effort（continue-on-error），扫描步骤 autoUpdate=false 纯离线；
+#   3) 冷缓存且更新失败时**显式判红**（避免空库静默放行），并给一次性修复指引；
+#   4) 关闭 OSS Index / RetireJS（两者在扫描期联网、易限流），只保留可缓存的 NVD 数据源。
+#
+# 数据源与缓存策略、本地复现命令、报告阅读与抑制规则政策：见 docs/OPS-DEPENDENCY-VULN-GATE.md。
+on:
+  workflow_dispatch:
+    inputs:
+      update_vulnerability_db:
+        description: "先更新 NVD 漏洞库（冷缓存/需要最新数据时勾选；默认勾选）"
+        type: boolean
+        default: true
+      scan_scope:
+        description: "只扫描指定模块（Maven -pl，如 ypbin-service/ypbin-iot）；留空=全反应堆"
+        type: string
+        default: ""
+  schedule:
+    # 每周一 04:00 UTC 刷新漏洞库并全量复扫（与 codeql.yml 的 03:00 错开）
+    - cron: "0 4 * * 1"
+  push:
+    branches: [main]
+    paths:
+      - pom.xml
+      - "**/pom.xml"
+      - .github/workflows/dependency-vuln-gate.yml
+      - deploy/dependency-check-suppressions.xml
+  pull_request:
+    branches: [main]
+    paths:
+      - pom.xml
+      - "**/pom.xml"
+      - .github/workflows/dependency-vuln-gate.yml
+      - deploy/dependency-check-suppressions.xml
+
+permissions:
+  contents: read
+  # SARIF 上传到 Code Scanning（尽力而为）；未开启代码扫描时该步 continue-on-error 兜底
+  security-events: write
+
+concurrency:
+  group: dependency-vuln-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ODC_VERSION: "13.0.0"
+  ODC_DATA_DIR: ${{ github.workspace }}/.dependency-check-data
+  ODC_SUPPRESSIONS: deploy/dependency-check-suppressions.xml
+
+jobs:
+  dependency-check:
+    name: OWASP Dependency-Check（CVSS >= 7 失败）
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7
+
+      - name: 配置 JDK 21（带 Maven 缓存）
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: 计算漏洞库缓存键（ISO 周）
+        id: cachekey
+        run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+
+      - name: 恢复 NVD 漏洞库缓存（离线扫描的数据来源）
+        id: restore
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ env.ODC_DATA_DIR }}
+          key: odc-nvd-${{ runner.os }}-${{ steps.cachekey.outputs.week }}
+          restore-keys: |
+            odc-nvd-${{ runner.os }}-
+
+      - name: 更新 NVD 漏洞库（尽力而为；失败不判红，用缓存旧库继续离线扫描）
+        id: update
+        # PR 不更新（fork PR 拿不到 secret；同仓 PR 也避免与 main 的缓存写冲突），只用 main 的缓存离线扫
+        if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.update_vulnerability_db)
+        continue-on-error: true
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+        run: |
+          set -euo pipefail
+          args=( -B -ntp
+                 -DdataDirectory="$ODC_DATA_DIR"
+                 -DretireJsAnalyzerEnabled=false )
+          if [ -n "${NVD_API_KEY:-}" ]; then
+            # 用“环境变量名”而不是把 Key 写进命令行：避免 Key 出现在 Maven 调试日志里
+            args+=( -DnvdApiKeyEnvironmentVariable=NVD_API_KEY )
+            echo "已配置 NVD_API_KEY（NVD API 配额更高、更新更快）"
+          else
+            echo "::warning::未配置 NVD_API_KEY：NVD API 按无 Key 配额限速，首次全量更新可能很慢"
+          fi
+          mvn org.owasp:dependency-check-maven:${ODC_VERSION}:update-only "${args[@]}"
+
+      - name: 保存 NVD 漏洞库缓存（即使上一步失败也保存已有副本）
+        if: always() && github.event_name != 'pull_request'
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.ODC_DATA_DIR }}
+          key: odc-nvd-${{ runner.os }}-${{ steps.cachekey.outputs.week }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: 断言漏洞库可用（防“空库静默放行”）
+        run: |
+          set -euo pipefail
+          db="$ODC_DATA_DIR/odc.mv.db"
+          if [ ! -s "$db" ]; then
+            echo "::error::未找到可用的 NVD 漏洞库（$db）——离线/限流下无法给出可信的依赖漏洞结论，拒绝静默放行。"
+            echo "::error::修复：① 在仓库 Settings -> Secrets and variables -> Actions 配置 NVD_API_KEY（NVD 官网免费申请）；② 重跑本工作流并勾选 update_vulnerability_db=true 预热缓存。"
+            exit 1
+          fi
+          echo "漏洞库：$db（$(du -h "$db" | cut -f1)）"
+
+      - name: 生成依赖漏洞报告（CVSS >= 7 判失败）
+        run: |
+          set -euo pipefail
+          scope_args=()
+          scope="${{ inputs.scan_scope }}"
+          if [ -n "$scope" ]; then scope_args=( -pl "$scope" ); fi
+          mvn -B -ntp "${scope_args[@]}" -DskipTests \
+            org.owasp:dependency-check-maven:${ODC_VERSION}:aggregate \
+            -DautoUpdate=false \
+            -DdataDirectory="$ODC_DATA_DIR" \
+            -DoutputDirectory="$GITHUB_WORKSPACE/target/dependency-check-report" \
+            -DfailBuildOnCVSS=7 \
+            -DfailOnError=true \
+            -DfailBuildOnUnusedSuppressionRule=false \
+            -DossIndexAnalyzerEnabled=false \
+            -DretireJsAnalyzerEnabled=false \
+            -Dformats=HTML,JSON,SARIF \
+            -DsuppressionFiles="$ODC_SUPPRESSIONS"
+
+      - name: 上传报告（无论成败都上传，供定级与留痕）
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dependency-check-report
+          path: target/dependency-check-report/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: 上传 SARIF 到 Code Scanning（尽力而为；失败不影响门禁结论）
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: target/dependency-check-report/dependency-check-report.sarif

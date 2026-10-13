@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  dependency-check 抑制规则（suppressions）——本仓唯一一份，纳入版本管理。
+  用法：.github/workflows/dependency-vuln-gate.yml 以
+        -DsuppressionFiles=deploy/dependency-check-suppressions.xml 传入。
+  纪律（与 SYNC.md 的“禁静默降级”同源）：
+    1) 只抑制“误报（FP）”或“已评估并接受的风险（accepted risk）”，
+       不抑制“已知该修、暂不修”的漏洞（那是在藏问题，不是在治理问题）；
+    2) 每条必须写 <notes>：CVE/GHSA 编号 + 判定（FP/接受）+ 理由 + 复核人 + 复核日期；
+    3) 工作流已设 -DfailBuildOnUnusedSuppressionRule=false（不因“规则没命中”随机判红），
+       但人工必须定期清理失效/过期规则，否则抑制会慢慢变成“黑洞”；
+    4) 可用 <suppress until="YYYY-MM-DDZ"> 给“接受的风险”设到期日，到期自动失效。
+  政策与示例见 docs/OPS-DEPENDENCY-VULN-GATE.md。
+-->
+<suppressions xmlns="https://jeremylong.github.io/DependencyCheck/dependency-suppression.1.4.xsd"
+              xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+              xsi:schemaLocation="https://jeremylong.github.io/DependencyCheck/dependency-suppression.1.4.xsd
+                                  https://dependency-check.github.io/DependencyCheck/dependency-suppression.1.4.xsd">
+  <!--
+    当前为空（尚无经确认的误报/接受项）。需要时按下述格式取消注释并填真实信息：
+
+    <suppress until="2027-01-31Z">
+      <notes><![CDATA[
+        CVE-2099-00001 —— 判定：误报（FP）。理由：该 CVE 只影响 <受影响条件>，本仓在 <证据> 下不满足。
+        复核人：<name>；复核日期：2026-10-13；下次复核：2027-01-31。
+      ]]></notes>
+      <packageUrl regex="true">^pkg:maven/<groupId>/<artifactId>@.*$</packageUrl>
+      <cve>CVE-2099-00001</cve>
+    </suppress>
+  -->
+</suppressions>
