@@ -9,6 +9,8 @@
  */
 package cn.ypbin.admin.iot.platform;
 
+import cn.ypbin.admin.iot.lock.LockNames;
+import cn.ypbin.admin.iot.lock.TaskLockGuard;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -36,14 +38,19 @@ public class PlatformAlertEvaluator {
 
     private final PlatformAlertService alertService;
 
-    public PlatformAlertEvaluator(PlatformAlertService alertService) {
+    private final TaskLockGuard taskLockGuard;
+
+    public PlatformAlertEvaluator(PlatformAlertService alertService, TaskLockGuard taskLockGuard) {
         this.alertService = alertService;
+        this.taskLockGuard = taskLockGuard;
     }
 
     /** 周期判定（间隔由 `ypbin.platform-alert.evaluate-interval-ms` 控制，默认 30s）。 */
     @Scheduled(fixedDelayString = "${ypbin.platform-alert.evaluate-interval-ms:30000}",
         initialDelayString = "${ypbin.platform-alert.initial-delay-ms:20000}")
     public void evaluate() {
-        alertService.evaluateOnce();
+        taskLockGuard.runExclusively(LockNames.PLATFORM_ALERT_EVALUATE, () -> {
+            alertService.evaluateOnce();
+        });
     }
 }

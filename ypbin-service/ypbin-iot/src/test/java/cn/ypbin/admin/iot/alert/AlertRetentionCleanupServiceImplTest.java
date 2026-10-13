@@ -19,6 +19,10 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import cn.ypbin.admin.iot.lock.DistributedLock;
+import cn.ypbin.admin.iot.lock.LockNames;
+import cn.ypbin.admin.iot.lock.LockTestSupport;
+import cn.ypbin.admin.iot.lock.TaskLockGuard;
 import cn.ypbin.admin.iot.mapper.DeviceLivenessMapper;
 import cn.ypbin.admin.iot.mapper.IotAlertInstanceMapper;
 import cn.ypbin.admin.iot.mapper.IotAlertNotificationMapper;
@@ -50,6 +54,8 @@ class AlertRetentionCleanupServiceImplTest {
 
     private AlertRetentionCleanupServiceImpl service;
 
+    private SimpleMeterRegistry registry;
+
     @BeforeEach
     void setUp() {
         properties = new AlertProperties();
@@ -57,8 +63,27 @@ class AlertRetentionCleanupServiceImplTest {
         notificationMapper = mock(IotAlertNotificationMapper.class);
         DeviceLivenessMapper livenessMapper = mock(DeviceLivenessMapper.class);
         when(livenessMapper.selectNow()).thenReturn(NOW);
+        registry = new SimpleMeterRegistry();
         service = new AlertRetentionCleanupServiceImpl(instanceMapper, notificationMapper, livenessMapper,
-            properties, new AlertMetrics(new SimpleMeterRegistry()));
+            properties, new AlertMetrics(registry),
+            LockTestSupport.guard(LockTestSupport.properties(), registry));
+    }
+
+    @Test
+    @DisplayName("★ 多节点（#220）：锁被另一实例持有时本轮跳过，不删任何数据")
+    void skipsWhenLockHeldByAnotherInstance() {
+        cn.ypbin.admin.iot.lock.LockProperties lockProperties = LockTestSupport.properties();
+        DistributedLock sharedLock = LockTestSupport.inMemoryLock(lockProperties,
+            new LockTestSupport.MutableClock(0L));
+        org.assertj.core.api.Assertions.assertThat(
+            sharedLock.tryAcquire(lockProperties.getKeyPrefix() + LockNames.ALERT_RETENTION_CLEANUP))
+            .isNotNull();
+        AlertRetentionCleanupServiceImpl locked = new AlertRetentionCleanupServiceImpl(
+            instanceMapper, notificationMapper, mock(DeviceLivenessMapper.class), properties,
+            new AlertMetrics(registry), LockTestSupport.guard(sharedLock, lockProperties, registry));
+
+        assertThat(locked.cleanupOnce().skipped()).isTrue();
+        verify(instanceMapper, never()).deleteResolvedByIds(anyList());
     }
 
     @Test

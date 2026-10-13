@@ -9,6 +9,8 @@
  */
 package cn.ypbin.admin.iot.alert;
 
+import cn.ypbin.admin.iot.lock.LockNames;
+import cn.ypbin.admin.iot.lock.TaskLockGuard;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -30,14 +32,20 @@ public class AlertOutageScanner {
 
     private final AlertOutageMappingService outletMappingService;
 
-    public AlertOutageScanner(AlertOutageMappingService outletMappingService) {
+    private final TaskLockGuard taskLockGuard;
+
+    public AlertOutageScanner(AlertOutageMappingService outletMappingService,
+                              TaskLockGuard taskLockGuard) {
         this.outletMappingService = outletMappingService;
+        this.taskLockGuard = taskLockGuard;
     }
 
     /** 周期映射（间隔由 {@code ypbin.alert.outage-scan-interval-ms} 控制，默认 15s）。 */
     @Scheduled(fixedDelayString = "${ypbin.alert.outage-scan-interval-ms:15000}",
         initialDelayString = "${ypbin.alert.outage-initial-delay-ms:20000}")
     public void scan() {
-        outletMappingService.mapOnce();
+        taskLockGuard.runExclusively(LockNames.ALERT_OUTAGE_SCAN, () -> {
+            outletMappingService.mapOnce();
+        });
     }
 }

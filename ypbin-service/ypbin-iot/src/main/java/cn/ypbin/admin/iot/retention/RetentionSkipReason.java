@@ -32,7 +32,10 @@ public enum RetentionSkipReason {
     INVALID_CONFIG("invalid-config", "保留天数配置非法（必须为正数）"),
 
     /** 上一轮仍在执行 ⇒ 防重入跳过，**未并发跑第二轮**（稍后重试即可）。 */
-    ALREADY_RUNNING("already-running", "上一轮清理仍在执行（防重入，本次未执行）");
+    ALREADY_RUNNING("already-running", "上一轮清理仍在执行（防重入，本次未执行）"),
+
+    /** 分布式锁被另一实例持有（#220 多节点）⇒ 跳过本轮，**未并发跑第二轮**。 */
+    LOCK_HELD_BY_OTHER("lock-held-by-other", "分布式锁被其它实例持有（多节点互斥，本次未执行）");
 
     private final String code;
 

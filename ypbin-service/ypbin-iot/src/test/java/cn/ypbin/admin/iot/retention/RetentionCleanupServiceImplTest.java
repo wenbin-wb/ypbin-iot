@@ -19,6 +19,10 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
+import cn.ypbin.admin.iot.lock.DistributedLock;
+import cn.ypbin.admin.iot.lock.LockNames;
+import cn.ypbin.admin.iot.lock.LockTestSupport;
+import cn.ypbin.admin.iot.lock.TaskLockGuard;
 import cn.ypbin.admin.iot.mapper.DeviceLivenessMapper;
 import cn.ypbin.admin.iot.mapper.IotPointMappingMapper;
 import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
@@ -56,8 +60,15 @@ class RetentionCleanupServiceImplTest {
 
     private RetentionCleanupServiceImpl service(RetentionProperties properties) {
         when(livenessMapper.selectNow()).thenReturn(DB_NOW);
+        TaskLockGuard guard = LockTestSupport.guard(LockTestSupport.properties(), registry);
         return new RetentionCleanupServiceImpl(outageEventMapper, maintenanceWindowMapper, livenessMapper,
-            pointMappingMapper, properties, registry);
+            pointMappingMapper, properties, registry, guard);
+    }
+
+    private RetentionCleanupServiceImpl service(RetentionProperties properties, TaskLockGuard guard) {
+        when(livenessMapper.selectNow()).thenReturn(DB_NOW);
+        return new RetentionCleanupServiceImpl(outageEventMapper, maintenanceWindowMapper, livenessMapper,
+            pointMappingMapper, properties, registry, guard);
     }
 
     private static RetentionProperties days(int outageDays, int windowDays) {
@@ -158,6 +169,25 @@ class RetentionCleanupServiceImplTest {
     }
 
     @Test
+    @DisplayName("★ 多节点（#220）：锁被另一实例持有时本轮**跳过**，如实返回 lock-held-by-other")
+    void mustSkipWhenLockHeldByAnotherInstance() {
+        cn.ypbin.admin.iot.lock.LockProperties lockProperties = LockTestSupport.properties();
+        DistributedLock sharedLock = LockTestSupport.inMemoryLock(lockProperties,
+            new LockTestSupport.MutableClock(0L));
+        // 另一实例先抢到锁（模拟另一个节点正在清理）
+        org.assertj.core.api.Assertions.assertThat(
+            sharedLock.tryAcquire(lockProperties.getKeyPrefix() + LockNames.RETENTION_CLEANUP)).isNotNull();
+        TaskLockGuard guard = LockTestSupport.guard(sharedLock, lockProperties, registry);
+
+        RetentionCleanupResult result = service(days(396, 396), guard).cleanupOnce();
+
+        assertThat(result.skipped()).isTrue();
+        assertThat(result.skipReason()).isEqualTo(RetentionSkipReason.LOCK_HELD_BY_OTHER);
+        verify(outageEventMapper, never()).deleteStartedBefore(any());
+        verify(maintenanceWindowMapper, never()).deleteStartedBefore(any());
+    }
+
+    @Test
     @DisplayName("★ 防重入：并发触发只跑一轮，后到者拿到 already-running（绝不并发删两轮）")
     void concurrentTriggerMustRunOnlyOnce() throws Exception {
         CountDownLatch enteredDelete = new CountDownLatch(1);
@@ -177,7 +207,8 @@ class RetentionCleanupServiceImplTest {
 
             Future<RetentionCleanupResult> second = pool.submit(svc::cleanupOnce);
             RetentionCleanupResult secondResult = second.get(10, TimeUnit.SECONDS);
-            assertThat(secondResult.skipReason()).as("后到者必须是防重入跳过").isEqualTo(RetentionSkipReason.ALREADY_RUNNING);
+            assertThat(secondResult.skipReason()).as("后到者必须因分布式锁被占而跳过")
+                .isEqualTo(RetentionSkipReason.LOCK_HELD_BY_OTHER);
             assertThat(secondResult.skipped()).isTrue();
             assertThat(secondResult.outageEvents()).isZero();
 
