@@ -76,13 +76,13 @@ TCP 帧 byte[] ──► starter TcpSession（payload-format=key-value）
 | UTF-8 校验、`KEY=VALUE` 拆分、按 `raw_address`（= selector）取键 | **starter 0.3.0** `TcpValueSelector` | 由 `ypbin.iot.protocol.tcp.payload-format=key-value` 启用；失败以 BAD 质量 + `iot.tcp.*` 指标显式表达 |
 | **物模型类型规范化**（`int`/`long`/`decimal`/`bool`/文本） | **宿主** `cn.ypbin.admin.access.egress.PointValueNormalizer` | SDK 类注释明确「不做数据类型转换，类型属于宿主物模型语义」；见下「为什么不能删」 |
 | 线性缩放/偏移 | **宿主** `AccessReading.applyScale` | 只对 `Number`/`BigDecimal` 生效 ⇒ **依赖上一步** |
-| 落 `value_double` / `value_text` | iot 侧 `ReadingValueMapper` | 默认按值的**词法形态**判定（如 bool `1` 必须先变 `true/false`）；**物模型声明为 `string` ⇒ `forceText=true` 强制 `value_text`**（TCP 由 `PointValueNormalizer.Outcome` 置位、Modbus 由 `PointMappingDataListener` 置位，见 §4.5.6） |
+| 落 `value_double` / `value_text` | iot 侧 `ValueColumn.from(iot_property.data_type)` + `ReadingValueMapper` | **只由物模型 `data_type` 唯一决定**（task-23 §4.6）：int/long/decimal ⇒ `value_double`，其余 6 类 ⇒ `value_text`；**不再看值形态、不再有 `forceText`** |
 
 **🔴 为什么「类型规范化」不能随帧解析层一起删**（2026-10-13 复核，独立纠正）：
 
 1. `AccessReading.applyScale` 只吃 `Number`/`BigDecimal`。SDK 交付 `String` ⇒ 直接删会让
    `scaleFactor`/`offsetValue` **静默失效、读数错值**（不是格式问题）；
-2. `ReadingValueMapper` 按词法落列：bool `1/0` 必须先规范成 `true/false` 才落 `value_text`（与切换前一致）；
+2. **落列只由 `iot_property.data_type` 决定**（task-23 §4.6）：bool 无论值形态如何都落 `value_text`；数值类型落 `value_double`（不可解析 ⇒ 丢弃 + 计数，不落文本）；
 3. `int`/`decimal` 收到非数值、`bool` 收到非法形态、`dataType` 缺失/未知时，切换前是
    「丢弃 + 计数 + WARN（不猜）」；这条纪律必须保留。
 
@@ -423,6 +423,10 @@ string 要 `N` 个（1..32）⇒ 必须泛化为「按 `word_index` 收齐 N 个
 
 #### 4.5.6 值类型落地的实现落点与理由（完整口径：string ⇒ value_text）
 
+> ⚠️ **历史归档（task-23，2026-10-13）**：本节描述的 v3 `forceText` 透传通道（`Outcome.forceText` →
+> `AccessReading` → `ReadingObservationDto` → `TimeSeriesPoint` → `map(raw, forceText)`）**已整体删除**。
+> 落列现由 §4.6 的 `ValueColumn.from(data_type)` 唯一决定；本节仅保留当时的决策记录。
+
 **判据是物模型类型，不是值形态**：物模型声明为 `string` ⇒ **一律落 `value_text`**（TCP 与 Modbus 一致，
 不再按词法猜）。
 
@@ -458,10 +462,15 @@ Req/实体/DTO 字段注释与 `@Pattern/@Max`、DDL 列注释（007 + v1/v2 迁
 
 ---
 
-### 4.6 落列由物模型类型唯一决定（task-23，**设计稿待 Lead 评审**）
+### 4.6 落列由物模型类型唯一决定（task-23，**已实现 2026-10-13**）
 
 > 目标：**替掉** §3/§4.5.6 的「按值形态猜列 + `forceText` 布尔补丁」。落列 `= f(iot_property.data_type)`，
 > **不再看值形态**；用户决策 D0.9（开发阶段不做向后兼容权衡、按最完美做法）。
+>
+> **实现状态（2026-10-13）**：`ValueColumn`（穷举 switch）· `ReadingValueMapper.map(raw, ValueColumn)` ·
+> `TimeSeriesPoint.column` 必填 · `PointMappingIndex` 同批取 `data_type` · `AvailabilityServiceImpl`
+> 类型解析与三个丢弃/精度指标（`type_missing`/`not_numeric`/`precision_lost`）· access/API 侧
+> `forceText` 通道全删。落地与验收见 `CHANGELOG.md`「未发布」。
 
 #### 4.6.1 缺陷（比"纯数字序列号被数值化"更根本）
 
@@ -562,7 +571,8 @@ starter **v0.3.0（2026-10-12）**交付了 `ypbin.iot.protocol.tcp.payload-form
 
 `TcpValueSelector` 的类注释原文：**「本类不做数据类型转换，帧里的值以 `String` 交付——类型属于宿主物模型语义。」**
 这是 starter 的**有意边界**，不是缺口。于是「文本 → 物模型类型」必须留在宿主，理由见 §3 的四点
-（`applyScale` 只吃 `Number`/`BigDecimal`、`ReadingValueMapper` 词法落列、`NOT_NUMERIC` 拒绝语义）。
+（`applyScale` 只吃 `Number`/`BigDecimal`、值级规范化/拒绝语义）。**落列不在这里**：它由 iot 侧
+`ValueColumn.from(iot_property.data_type)` 唯一决定（task-23 §4.6），宿主不再传递任何列标记。
 落地为 `cn.ypbin.admin.access.egress.PointValueNormalizer`（与删除前的 `canonicalize` 逐字等价）。
 
 ### 5.3 保留的契约
