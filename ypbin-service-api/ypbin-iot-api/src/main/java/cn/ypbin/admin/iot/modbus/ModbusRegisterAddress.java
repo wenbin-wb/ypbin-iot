@@ -85,17 +85,36 @@ public final class ModbusRegisterAddress {
     }
 
     /**
-     * 下一个寄存器地址（{@code type:(offset+1)}，规范化为小写类型、无空白）。
+     * 基址偏移 {@code delta} 个寄存器（{@code type:(offset+delta)}，规范化为小写类型、无空白）。
+     *
+     * <p>v3 起多寄存器点位不再只扩 1 个地址（string 的 {@code word_count} 可达 32），
+     * 故把「+1」泛化为任意非负 {@code delta}；地址算术仍只认显式写法（见类注释）。</p>
+     *
+     * @param raw   基址（必须是显式写法）
+     * @param delta 偏移个数（≥0）
+     * @return 偏移后的地址
+     * @throws IllegalArgumentException 非显式写法、{@code delta<0} 或 {@code offset+delta} 越界
+     */
+    public static String plus(String raw, int delta) {
+        if (delta < 0) {
+            throw new IllegalArgumentException("寄存器偏移个数不能为负：" + delta);
+        }
+        int offset = offset(raw);
+        if (offset + delta > MAX_OFFSET) {
+            throw new IllegalArgumentException("寄存器偏移越界（> " + MAX_OFFSET + "）："
+                + raw + " + " + delta);
+        }
+        return typeCode(raw) + ":" + (offset + delta);
+    }
+
+    /**
+     * 下一个寄存器地址（{@code type:(offset+1)}）。
      *
      * @param raw 基址（必须是显式写法）
      * @return 下一个地址
      * @throws IllegalArgumentException 非显式写法或 {@code offset+1} 越界
      */
     public static String next(String raw) {
-        int offset = offset(raw);
-        if (offset + 1 > MAX_OFFSET) {
-            throw new IllegalArgumentException("下一个寄存器偏移越界（> " + MAX_OFFSET + "）：" + raw);
-        }
-        return typeCode(raw) + ":" + (offset + 1);
+        return plus(raw, 1);
     }
 }

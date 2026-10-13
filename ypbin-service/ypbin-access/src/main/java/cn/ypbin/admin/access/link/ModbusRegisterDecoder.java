@@ -9,6 +9,12 @@
  */
 package cn.ypbin.admin.access.link;
 
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CharsetDecoder;
+import java.nio.charset.CodingErrorAction;
+import java.nio.charset.StandardCharsets;
+
 /**
  * Modbus 寄存器**纯词法解码**：把 SDK 交付的 16 位无符号寄存器值按 {@code word_count}/{@code signed}/
  * 字序组合成平台规范值（无 IO、无状态，便于单测钉住 8 组矩阵）。
@@ -22,7 +28,8 @@ package cn.ypbin.admin.access.link;
  *       无符号用 {@code long} 承载 0..2^32-1（不截断/不溢出），有符号做 32 位符号扩展。</li>
  * </ul>
  *
- * <p>不支持 IEEE754 浮点与 BADC/DCBA 字内字节交换（见 {@code docs/VALUE-DECODE-DESIGN.md} §4.3.6）。</p>
+ * <p>不支持 IEEE754 浮点与 BADC/DCBA 字内字节交换（见 {@code docs/VALUE-DECODE-DESIGN.md} §4.3.6）；
+ * v3 起新增多寄存器 UTF-8 字符串（{@link #decodeStringUtf8(int[])}，见 §4.5）。</p>
  *
  * @author wenbin
  * @since 2026-10-13
@@ -88,6 +95,41 @@ public final class ModbusRegisterDecoder {
         }
         long field = ((raw & 0xFFFFL) >>> bitOffset) & ((1L << bitLength) - 1);
         return bitLength == 1 ? Boolean.valueOf(field != 0) : Integer.valueOf((int) field);
+    }
+
+    /**
+     * 多寄存器 UTF-8 字符串解码（v3，{@code register_format=string}）。
+     *
+     * <p><b>口径（冻结，见 docs/VALUE-DECODE-DESIGN.md §4.5.2）</b>：</p>
+     * <ol>
+     *   <li>按寄存器顺序、每寄存器**高字节在前**（Modbus 本体序）拼字节：
+     *       {@code bytes[2i]=(word>>8)&0xFF}、{@code bytes[2i+1]=word&0xFF}；</li>
+     *   <li>去掉**尾部连续 0x00**（设备常用 NUL 补齐定长字段）；不去空格、中间 0x00 保留；</li>
+     *   <li>严格 UTF-8（{@link CodingErrorAction#REPORT}）：非法字节序列抛
+     *       {@link CharacterCodingException}，调用方据此判点位 BAD（不替换字符、不静默）。</li>
+     * </ol>
+     *
+     * <p>全 NUL ⇒ 去尾后为空字节串 ⇒ 返回空字符串（合法，调用方按 GOOD 上报；「未填」的显示歧义见文档）。
+     * {@code byte_order} 对字符串**不参与**（本方法不接收该参数）。</p>
+     *
+     * @param words 16 位无符号寄存器值（按 word_index 升序；长度 = word_count）
+     * @return 严格 UTF-8 解码结果（可为空串）
+     * @throws CharacterCodingException 字节串不是合法 UTF-8
+     */
+    public static String decodeStringUtf8(int[] words) throws CharacterCodingException {
+        byte[] bytes = new byte[words.length * 2];
+        for (int i = 0; i < words.length; i++) {
+            bytes[i * 2] = (byte) ((words[i] >> 8) & 0xFF);
+            bytes[i * 2 + 1] = (byte) (words[i] & 0xFF);
+        }
+        int end = bytes.length;
+        while (end > 0 && bytes[end - 1] == 0) {
+            end--;
+        }
+        CharsetDecoder decoder = StandardCharsets.UTF_8.newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT);
+        return decoder.decode(ByteBuffer.wrap(bytes, 0, end)).toString();
     }
 
     /** 按字序组装 32 位原始字（big=高字在前 / little=低字在前）。 */

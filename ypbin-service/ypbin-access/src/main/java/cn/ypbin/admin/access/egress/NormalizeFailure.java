@@ -35,7 +35,10 @@ public enum NormalizeFailure {
     UNKNOWN_DATA_TYPE("unknown-data-type", "属性数据类型缺失或未知"),
 
     /** 浮点值为 NaN/±Inf（不是有效测量，无法表示为规范读数；Modbus float 形态）。 */
-    NON_FINITE("non-finite", "浮点值为 NaN/Inf");
+    NON_FINITE("non-finite", "浮点值为 NaN/Inf"),
+
+    /** 多寄存器字符串不是合法 UTF-8（Modbus {@code register_format=string} 形态；严格解码，不替换字符）。 */
+    NOT_UTF8("not-utf8", "字节串不是合法 UTF-8");
 
     private final String code;
 

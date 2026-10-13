@@ -5,5 +5,5 @@
 -- 与 migration/2026-09-19-iot-m1-thing-model-schema.sql 的分工：后者是 M1 的建表，本文件是 v1 的追加列。
 -- =============================================================
 ALTER TABLE iot_point_mapping
-    ADD COLUMN word_count INT NOT NULL DEFAULT 1 COMMENT '连续寄存器个数（1|2；默认 1 = 旧行为）',
+    ADD COLUMN word_count INT NOT NULL DEFAULT 1 COMMENT '连续寄存器个数（int/float: 1|2；bits: 1；string: 1..32；默认 1 = 旧行为）',
     ADD COLUMN `signed`   TINYINT NOT NULL DEFAULT 0 COMMENT '整型符号：0=无符号 / 1=有符号（Java 侧 Boolean）';
