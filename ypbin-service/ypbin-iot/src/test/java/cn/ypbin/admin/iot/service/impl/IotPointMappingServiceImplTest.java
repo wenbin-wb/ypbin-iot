@@ -525,6 +525,104 @@ class IotPointMappingServiceImplTest {
     }
 
     @Test
+    @DisplayName("★ v4 double：word_count=4 + signed=false + bit_* 空 + decimal + 显式地址 + 字序 ⇒ 接受并搬运")
+    void doubleFormatAccepted() {
+        stubProduct("modbus", "decimal");
+        IotPointMappingReq req = request(DEVICE_ID, PROPERTY_ID, "RW");
+        req.setRawAddress("holding:0");
+        req.setRegisterFormat("double");
+        req.setWordCount(4);
+        req.setSigned(Boolean.FALSE);
+        req.setByteOrder("little");
+
+        service.create(req);
+
+        ArgumentCaptor<IotPointMapping> captor = ArgumentCaptor.forClass(IotPointMapping.class);
+        verify(mappingMapper).insert(captor.capture());
+        assertThat(captor.getValue().getRegisterFormat()).isEqualTo("double");
+        assertThat(captor.getValue().getWordCount()).isEqualTo(4);
+        assertThat(captor.getValue().getSigned()).isFalse();
+        assertThat(captor.getValue().getByteOrder()).isEqualTo("little");
+    }
+
+    @Test
+    @DisplayName("★ v4 double：word_count≠4 ⇒ 拒绝（不静默改成 4）")
+    void doubleWordCountMustBeFour() {
+        stubProduct("modbus", "decimal");
+        for (int wrong : new int[] {1, 2, 3, 5, 32}) {
+            IotPointMappingReq req = request(DEVICE_ID, PROPERTY_ID, "RW");
+            req.setRawAddress("holding:0");
+            req.setRegisterFormat("double");
+            req.setWordCount(wrong);
+            assertThatThrownBy(() -> service.create(req))
+                .as("word_count=%s 必须拒绝", wrong)
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("register_format=double 要求 word_count=4");
+        }
+    }
+
+    @Test
+    @DisplayName("★ v4 double：signed=true / bit_* 非空 / data_type≠decimal / 非 Modbus / 位类型 ⇒ 拒绝")
+    void doubleIncompatibleFieldsRejected() {
+        stubProduct("modbus", "decimal");
+        IotPointMappingReq signedReq = request(DEVICE_ID, PROPERTY_ID, "RW");
+        signedReq.setRawAddress("holding:0");
+        signedReq.setRegisterFormat("double");
+        signedReq.setWordCount(4);
+        signedReq.setSigned(Boolean.TRUE);
+        assertThatThrownBy(() -> service.create(signedReq))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("signed 必须为 false");
+
+        IotPointMappingReq bitReq = request(DEVICE_ID, PROPERTY_ID, "RW");
+        bitReq.setRawAddress("holding:0");
+        bitReq.setRegisterFormat("double");
+        bitReq.setWordCount(4);
+        bitReq.setBitOffset(0);
+        bitReq.setBitLength(1);
+        assertThatThrownBy(() -> service.create(bitReq))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("不支持 bit_offset/bit_length");
+
+        stubProduct("modbus", "int");
+        IotPointMappingReq typeReq = request(DEVICE_ID, PROPERTY_ID, "RW");
+        typeReq.setRawAddress("holding:0");
+        typeReq.setRegisterFormat("double");
+        typeReq.setWordCount(4);
+        assertThatThrownBy(() -> service.create(typeReq))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("要求属性类型是 decimal");
+
+        stubProduct("tcp", "decimal");
+        IotPointMappingReq nonModbusReq = request(DEVICE_ID, PROPERTY_ID, "RW");
+        nonModbusReq.setRegisterFormat("double");
+        nonModbusReq.setWordCount(4);
+        assertThatThrownBy(() -> service.create(nonModbusReq))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("仅 Modbus 寄存器点位支持 register_format=double");
+
+        stubProduct("modbus", "decimal");
+        IotPointMappingReq bitTypeReq = request(DEVICE_ID, PROPERTY_ID, "RW");
+        bitTypeReq.setRawAddress("coil:0");
+        bitTypeReq.setAddressType("coil");
+        bitTypeReq.setRegisterFormat("double");
+        bitTypeReq.setWordCount(4);
+        assertThatThrownBy(() -> service.create(bitTypeReq))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("位类型（coil）不支持 register_format=double");
+    }
+
+    @Test
+    @DisplayName("★ v4 double：非显式多寄存器地址（传统 5 位编号）⇒ 拒绝")
+    void doubleTraditionalAddressRejected() {
+        stubProduct("modbus", "decimal");
+        IotPointMappingReq req = request(DEVICE_ID, PROPERTY_ID, "RW");
+        req.setRegisterFormat("double");
+        req.setWordCount(4);
+
+        assertThatThrownBy(() -> service.create(req))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("word_count>1 需要显式 type:offset 形式");
+    }
+
+    @Test
     @DisplayName("★ v2 bits：word_count=1 + 合法 bit 区间 + data_type 匹配 ⇒ 接受（传统 5 位编号也可）")
     void bitsFormatAccepted() {
         stubProduct("modbus", "bool");

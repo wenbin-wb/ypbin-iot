@@ -54,13 +54,13 @@ public class IotPointMappingResp {
     /** 字序（word order）。 */
     private String byteOrder;
 
-    /** 连续寄存器个数（1|2）。 */
+    /** 连续寄存器个数（int/float: 1|2；double: 4；bits: 1；string: 1..32）。 */
     private Integer wordCount;
 
     /** 整型符号（true=有符号）。 */
     private Boolean signed;
 
-    /** 寄存器值形态：int|float|bits。 */
+    /** 寄存器值形态：int|float|double|bits|string。 */
     private String registerFormat;
 
     /** 仅 bits：起始位。 */

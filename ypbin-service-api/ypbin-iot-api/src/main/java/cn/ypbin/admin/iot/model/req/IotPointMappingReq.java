@@ -66,27 +66,27 @@ public class IotPointMappingReq {
     @Digits(integer = 14, fraction = 6, message = "缩放偏移超出精度范围")
     private BigDecimal offsetValue;
 
-    /** 字序（word order）：big=高字在前 / little=低字在前；仅 Modbus int+word_count=2 或 float 生效，其余场景非空即拒绝。 */
+    /** 字序（word order）：big=高字在前 / little=低字在前；仅 Modbus int+word_count=2、float 或 double 生效，其余场景非空即拒绝。 */
     @Pattern(regexp = "big|little", message = "字序非法（应为 big|little）")
     private String byteOrder;
 
     /**
      * 连续寄存器个数；默认 1 = 旧行为。仅 Modbus 寄存器点位生效。
      *
-     * <p>合法范围按形态：{@code int}/{@code float} 为 1|2、{@code bits} 为 1、
-     * {@code string} 为 1..32（≤64 字节）。此处只做 1..32 的粗粒度下上界，
+     * <p>合法范围按形态：{@code int}/{@code float} 为 1|2、{@code double} 为 4、
+     * {@code bits} 为 1、{@code string} 为 1..32（≤64 字节）。此处只做 1..32 的粗粒度下上界，
      * 形态相关收窄由服务层校验（错误文案更具体）。</p>
      */
-    @Min(value = 1, message = "寄存器个数必须在 1..32（int/float: 1|2；bits: 1；string: 1..32）")
-    @Max(value = 32, message = "寄存器个数必须在 1..32（int/float: 1|2；bits: 1；string: 1..32）")
+    @Min(value = 1, message = "寄存器个数必须在 1..32（int/float: 1|2；double: 4；bits: 1；string: 1..32）")
+    @Max(value = 32, message = "寄存器个数必须在 1..32（int/float: 1|2；double: 4；bits: 1；string: 1..32）")
     private Integer wordCount;
 
     /** 整型符号：true=有符号；默认 false（无符号）。仅 Modbus 寄存器点位生效。 */
     private Boolean signed;
 
-    /** 寄存器值形态：int|float|bits|string；默认 int（= v1 行为）。仅 Modbus 寄存器点位生效。 */
-    @Pattern(regexp = "int|float|bits|string",
-        message = "寄存器值形态非法（应为 int|float|bits|string）")
+    /** 寄存器值形态：int|float|double|bits|string；默认 int（= v1 行为）。仅 Modbus 寄存器点位生效。 */
+    @Pattern(regexp = "int|float|double|bits|string",
+        message = "寄存器值形态非法（应为 int|float|double|bits|string）")
     private String registerFormat;
 
     /** 仅 bits：起始位（0..15）。 */
