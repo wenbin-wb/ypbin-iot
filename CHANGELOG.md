@@ -6,6 +6,17 @@
 
 ## [未发布]
 
+### 修复
+
+- **制品化交付加守卫：只给默认分支上的提交产出制品**（`.github/workflows/release-artifacts.yml`）。
+  验证时发现本仓**继承了 upstream admin 的 `v1.0.0` tag**（`git log -1 v1.0.0` = 2026-08-28，
+  `git rev-list --count v1.0.0..main` = 463），而本仓版本是 `1.0.0-SNAPSHOT` ⇒ 将来真正的首个 1.0.0
+  发版会撞 tag，且若有人误推这类陈旧 tag 触发发布，制品会被挂到陈旧代码上、并被当成可部署产物。
+  现在工作流用两条判据显式拒绝：**项目版本必须等于 tag 名（去 `v`）且不含 `SNAPSHOT`**，外加"提交在 `origin/main` 上"。
+  也就是说：发版前必须先做 release 提交把版本定成 `X.Y.Z`，再打 `vX.Y.Z` tag。
+  ⚠️ 经验保留：`merge-base --is-ancestor` **单独用拦不住它**（该 tag 是 `main` 的祖先会放行）——
+  这条已写进工作流注释，免得后人只留那一条判据。
+
 ### 新增
 
 - **制品化交付：`v*` tag 自动产出并挂载可执行 jar**（`.github/workflows/release-artifacts.yml`）。

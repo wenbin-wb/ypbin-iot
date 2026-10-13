@@ -74,6 +74,14 @@ git -C <repo> rev-parse HEAD      # 应与清单首部的 `# git:` 行一致
 # ③ 之后的「替换 → 只重启该服务 → 核对容器内 md5/health」与第 2 节的 ②③④ 完全相同
 ```
 
+⚠️ **守卫（发版前提）**：工作流只给「**把版本号定为该 tag**」的提交产出制品 —— 判据是
+`project.version` 必须等于 tag 名（去掉 `v`）**且不含 `SNAPSHOT`**。故发版前必须先做一次
+**release 提交**（把 `<revision>` 定成 `X.Y.Z`、折叠 CHANGELOG），再打 `vX.Y.Z` tag。
+本仓继承了 upstream admin 的 `v1.0.0` tag（`git log -1 v1.0.0` = 2026-08-28、落后 main 463 个提交、
+其 pom 声明 `1.0.0-SNAPSHOT`）⇒ 会被这两条判据挡下，不会被挂上"可部署的正式产物"。
+> ⚠️ 经验保留：`git merge-base --is-ancestor HEAD origin/main` **单独用拦不住它**（该 tag 是 `main`
+> 的祖先、会被放行）——判据必须是"版本一致性"这条，不能只留"是否在 main 上"。
+
 ⚠️ **边界（如实登记）**：本工作流**只产 jar**，不产 Docker 镜像与 SBOM；镜像仍由部署机
 `docker compose build`（Dockerfile 只 `COPY target/*.jar`、不编译源码，故安全）。镜像制品化与 SBOM 属后续增量。
 
