@@ -178,6 +178,8 @@ public class PointMappingDataListener implements DataListener {
                 return;
             }
             raw = outcome.value();
+            // 物模型声明为 string ⇒ 强制落 value_text（TCP 与 Modbus 口径一致；见 §4.5.6）
+            forceText = outcome.forceText();
         } else if (modbus && isString(point)) {
             // v3 单寄存器 string：一个字的严格 UTF-8（byte_order 忽略）
             if (!(raw instanceof Number number)) {
