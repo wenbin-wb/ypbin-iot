@@ -107,6 +107,6 @@ ypbin:
   xxl-job:
     enabled: true
     admin-addresses: http://xxl-job-admin:8080
-    access-token: ""
+    access-token: "${XXL_JOB_ACCESS_TOKEN:?3.5.0 起执行器维度 AccessToken 必填，且须与 admin 中同名 AppName 一致}"
     appname: ypbin-system
     port: 9999

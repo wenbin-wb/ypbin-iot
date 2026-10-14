@@ -480,10 +480,10 @@ services:
   # ---------- XXL-JOB 调度中心（独立中间件，任务调度/日志 UI）----------
   xxl-job-admin:
     <<: *logging
-    image: ${REGISTRY_PREFIX:-}xuxueli/xxl-job-admin:3.4.2
+    image: ${REGISTRY_PREFIX:-}xuxueli/xxl-job-admin:3.5.0
     container_name: ypbin-xxl-job-admin
     environment:
-      PARAMS: "--spring.datasource.url=jdbc:mysql://mysql:3306/xxl_job?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true --spring.datasource.username=root --spring.datasource.password=${MYSQL_ROOT_PASSWORD:?请在 .env 设置 MYSQL_ROOT_PASSWORD} --xxl.job.accessToken= --server.port=8080"
+      PARAMS: "--spring.datasource.url=jdbc:mysql://mysql:3306/xxl_job?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true --spring.datasource.username=root --spring.datasource.password=${MYSQL_ROOT_PASSWORD:?请在 .env 设置 MYSQL_ROOT_PASSWORD} --server.port=8080"
     ports:
       # XXL-JOB 控制台默认只绑回环（调度中心属内部运维面，默认不对外网暴露；
       # 需要外部访问时显式设 INTERNAL_BIND_ADDR=0.0.0.0）
