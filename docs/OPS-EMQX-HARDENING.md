@@ -168,3 +168,39 @@ cd /opt/emqx && docker compose up -d emqx
 3. 生产 8883 修复**未执行**（改的是宿主权限 + 重建容器，属生产变更）；只给出根因与步骤。
 4. `docs/EMQX-TLS-DESIGN.md` 里历史"8883 自检通过"的结论现与事实不符，**未改该文档**（避免
    与既有设计叙述冲突，请在评审时一并更正）。
+
+---
+
+## 12. 2026-10-14：dev EMQX 已实际应用（本次）
+
+用户确认「EMQX 那台也是 dev，不用考虑证书」⇒ 本轮把收紧**落到运行中的 dev `ypbin-emqx`**（宿主机 `43.242.200.8:61260`，compose 项目 `emqx-edge`，配置挂载 `/opt/emqx/emqx.conf -> /opt/emqx/etc/emqx.conf`）。**TLS/证书部分按指示不做**。
+
+### 已应用（写入 `/opt/emqx/emqx.conf`，重启容器生效）
+- `listeners.tcp.default`：`max_conn_rate = "200/s"` + **来源限制**
+  `access_rules = ["allow 113.142.217.42/32", "deny all"]`
+- `listeners.ssl.default`：`max_conn_rate = "200/s"`
+- node 级 `limiter { max_conn_rate="200/s"; messages_rate="1000/s"; bytes_rate="10MB/s" }`
+
+⚠️ **踩坑留痕**：`access_rules` 数组元素**必须带逗号**。只换行会被 HOCON 粘成一个字符串，EMQX 报
+`invalid_rule(s): allow 113.142.217.42/32deny all` 并**拒绝启动该配置**（本次实测复现并修正）。
+
+### 实测证据（2026-10-14）
+| 来源 | 结果 | 判定 |
+|---|---|---|
+| 本机（不在 allow 列表） | TCP 连接被服务端关闭、**无 CONNACK** | **拒绝生效** |
+| dev 应用机 `113.142.217.42`（在 allow 列表） | 收到 `CONNACK 20 02 00 04`（rc=4 认证失败，属正常） | **允许生效** |
+- `emqx ctl conf show listeners` 可见 `access_rules = ["allow 113.142.217.42/32","deny all"]` 与 `max_conn_rate="200/s"`；`conf show limiter` 可见三项速率。
+- 重启后 `--since 30s` 无 `invalid_rule`/`unknown_fields`。
+- **未做**：速率限制的压测（`max_conn_rate`/`limiter` 的节流实测在隔离实验床已验证，见 §5）；TLS/证书按用户指示跳过。
+
+### 回滚（一条命令）
+```bash
+ssh -p 61260 -i ~/.ssh/id_ed25519_ypbin_mw root@43.242.200.8 \
+  'cp -a $(ls -t /opt/emqx/emqx.conf.bak-hardening-* | head -1) /opt/emqx/emqx.conf && docker restart ypbin-emqx'
+```
+（备份文件为 `/opt/emqx/emqx.conf.bak-hardening-<ts>`；恢复后 `access_rules` 回到 `allow all` 语义。）
+
+### 边界（如实登记）
+- `access_rules` 一旦生效，**不在列表内的来源一律连不上**（含未来新设备/新模拟器）⇒ 新增来源需同步改本文件并重启容器。
+- 云安全组规则内容未读（用户控制台）；本轮的"来源限制"是 **EMQX 应用层**的，不替代安全组。
+
