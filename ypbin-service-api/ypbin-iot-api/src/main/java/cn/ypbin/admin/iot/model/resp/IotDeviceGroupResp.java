@@ -9,6 +9,7 @@
  */
 package cn.ypbin.admin.iot.model.resp;
 
+import cn.ypbin.starter.json.ref.RefText;
 import java.time.LocalDateTime;
 import lombok.Getter;
 import lombok.Setter;
@@ -30,6 +31,7 @@ public class IotDeviceGroupResp {
     private String groupName;
 
     /** 父分组 ID（null=根）。 */
+    @RefText("group")
     private Long parentId;
 
     /** 排序。 */

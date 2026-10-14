@@ -9,6 +9,7 @@
  */
 package cn.ypbin.admin.iot.model.resp;
 
+import cn.ypbin.starter.json.ref.RefText;
 import java.time.LocalDateTime;
 import lombok.Getter;
 import lombok.Setter;
@@ -39,6 +40,7 @@ public class IotDeviceResp {
     private String endpoint;
 
     /** 绑定产品 ID。 */
+    @RefText("product")
     private Long productId;
 
     /** 绑定物模型版本。 */

@@ -178,6 +178,9 @@ public class IotDeviceServiceImpl extends BaseServiceImpl<IotDeviceMapper, IotDe
         if (StringUtils.hasText(query.getProtocol())) {
             wrapper.eq(IotDevice::getProtocol, query.getProtocol());
         }
+        if (query.getProductId() != null) {
+            wrapper.eq(IotDevice::getProductId, query.getProductId());
+        }
         return wrapper;
     }
 

@@ -10,11 +10,16 @@
 package cn.ypbin.admin.iot.it;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import cn.ypbin.admin.iot.entity.TenantNodeAssignment;
 import cn.ypbin.admin.iot.entity.TenantLedger;
 import cn.ypbin.admin.iot.lease.LeaseState;
 import cn.ypbin.admin.iot.lease.TenantLedgerService;
+import cn.ypbin.admin.iot.mapper.IotDeviceCredentialMapper;
+import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.TenantNodeAssignmentMapper;
 import cn.ypbin.admin.iot.mapper.TenantLedgerMapper;
 import cn.ypbin.starter.test.condition.EnabledIfMySqlAvailable;
@@ -110,7 +115,12 @@ class TenantLedgerIT {
         assignmentMapper = new SqlSessionTemplate(factory).getMapper(TenantNodeAssignmentMapper.class);
         transactionTemplate = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
         meterRegistry = new SimpleMeterRegistry();
-        ledgerService = new TenantLedgerService(ledgerMapper, meterRegistry);
+        // listAll 的三列聚合只在 mock 的批量查询上验证（本 IT 只关心台账行与版本号语义）
+        IotDeviceMapper deviceMapper = mock(IotDeviceMapper.class);
+        when(deviceMapper.selectMaps(any())).thenReturn(List.of());
+        IotDeviceCredentialMapper credentialMapper = mock(IotDeviceCredentialMapper.class);
+        when(credentialMapper.selectMaps(any())).thenReturn(List.of());
+        ledgerService = new TenantLedgerService(ledgerMapper, deviceMapper, credentialMapper, meterRegistry);
 
         // 崩溃自愈：若上次运行在「改名窗口」内被杀，备份表会残留 ⇒ 其它共用库的 IT 会集体红且不会自愈
         if (tableExists(LEDGER_BACKUP_TABLE)) {

@@ -9,18 +9,32 @@
  */
 package cn.ypbin.admin.iot.lease;
 
+import cn.ypbin.admin.iot.entity.IotDevice;
+import cn.ypbin.admin.iot.entity.IotDeviceCredential;
 import cn.ypbin.admin.iot.entity.TenantLedger;
+import cn.ypbin.admin.iot.mapper.IotDeviceCredentialMapper;
+import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.TenantLedgerMapper;
 import cn.ypbin.admin.iot.model.resp.TenantLedgerResp;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.core.exception.GlobalErrorCode;
 import cn.ypbin.starter.core.util.LogSanitizer;
 import cn.ypbin.starter.tenant.core.TenantContext;
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
+import java.sql.Timestamp;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DuplicateKeyException;
@@ -38,6 +52,10 @@ import org.springframework.transaction.annotation.Transactional;
  * 因此本类必须先查（含已删除行）再决定 insert 还是「复活 + 递增」；否则对同一个租户第二次置为可分配时
  * 会直接撞唯一键（M-1 的 {@code iot_service} 踩过同类问题）。</p>
  *
+ * <p><b>台账列表的三列聚合</b>：{@link #listAll()} 用两条 {@code GROUP BY tenant_id} 的批量查询
+ * 拿到设备统计与凭据统计后在内存合并，不做「每租户一次查询」的 N+1；台账页是平台级跨租户视图，
+ * 聚合读取显式走 {@link TenantContext#executeIgnore}，避免租户插件把统计限定到当前租户。</p>
+ *
  * @author wenbin
  * @since 2026-09-21
  */
@@ -51,6 +69,12 @@ public class TenantLedgerService {
 
     private final TenantLedgerMapper ledgerMapper;
 
+    /** 设备统计来源（聚合查询必须批量，禁止在租户循环内逐条打库）。 */
+    private final IotDeviceMapper deviceMapper;
+
+    /** 凭据统计来源（只统计未被吊销、即 {@code password_hash} 非空的行）。 */
+    private final IotDeviceCredentialMapper credentialMapper;
+
     /**
      * 台账版本号推进失败的次数（R8-8 方案 B：**失败不回滚业务写入**，但必须计数 + ERROR 以便告警）。
      *
@@ -59,8 +83,13 @@ public class TenantLedgerService {
      */
     private final Counter bumpFailureCounter;
 
-    public TenantLedgerService(TenantLedgerMapper ledgerMapper, MeterRegistry meterRegistry) {
+    public TenantLedgerService(TenantLedgerMapper ledgerMapper,
+                               IotDeviceMapper deviceMapper,
+                               IotDeviceCredentialMapper credentialMapper,
+                               MeterRegistry meterRegistry) {
         this.ledgerMapper = ledgerMapper;
+        this.deviceMapper = deviceMapper;
+        this.credentialMapper = credentialMapper;
         this.bumpFailureCounter = Counter.builder(TenantLedgerMetrics.METRIC_BUMP_FAILURE)
             .description("台账版本号推进失败次数（失败不回滚业务写入，靠周期安全网兜底）")
             .register(meterRegistry);
@@ -84,9 +113,12 @@ public class TenantLedgerService {
      * <p>回读是刻意的：返回值必须来自数据库，而不是「我刚写进去的意图」——
      * 「声称改了、产物没落地」在本仓有历史教训。</p>
      *
+     * <p>聚合列（设备数/最近上报/是否有凭据）也按 {@link #listAll()} 的同一口径填充：
+     * 三列是台账事实，写入口回读不应缺列。</p>
+     *
      * @param tenantId   租户 ID
      * @param assignable 是否可分配
-     * @return 落库后的台账状态（含本次变更类型与最新版本号）
+     * @return 落库后的台账状态（含本次变更类型、最新版本号与聚合列）
      */
     @Transactional(rollbackFor = Exception.class)
     public TenantLedgerResp setAssignableAndGet(Long tenantId, boolean assignable) {
@@ -98,6 +130,7 @@ public class TenantLedgerService {
                 "台账写入后回读失败（并发冲突？）：" + tenantId);
         }
         TenantLedgerResp resp = toResp(row);
+        fillAggregates(List.of(resp));
         resp.setChange(change.getCode());
         return resp;
     }
@@ -220,7 +253,23 @@ public class TenantLedgerService {
     }
 
     /**
-     * 台账全量（供运维端点查看「谁可被分配、版本号到哪了」）。
+     * 台账全量（供运维端点查看「谁可被分配、版本号到哪了、接入进度如何」）。
+     *
+     * <p><b>三列聚合口径</b>：{@code deviceCount} = 未删除设备数；
+     * {@code lastReportAt} = 未删除设备 {@code last_seen_at} 的最大值；
+     * {@code hasCredential} = 是否存在未删除且 {@code password_hash} 非空的凭据行。
+     * 没有统计行的租户回落为 {@code 0 / null / false}——这是「确实没有」的事实，不是「缺统计」，
+     * 空统计与未查询必须区分。</p>
+     *
+     * <p><b>实现方式（防 N+1，勿改回逐租户查询）</b>：两条 {@code GROUP BY tenant_id} 的
+     * {@code selectMaps} 批量查询拿到全部租户的设备统计与凭据统计，再与台账行在内存合并。
+     * {@code selectMaps} 的 key 取自 JDBC column label，不同驱动可能返回
+     * {@code device_count}/{@code deviceCount}/{@code DEVICE_COUNT}，故用
+     * {@link #mapValue(Map, String...)} 做「精确 + 忽略大小写与下划线」的健壮取值。</p>
+     *
+     * <p><b>为什么包 {@link TenantContext#executeIgnore}</b>：本页是平台级跨租户台账，
+     * 读的是各租户的设备/凭据（均为租户表）。不绕过租户插件时：无租户上下文会被 fail-closed 拒绝；
+     * 有租户上下文则只统计当前租户，其它租户被静默显示为 0——两者都不是本页要的事实。</p>
      *
      * @return 台账行（按租户排序；可能为空集合，绝不返回 null）
      */
@@ -231,7 +280,151 @@ public class TenantLedgerService {
         for (TenantLedger row : rows) {
             result.add(toResp(row));
         }
+        fillAggregates(result);
         return result;
+    }
+
+    /**
+     * 给台账行填充聚合列（两条批量查询 + 内存合并；空集合直接短路，不空打聚合 SQL）。
+     *
+     * @param rows 待填充的台账行（可为空集合；元素不可为 null）
+     */
+    private void fillAggregates(List<TenantLedgerResp> rows) {
+        if (rows.isEmpty()) {
+            return;
+        }
+        Map<Long, DeviceAggregate> deviceAggregates = queryDeviceAggregates();
+        Set<Long> tenantIdsWithCredential = queryTenantIdsWithCredential();
+        for (TenantLedgerResp row : rows) {
+            DeviceAggregate aggregate = deviceAggregates.get(row.getTenantId());
+            row.setDeviceCount(aggregate == null ? 0 : aggregate.deviceCount());
+            row.setLastReportAt(aggregate == null ? null : aggregate.lastReportAt());
+            row.setHasCredential(tenantIdsWithCredential.contains(row.getTenantId()));
+        }
+    }
+
+    /**
+     * 批量查设备统计：一条 {@code GROUP BY tenant_id} 拿到所有租户的设备数与最近上报时刻。
+     *
+     * <p>必须保持「一条聚合 SQL 覆盖全部租户」，禁止在租户循环里逐条打库（N+1 零容忍）。</p>
+     *
+     * @return tenantId → 设备统计；无任何设备的租户不在 Map 中（由调用方回落事实零值）
+     */
+    private Map<Long, DeviceAggregate> queryDeviceAggregates() {
+        List<Map<String, Object>> stats = TenantContext.executeIgnore(() ->
+            deviceMapper.selectMaps(new QueryWrapper<IotDevice>()
+                .select("tenant_id", "COUNT(*) AS device_count", "MAX(last_seen_at) AS last_report_at")
+                .eq("is_deleted", 0)
+                .groupBy("tenant_id")));
+        Map<Long, DeviceAggregate> aggregates = new HashMap<>(stats.size());
+        for (Map<String, Object> stat : stats) {
+            aggregates.put(tenantIdOf(stat), new DeviceAggregate(
+                countOf(stat, "device_count", "deviceCount"),
+                toLocalDateTime(mapValue(stat, "last_report_at", "lastReportAt"))));
+        }
+        return aggregates;
+    }
+
+    /**
+     * 批量查「有有效凭据」的租户：一条 {@code GROUP BY tenant_id} 统计未删除且
+     * {@code password_hash} 非空的凭据行（吊销会把哈希置为空串）。
+     *
+     * @return 存在有效凭据的租户 ID 集合；无有效凭据的租户不在集合中
+     */
+    private Set<Long> queryTenantIdsWithCredential() {
+        List<Map<String, Object>> stats = TenantContext.executeIgnore(() ->
+            credentialMapper.selectMaps(new QueryWrapper<IotDeviceCredential>()
+                .select("tenant_id", "COUNT(*) AS credential_count")
+                .eq("is_deleted", 0)
+                .ne("password_hash", "")
+                .groupBy("tenant_id")));
+        Set<Long> tenantIds = new HashSet<>(stats.size());
+        for (Map<String, Object> stat : stats) {
+            if (countOf(stat, "credential_count", "credentialCount") > 0) {
+                tenantIds.add(tenantIdOf(stat));
+            }
+        }
+        return tenantIds;
+    }
+
+    /**
+     * 从 {@code selectMaps} 结果行按候选列名取值，兼容不同驱动对别名大小写/下划线的处理差异。
+     *
+     * <p>取值顺序：先按候选名精确匹配；再按「忽略大小写与下划线」归一化匹配
+     * （覆盖 {@code device_count} / {@code deviceCount} / {@code DEVICE_COUNT}）。
+     * 都未命中返回 {@code null}，由调用方区分「列不可缺失」与「NULL 本身是合法值」（如 MAX 无上报）。</p>
+     *
+     * @param row     一行 {@code selectMaps} 结果
+     * @param aliases 候选列名（按优先级）
+     * @return 命中的值；所有候选名均未命中时 {@code null}
+     */
+    private static Object mapValue(Map<String, Object> row, String... aliases) {
+        for (String alias : aliases) {
+            if (row.containsKey(alias)) {
+                return row.get(alias);
+            }
+        }
+        for (Map.Entry<String, Object> entry : row.entrySet()) {
+            String normalizedKey = normalizeColumnKey(entry.getKey());
+            for (String alias : aliases) {
+                if (normalizedKey.equals(normalizeColumnKey(alias))) {
+                    return entry.getValue();
+                }
+            }
+        }
+        return null;
+    }
+
+    /** 列名归一化：去掉下划线并转小写，用于兼容 {@code device_count}/{@code deviceCount}/{@code DEVICE_COUNT}。 */
+    private static String normalizeColumnKey(String key) {
+        return key == null ? "" : key.replace("_", "").toLowerCase(Locale.ROOT);
+    }
+
+    /** 取 {@code GROUP BY} 行的 tenant_id；缺失或类型不可识别属实现错误（列名/别名被改），显式抛错不静默。 */
+    private static Long tenantIdOf(Map<String, Object> row) {
+        Object value = mapValue(row, "tenant_id", "tenantId");
+        if (value instanceof Number number) {
+            return number.longValue();
+        }
+        if (value instanceof CharSequence text) {
+            try {
+                return Long.valueOf(text.toString());
+            } catch (NumberFormatException ex) {
+                throw new IllegalStateException("台账聚合结果 tenant_id 无法解析：" + value, ex);
+            }
+        }
+        throw new IllegalStateException("台账聚合结果缺少 tenant_id 列或类型不可识别：实际列=" + row.keySet());
+    }
+
+    /** 取 COUNT 列并转 Integer；列缺失或类型不是数字属实现错误，显式抛错不静默。 */
+    private static Integer countOf(Map<String, Object> row, String column, String... aliases) {
+        Object value = mapValue(row, aliases);
+        if (value instanceof Number number) {
+            return number.intValue();
+        }
+        throw new IllegalStateException("台账聚合结果缺少列 " + column + "（或类型不是数字）：实际列=" + row.keySet());
+    }
+
+    /**
+     * {@code MAX(last_seen_at)} 值 → 契约字段 {@link LocalDateTime}。
+     *
+     * <p>驱动对 DATETIME 的 {@code getObject} 可能返回 {@link LocalDateTime}，也可能返回
+     * {@link Timestamp}，这里统一收敛；值为 {@code null}（从未上报）时原样返回。</p>
+     */
+    private static LocalDateTime toLocalDateTime(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof LocalDateTime dateTime) {
+            return dateTime;
+        }
+        if (value instanceof Timestamp timestamp) {
+            return timestamp.toLocalDateTime();
+        }
+        if (value instanceof Date date) {
+            return LocalDateTime.ofInstant(date.toInstant(), ZoneId.systemDefault());
+        }
+        throw new IllegalStateException("台账聚合结果 last_report_at 类型不可识别：" + value.getClass());
     }
 
     /** 实体 → 契约模型。 */
@@ -242,6 +435,17 @@ public class TenantLedgerService {
         resp.setConfigEpoch(row.getConfigEpoch());
         resp.setUpdateTime(row.getUpdateTime());
         return resp;
+    }
+
+    /**
+     * 单租户设备聚合（{@code GROUP BY} 行 → 内存形态）。
+     *
+     * @param deviceCount  未删除设备数
+     * @param lastReportAt 最近上报时刻；设备从未上报时为 {@code null}
+     * @author wenbin
+     * @since 2026-10-14
+     */
+    private record DeviceAggregate(Integer deviceCount, LocalDateTime lastReportAt) {
     }
 
     /**

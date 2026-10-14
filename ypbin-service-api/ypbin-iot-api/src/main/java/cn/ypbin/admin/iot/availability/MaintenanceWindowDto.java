@@ -9,6 +9,7 @@
  */
 package cn.ypbin.admin.iot.availability;
 
+import cn.ypbin.starter.json.ref.RefText;
 import java.time.LocalDateTime;
 import lombok.Getter;
 import lombok.Setter;
@@ -27,6 +28,7 @@ public class MaintenanceWindowDto {
     private Long id;
 
     /** 设备 ID；{@code null}=该租户全部设备。 */
+    @RefText("device")
     private Long deviceId;
 
     /** 窗口开始。 */

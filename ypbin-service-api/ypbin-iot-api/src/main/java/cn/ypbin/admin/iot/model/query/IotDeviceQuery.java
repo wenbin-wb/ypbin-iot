@@ -28,4 +28,7 @@ public class IotDeviceQuery extends PageQuery {
 
     /** 协议过滤（可空）。 */
     private String protocol;
+
+    /** 绑定产品 ID 过滤（可空；按产品筛选该产品下的设备）。 */
+    private Long productId;
 }
