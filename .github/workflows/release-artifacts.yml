@@ -13,6 +13,12 @@ name: Release Artifacts
 # 产出：`v*` tag 上把 **6 个可执行服务 jar** + 一份 `jars.manifest.sha256`（含 git sha 与构建时刻）
 # 作为该 Release 的资产。生产侧按 docs/DEPLOY-BACKEND.md「从 Release 制品部署」一节下载并校验 sha256。
 # 与 `release.yml` 的分工：那份写 Release 说明（正文），本份只挂制品（files），互不覆盖。
+#
+# 2026-10-14 增量（issue #234 剩余项「镜像制品化」）：同一个工作流新增 `images` 作业，把镜像也做成
+# Release 资产——**主路径推 GHCR，兜底 docker save tar.gz**。它 `needs: artifacts` 并复用上一步已构建的
+# jar（download-artifact），**不重新编译**。产出：`images.digests.tsv`（registry digest + image id）、
+# `images.manifest.sha256`（tar.gz 的 sha256）与 6 个 `*.tar.gz`。方案对比与权限/可见性说明见
+# docs/OPS-RELEASE-IMAGES.md；部署侧校验入口 deploy/verify-release-images.sh。
 on:
   push:
     tags: ['v*']
@@ -139,6 +145,23 @@ jobs:
           done
           cat jars.manifest.sha256
 
+      # 把 jar 再存一份为**工作流制品**，供下游 `images` 作业复用——镜像作业因此**不必重跑 Maven**
+      # （任务要求「用已构建的 jar，不要重复编译」）。排除 -sources/-javadoc/*.original，避免 Dockerfile
+      # 的 `COPY target/*.jar` 通配命中多个文件。
+      - name: 上传 jar 工作流制品（供镜像作业复用，避免重复编译）
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-jars
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            ypbin-gateway/target/*.jar
+            ypbin-auth/target/*.jar
+            ypbin-service/*/target/*.jar
+            !**/*-sources.jar
+            !**/*-javadoc.jar
+            !**/*.original
+
       - name: 附加到该 tag 的 Release（只挂制品，不动正文）
         uses: softprops/action-gh-release@v3
         with:
@@ -150,3 +173,243 @@ jobs:
             ypbin-auth/target/*.jar
             ypbin-service/*/target/*.jar
           fail_on_unmatched_files: true
+
+  # ---------------------------------------------------------------------------
+  # 容器镜像制品化（issue #234 剩余项）
+  #
+  # 为什么加：jar 已能自动产出，但镜像仍要在部署机上 `docker compose build`。本仓 dev 实测该机
+  # **无外网出口**（deploy/PROD-OPS-NOTES.md §15；docs/DEPLOY-RUNBOOK.md §F），镜像源 502/超时是常态，
+  # 「有 jar 也无法稳定得到镜像」。故把镜像也变成**可下载、可校验**的 Release 资产：
+  #   · 主路径：推 GHCR（`ghcr.io/<owner>/ypbin-<service>`，tag = <version> / <release-tag> / latest），
+  #     读回 registry digest；
+  #   · 兜底  ：`docker save | gzip -9` 产 tar.gz + sha256（**不依赖 GHCR**，供无外网的部署机 docker load）。
+  # 复用上一作业已构建的 jar（download-artifact），**本作业不跑 Maven**。
+  # 方案对比、权限与可见性、部署侧用法见 docs/OPS-RELEASE-IMAGES.md。
+  #
+  # 失败语义：GHCR 推送失败**不静默**——本作业判红（::error:: + 修复指引）；但 tar 兜底资产与摘要清单
+  # 仍以 `if: always()` 挂到 Release（jar 资产由上一作业独立完成，不受影响）。
+  # ---------------------------------------------------------------------------
+  images:
+    name: 构建并发布容器镜像（GHCR 主 + tar 兜底）
+    needs: artifacts
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # 把镜像摘要/checksum/tar 作为 Release 资产挂出
+      packages: write   # 推 GHCR；缺失时 docker push 会被拒（见登录/推送步骤的修复指引）
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      GHCR_REGISTRY: ghcr.io
+      GHCR_OWNER: ${{ github.repository_owner }}
+    steps:
+      - name: 检出代码（与 jar 制品同一个 tag；提供各服务 Dockerfile）
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 1
+
+      - name: 下载 jar 作业已构建的制品（复用，不重复编译）
+        uses: actions/download-artifact@v7
+        with:
+          name: release-jars
+          path: /tmp/release-jars
+
+      - name: 把 jar 按服务放回 Dockerfile 期望的 target/（缺一个即失败）
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          count=0
+          while IFS= read -r jar; do
+            [ -n "$jar" ] || continue
+            base="$(basename "$jar")"
+            case "$base" in
+              ypbin-gateway-*.jar) ctx=ypbin-gateway ;;
+              ypbin-auth-*.jar)    ctx=ypbin-auth ;;
+              ypbin-system-*.jar)  ctx=ypbin-service/ypbin-system ;;
+              ypbin-ai-*.jar)      ctx=ypbin-service/ypbin-ai ;;
+              ypbin-access-*.jar)  ctx=ypbin-service/ypbin-access ;;
+              ypbin-iot-*.jar)     ctx=ypbin-service/ypbin-iot ;;
+              *) echo "::error::未知 jar 名（无法归类到服务）：$base"; exit 1 ;;
+            esac
+            install -D -m 644 "$jar" "${ctx}/target/${base}"
+            count=$((count + 1))
+          done < <(find /tmp/release-jars -type f -name '*.jar')
+          echo "放置 jar 数：${count}"
+          [ "$count" -eq 6 ] || { echo "::error::期望 6 个服务 jar，实际 ${count}（jar 作业制品契约不一致）"; exit 1; }
+          for ctx in ypbin-gateway ypbin-auth ypbin-service/ypbin-system ypbin-service/ypbin-ai \
+                     ypbin-service/ypbin-access ypbin-service/ypbin-iot; do
+            matches=("${ctx}/target"/*.jar)
+            [ "${#matches[@]}" -eq 1 ] || { echo "::error file=${ctx}::${ctx}/target 下 jar 数=${#matches[@]}（Dockerfile 的 COPY 通配要求恰好 1 个）"; exit 1; }
+          done
+
+      - name: 登录 GHCR（失败即给明确修复指引）
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! echo "$GHCR_TOKEN" | docker login "$GHCR_REGISTRY" -u "${{ github.actor }}" --password-stdin; then
+            echo "::error::GHCR 登录失败。修复：① 确认本作业 permissions 含 packages: write；② 仓库 Settings → Actions → General → Workflow permissions 允许写入；③ 组织/账号未禁用 GitHub Packages。"
+            exit 1
+          fi
+
+      - name: 构建 → 产 tar 兜底 → 推 GHCR → 读回 digest（任一服务失败都显式判红）
+        run: |
+          set -uo pipefail
+          mkdir -p dist/tars
+          VERSION="${RELEASE_TAG#v}"
+          echo "release tag=${RELEASE_TAG}  version=${VERSION}"
+
+          services=(gateway auth system ai access iot)
+          declare -A ctx=(
+            [gateway]=ypbin-gateway
+            [auth]=ypbin-auth
+            [system]=ypbin-service/ypbin-system
+            [ai]=ypbin-service/ypbin-ai
+            [access]=ypbin-service/ypbin-access
+            [iot]=ypbin-service/ypbin-iot
+          )
+
+          {
+            echo "# ypbin-iot release container images"
+            echo "# git: $(git rev-parse HEAD)"
+            echo "# built: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "# release-tag: ${RELEASE_TAG}"
+            echo "# version: ${VERSION}"
+            echo "# registry: ${GHCR_REGISTRY}/${GHCR_OWNER}"
+            echo "# columns: service<TAB>local_image<TAB>ghcr_repo<TAB>tags<TAB>digest<TAB>image_id<TAB>tar_file<TAB>tar_sha256"
+          } > dist/images.digests.tsv
+          {
+            echo "# ypbin-iot release container image tarballs (docker save | gzip -9)"
+            echo "# git: $(git rev-parse HEAD)"
+            echo "# built: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "# release-tag: ${RELEASE_TAG}"
+            echo "# version: ${VERSION}"
+          } > dist/images.manifest.sha256
+
+          failed=0
+          for svc in "${services[@]}"; do
+            c="${ctx[$svc]}"
+            local_img="ypbin-${svc}"
+            repo="${GHCR_REGISTRY}/${GHCR_OWNER}/${local_img}"
+            tags=("${VERSION}")
+            [ "${RELEASE_TAG}" != "${VERSION}" ] && tags+=("${RELEASE_TAG}")
+            tags+=("latest")
+
+            echo "::group::${svc}: docker build（context=${c}）"
+            if ! docker build -t "${local_img}:${VERSION}" "$c"; then
+              echo "::error::${svc} 镜像构建失败（context=${c}）"
+              failed=1
+              echo "::endgroup::"
+              continue
+            fi
+            image_id="$(docker image inspect --format '{{.Id}}' "${local_img}:${VERSION}")"
+
+            # 镜像内容自检：镜像内 /app/app.jar 必须与输入 jar 逐字节一致（防 COPY 命中错文件）
+            src_jar="$(ls "${c}/target"/*.jar)"
+            src_sha="$(sha256sum "$src_jar" | awk '{print $1}')"
+            probe="$(docker create "${local_img}:${VERSION}")"
+            tmpd="$(mktemp -d)"
+            docker cp "${probe}:/app/app.jar" "${tmpd}/app.jar"
+            docker rm -f "$probe" >/dev/null
+            in_sha="$(sha256sum "${tmpd}/app.jar" | awk '{print $1}')"
+            rm -rf "$tmpd"
+            if [ "$in_sha" != "$src_sha" ]; then
+              echo "::error::${svc} 镜像内 /app/app.jar（${in_sha}）≠ 输入 jar（${src_sha}）"
+              failed=1
+            fi
+            echo "::endgroup::"
+
+            # 兜底资产：先出 tar（**不依赖 GHCR 是否可用**）
+            echo "::group::${svc}: docker save -> tar.gz + sha256"
+            tar_file="ypbin-iot-${svc}-${VERSION}.tar.gz"
+            tar_sha=""
+            if docker save "${local_img}:${VERSION}" | gzip -9 > "dist/tars/${tar_file}"; then
+              tar_sha="$(sha256sum "dist/tars/${tar_file}" | awk '{print $1}')"
+              echo "${tar_sha}  ${tar_file}" >> dist/images.manifest.sha256
+            else
+              echo "::error::${svc} docker save 失败（无法产出 tar 兜底资产）"
+              failed=1
+            fi
+            echo "::endgroup::"
+
+            # 主路径：推 GHCR
+            echo "::group::${svc}: push ${repo}"
+            digest=""
+            push_ok=1
+            for t in "${tags[@]}"; do
+              docker tag "${local_img}:${VERSION}" "${repo}:${t}"
+              if ! docker push "${repo}:${t}"; then
+                push_ok=0
+              fi
+            done
+            if [ "$push_ok" -eq 1 ]; then
+              digest="$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "${repo}:${VERSION}" 2>/dev/null || true)"
+              if ! printf '%s' "$digest" | grep -qE '^sha256:[0-9a-f]{64}$'; then
+                echo "::error::无法从 registry 读回 ${repo}:${VERSION} 的 digest（得到『${digest}』）——拒写空 digest 到清单，判红。"
+                digest=""
+                failed=1
+              fi
+            else
+              echo "::error::推送 ${repo} 失败。修复：① 本作业 permissions 必须含 packages: write；② 仓库 Settings → Actions → General → Workflow permissions 允许写入；③ 组织未禁用 GitHub Packages；④ 若同名包已存在但未连接到本仓库，先在包设置连接仓库，或删除该包后重推；⑤ 私有包拉取需要 read:packages 的 PAT（部署侧，见 docs/OPS-RELEASE-IMAGES.md）。"
+              failed=1
+            fi
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+              "$svc" "$local_img" "$repo" "$(IFS=,; echo "${tags[*]}")" "$digest" "$image_id" "$tar_file" "$tar_sha" \
+              >> dist/images.digests.tsv
+            echo "::endgroup::"
+          done
+
+          echo "== images.digests.tsv =="
+          cat dist/images.digests.tsv
+          echo "== images.manifest.sha256 =="
+          cat dist/images.manifest.sha256
+
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::镜像发布**存在失败项**（见上方 ::error，绝不静默跳过）。jar 资产已由上一作业完成、不受影响；tar 兜底资产仍会挂出。修复后重跑本工作流（workflow_dispatch 指定同一 tag）即可。"
+            exit 1
+          fi
+
+      - name: 写 job summary（镜像摘要 + checksum，便于人工核对）
+        if: always()
+        run: |
+          {
+            echo "## 容器镜像制品（issue #234）"
+            echo ""
+            echo "- release tag：`${{ inputs.tag || github.ref_name }}`"
+            echo ""
+            echo "### images.digests.tsv"
+            echo ""
+            echo '```'
+            cat dist/images.digests.tsv 2>/dev/null || echo "(未生成)"
+            echo '```'
+            echo ""
+            echo "### images.manifest.sha256"
+            echo ""
+            echo '```'
+            cat dist/images.manifest.sha256 2>/dev/null || echo "(未生成)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 失败诊断（本作业失败时的排查入口）
+        if: failure()
+        run: |
+          {
+            echo "## 镜像作业失败：排查顺序"
+            echo ""
+            echo "1. GHCR 推送被拒 → 本作业 `permissions.packages: write`、仓库 Actions 写权限、组织是否禁用 Packages、同名包是否已连接仓库。"
+            echo "2. `docker login` 失败 → 同上，另查 actor 权限。"
+            echo "3. `docker build` 失败 → 看该服务 Dockerfile 的 `COPY target/*.jar` 是否恰好命中 1 个 jar（上一步已断言）。"
+            echo "4. 读 digest 失败 → runner 缺 `docker buildx`，或推送未真正完成。"
+            echo "5. 完整方案与权限说明：`docs/OPS-RELEASE-IMAGES.md`。"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::镜像作业失败——见 job summary 的排查顺序与上方 ::error 行。"
+
+      - name: 附加镜像资产到 Release（tar + 摘要清单；本作业失败时也按 always() 执行）
+        if: always()
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: |
+            dist/images.digests.tsv
+            dist/images.manifest.sha256
+            dist/tars/*.tar.gz
+          fail_on_unmatched_files: false
