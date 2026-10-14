@@ -38,12 +38,23 @@ import org.springframework.transaction.annotation.Transactional;
 /**
  * IoT 设备分组服务实现（§3.11，树形 + 成员多对多）。
  *
+ * <p>树形写入必须守好层级：新增/编辑的父分组必须存在，编辑还必须沿父链检查，禁止自引用或挂到
+ * 自己的后代下形成环——否则前端组树会无限递归、成员归属也会变得不可判定。</p>
+ *
  * @author wenbin
  * @since 2026-09-20
  */
 @Service
 public class IotDeviceGroupServiceImpl extends BaseServiceImpl<IotDeviceGroupMapper, IotDeviceGroup>
     implements IotDeviceGroupService {
+
+    /**
+     * 父链最大上溯层数。
+     *
+     * <p>树校验必须上溯父链：正常树远达不到 100 层；一旦遇到历史脏数据留下的环，超过上限即拒绝，
+     * 保证查询次数有界、不会无界循环。</p>
+     */
+    private static final int MAX_PARENT_DEPTH = 100;
 
     private final IotDeviceGroupMemberMapper iotDeviceGroupMemberMapper;
     private final IotDeviceMapper iotDeviceMapper;
@@ -67,6 +78,9 @@ public class IotDeviceGroupServiceImpl extends BaseServiceImpl<IotDeviceGroupMap
     @Override
     @Transactional(rollbackFor = Exception.class)
     public Long create(IotDeviceGroupReq req) {
+        if (req.getParentId() != null) {
+            requireGroup(req.getParentId());
+        }
         IotDeviceGroup group = new IotDeviceGroup();
         apply(group, req);
         save(group);
@@ -77,11 +91,43 @@ public class IotDeviceGroupServiceImpl extends BaseServiceImpl<IotDeviceGroupMap
     @Transactional(rollbackFor = Exception.class)
     public void update(Long id, IotDeviceGroupReq req) {
         IotDeviceGroup group = requireGroup(id);
-        if (req.getParentId() != null && req.getParentId().equals(id)) {
-            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "分组不能作为自己的父分组");
+        Long parentId = req.getParentId();
+        if (parentId != null) {
+            if (parentId.equals(id)) {
+                throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "分组不能作为自己的父分组");
+            }
+            // 候选父必须存在；再从它沿父链上溯，防止把当前分组挂到自己的后代下形成环。
+            requireNoCycle(id, requireGroup(parentId));
         }
         apply(group, req);
         updateById(group);
+    }
+
+    /**
+     * 从候选父分组沿 {@code parentId} 链向上检查：遇到当前分组即判定成环。
+     *
+     * <p>父链是链式结构，只能逐层上溯；这里用 {@link #MAX_PARENT_DEPTH} 给查询次数封顶——
+     * 历史脏数据中的环若不经过当前 id（无法在成环判定时提前退出），到上限同样抛业务异常，
+     * 不静默放行、也不无界循环。</p>
+     *
+     * @param id    当前分组主键
+     * @param start 候选父分组（调用方已校验其存在）
+     */
+    private void requireNoCycle(Long id, IotDeviceGroup start) {
+        IotDeviceGroup current = start;
+        int depth = 0;
+        while (current != null) {
+            if (id.equals(current.getId())) {
+                throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "分组层级不能形成环");
+            }
+            depth++;
+            if (depth > MAX_PARENT_DEPTH) {
+                throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                    "分组层级超过 " + MAX_PARENT_DEPTH + " 层，拒绝保存（疑似存在环）");
+            }
+            Long parentId = current.getParentId();
+            current = parentId == null ? null : getById(parentId);
+        }
     }
 
     @Override

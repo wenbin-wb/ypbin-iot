@@ -13,6 +13,7 @@ import cn.ypbin.admin.iot.model.query.IotDeviceQuery;
 import cn.ypbin.admin.iot.model.req.IotDeviceReq;
 import cn.ypbin.admin.iot.model.resp.IotDeviceResp;
 import cn.ypbin.starter.crud.model.PageResult;
+import java.util.List;
 
 /**
  * IoT 设备台账服务。
@@ -69,4 +70,28 @@ public interface IotDeviceService {
      * @param status 启停位：1 启用 / 0 停用（{@code EntityStatus} 的 code）
      */
     void updateStatus(Long id, Integer status);
+
+    /**
+     * 批量启用/停用设备（列表页多选后的单点动作）。
+     *
+     * <p>校验后只发<b>一条批量 UPDATE</b>，不逐台调用 {@link #updateStatus}：单条 SQL 是原子操作，
+     * 且不会把 500 台设备放大成 500 次数据库往返。写入成功后台账 {@code config_epoch} 只推进一次，
+     * 接入侧据一次对账即可看到整批变更。</p>
+     *
+     * @param ids    设备主键（非空，最多 500 个）
+     * @param status 启停位：1 启用 / 0 停用（{@code EntityStatus} 的 code）
+     * @return 实际受影响行数
+     */
+    int batchUpdateStatus(List<Long> ids, Integer status);
+
+    /**
+     * 批量逻辑删除设备（列表页多选删除）。
+     *
+     * <p>校验后只发<b>一条批量 DELETE</b>（逻辑删除由 MyBatis-Plus 注入为 {@code UPDATE is_deleted=1}），
+     * 不逐台调用 {@link #removeDevice}；写入成功后台账 {@code config_epoch} 只推进一次。</p>
+     *
+     * @param ids 设备主键（非空，最多 500 个）
+     * @return 实际受影响行数
+     */
+    int batchRemove(List<Long> ids);
 }

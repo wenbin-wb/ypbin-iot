@@ -41,6 +41,7 @@ import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
 import cn.ypbin.admin.iot.mapper.OutageEventMapper;
 import cn.ypbin.admin.iot.mapping.PointMappingIndex;
+import cn.ypbin.admin.iot.realtime.IotRealtimeService;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.tenant.core.TenantContext;
 import cn.ypbin.starter.tenant.core.TenantProvider;
@@ -112,6 +113,7 @@ class AvailabilityServiceImplTest {
     private AvailabilityProperties properties;
     private SimpleMeterRegistry meterRegistry;
     private PointMappingIndex pointMappingIndex;
+    private IotRealtimeService realtimeService;
     private AvailabilityServiceImpl service;
 
     /**
@@ -151,9 +153,10 @@ class AvailabilityServiceImplTest {
         properties = new AvailabilityProperties();
         meterRegistry = new SimpleMeterRegistry();
         pointMappingIndex = mock(PointMappingIndex.class);
+        realtimeService = mock(IotRealtimeService.class);
         service = new AvailabilityServiceImpl(livenessMapper, outageMapper, maintenanceWindowMapper, deviceMapper,
             properties, tenantProvider, latestValueWriter, timeSeriesWriter, timeSeriesProperties,
-            shadowReportedWriter, pointMappingIndex, meterRegistry);
+            shadowReportedWriter, pointMappingIndex, realtimeService, meterRegistry);
         // 默认把本类用到的设备/点位视为「已映射」：既有用例（最新值/影子/可用率）不关心成员校验。
         // 映射成员校验的专项用例会用更具体的桩覆盖它（见下方 unmapped*/orphan* 用例）。
         lenient().when(pointMappingIndex.loadCoordinates(any())).thenAnswer(invocation -> {
@@ -415,7 +418,8 @@ class AvailabilityServiceImplTest {
             new ExplodingMeterRegistry(AvailabilityServiceImpl.METRIC_SERIES_COLLECTED);
         AvailabilityServiceImpl fragileService = new AvailabilityServiceImpl(livenessMapper, outageMapper,
             maintenanceWindowMapper, deviceMapper, properties, tenantProvider, latestValueWriter,
-            timeSeriesWriter, timeSeriesProperties, shadowReportedWriter, pointMappingIndex, exploding);
+            timeSeriesWriter, timeSeriesProperties, shadowReportedWriter, pointMappingIndex, realtimeService,
+            exploding);
 
         assertThatCode(() -> fragileService.ingest(
             req(point(DEVICE, "temperature", "23.5", 1_700_000_000_000L))))

@@ -18,6 +18,7 @@ import cn.ypbin.admin.iot.mapper.IotProductMapper;
 import cn.ypbin.admin.iot.model.query.IotDeviceQuery;
 import cn.ypbin.admin.iot.model.req.IotDeviceReq;
 import cn.ypbin.admin.iot.model.resp.IotDeviceResp;
+import cn.ypbin.admin.iot.realtime.IotRealtimeService;
 import cn.ypbin.admin.iot.service.IotDeviceService;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.core.exception.GlobalErrorCode;
@@ -25,7 +26,9 @@ import cn.ypbin.starter.crud.model.PageResult;
 import cn.ypbin.starter.crud.service.BaseServiceImpl;
 import cn.ypbin.starter.data.core.EntityStatus;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import java.util.List;
+import java.util.Objects;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -46,13 +49,21 @@ import org.springframework.util.StringUtils;
 public class IotDeviceServiceImpl extends BaseServiceImpl<IotDeviceMapper, IotDevice>
     implements IotDeviceService {
 
+    /** 单次批量操作设备数上限（服务层兜底；请求 DTO 的 {@code @Size} 是接口层第一道闸）。 */
+    private static final int MAX_BATCH_SIZE = 500;
+
     private final IotProductMapper iotProductMapper;
     private final TenantLedgerService tenantLedgerService;
 
+    /** 实时事件流（启停状态更新成功后旁路发布 device-status）。 */
+    private final IotRealtimeService realtimeService;
+
     public IotDeviceServiceImpl(IotProductMapper iotProductMapper,
-                                TenantLedgerService tenantLedgerService) {
+                                TenantLedgerService tenantLedgerService,
+                                IotRealtimeService realtimeService) {
         this.iotProductMapper = iotProductMapper;
         this.tenantLedgerService = tenantLedgerService;
+        this.realtimeService = realtimeService;
     }
 
     @Override
@@ -121,6 +132,66 @@ public class IotDeviceServiceImpl extends BaseServiceImpl<IotDeviceMapper, IotDe
         // 停用/启用都改变「采什么」⇒ 必须推进台账版本号，否则接入侧要等安全网周期才发现
         // （见 IotDeviceServiceImpl 类注释与 ROADMAP 的 G8/R8-9）。
         notifyConfigChanged();
+        // 实时旁路：状态变更成功后推给同租户订阅者（发布失败不回滚写入，见 IotRealtimeService）
+        realtimeService.publishAfterCommit(IotRealtimeService.EVENT_DEVICE_STATUS, device.getTenantId(),
+            new IotRealtimeService.DeviceStatusEvent(id, status));
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public int batchUpdateStatus(List<Long> ids, Integer status) {
+        List<Long> idList = requireBatchIds(ids);
+        if (!EntityStatus.ENABLED.getCode().equals(status)
+            && !EntityStatus.DISABLED.getCode().equals(status)) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "状态取值非法（仅支持 0 停用 / 1 启用）：" + status);
+        }
+        // 一条 UPDATE 覆盖整批：既保证原子性，也避免把 N 台设备放大成 N 次往返。
+        int rows = baseMapper.update(new LambdaUpdateWrapper<IotDevice>()
+            .in(IotDevice::getId, idList)
+            .set(IotDevice::getStatus, status));
+        // 整批只推进一次台账版本号（接入侧一次对账即可看到全部变更），不是逐台推进。
+        notifyConfigChanged();
+        // 实时旁路：批量启停同样在事务提交后推一条批量事件，页面据此刷新总览/列表。
+        realtimeService.publishToCurrentTenantAfterCommit(IotRealtimeService.EVENT_DEVICE_STATUS,
+            new IotRealtimeService.DeviceStatusBatchEvent(List.copyOf(idList), status));
+        return rows;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public int batchRemove(List<Long> ids) {
+        List<Long> idList = requireBatchIds(ids);
+        // 一条 DELETE（逻辑删除由 MyBatis-Plus 注入为 UPDATE is_deleted=1），不逐台 removeById。
+        int rows = baseMapper.delete(new LambdaQueryWrapper<IotDevice>()
+            .in(IotDevice::getId, idList));
+        notifyConfigChanged();
+        realtimeService.publishToCurrentTenantAfterCommit(IotRealtimeService.EVENT_DEVICE_STATUS,
+            new IotRealtimeService.DeviceDeletedBatchEvent(List.copyOf(idList)));
+        return rows;
+    }
+
+    /**
+     * 批量主键校验与服务层上限兜底。
+     *
+     * <p>{@code null}/空集合直接拒绝（空集合进 IN 会拼出非法 SQL）；超过上限拒绝，防止一个请求
+     * 把事务与 IN 列表拖垮；含 {@code null} 元素拒绝（否则会写出 {@code id IN (null)} 的歧义条件）。</p>
+     *
+     * @param ids 设备主键清单
+     * @return 去重后的不可变主键清单
+     */
+    private List<Long> requireBatchIds(List<Long> ids) {
+        if (ids == null || ids.isEmpty()) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "设备 ID 列表不能为空");
+        }
+        if (ids.size() > MAX_BATCH_SIZE) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "单次批量操作设备数不能超过 " + MAX_BATCH_SIZE + "：实际 " + ids.size());
+        }
+        if (ids.stream().anyMatch(Objects::isNull)) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "设备 ID 不能为空");
+        }
+        return ids.stream().distinct().toList();
     }
 
     /**

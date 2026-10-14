@@ -10,6 +10,7 @@
 package cn.ypbin.admin.iot.it;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import cn.ypbin.admin.iot.availability.MaintenanceWindowReq;
@@ -34,6 +35,7 @@ import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
 import cn.ypbin.admin.iot.mapper.OutageEventMapper;
 import cn.ypbin.admin.iot.mapping.PointMappingIndex;
+import cn.ypbin.admin.iot.realtime.IotRealtimeService;
 import cn.ypbin.admin.iot.service.impl.AvailabilityServiceImpl;
 import cn.ypbin.admin.iot.shadow.ShadowReportedUpdate;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesPoint;
@@ -169,7 +171,7 @@ class OutageAvailabilityIT {
         service = new AvailabilityServiceImpl(livenessMapper, outageMapper, maintenanceWindowMapper,
             deviceMapper, new AvailabilityProperties(), () -> java.util.Optional.of(TENANT),
             RECORDED_LATEST::addAll, RECORDED_SERIES::addAll, new TimeSeriesProperties(),
-            RECORDED_SHADOW::addAll, pointMappingIndex, new SimpleMeterRegistry());
+            RECORDED_SHADOW::addAll, pointMappingIndex, mock(IotRealtimeService.class), new SimpleMeterRegistry());
         cleanup();
         seedDevices();
     }
@@ -312,7 +314,7 @@ class OutageAvailabilityIT {
         AvailabilityServiceImpl tightScan = new AvailabilityServiceImpl(livenessMapper, outageMapper,
             maintenanceWindowMapper, deviceMapper, oneByOne, () -> java.util.Optional.of(TENANT),
             RECORDED_LATEST::addAll, RECORDED_SERIES::addAll, new TimeSeriesProperties(),
-            RECORDED_SHADOW::addAll, pointMappingIndex, new SimpleMeterRegistry());
+            RECORDED_SHADOW::addAll, pointMappingIndex, mock(IotRealtimeService.class), new SimpleMeterRegistry());
         // 两个「设备不存在」的垃圾活性行（id 更小 ⇒ 优先被候选查询选中）+ 一个真断档设备
         insertOrphanLiveness(1L, 999_998L, dbNow.minusHours(1));
         insertOrphanLiveness(2L, 999_999L, dbNow.minusHours(1));

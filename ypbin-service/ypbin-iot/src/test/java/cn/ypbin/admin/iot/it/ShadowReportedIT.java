@@ -10,6 +10,7 @@
 package cn.ypbin.admin.iot.it;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
 
 import cn.ypbin.admin.iot.availability.AvailabilityProperties;
 import cn.ypbin.starter.iot.availability.AvailabilityRules;
@@ -30,6 +31,7 @@ import cn.ypbin.admin.iot.mapper.IotShadowMapper;
 import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
 import cn.ypbin.admin.iot.mapper.OutageEventMapper;
 import cn.ypbin.admin.iot.mapping.PointMappingIndex;
+import cn.ypbin.admin.iot.realtime.IotRealtimeService;
 import cn.ypbin.admin.iot.service.impl.AvailabilityServiceImpl;
 import cn.ypbin.admin.iot.shadow.DbShadowReportedWriter;
 import cn.ypbin.admin.iot.shadow.ShadowReportedUpdate;
@@ -155,7 +157,7 @@ class ShadowReportedIT {
             sessionTemplate.getMapper(MaintenanceWindowMapper.class),
             sessionTemplate.getMapper(IotDeviceMapper.class), new AvailabilityProperties(),
             () -> Optional.of(TENANT), values -> { }, points -> { }, new TimeSeriesProperties(), writer,
-            pointMappingIndex, new SimpleMeterRegistry());
+            pointMappingIndex, mock(IotRealtimeService.class), new SimpleMeterRegistry());
         cleanup();
         seedDevices();
     }

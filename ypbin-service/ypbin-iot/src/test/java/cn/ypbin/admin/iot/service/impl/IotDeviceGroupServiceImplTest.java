@@ -12,6 +12,7 @@ package cn.ypbin.admin.iot.service.impl;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -25,6 +26,7 @@ import cn.ypbin.admin.iot.mapper.IotDeviceGroupMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceGroupMemberMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.IotProductMapper;
+import cn.ypbin.admin.iot.model.req.IotDeviceGroupReq;
 import cn.ypbin.admin.iot.model.resp.IotDeviceGroupMemberResp;
 import cn.ypbin.starter.core.exception.BusinessException;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
@@ -37,6 +39,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.test.util.ReflectionTestUtils;
 
 /**
@@ -179,5 +182,128 @@ class IotDeviceGroupServiceImplTest {
         service.removeMember(1L, 11L);
 
         verify(memberMapper).deleteById(11L);
+    }
+
+    @Test
+    @DisplayName("新增分组：父分组不存在 ⇒ 拒绝且不落库（悬空父会变成孤儿节点）")
+    void createWithMissingParentMustFail() {
+        when(groupMapper.selectById(99L)).thenReturn(null);
+
+        assertThatThrownBy(() -> service.create(groupReq(99L)))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("分组不存在");
+        verify(groupMapper, never()).insert(any(IotDeviceGroup.class));
+    }
+
+    @Test
+    @DisplayName("新增分组：父分组存在 ⇒ 正常落库并带上 parentId")
+    void createWithExistingParentShouldSave() {
+        when(groupMapper.selectById(2L)).thenReturn(group(2L, null));
+
+        service.create(groupReq(2L));
+
+        ArgumentCaptor<IotDeviceGroup> captor = ArgumentCaptor.forClass(IotDeviceGroup.class);
+        verify(groupMapper).insert(captor.capture());
+        assertThat(captor.getValue().getGroupName()).isEqualTo("子分组");
+        assertThat(captor.getValue().getParentId()).isEqualTo(2L);
+    }
+
+    @Test
+    @DisplayName("编辑分组：自引用 ⇒ 拒绝且不写库")
+    void updateSelfParentMustBeRejected() {
+        when(groupMapper.selectById(1L)).thenReturn(group(1L, null));
+
+        assertThatThrownBy(() -> service.update(1L, groupReq(1L)))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("不能作为自己的父分组");
+        verify(groupMapper, never()).updateById(any(IotDeviceGroup.class));
+    }
+
+    @Test
+    @DisplayName("编辑分组：父分组不存在 ⇒ 拒绝且不写库")
+    void updateWithMissingParentMustFail() {
+        when(groupMapper.selectById(1L)).thenReturn(group(1L, null));
+        when(groupMapper.selectById(99L)).thenReturn(null);
+
+        assertThatThrownBy(() -> service.update(1L, groupReq(99L)))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("分组不存在");
+        verify(groupMapper, never()).updateById(any(IotDeviceGroup.class));
+    }
+
+    @Test
+    @DisplayName("🔴 直接环：把 A 挂到自己的子 B 下 ⇒ 拒绝且不写库")
+    void directCycleMustBeRejected() {
+        when(groupMapper.selectById(1L)).thenReturn(group(1L, 2L));
+        when(groupMapper.selectById(2L)).thenReturn(group(2L, 1L));
+
+        assertThatThrownBy(() -> service.update(1L, groupReq(2L)))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("不能形成环");
+        verify(groupMapper, never()).updateById(any(IotDeviceGroup.class));
+    }
+
+    @Test
+    @DisplayName("🔴 间接环：父链 A→B→C→A 回到当前节点 ⇒ 拒绝且不写库")
+    void indirectCycleMustBeRejected() {
+        when(groupMapper.selectById(1L)).thenReturn(group(1L, null));
+        when(groupMapper.selectById(2L)).thenReturn(group(2L, 3L));
+        when(groupMapper.selectById(3L)).thenReturn(group(3L, 1L));
+
+        assertThatThrownBy(() -> service.update(1L, groupReq(2L)))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("不能形成环");
+        verify(groupMapper, never()).updateById(any(IotDeviceGroup.class));
+    }
+
+    @Test
+    @DisplayName("🔴 脏环不经过当前节点：上溯超过 100 层上限同样拒绝（查询有界，不无界循环）")
+    void dirtyCycleWithoutCurrentIdMustHitDepthLimit() {
+        when(groupMapper.selectById(anyLong())).thenAnswer(invocation -> {
+            Long id = invocation.getArgument(0);
+            if (id == 1L) {
+                return group(1L, null);
+            }
+            if (id == 2L) {
+                return group(2L, 3L);
+            }
+            if (id == 3L) {
+                return group(3L, 2L);
+            }
+            return null;
+        });
+
+        assertThatThrownBy(() -> service.update(1L, groupReq(2L)))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("超过 100 层");
+        verify(groupMapper, never()).updateById(any(IotDeviceGroup.class));
+    }
+
+    @Test
+    @DisplayName("合法编辑：候选父链正常结束 ⇒ 放行并写入 parentId")
+    void validParentChainShouldUpdate() {
+        when(groupMapper.selectById(1L)).thenReturn(group(1L, null));
+        when(groupMapper.selectById(2L)).thenReturn(group(2L, null));
+
+        service.update(1L, groupReq(2L));
+
+        ArgumentCaptor<IotDeviceGroup> captor = ArgumentCaptor.forClass(IotDeviceGroup.class);
+        verify(groupMapper).updateById(captor.capture());
+        assertThat(captor.getValue().getParentId()).isEqualTo(2L);
+    }
+
+    private static IotDeviceGroupReq groupReq(Long parentId) {
+        IotDeviceGroupReq req = new IotDeviceGroupReq();
+        req.setGroupName("子分组");
+        req.setParentId(parentId);
+        return req;
+    }
+
+    private static IotDeviceGroup group(Long id, Long parentId) {
+        IotDeviceGroup group = new IotDeviceGroup();
+        group.setId(id);
+        group.setGroupName("G" + id);
+        group.setParentId(parentId);
+        return group;
     }
 }

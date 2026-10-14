@@ -34,6 +34,7 @@ import cn.ypbin.admin.iot.model.req.AlertInstanceQuery;
 import cn.ypbin.admin.iot.model.resp.AlertInstanceResp;
 import cn.ypbin.admin.iot.model.resp.AlertNotificationResp;
 import cn.ypbin.admin.iot.model.resp.AlertSummaryResp;
+import cn.ypbin.admin.iot.realtime.IotRealtimeService;
 import cn.ypbin.admin.iot.service.AlertInstanceService;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.crud.model.PageResult;
@@ -86,6 +87,9 @@ public class AlertInstanceServiceImpl implements AlertInstanceService {
     private final AlertNotifyScheduler notifyScheduler;
     private final AlertMetrics metrics;
     private final AlertGate gate;
+
+    /** 实时事件流（确认/静默/收口成功后旁路发布 alert）。 */
+    private final IotRealtimeService realtimeService;
     private final AlertProperties properties;
 
     public AlertInstanceServiceImpl(IotAlertInstanceMapper instanceMapper,
@@ -94,7 +98,7 @@ public class AlertInstanceServiceImpl implements AlertInstanceService {
                                     DeviceLivenessMapper livenessMapper,
                                     AlertSilencePolicy silencePolicy, AlertNotifyPlanner notifyPlanner,
                                     AlertNotifyScheduler notifyScheduler, AlertMetrics metrics, AlertGate gate,
-                                    AlertProperties properties) {
+                                    IotRealtimeService realtimeService, AlertProperties properties) {
         this.instanceMapper = instanceMapper;
         this.notificationMapper = notificationMapper;
         this.ruleMapper = ruleMapper;
@@ -105,6 +109,7 @@ public class AlertInstanceServiceImpl implements AlertInstanceService {
         this.notifyScheduler = notifyScheduler;
         this.metrics = metrics;
         this.gate = gate;
+        this.realtimeService = realtimeService;
         this.properties = properties;
     }
 
@@ -214,6 +219,7 @@ public class AlertInstanceServiceImpl implements AlertInstanceService {
         // 确认后**通知一次**（ACKED 事件）：让「我看到了、正在处理」被记录并让别人也知道；
         // 之后不再按 repeat_interval 重复打扰（设计 §2.3/§3.4-S5 的「降级」语义）
         notifyAcked(ids, userId, now);
+        publishAlert(IotRealtimeService.ALERT_ACTION_ACK, ids, null, acked, null);
         return acked;
     }
 
@@ -280,7 +286,11 @@ public class AlertInstanceServiceImpl implements AlertInstanceService {
             throw new BusinessException("静默时长必须大于 0 分钟");
         }
         LocalDateTime now = livenessMapper.selectNow();
-        return instanceMapper.batchSilence(ids, now.plusMinutes(minutes));
+        int silenced = instanceMapper.batchSilence(ids, now.plusMinutes(minutes));
+        if (silenced > 0) {
+            publishAlert(IotRealtimeService.ALERT_ACTION_SILENCE, ids, null, silenced, minutes);
+        }
+        return silenced;
     }
 
     @Override
@@ -326,7 +336,25 @@ public class AlertInstanceServiceImpl implements AlertInstanceService {
             metrics.notifyQueued(inserted);
         }
         log.info("[iot] 规则停用收口活动告警：实例 {} 条，通知入队 {} 条", actives.size(), rows.size());
+        publishAlert(IotRealtimeService.ALERT_ACTION_RESOLVE, null, ruleIds, actives.size(), null);
         return actives.size();
+    }
+
+    /**
+     * 发布告警事件（租户与 MP 租户插件同源：{@code TenantContext} 优先，其次 {@code TenantProvider}；
+     * 两者都无时只对平台订阅者可见）。
+     *
+     * <p>旁路语义：实时推送失败只影响「看得快不快」，不回滚已完成的确认/静默/收口。
+     * 负载里的集合做快照拷贝，避免调用方后续修改影响事件语义。</p>
+     */
+    private void publishAlert(String action, List<Long> instanceIds, List<Long> ruleIds, int count,
+                              Integer minutes) {
+        // 用 publishToCurrentTenant：与 MP 租户插件同源（ThreadLocal 优先，其次 Provider），
+        // 生产 HTTP 请求不会因 TenantContext 为空把告警事件误发成平台事件
+        realtimeService.publishToCurrentTenantAfterCommit(IotRealtimeService.EVENT_ALERT,
+            new IotRealtimeService.AlertEvent(action,
+                instanceIds == null ? null : new ArrayList<>(instanceIds),
+                ruleIds == null ? null : new ArrayList<>(ruleIds), count, minutes));
     }
 
     /** 按产品反查设备 ID（一次查询；上限 {@value #MAX_PRODUCT_DEVICES}，超出只取前 N 台并不静默失败）。 */

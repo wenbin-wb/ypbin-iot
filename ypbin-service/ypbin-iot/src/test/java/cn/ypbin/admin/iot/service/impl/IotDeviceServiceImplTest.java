@@ -23,14 +23,19 @@ import cn.ypbin.admin.iot.lease.TenantLedgerService;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.IotProductMapper;
 import cn.ypbin.admin.iot.model.req.IotDeviceReq;
+import cn.ypbin.admin.iot.realtime.IotRealtimeService;
 import cn.ypbin.admin.iot.model.query.IotDeviceQuery;
 import cn.ypbin.admin.iot.model.resp.IotDeviceResp;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.data.core.EntityStatus;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import java.time.LocalDateTime;
+import java.util.Arrays;
+import java.util.List;
+import java.util.stream.IntStream;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
@@ -55,7 +60,8 @@ class IotDeviceServiceImplTest {
 
     private final IotProductMapper productMapper = mock(IotProductMapper.class);
     private final TenantLedgerService ledgerService = mock(TenantLedgerService.class);
-    private final IotDeviceServiceImpl service = new IotDeviceServiceImpl(productMapper, ledgerService);
+    private final IotDeviceServiceImpl service = new IotDeviceServiceImpl(
+        productMapper, ledgerService, mock(IotRealtimeService.class));
 
     /**
      * 初始化 MyBatis-Plus 的实体元信息。
@@ -245,6 +251,99 @@ class IotDeviceServiceImplTest {
         ArgumentCaptor<IotDevice> captured = ArgumentCaptor.forClass(IotDevice.class);
         verify(mapper).updateById(captured.capture());
         assertThat(captured.getValue().getStatus()).isEqualTo(EntityStatus.DISABLED.getCode());
+    }
+
+    @Test
+    @DisplayName("批量启停：一次批量 UPDATE + 台账版本号只推进一次")
+    void batchUpdateStatusShouldUpdateOnceAndBumpEpochOnce() {
+        IotDeviceMapper mapper = mock(IotDeviceMapper.class);
+        ReflectionTestUtils.setField(service, "baseMapper", mapper);
+        when(mapper.update(any(LambdaUpdateWrapper.class))).thenReturn(3);
+
+        int rows = service.batchUpdateStatus(List.of(1L, 2L, 3L), EntityStatus.DISABLED.getCode());
+
+        assertThat(rows).isEqualTo(3);
+        ArgumentCaptor<LambdaUpdateWrapper<IotDevice>> captor =
+            ArgumentCaptor.forClass(LambdaUpdateWrapper.class);
+        verify(mapper, times(1)).update(captor.capture());
+        assertThat(captor.getValue().getSqlSet())
+            .as("批量启停必须显式 set status").contains("status");
+        assertThat(captor.getValue().getSqlSegment())
+            .as("WHERE 必须是 id IN (一批主键)").contains("id");
+        assertThat(captor.getValue().getParamNameValuePairs().values())
+            .contains(1L, 2L, 3L, EntityStatus.DISABLED.getCode());
+        verify(ledgerService, times(1)).bumpConfigEpochOfCurrentTenant();
+    }
+
+    @Test
+    @DisplayName("批量删除：一次批量 DELETE + 台账版本号只推进一次")
+    void batchRemoveShouldDeleteOnceAndBumpEpochOnce() {
+        IotDeviceMapper mapper = mock(IotDeviceMapper.class);
+        ReflectionTestUtils.setField(service, "baseMapper", mapper);
+        when(mapper.delete(any(LambdaQueryWrapper.class))).thenReturn(2);
+
+        int rows = service.batchRemove(List.of(7L, 8L));
+
+        assertThat(rows).isEqualTo(2);
+        ArgumentCaptor<LambdaQueryWrapper<IotDevice>> captor =
+            ArgumentCaptor.forClass(LambdaQueryWrapper.class);
+        verify(mapper, times(1)).delete(captor.capture());
+        assertThat(captor.getValue().getSqlSegment())
+            .as("WHERE 必须是 id IN (一批主键)").contains("id");
+        assertThat(captor.getValue().getParamNameValuePairs().values()).contains(7L, 8L);
+        verify(ledgerService, times(1)).bumpConfigEpochOfCurrentTenant();
+    }
+
+    @Test
+    @DisplayName("批量校验：null/空/超 500/含 null ID/非法状态一律拒绝，不写库、不推进版本号")
+    void batchOperationsMustValidateBeforeWrite() {
+        IotDeviceMapper mapper = mock(IotDeviceMapper.class);
+        ReflectionTestUtils.setField(service, "baseMapper", mapper);
+
+        assertThatThrownBy(() -> service.batchUpdateStatus(null, EntityStatus.ENABLED.getCode()))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("不能为空");
+        assertThatThrownBy(() -> service.batchUpdateStatus(List.of(), EntityStatus.ENABLED.getCode()))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("不能为空");
+        assertThatThrownBy(() -> service.batchUpdateStatus(Arrays.asList(1L, null),
+            EntityStatus.ENABLED.getCode()))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("不能为空");
+        assertThatThrownBy(() -> service.batchUpdateStatus(manyIds(501), EntityStatus.ENABLED.getCode()))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("不能超过 500");
+        for (Integer bad : new Integer[] {null, 2, -1}) {
+            assertThatThrownBy(() -> service.batchUpdateStatus(List.of(1L), bad))
+                .as("status=%s 必须被拒（第三态会静默停采）", bad)
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("状态取值非法");
+        }
+        assertThatThrownBy(() -> service.batchRemove(null))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("不能为空");
+        assertThatThrownBy(() -> service.batchRemove(List.of()))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("不能为空");
+        assertThatThrownBy(() -> service.batchRemove(manyIds(501)))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("不能超过 500");
+
+        verify(mapper, never()).update(any(LambdaUpdateWrapper.class));
+        verify(mapper, never()).delete(any(LambdaQueryWrapper.class));
+        verify(ledgerService, never()).bumpConfigEpochOfCurrentTenant();
+    }
+
+    @Test
+    @DisplayName("500 台上限：500 放行且仍为一次 SQL，501 在服务层兜底拒绝")
+    void batchSizeLimitShouldAllowBoundaryAndRejectBeyond() {
+        IotDeviceMapper mapper = mock(IotDeviceMapper.class);
+        ReflectionTestUtils.setField(service, "baseMapper", mapper);
+        when(mapper.delete(any(LambdaQueryWrapper.class))).thenReturn(500);
+
+        int rows = service.batchRemove(manyIds(500));
+
+        assertThat(rows).isEqualTo(500);
+        verify(mapper, times(1)).delete(any(LambdaQueryWrapper.class));
+        verify(ledgerService, times(1)).bumpConfigEpochOfCurrentTenant();
+    }
+
+    /** 构造 n 个连续主键（用于批量边界用例）。 */
+    private static List<Long> manyIds(int size) {
+        return IntStream.rangeClosed(1, size).mapToObj(Long::valueOf).toList();
     }
 
     private static IotDevice existingDevice() {

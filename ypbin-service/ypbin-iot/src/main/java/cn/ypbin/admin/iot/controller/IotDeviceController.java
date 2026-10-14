@@ -10,6 +10,8 @@
 package cn.ypbin.admin.iot.controller;
 
 import cn.ypbin.admin.iot.model.query.IotDeviceQuery;
+import cn.ypbin.admin.iot.model.req.IotDeviceBatchDeleteReq;
+import cn.ypbin.admin.iot.model.req.IotDeviceBatchStatusReq;
 import cn.ypbin.admin.iot.model.req.IotDeviceReq;
 import cn.ypbin.admin.iot.model.resp.IotDeviceResp;
 import cn.ypbin.admin.iot.service.IotDeviceService;
@@ -121,5 +123,38 @@ public class IotDeviceController {
     public R<Void> updateStatus(@PathVariable Long id, @PathVariable Integer status) {
         iotDeviceService.updateStatus(id, status);
         return R.ok();
+    }
+
+    /**
+     * 批量启用/停用设备（列表页多选；单次最多 500 台）。
+     *
+     * <p>与单个启停同权限同语义，只是一次提交一批：服务层一条批量 UPDATE + 台账版本号只推进一次。
+     * 状态仅接受 0/1，第三态会被拒（理由见单台 {@link #updateStatus}）。</p>
+     *
+     * @param req 批量启停请求
+     * @return 实际生效台数
+     */
+    @PutMapping("/batch/status")
+    @SaCheckPermission("iot:device:update")
+    @Idempotent
+    @Log("批量切换 IoT 设备状态")
+    public R<Integer> batchUpdateStatus(@Valid @RequestBody IotDeviceBatchStatusReq req) {
+        return R.ok(iotDeviceService.batchUpdateStatus(req.getIds(), req.getStatus()));
+    }
+
+    /**
+     * 批量删除设备（列表页多选；单次最多 500 台）。
+     *
+     * <p>逻辑删除 + 一次批量 SQL；删除成功后推进台账版本号，接入侧据此解绑停采。</p>
+     *
+     * @param req 批量删除请求
+     * @return 实际删除台数
+     */
+    @PostMapping("/batch/delete")
+    @SaCheckPermission("iot:device:delete")
+    @Idempotent
+    @Log("批量删除 IoT 设备")
+    public R<Integer> batchRemove(@Valid @RequestBody IotDeviceBatchDeleteReq req) {
+        return R.ok(iotDeviceService.batchRemove(req.getIds()));
     }
 }

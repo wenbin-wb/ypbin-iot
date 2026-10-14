@@ -10,6 +10,7 @@
 package cn.ypbin.admin.iot.it;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import cn.ypbin.admin.iot.availability.AvailabilityProperties;
@@ -31,6 +32,7 @@ import cn.ypbin.admin.iot.mapper.IotShadowMapper;
 import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
 import cn.ypbin.admin.iot.mapper.OutageEventMapper;
 import cn.ypbin.admin.iot.mapping.PointMappingIndex;
+import cn.ypbin.admin.iot.realtime.IotRealtimeService;
 import cn.ypbin.admin.iot.service.impl.AvailabilityServiceImpl;
 import cn.ypbin.admin.iot.shadow.ShadowReportedUpdate;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesPoint;
@@ -215,7 +217,7 @@ class IngestPointMappingIT {
         service = new AvailabilityServiceImpl(livenessMapper, outageMapper, maintenanceWindowMapper, deviceMapper,
             new AvailabilityProperties(), () -> Optional.of(TENANT), RECORDED_LATEST::addAll,
             RECORDED_SERIES::addAll, new TimeSeriesProperties(), RECORDED_SHADOW::addAll, pointMappingIndex,
-            registry);
+            mock(IotRealtimeService.class), registry);
     }
 
     @Test
