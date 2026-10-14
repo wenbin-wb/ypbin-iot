@@ -91,6 +91,21 @@ class IotDeviceServiceImplTest {
     }
 
     @Test
+    @DisplayName("产品过滤：productId 非空按等值过滤，为空不加任何过滤")
+    void buildWrapperShouldFilterByProductIdOnlyWhenPresent() {
+        IotDeviceQuery query = new IotDeviceQuery();
+        query.setProductId(2001L);
+
+        LambdaQueryWrapper<IotDevice> wrapper = service.buildWrapper(query);
+
+        assertThat(wrapper.getSqlSegment()).contains("product_id");
+        assertThat(wrapper.getParamNameValuePairs().values()).contains(2001L);
+
+        IotDeviceQuery withoutProduct = new IotDeviceQuery();
+        assertThat(service.buildWrapper(withoutProduct).getSqlSegment()).doesNotContain("product_id");
+    }
+
+    @Test
     @DisplayName("实体→响应：字段逐个搬运（含创建时间与 M-1 扩展字段），不做改名")
     void toRespShouldMapEveryField() {
         IotDevice entity = new IotDevice();

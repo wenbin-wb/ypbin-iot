@@ -33,6 +33,31 @@ public class TenantLedgerResp {
     private Long configEpoch;
 
     /**
+     * 设备数：该租户名下**未删除**设备的总数。
+     *
+     * <p>{@code 0} 表示「确实没有设备」，不是「未统计、待补」。查询接口（台账列表）会填充；
+     * 写入口回读时也按同一口径填充。</p>
+     */
+    private Integer deviceCount;
+
+    /**
+     * 最近上报时刻：该租户名下未删除设备 {@code last_seen_at} 的最大值。
+     *
+     * <p>{@code null} 表示「没有设备」或「设备从未上报」，是事实而不是未统计。查询接口会填充；
+     * 写入口回读时也按同一口径填充。</p>
+     */
+    private LocalDateTime lastReportAt;
+
+    /**
+     * 是否有有效凭据：该租户是否存在**未删除且 {@code password_hash} 非空**的设备凭据行
+     * （吊销会把哈希置空，因此空哈希视作无有效凭据）。
+     *
+     * <p>{@code false} 表示「确实没有有效凭据」，不是「未统计、待补」。查询接口会填充；
+     * 写入口回读时也按同一口径填充。</p>
+     */
+    private Boolean hasCredential;
+
+    /**
      * 本次写操作的结果类型：{@code created} / {@code revived} / {@code updated}。
      *
      * <p>仅写入口回填；查询接口为 {@code null}（没有「本次变更」可言）。</p>

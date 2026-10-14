@@ -18,20 +18,25 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import cn.ypbin.admin.iot.entity.TenantLedger;
+import cn.ypbin.admin.iot.mapper.IotDeviceCredentialMapper;
+import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.TenantLedgerMapper;
 import cn.ypbin.admin.iot.model.resp.TenantLedgerResp;
 import cn.ypbin.starter.core.exception.BusinessException;
-import org.springframework.dao.DataAccessResourceFailureException;
-import org.springframework.dao.DeadlockLoserDataAccessException;
-import org.springframework.transaction.annotation.Transactional;
 import cn.ypbin.starter.tenant.core.TenantContext;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.sql.SQLException;
+import java.sql.Timestamp;
 import java.time.LocalDateTime;
 import java.util.List;
-import org.junit.jupiter.api.DisplayName;
+import java.util.Map;
 import org.apache.ibatis.exceptions.PersistenceException;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.dao.DeadlockLoserDataAccessException;
+import org.springframework.transaction.annotation.Transactional;
 
 /**
  * 租户台账服务单测（M-2：配置版本号的推进语义 + 运维写入口）。
@@ -48,8 +53,18 @@ class TenantLedgerServiceTest {
     private static final Long TENANT = 11L;
 
     private final TenantLedgerMapper ledgerMapper = mock(TenantLedgerMapper.class);
+    private final IotDeviceMapper deviceMapper = mock(IotDeviceMapper.class);
+    private final IotDeviceCredentialMapper credentialMapper = mock(IotDeviceCredentialMapper.class);
     private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
-    private final TenantLedgerService service = new TenantLedgerService(ledgerMapper, meterRegistry);
+    private final TenantLedgerService service = new TenantLedgerService(
+        ledgerMapper, deviceMapper, credentialMapper, meterRegistry);
+
+    @BeforeEach
+    void setUp() {
+        // 台账有行时 listAll/回读会各打一条批量聚合 SQL；默认空统计 = 无设备/无有效凭据（事实零值）
+        when(deviceMapper.selectMaps(any())).thenReturn(List.of());
+        when(credentialMapper.selectMaps(any())).thenReturn(List.of());
+    }
 
     @Test
     @DisplayName("★ 配置版本号推进：台账有该租户才推进；无该租户/无租户上下文一律 no-op（不得 insert）")
@@ -113,6 +128,94 @@ class TenantLedgerServiceTest {
 
         when(ledgerMapper.selectList(any())).thenReturn(List.of());
         assertThat(service.listAll()).as("查询类不得返回 null").isEmpty();
+    }
+
+    @Test
+    @DisplayName("★ 台账全量：设备数与最近上报按 tenant_id 批量聚合，凭据只认 password_hash 非空的行")
+    void listAllShouldAggregateDeviceAndCredentialStats() {
+        TenantLedger first = persistedRow(1L, Boolean.TRUE);
+        TenantLedger second = new TenantLedger();
+        second.setTenantId(22L);
+        second.setAssignable(Boolean.FALSE);
+        second.setConfigEpoch(3L);
+        when(ledgerMapper.selectList(any())).thenReturn(List.of(first, second));
+
+        LocalDateTime lastReportAt = LocalDateTime.of(2026, 10, 14, 10, 30);
+        when(deviceMapper.selectMaps(any())).thenReturn(List.of(
+            Map.of("tenant_id", TENANT, "device_count", 3L, "last_report_at", lastReportAt),
+            // 22 号租户用大写/无下划线别名，且无 last_report_at 列：一起覆盖 key 兼容与「从未上报」
+            Map.of("TENANT_ID", 22L, "DEVICECOUNT", 5L)));
+        when(credentialMapper.selectMaps(any())).thenReturn(List.of(
+            Map.of("tenant_id", TENANT, "credential_count", 1L)));
+
+        List<TenantLedgerResp> rows = service.listAll();
+
+        assertThat(rows).hasSize(2);
+        TenantLedgerResp withStats = rows.getFirst();
+        assertThat(withStats.getDeviceCount()).isEqualTo(3);
+        assertThat(withStats.getLastReportAt()).isEqualTo(lastReportAt);
+        assertThat(withStats.getHasCredential()).as("存在未删除且哈希非空的凭据行").isTrue();
+
+        TenantLedgerResp uppercaseKeys = rows.get(1);
+        assertThat(uppercaseKeys.getDeviceCount()).as("别名大小写/下划线差异必须兼容").isEqualTo(5);
+        assertThat(uppercaseKeys.getLastReportAt()).as("从未上报 ⇒ null，不是 0").isNull();
+        assertThat(uppercaseKeys.getHasCredential()).as("无凭据行 ⇒ false，是事实不是未统计").isFalse();
+    }
+
+    @Test
+    @DisplayName("★ 聚合空统计回落为事实零值：deviceCount=0、lastReportAt=null、hasCredential=false")
+    void listAllShouldFallBackToFactDefaultsWithoutStats() {
+        when(ledgerMapper.selectList(any())).thenReturn(List.of(persistedRow(1L, Boolean.TRUE)));
+        when(deviceMapper.selectMaps(any())).thenReturn(List.of());
+        when(credentialMapper.selectMaps(any())).thenReturn(List.of());
+
+        TenantLedgerResp resp = service.listAll().getFirst();
+
+        assertThat(resp.getDeviceCount()).isZero();
+        assertThat(resp.getLastReportAt()).isNull();
+        assertThat(resp.getHasCredential()).isFalse();
+    }
+
+    @Test
+    @DisplayName("最近上报时刻兼容驱动返回 java.sql.Timestamp 的形态")
+    void listAllShouldAcceptTimestampLastReportAt() {
+        when(ledgerMapper.selectList(any())).thenReturn(List.of(persistedRow(1L, Boolean.TRUE)));
+        LocalDateTime lastReportAt = LocalDateTime.of(2026, 10, 12, 8, 15, 30);
+        when(deviceMapper.selectMaps(any())).thenReturn(List.of(
+            Map.<String, Object>of("tenant_id", TENANT, "device_count", 1L,
+                "last_report_at", Timestamp.valueOf(lastReportAt))));
+
+        assertThat(service.listAll().getFirst().getLastReportAt()).isEqualTo(lastReportAt);
+    }
+
+    @Test
+    @DisplayName("台账无行时不得空打聚合查询（批量查询前先短路）")
+    void listAllShouldNotQueryAggregatesWhenLedgerEmpty() {
+        when(ledgerMapper.selectList(any())).thenReturn(List.of());
+
+        assertThat(service.listAll()).isEmpty();
+        verify(deviceMapper, never()).selectMaps(any());
+        verify(credentialMapper, never()).selectMaps(any());
+    }
+
+    @Test
+    @DisplayName("★ 写入口回读也填充聚合列（与列表同一口径），且不破坏「回读落库状态」")
+    void setAssignableAndGetShouldFillAggregatesOnReadBack() {
+        when(ledgerMapper.selectIncludingDeleted(TENANT))
+            .thenReturn(null, persistedRow(1L, Boolean.TRUE));
+        LocalDateTime lastReportAt = LocalDateTime.of(2026, 10, 13, 9, 0);
+        when(deviceMapper.selectMaps(any())).thenReturn(List.of(
+            Map.of("tenant_id", TENANT, "device_count", 2L, "last_report_at", lastReportAt)));
+        when(credentialMapper.selectMaps(any())).thenReturn(List.of(
+            Map.of("tenant_id", TENANT, "credential_count", 4L)));
+
+        TenantLedgerResp resp = service.setAssignableAndGet(TENANT, true);
+
+        assertThat(resp.getDeviceCount()).isEqualTo(2);
+        assertThat(resp.getLastReportAt()).isEqualTo(lastReportAt);
+        assertThat(resp.getHasCredential()).isTrue();
+        assertThat(resp.getConfigEpoch()).as("版本号仍必须来自回读的落库行").isEqualTo(1L);
+        assertThat(resp.getChange()).isEqualTo("created");
     }
 
     private static TenantLedger persistedRow(Long configEpoch, Boolean assignable) {
