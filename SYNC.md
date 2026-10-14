@@ -51,6 +51,7 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 | `deploy/install.sh` | IoT/access 服务与 Nacos 模板清单 + 本仓加固（见 §三 的逐文件配方） | 部署脚本。2026-10-09 并入 upstream 后：Nacos 配置导入段改用 `SCRIPT_DIR` 解析 + 自动枚举，并保留本仓加固（期望清单缺失告警、零模板 `die`、口令不回显、`MYSQL_PWD` 写法） |
 | `deploy/docker-compose.yml` | 新增 `ypbin-iot` 服务块 | 部署编排 |
 | `deploy/nacos/ypbin-gateway.yaml` | routes 加 `iot` 一段（`Path=/iot/**` + `StripPrefix=1`） | 网关路由（IoT 路由也进仓，便于与其它服务同构） |
+| `deploy/nacos/ypbin-system.yaml` | `xxl-job.access-token` 由**空值**改为**必填占位** | **2026-10-14 加**：xxl-job-core **3.5.0 成对升级**要求 AccessToken 改为**执行器维度且不可为空**（空值会让执行器启动即失败）。该键位于 admin 侧 Data ID 的 `xxl-job` 段，**无法用新文件表达**（Spring 按 Data ID 加载整份配置）。**代价**：与 upstream 同步时该文件冲突**整体取本仓版本**（同 CHANGELOG.md 的既有约定）。 |
 | `deploy/.env.example` | 端口段注释加 18084 | 环境变量示例（纯注释） |
 | `ypbin-architecture-tests/src/test/java/cn/ypbin/admin/arch/SourceConventionTest.java` | `LOOP_DB_EXEMPTIONS` **加一条误报豁免**（类名#接收者.方法 + 理由） | **唯一的上游测试类例外**，理由见下方专条 |
 | `ypbin-service/ypbin-ai/src/main/java/cn/ypbin/admin/ai/service/impl/AiModelConfigServiceImpl.java` | `testConnection` 的 HTTP 客户端改为**复用单个实例 + 显式 `HTTP/1.1` + 具名超时常量** | **2026-09-27 加**：修 admin 既有代码里的**缺陷**——该方法**每次调用新建 `HttpClient`**（丢掉连接池、超时策略散落）且**未指定协议版本**（JDK 默认 HTTP/2）。而它的调用形态恰是「新连接 + 带体 POST」，`baseUrl` 又允许明文 `http://` ⇒ 会踩已在 `ypbin-iot` 实测到的 h2c 坑（带体 POST 作为新连接首个请求 ⇒ `EOF reached while reading`）。**为什么不能用新文件**：问题就在这一行上，改的必须是这个既有方法。⚠️ **更好的长期做法是改上游 admin 仓**（本仓下次同步自然继承、分歧面回到 9）——本轮受「改动落在 ypbin-iot」的范围约束才走白名单。 |

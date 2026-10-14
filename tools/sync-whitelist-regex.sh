@@ -21,6 +21,10 @@ ALLOWED+='deploy/install\.sh|'
 ALLOWED+='\.github/workflows/ci\.yml|'
 ALLOWED+='deploy/docker-compose\.yml|'
 ALLOWED+='deploy/nacos/ypbin-gateway\.yaml|'
+# 第 23 项（2026-10-14 加）：xxl-job 3.5.0 **成对升级**要求执行器 AccessToken 必填
+# 且与 admin 中同名 AppName 一致；该键位于 admin 侧 Data ID ypbin-system.yaml 的 xxl-job 段，
+# 无法用新文件表达（Spring 配置按 Data ID 加载）。理由与代价见 SYNC.md 第二节。
+ALLOWED+='deploy/nacos/ypbin-system\.yaml|'
 ALLOWED+='deploy/\.env\.example|'
 ALLOWED+='docs/microservice-deployment\.md|'
 ALLOWED+='ypbin-architecture-tests/src/test/java/cn/ypbin/admin/arch/SourceConventionTest\.java|'
