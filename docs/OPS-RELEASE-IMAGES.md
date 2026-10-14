@@ -141,3 +141,20 @@ done
 - Docker Docs《docker image save》，访问 2026-10-14：https://docs.docker.com/reference/cli/docker/image/save/
 - 本仓一手证据：`.github/workflows/release-artifacts.yml`、`deploy/verify-release-images.sh`、
   `deploy/PROD-OPS-NOTES.md` §15、`docs/DEPLOY-BACKEND.md` §2.0。
+
+---
+
+## 10. 2026-10-14 调整：离线 tar 资产改为**按需产出**（默认关闭）
+
+**背景**：每次 Release 都产 6 个 `docker save | gzip -9` 的 `*.tar.gz`（单服务实测约 115MB ⇒ 合计约 700MB），而离线包只在「部署机无外网」时才需要。
+
+**现在的行为**
+
+| 触发方式 | GHCR 推送 + `images.digests.tsv` | 离线 `*.tar.gz` + `images.manifest.sha256` |
+|---|---|---|
+| tag 推送（常规发版） | 是 | 否（默认不产） |
+| `workflow_dispatch` 且勾选 `build_image_tarballs=true` | 是 | 是 |
+
+**怎么取离线包**：Actions → Release Artifacts → Run workflow，填入目标 tag（`tag` 输入）并勾选 `build_image_tarballs`；跑完到该 tag 的 Release 资产里取 `ypbin-iot-<service>-<version>.tar.gz` 与 `images.manifest.sha256`。
+
+**为什么仍保留这条路径**：dev 部署机无外网（`deploy/PROD-OPS-NOTES.md` §15），`docker load` 是唯一离线手段；只是不再让每次发版都背上约 700MB。
