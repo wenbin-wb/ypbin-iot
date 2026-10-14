@@ -21,6 +21,7 @@
 - **宿主可插字节载荷解码 SPI（issue #223）**：新增 `cn.ypbin.admin.access.decode`（`BytePayloadDecoder` + 注册表 SSOT + 失败原因码），未注册时行为与今天逐字一致（出口闸门 + `egress.invalid`），注册后解出值走既有规范化/落列；含 MQTT binary 参考实现（默认关闭）。
 - **迁移登记表与升级运行器（防升级静默漏迁移）**：`iot_schema_migration` 登记表 + `deploy/migrate.sh`（`--status`/`--dry-run`/apply/`--baseline`；校验和不一致判红且不自动重放）；`install.sh` 双写账本。**背景**：dev 实测发现 4 个迁移静默未应用导致新 jar 直接 `Unknown column 'word_count'`。
 - **Release 制品一键校验（issue #234）**：`deploy/verify-release-artifacts.sh`（sha256 校验 + 断言 6 jar + 可选 git sha 比对）。
+- **镜像制品化（issue #234 剩余项）**：`release-artifacts.yml` 新增 `images` 作业——**复用已构建 jar（不重复编译）**，推 **GHCR**（`ghcr.io/<owner>/ypbin-<service>`，tag `<version>`/`<release-tag>`/`latest`）并读回 registry digest；同时 `docker save` 产 6 个 `*.tar.gz` + sha256 作为**无外网部署机的兜底**。Release 新增 `images.digests.tsv`（digest + image id）与 `images.manifest.sha256`；部署侧新增 `deploy/verify-release-images.sh`（tar sha256 + digest + `--load` 时核对**镜像内 /app/app.jar == jar 清单**）。失败**显式判红**（登录/推送/构建/读 digest 各有修复指引），不静默跳过；方案对比与权限/可见性见 `docs/OPS-RELEASE-IMAGES.md`。
 - **依赖漏洞门禁（issue #237）**：新增 `dependency-vuln-gate.yml`（OWASP Dependency-Check，CVSS ≥ 7 判红；NVD 库按周缓存；空库/冷缓存不静默放行，且失败**自解释**）；`deploy/dependency-check-suppressions.xml`。
 - **可观测栈与 EMQX 能力验证（issue #222/#218/#219）**：`deploy/observability/`（Prometheus + Grafana + Alertmanager + 只读 actuator 桥接器 + 8 条规则 + promtool 单测）；`deploy/emqx/` 收紧配置与隔离实验床、集群方案文档。
 - **上线手册收紧（实测驱动）**：`C2.4` 更正 SDK 指标名（`iot.tcp.*` 实际记在 **`ypbin.iot.errors` 的 `type` 标签**，且宿主可能未启用桥接）；`B.2` 迁移硬步骤（换 jar 前 `migrate.sh --status`）。
