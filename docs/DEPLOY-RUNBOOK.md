@@ -114,6 +114,13 @@ git -C <repo> rev-parse HEAD
 - ⚠️ SBOM 是**依赖清单**，**不是漏洞扫描**；依赖漏洞门禁已落地（`.github/workflows/dependency-vuln-gate.yml`，
   OWASP Dependency-Check，CVSS ≥ 7 判红）——见 `docs/OPS-DEPENDENCY-VULN-GATE.md` 与 `docs/DEPLOY-BACKEND.md` §2.0。
 
+**镜像制品（2026-10-14 起，同一 Release）**：6 个 `ypbin-iot-<service>-<version>.tar.gz` +
+`images.manifest.sha256`（tar 的 sha256）+ `images.digests.tsv`（GHCR digest + image id）。
+无外网部署机用 `deploy/verify-release-images.sh --tag "$TAG" --dir . --load --jars-manifest ./jars.manifest.sha256`
+校验并 load（会核对**镜像内 /app/app.jar == jar 清单**），再 `docker tag ypbin/<svc>:<ver> ypbin/<svc>:local`；
+有外网可直接 `docker pull ghcr.io/wenbin-wb/ypbin-<svc>:$TAG`（私有包先 `docker login ghcr.io`）。
+方案对比、权限/可见性与边界见 `docs/OPS-RELEASE-IMAGES.md`。**禁止部署浮动 `latest`**。
+
 ### A.5 先做一次备份（回滚物）
 
 ```bash
@@ -209,6 +216,11 @@ $COMPOSE up -d --no-deps ypbin-access
   （`docs/DEPLOY-BACKEND.md` §2；`docs/DEPLOY-UI.md` §5）。
 - 若走一键安装（`install.sh`），它会拉代码 → 构建 → 起全栈，并把本仓检出到 `$ROOT/ypbin-admin`；
   首装/整栈场景用它，**单服务升级不要用整栈 `up -d`**（`README.md`「一键安装」；`docs/DEPLOY-BACKEND.md` §2.3）。
+
+> **镜像路径（2026-10-14 起，可选）**：若本 Release 的镜像已按 §A.4 用 `deploy/verify-release-images.sh --load`
+> 校验并 retag 成 `ypbin/<svc>:local`，则上面的「覆盖 jar → `$COMPOSE build <svc>`」两步可**省略**，
+> 直接 `$COMPOSE up -d --no-deps <svc>`（compose 有本地镜像即不再 build）。仍必须先完成 §B.1 的旧镜像
+> rollback tag 与 §B.2 的迁移登记。详见 `docs/OPS-RELEASE-IMAGES.md`。
 
 ### B.4 立即核对（进入 §C 之前的最低门槛）
 
@@ -478,7 +490,7 @@ deploy/restore.sh --mysql ... --iotdb ... --yes
 |---|---|---|
 | **EMQX 集群** | 生产仍单节点；**2 节点集群已在隔离实验床实测通过**（static 发现 + 跨节点路由），生产未落地 | `docs/OPS-EMQX-CLUSTER.md`（issue #219） |
 | **Prometheus / Grafana 大盘** | **dev 已落地**（Prometheus+Grafana+Alertmanager+桥接器；8 条规则过 promtool）；当前 jar 无 `micrometer-registry-prometheus`，故用桥接器过渡 | `docs/OPS-MONITORING.md`（issue #222） |
-| **镜像制品化（GHCR / tar）** | Release 已产 jar + sha256 + SBOM；镜像仍由部署机 `docker compose build` | `docs/DEPLOY-BACKEND.md` §2.0 边界；审计登记 issue **#234**（镜像制品化剩余） |
+| **镜像制品化（GHCR / tar）** | **已落地**（2026-10-14）：Release 产 6 个镜像 tar + `images.manifest.sha256` + `images.digests.tsv` 并推 GHCR；部署机 `docker load`/`docker pull` 后 retag 部署 | `docs/OPS-RELEASE-IMAGES.md`；`.github/workflows/release-artifacts.yml` 的 `images` 作业（issue #234） |
 | **K8s / HA / 多副本** | 仓内只有 docker compose 编排，无 K8s manifests；多实例告警评估分布式锁未做 | `deploy/docker-compose.yml`；`README.md`「未做」（多实例告警锁） |
 | **外部 EMQX / 隧道 / 入口中间件机** | 不在本 compose 内 | `deploy/emqx/*`；`docs/EMQX-INGRESS-DESIGN.md` |
 | **SBOM = 漏洞扫描？** | **不是**：SBOM 只是依赖清单；依赖漏洞门禁已另立（OWASP Dependency-Check，CVSS ≥ 7 判红） | `docs/DEPLOY-BACKEND.md` §2.0；`docs/OPS-DEPENDENCY-VULN-GATE.md` |

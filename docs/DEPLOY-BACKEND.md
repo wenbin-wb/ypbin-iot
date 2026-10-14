@@ -92,8 +92,25 @@ git -C <repo> rev-parse HEAD      # 应与清单首部的 `# git:` 行一致
 ⚠️ **边界（如实登记）**：SBOM 是**依赖清单**，**不是**漏洞扫描——「已知 CVE 门禁」是另一件事，
 已由独立工作流 `.github/workflows/dependency-vuln-gate.yml`（OWASP Dependency-Check，**CVSS ≥ 7 判红**）落地；
 数据源/缓存/抑制规则见 `docs/OPS-DEPENDENCY-VULN-GATE.md`。
-镜像仍由部署机 `docker compose build`（Dockerfile 只 `COPY target/*.jar`、不编译源码，故安全）；
-镜像制品化属后续增量。
+镜像现已制品化（GHCR + tar，见 §2.0.1）；部署机仍保留 `docker compose build` 作为**离线自建**能力
+（Dockerfile 只 `COPY target/*.jar`、不编译源码，故安全），但不再是唯一路径。
+
+### 2.0.1 镜像制品（2026-10-14 起）：GHCR 主 + `docker save` tar 兜底
+
+同一个工作流的 `images` 作业把 **6 个服务镜像**也做成 Release 资产（复用上面的 jar，**不重复编译**）：
+
+- **主路径 GHCR**：`ghcr.io/<owner>/ypbin-<service>`，tag = `<version>` / `<release-tag>` / `latest`；
+  首次发布的包**默认私有**，私有包拉取需 `read:packages` 的 PAT，公共包可匿名拉取。
+- **兜底 tar**：`ypbin-iot-<service>-<version>.tar.gz` × 6 + `images.manifest.sha256`（tar 的 sha256）
+  + `images.digests.tsv`（registry digest + image id）。
+- **无外网部署机走 tar**：
+  `deploy/verify-release-images.sh --tag <tag> --dir <dir> --load --jars-manifest <dir>/jars.manifest.sha256`
+  → `docker tag ypbin/<svc>:<ver> ypbin/<svc>:local`（compose 已有本地镜像即**不再 build**）→ 只重启该服务。
+- **有外网走 GHCR**：`docker pull ghcr.io/<owner>/ypbin-<service>:<tag>` 后同样 retag 到 `ypbin/<svc>:local`；
+  `deploy/verify-release-images.sh --tag <tag> --pull` 可按 digest 核验。
+- ⚠️ **禁止部署浮动 `latest`**：一律用 `<version>` 或 `@sha256:<digest>`。
+
+方案对比、权限/可见性、校验与边界见 `docs/OPS-RELEASE-IMAGES.md`。
 
 ## 2.1 compose 必填变量（`${VAR:?}`）：EMQX 是**硬前置**，缺失时在「起任何容器之前」报错
 
