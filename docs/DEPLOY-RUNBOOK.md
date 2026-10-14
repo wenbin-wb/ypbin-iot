@@ -305,11 +305,18 @@ code_auth() { curl -s -H "Authorization: Bearer $T" "$1" | python3 -c 'import sy
 | C2.3 | 【access 18086】在途去重 | `curl -s http://127.0.0.1:18086/actuator/metrics/iot.access.subscribe.inflight.skipped` | 少量正常；长期增长 = 订阅长时间不完成 | `docs/METRICS.md` §2.4 |
 | C2.4 | 【access 18086】selector 未命中（SDK 指标，**不能单看 404/0 条**） | 首选**探针制造一次已知失败**再核：用 `deploy/access-tcp-simulator`（或一台**专用探针** TCP 设备）发一个**故意不合格**的帧（键值形态但去掉 `=`，或非 UTF-8 字节），然后 `curl -s "http://127.0.0.1:18086/actuator/metrics/ypbin.iot.errors?tag=type:iot.tcp.selector.not-found"`（⚠️ **SDK 指标不是独立指标名**：`MicrometerMetricsRecorder` 把 `iot.tcp.*` 记进 **`ypbin.iot.errors`** 的 **`type`** 标签，故 `/actuator/metrics/iot.tcp.selector.not-found` **恒 404**） | **该 tag 的计数出现且 +1** ⇒ SDK→Micrometer 桥接正常，该指标可继续用；**不出现** ⇒ 指标链路没接上（这才是真问题） | 2026-10-13 生产只读实测：18086 的 **92 条指标里 `iot.tcp.*` 为 0 条**（`selector.not-found` / `payload.not-key-value` / `payload.not-utf8` 全 404）⇒ 惰性注册下**无法区分**「还没失败过」与「桥没接上」。⚠️ **不要为探针去改生产设备配置**；没有可用探针设备时本条标 `[未核实]`，兜底用 access 日志 + 点位 BAD 质量 + `iot.access.egress.*`；指标名的文档出处 `docs/METRICS.md` §2.6 / `docs/VALUE-DECODE-DESIGN.md` §5.5 |
 
-> ⚠️ **2026-10-14 dev 实测（新增，务必先读）**：`ypbin.iot.errors` 在宿主里**可能根本不存在** ——
-> `ypbin-access` 每次启动都会打 starter 的 WARN：`[ypbin-iot] micrometer 在 classpath 上但没有可用的 MeterRegistry bean ——
-> iotMetricsRecorder 回退到 no-op，框架指标（read/write/subscription/errors）全部丢弃`。此时 **93 条指标里没有任何 SDK 指标**，
-> 用探针制造 selector 未命中后 `ypbin.iot.errors` 仍 404 ⇒ **不是"还没失败过"，而是桥没接上**（starter 侧装配缺陷，已修复）。
-> 判据：先 `curl -s http://127.0.0.1:18086/actuator/metrics | grep ypbin`，**空 ⇒ 本条标 `[未验证]`**，改用 access 日志 + 点位 BAD 质量 + `iot.access.egress.*`。
+> ✅ **2026-10-14 实测更新（问题已修复，本条判据现在可用）**：
+>
+> - **指标桥已生效**：`ypbin-access` 启动打 `[ypbin-iot] iotMetricsRecorder bound to Micrometer (...)`，**不再**出现 no-op 回退 WARN。
+>   前置：starter **≥ 0.3.2**（修复 MeterRegistry 自动配置锚错类导致的静默回退）；本仓 `ypbin-iot.version` 已升到 **0.3.3**。
+> - **协议层错误指标真实上报**：前置 starter **≥ 0.3.3**（issue #27：TCP/MQTT 协议层此前**只打日志、从不调用** MetricsRecorder#recordError ⇒ 指标永远 404）。
+> - **实测证据（dev，2026-10-14）**：把模拟器整帧的键**全部改错**后：
+>   `GET /actuator/metrics/ypbin.iot.errors` → **200**；`availableTags.type = iot.tcp.selector.not-found`；`COUNT = 8`；
+>   `GET .../ypbin.iot.errors?tag=type:iot.tcp.selector.not-found` → **8**（探针已还原）。
+> - **判据（修正后）**：先 `curl -s http://127.0.0.1:18086/actuator/metrics | grep ypbin` —— 出现 `ypbin.iot.errors` 即「桥 + 上报链路」都正常；
+>   **404 只说明还没发生过错误（指标惰性注册）**，应先用探针制造一次已知失败再判，不要据此认定桥没接上。
+> - ⚠️ **触发语义（实测留痕）**：selector 只在**整帧的键全不匹配**时记 `iot.tcp.selector.not-found`；**只缺一个键**（其余仍匹配）**不记**错误指标。
+
 ### C.3 落列（物模型 `data_type` 唯一决定）
 
 | # | 核验项 | 命令 | 期望 | 不满足说明什么 |
