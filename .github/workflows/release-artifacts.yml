@@ -24,6 +24,10 @@ on:
     tags: ['v*']
   workflow_dispatch:
     inputs:
+      build_image_tarballs:
+        description: '是否额外产出离线镜像 tar.gz（默认否；仅无外网部署机需要）'
+        type: boolean
+        default: false
       tag:
         description: '要回填制品的已有 tag（例如 v1.0.0）'
         required: true
@@ -253,6 +257,8 @@ jobs:
 
       - name: 构建 → 产 tar 兜底 → 推 GHCR → 读回 digest（任一服务失败都显式判红）
         run: |
+          # 离线 tar 兜底资产仅在手动触发且勾选时产出（默认关闭：避免每次 Release 多约 700MB）
+          BUILD_TARS="${{ inputs.build_image_tarballs }}"
           set -uo pipefail
           mkdir -p dist/tars
           VERSION="${RELEASE_TAG#v}"
@@ -277,6 +283,7 @@ jobs:
             echo "# registry: ${GHCR_REGISTRY}/${GHCR_OWNER}"
             echo "# columns: service<TAB>local_image<TAB>ghcr_repo<TAB>tags<TAB>digest<TAB>image_id<TAB>tar_file<TAB>tar_sha256"
           } > dist/images.digests.tsv
+          if [ "$BUILD_TARS" = "true" ]; then
           {
             echo "# ypbin-iot release container image tarballs (docker save | gzip -9)"
             echo "# git: $(git rev-parse HEAD)"
@@ -284,6 +291,7 @@ jobs:
             echo "# release-tag: ${RELEASE_TAG}"
             echo "# version: ${VERSION}"
           } > dist/images.manifest.sha256
+          fi
 
           failed=0
           for svc in "${services[@]}"; do
@@ -318,7 +326,8 @@ jobs:
             fi
             echo "::endgroup::"
 
-            # 兜底资产：先出 tar（**不依赖 GHCR 是否可用**）
+            # 兜底资产：先出 tar（**不依赖 GHCR 是否可用**）；默认关闭，见 BUILD_TARS
+            if [ "$BUILD_TARS" = "true" ]; then
             echo "::group::${svc}: docker save -> tar.gz + sha256"
             tar_file="ypbin-iot-${svc}-${VERSION}.tar.gz"
             tar_sha=""
@@ -330,6 +339,7 @@ jobs:
               failed=1
             fi
             echo "::endgroup::"
+            fi
 
             # 主路径：推 GHCR
             echo "::group::${svc}: push ${repo}"
@@ -410,6 +420,14 @@ jobs:
           tag_name: ${{ inputs.tag || github.ref_name }}
           files: |
             dist/images.digests.tsv
+          fail_on_unmatched_files: false
+
+      - name: 附加离线镜像 tar 资产到 Release（仅手动触发且勾选时）
+        if: always() && inputs.build_image_tarballs
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: |
             dist/images.manifest.sha256
             dist/tars/*.tar.gz
           fail_on_unmatched_files: false

@@ -12,6 +12,9 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
 ## [未发布]
+### 变更
+
+- **Release 离线镜像 tar 资产改为按需产出（默认关闭）**：常规 tag 发版只产 jar/SBOM/GHCR digest；离线 `*.tar.gz` + `images.manifest.sha256` 仅在手动触发并勾选 `build_image_tarballs=true` 时产出（避免每次 Release 多约 700MB）。见 `docs/OPS-RELEASE-IMAGES.md` §10。
 ### 新增（2026-10-14 批次）
 
 - **消息跟踪二批（issue #221）**：`iot_mqtt_ingest_receipt` 增 6 列（`receipt_status`/`received_count`/`persisted_rows`/`persisted_at`/`discard_reason`/`discard_detail`）+ `(tenant_id, device_id, create_time)` 索引；**整批被拒改为写 `rejected` 行**（此前零痕迹），幂等预查只认 `accepted`、命中 `rejected` 物理删除后按新批次继续；追踪接口新增阶段 `up-persisted`/`up-discarded` 与条目 6 字段。
