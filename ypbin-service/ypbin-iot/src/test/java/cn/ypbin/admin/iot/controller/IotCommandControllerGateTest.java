@@ -13,11 +13,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
 import cn.ypbin.admin.iot.command.CommandReplyReq;
+import cn.ypbin.admin.iot.model.req.CommandBatchSendReq;
 import cn.ypbin.admin.iot.model.req.CommandSendReq;
 import cn.ypbin.admin.iot.model.req.CommandQuery;
 import cn.ypbin.admin.iot.model.req.CommandSendReq;
 import cn.ypbin.starter.log.annotation.Log;
+import cn.ypbin.starter.tools.idempotent.Idempotent;
 import java.lang.reflect.Method;
+import org.springframework.web.bind.annotation.PostMapping;
 import java.util.Map;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -41,13 +44,31 @@ import tools.jackson.databind.ObjectMapper;
 class IotCommandControllerGateTest {
 
     @Test
-    @DisplayName("三个端点的权限码逐一对应（查询与下发绝不能同码）")
+    @DisplayName("四个端点的权限码逐一对应（查询与下发绝不能同码；批量沿用下发码，不新造）")
     void permissionsMustMatchEachEndpoint() throws Exception {
         assertPermission("send", new Class<?>[] {Long.class, CommandSendReq.class},
             "iot:debug:send");
         assertPermission("page", new Class<?>[] {Long.class, CommandQuery.class},
             "iot:debug:get");
         assertPermission("resend", new Class<?>[] {Long.class, String.class}, "iot:debug:send");
+        // 批量是"同一动作的放大"（同一份物模型校验、同一条下发链路），沿用 iot:debug:send；
+        // 新造权限码会要求所有既有角色重新授权，而能力边界并没有变。
+        assertPermission("batchSend", new Class<?>[] {CommandBatchSendReq.class}, "iot:debug:send");
+    }
+
+    @Test
+    @DisplayName("批量端点：路径挂在 /devices 下、必须 @Log + @Idempotent（防连点 + 审计留痕）")
+    void batchEndpointMustBeGuarded() throws Exception {
+        Method batch = IotCommandController.class.getMethod("batchSend", CommandBatchSendReq.class);
+        PostMapping mapping = batch.getAnnotation(PostMapping.class);
+        assertThat(mapping).as("批量端点必须用 POST").isNotNull();
+        assertThat(mapping.value()).as("客户端路径为 /iot/devices/commands/batch（StripPrefix=1）")
+            .containsExactly("/commands/batch");
+        assertThat(batch.getAnnotation(Log.class)).as("写操作必须审计留痕").isNotNull();
+        assertThat(batch.getAnnotation(Idempotent.class))
+            .as("@Idempotent 防浏览器连点造成的重复批次（业务幂等由逐设备派生的 clientRequestId 承担）")
+            .isNotNull();
+        assertThat(batch.getReturnType().getSimpleName()).isEqualTo("R");
     }
 
     @Test

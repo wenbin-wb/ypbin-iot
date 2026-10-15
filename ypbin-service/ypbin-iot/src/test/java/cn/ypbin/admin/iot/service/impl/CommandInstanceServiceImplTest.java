@@ -49,6 +49,7 @@ import cn.ypbin.admin.iot.mapper.IotPropertyMapper;
 import cn.ypbin.admin.iot.mapper.IotServiceMapper;
 import cn.ypbin.admin.iot.model.req.CommandSendReq;
 import cn.ypbin.admin.iot.model.resp.CommandInstanceResp;
+import cn.ypbin.admin.iot.service.CommandBatchProperties;
 import cn.ypbin.admin.iot.service.IotShadowService;
 import cn.ypbin.starter.core.exception.BusinessException;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
@@ -138,7 +139,7 @@ class CommandInstanceServiceImplTest {
         meterRegistry = new SimpleMeterRegistry();
         service = new CommandInstanceServiceImpl(deviceMapper, serviceMapper, propertyMapper,
             commandMapper, instanceMapper, pointMappingMapper, emqxAdminClient, new EmqxProperties(),
-            new ObjectMapper(), shadowService, meterRegistry);
+            new ObjectMapper(), shadowService, new CommandBatchProperties(), meterRegistry);
     }
 
     @Test

@@ -11,14 +11,17 @@ package cn.ypbin.admin.iot.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
 import cn.ypbin.admin.iot.enums.CommandSource;
+import cn.ypbin.admin.iot.model.req.CommandBatchSendReq;
 import cn.ypbin.admin.iot.model.req.CommandQuery;
 import cn.ypbin.admin.iot.model.req.CommandSendReq;
+import cn.ypbin.admin.iot.model.resp.CommandBatchResp;
 import cn.ypbin.admin.iot.model.resp.CommandInstanceResp;
 import cn.ypbin.admin.iot.service.CommandInstanceService;
 import cn.ypbin.starter.security.core.UserContext;
 import cn.ypbin.starter.core.model.R;
 import cn.ypbin.starter.crud.model.PageResult;
 import cn.ypbin.starter.log.annotation.Log;
+import cn.ypbin.starter.tools.idempotent.Idempotent;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -62,6 +65,36 @@ public class IotCommandController {
     public R<CommandInstanceResp> send(@PathVariable Long deviceId,
                                        @Valid @RequestBody CommandSendReq req) {
         return R.ok(commandInstanceService.send(deviceId, req, CommandSource.CONSOLE,
+            UserContext.getUserId()));
+    }
+
+    /**
+     * 批量下发：**一个命令模板**应用到多台设备，返回**逐设备结果**（部分失败如实逐条返回）。
+     *
+     * <p><b>为什么错误语义与单台不同</b>：单台端点把业务性拒绝表达为 {@code R.code} 信封（整体失败），
+     * 因为它只有一个对象。批量有 N 个对象，"整体失败"会丢掉"哪些成功、哪些失败、各自为什么"——
+     * 而那正是运维要看的东西。因此：</p>
+     * <ul>
+     *   <li>**整批级**错误（设备清单为空/超上限/命令模板形态非法）仍按本仓惯例抛业务错误
+     *       （HTTP 200 + {@code R.code} 非 0），因为此时请求本身不成立；</li>
+     *   <li>**逐台**问题（设备不存在/不属于本租户/已停用/物模型不可用/该台投递失败）一律进
+     *       {@code results[]} 并计入 {@code accepted}/{@code rejected}，**不**让整批变红。</li>
+     * </ul>
+     *
+     * <p><b>权限沿用 {@code iot:debug:send}</b>：批量是同一动作的放大（同一份物模型校验、同一条
+     * 下发链路），不新造权限码；新造会要求所有既有角色重新授权，而能力边界并没有变。
+     * {@code @Idempotent} 防的是浏览器连点造成的重复批次（同参数指纹 5s 窗口），
+     * **不承担业务幂等**——业务幂等由 {@code clientRequestId} 逐设备派生保证。</p>
+     *
+     * @param req 批量下发请求（设备清单 + 命令模板）
+     * @return 逐设备结果回执
+     */
+    @PostMapping("/commands/batch")
+    @SaCheckPermission("iot:debug:send")
+    @Idempotent
+    @Log("批量下发 IoT 设备命令")
+    public R<CommandBatchResp> batchSend(@Valid @RequestBody CommandBatchSendReq req) {
+        return R.ok(commandInstanceService.sendBatch(req, CommandSource.CONSOLE,
             UserContext.getUserId()));
     }
 

@@ -12,8 +12,10 @@ package cn.ypbin.admin.iot.service;
 import cn.ypbin.admin.iot.command.CommandReplyReq;
 import cn.ypbin.admin.iot.command.CommandReplyResult;
 import cn.ypbin.admin.iot.enums.CommandSource;
+import cn.ypbin.admin.iot.model.req.CommandBatchSendReq;
 import cn.ypbin.admin.iot.model.req.CommandQuery;
 import cn.ypbin.admin.iot.model.req.CommandSendReq;
+import cn.ypbin.admin.iot.model.resp.CommandBatchResp;
 import cn.ypbin.admin.iot.model.resp.CommandInstanceResp;
 import cn.ypbin.starter.crud.model.PageResult;
 
@@ -39,6 +41,27 @@ public interface CommandInstanceService {
      */
     CommandInstanceResp send(Long deviceId, CommandSendReq req, CommandSource source,
                              Long operatorUserId);
+
+    /**
+     * 批量下发：**一个命令模板**应用到多台设备，逐台返回结果（部分失败如实返回，不整体失败）。
+     *
+     * <p><b>并发与事务</b>：本方法刻意**不加 {@code @Transactional}**——单台下发的语义就是"每台各自
+     * 即时提交"（见 {@link #send}），批量若包一个大事务，一台设备失败就会把已成功下发的实例一起回滚，
+     * 与"单台失败不影响其它"直接矛盾。</p>
+     *
+     * <p><b>幂等键逐设备派生</b>：请求级 {@code clientRequestId} 会被拼成 {@code <key>:<deviceId>}
+     * 落到各设备（见实现注释），因此 A 设备命中幂等不会短路 B 设备。</p>
+     *
+     * <p><b>耗时上界不是严丝合缝的预算</b>：{@code ypbin.emqx.command-batch.total-budget-ms} 是
+     * **循环入口检查点**（每台开跑前判一次），故实际总耗时可超出该值最多约一台设备的耗时
+     * （≈ 单台 EMQX 写超时）。详见 {@link CommandBatchProperties#getTotalBudgetMs()}。</p>
+     *
+     * @param req            批量请求（设备清单非空、模板必填）
+     * @param source         来源
+     * @param operatorUserId 下发人
+     * @return 逐设备结果回执（含 total/accepted/rejected）
+     */
+    CommandBatchResp sendBatch(CommandBatchSendReq req, CommandSource source, Long operatorUserId);
 
     /**
      * 分页查询某设备的命令实例（按创建时刻倒序）。
