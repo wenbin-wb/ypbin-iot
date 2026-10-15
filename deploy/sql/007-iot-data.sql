@@ -785,3 +785,32 @@ ALTER TABLE iot_mqtt_ingest_receipt
     ADD COLUMN discard_reason VARCHAR(32)  NULL COMMENT '丢弃原因码（复用 MqttIngestRejectReason 枚举，不新造分类）',
     ADD COLUMN discard_detail VARCHAR(512) NULL COMMENT '丢弃明细：未映射 pointId 前 8 个逗号连接，超出记 ,...(+N) 后缀',
     ADD KEY idx_iot_mqtt_ingest_receipt_time (tenant_id, device_id, create_time);
+
+-- =============================================================
+-- 仪表盘在线趋势每日快照（2026-10-15 追加）
+-- 覆盖：iot_dashboard_daily_snapshot —— 在线趋势（近 14 天）的历史数据源。
+-- 租户表：含 tenant_id 且不进 deploy/nacos/ypbin-iot.yaml 的 ignore-tables，
+--       由租户插件统一追加 tenant_id 条件（与 iot_device 一致）。
+-- 唯一键：uk_iot_dashboard_daily_snapshot(tenant_id, snapshot_date) —— 每租户每天一条；
+--       应用层「先查后写」存在竞态窗口，并发首写由该唯一键兜底（冲突回退为更新）。
+-- 等价性：本文件追加部分与 migration/2026-10-15-iot-dashboard-snapshot.sql 语句等价。
+-- =============================================================
+
+CREATE TABLE iot_dashboard_daily_snapshot
+(
+    id              BIGINT   NOT NULL COMMENT '主键',
+    tenant_id       BIGINT   NOT NULL COMMENT '租户 ID',
+    snapshot_date   DATE     NOT NULL COMMENT '快照日期（租户内唯一，每天一条）',
+    device_total    INT      NOT NULL COMMENT '设备总数（含停用）',
+    device_online   INT      NOT NULL COMMENT '在线设备数（online_status = online）',
+    device_offline  INT      NOT NULL COMMENT '离线设备数（online_status = offline）',
+    device_disabled INT      NOT NULL COMMENT '停用（禁用采集）设备数（status = 0）',
+    create_user     BIGINT   NULL COMMENT '创建人',
+    create_time     DATETIME NULL COMMENT '创建时间',
+    update_user     BIGINT   NULL COMMENT '更新人',
+    update_time     DATETIME NULL COMMENT '更新时间',
+    status          TINYINT  NOT NULL DEFAULT 1 COMMENT '状态：1 启用 0 停用',
+    is_deleted      TINYINT  NOT NULL DEFAULT 0 COMMENT '逻辑删除',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_iot_dashboard_daily_snapshot (tenant_id, snapshot_date)
+) COMMENT 'IoT 仪表盘在线趋势每日快照（历史数据源）';

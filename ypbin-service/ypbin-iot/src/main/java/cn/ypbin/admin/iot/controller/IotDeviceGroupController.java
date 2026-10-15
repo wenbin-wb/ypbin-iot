@@ -9,8 +9,10 @@
  */
 package cn.ypbin.admin.iot.controller;
 
+import cn.ypbin.admin.iot.model.req.IotDeviceGroupMemberBatchReq;
 import cn.ypbin.admin.iot.model.req.IotDeviceGroupMemberReq;
 import cn.ypbin.admin.iot.model.req.IotDeviceGroupReq;
+import cn.ypbin.admin.iot.model.resp.BatchMemberAddResp;
 import cn.ypbin.admin.iot.model.resp.IotDeviceGroupMemberResp;
 import cn.ypbin.admin.iot.model.resp.IotDeviceGroupResp;
 import cn.ypbin.admin.iot.service.IotDeviceGroupService;
@@ -124,6 +126,24 @@ public class IotDeviceGroupController {
     @Log("向 IoT 设备分组添加设备")
     public R<Long> addMember(@PathVariable Long id, @Valid @RequestBody IotDeviceGroupMemberReq req) {
         return R.ok(iotDeviceGroupService.addMember(id, req));
+    }
+
+    /**
+     * 批量加入设备成员（列表页多选，单次最多 200 台）。
+     *
+     * <p>已存在的设备按幂等命中跳过；任一设备不存在则整批拒绝，错误信息一次列出全部缺失 ID。</p>
+     *
+     * @param id  分组主键
+     * @param req 批量设备 ID
+     * @return 新增/跳过计数
+     */
+    @PostMapping("/{id}/members/batch")
+    @SaCheckPermission("iot:group:update")
+    @Idempotent
+    @Log("批量向 IoT 设备分组添加设备")
+    public R<BatchMemberAddResp> addMembers(@PathVariable Long id,
+                                            @Valid @RequestBody IotDeviceGroupMemberBatchReq req) {
+        return R.ok(iotDeviceGroupService.addMembers(id, req.getDeviceIds()));
     }
 
     /**

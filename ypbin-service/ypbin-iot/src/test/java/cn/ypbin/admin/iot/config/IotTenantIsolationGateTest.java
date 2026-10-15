@@ -74,7 +74,10 @@ class IotTenantIsolationGateTest {
         // 平台自告警（2026-09-30 追加）：建表**同批**登记，不重犯消息跟踪复核发现的
         // "实体是租户表却没登记"缺口。平台告警含 metric_snapshot（指标快照）与 summary，
         // 跨租户读到会暴露别的租户的平台运行状态。
-        "iot_platform_alert");
+        "iot_platform_alert",
+        // 仪表盘在线趋势快照（2026-10-15 追加）：实体 extends TenantBaseEntity，
+        // 必须进本清单；否则「快照按租户隔离」这条会脱离清单式门禁覆盖。
+        "iot_dashboard_daily_snapshot");
 
     /** 平台表（不继承租户基类，必须被忽略——作为「ignoreTable 能返回 true」的自检锚点）。 */
     /**

@@ -9,8 +9,10 @@
  */
 package cn.ypbin.admin.iot.service;
 
+import cn.ypbin.admin.iot.model.req.IotDeviceGroupMemberBatchReq;
 import cn.ypbin.admin.iot.model.req.IotDeviceGroupMemberReq;
 import cn.ypbin.admin.iot.model.req.IotDeviceGroupReq;
+import cn.ypbin.admin.iot.model.resp.BatchMemberAddResp;
 import cn.ypbin.admin.iot.model.resp.IotDeviceGroupMemberResp;
 import cn.ypbin.admin.iot.model.resp.IotDeviceGroupResp;
 import java.util.List;
@@ -69,6 +71,19 @@ public interface IotDeviceGroupService {
      * @return 成员主键
      */
     Long addMember(Long groupId, IotDeviceGroupMemberReq req);
+
+    /**
+     * 批量向分组加入设备（单次去重后最多 {@link IotDeviceGroupMemberBatchReq#MAX_BATCH_SIZE} 台）。
+     *
+     * <p>已存在的成员按幂等命中计入 {@code skipped} 不重复插入；任一设备不存在则**整批拒绝**，
+     * 错误信息一次性列出全部缺失 ID（不静默、不部分写入）。新增成员复用
+     * {@code IotDeviceGroupMemberMapper.insertBatch}，一次批量落库，不在循环里逐条 insert。</p>
+     *
+     * @param groupId   分组主键
+     * @param deviceIds 设备主键（去重后非空且不超上限）
+     * @return 新增/跳过计数（及缺失设备列表，正常成功时为空）
+     */
+    BatchMemberAddResp addMembers(Long groupId, List<Long> deviceIds);
 
     /**
      * 移除分组设备成员。
