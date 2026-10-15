@@ -29,6 +29,7 @@ import cn.ypbin.admin.iot.enums.AlertState;
 import cn.ypbin.admin.iot.mapper.IotAlertInstanceMapper;
 import cn.ypbin.admin.iot.mapper.IotAlertNotificationMapper;
 import cn.ypbin.admin.iot.mapper.IotAlertRuleMapper;
+import cn.ypbin.admin.iot.mapper.IotAlertRulePointMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.LocalDateTime;
@@ -82,7 +83,8 @@ class AlertTenantNotifierTest {
         });
         when(deviceMapper.selectList(any())).thenReturn(List.of(device()));
         when(ruleMapper.selectByIds(anyList())).thenReturn(List.of());
-        notifier = new AlertTenantNotifier(notificationMapper, instanceMapper, ruleMapper, deviceMapper,
+        notifier = new AlertTenantNotifier(notificationMapper, instanceMapper, ruleMapper,
+            mock(IotAlertRulePointMapper.class), deviceMapper,
             sender, new AlertNotifyThrottle(properties), new AlertMetrics(new SimpleMeterRegistry()),
             properties);
     }
@@ -124,7 +126,7 @@ class AlertTenantNotifierTest {
     @Test
     @DisplayName("成功：置 SENT、清空 next_retry_ts 与 last_error，并累加尝试次数")
     void successMarksSent() {
-        when(sender.send(any(), any(), any(), any(), any())).thenReturn(
+        when(sender.send(any(), any(), any(), any(), any(), anyList())).thenReturn(
             SystemAlertNotificationSender.SendResult.ok());
         IotAlertNotification item = notification(1L, 0, AlertNotifyStatus.PENDING.getCode());
 
@@ -141,7 +143,7 @@ class AlertTenantNotifierTest {
     @Test
     @DisplayName("S6 失败但未耗尽 ⇒ FAILED + 退避（首次 30s），错误原因**原样**记入 last_error")
     void failureSchedulesBackoff() {
-        when(sender.send(any(), any(), any(), any(), any())).thenReturn(
+        when(sender.send(any(), any(), any(), any(), any(), anyList())).thenReturn(
             SystemAlertNotificationSender.SendResult.fail("系统服务返回失败：邮件网关 500"));
         IotAlertNotification item = notification(1L, 0, AlertNotifyStatus.PENDING.getCode());
 
@@ -156,7 +158,7 @@ class AlertTenantNotifierTest {
     @Test
     @DisplayName("S6 退避按阶梯推进：第 2 次失败退避 2 分钟、第 3 次失败退避 10 分钟")
     void backoffFollowsLadder() {
-        when(sender.send(any(), any(), any(), any(), any())).thenReturn(
+        when(sender.send(any(), any(), any(), any(), any(), anyList())).thenReturn(
             SystemAlertNotificationSender.SendResult.fail("boom"));
         IotAlertNotification second = notification(1L, 1, AlertNotifyStatus.FAILED.getCode());
         notifier.dispatchTenant(List.of(second), NOW);
@@ -170,7 +172,7 @@ class AlertTenantNotifierTest {
     @Test
     @DisplayName("S6 重试耗尽（尝试次数达到上限）⇒ GIVEN_UP 且不再排重试，last_error 保留原因")
     void exhaustedRetriesGiveUp() {
-        when(sender.send(any(), any(), any(), any(), any())).thenReturn(
+        when(sender.send(any(), any(), any(), any(), any(), anyList())).thenReturn(
             SystemAlertNotificationSender.SendResult.fail("SMTP 连接超时"));
         IotAlertNotification item = notification(1L, 3, AlertNotifyStatus.FAILED.getCode());
 
@@ -186,7 +188,7 @@ class AlertTenantNotifierTest {
     @DisplayName("★ S7 全局限流：超出的通知**延后**（保持原状态、推到下一个时间窗），且不消耗尝试次数")
     void throttledIsDeferredNotDropped() {
         properties.setNotifyThrottlePerMinute(1);
-        when(sender.send(any(), any(), any(), any(), any())).thenReturn(
+        when(sender.send(any(), any(), any(), any(), any(), anyList())).thenReturn(
             SystemAlertNotificationSender.SendResult.ok());
         IotAlertNotification first = notification(1L, 0, AlertNotifyStatus.PENDING.getCode());
         IotAlertNotification second = notification(2L, 0, AlertNotifyStatus.PENDING.getCode());

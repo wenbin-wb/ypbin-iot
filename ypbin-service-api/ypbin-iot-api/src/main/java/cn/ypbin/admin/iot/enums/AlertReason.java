@@ -42,7 +42,17 @@ public enum AlertReason {
      * 因此宽限 {@code ypbin.alert.outage-orphan-grace-rounds} 轮（默认 20 轮 ≈ 5 分钟）后**显式收口**
      * 并留下这个**可区分的原因码**，值班一眼能看出「不是设备恢复了，是事件数据丢了」。</p>
      */
-    OUTAGE_EVENT_MISSING("OUTAGE_EVENT_MISSING", "断档事件已不存在（数据被清理，宽限后收口）");
+    OUTAGE_EVENT_MISSING("OUTAGE_EVENT_MISSING", "断档事件已不存在（数据被清理，宽限后收口）"),
+
+    /**
+     * 条件组语义改造（2026-10-15 真 AND）的**一次性数据迁移**留下的收口原因码。
+     *
+     * <p>改造前「一条规则 + 一条点位条件」各建实例，同一 (规则, 设备) 可以有多个活动实例；改造后
+     * 「规则 × 设备」至多一条活动实例，故迁移会把多余的那些收口为 {@code RESOLVED} 并写本原因码。
+     * <b>它不是「条件已恢复」</b>——留下这个可区分的原因码，值班一眼能看出「不是设备好了，
+     * 是规则语义变了、同一组只保留一条」。回滚脚本**不会**把这些行改回活动（旧语义下它们本就是同键重复项）。</p>
+     */
+    CONDITION_GROUP_MERGED("CONDITION_GROUP_MERGED", "同一规则同一设备的重复活动告警已按条件组语义收口");
 
     private final String code;
 

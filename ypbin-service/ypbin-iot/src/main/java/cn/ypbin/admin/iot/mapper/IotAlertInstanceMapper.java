@@ -40,9 +40,9 @@ public interface IotAlertInstanceMapper extends BaseMapper<IotAlertInstance> {
 
     /** 显式列清单。 */
     String COLUMNS = "id, tenant_id, rule_id, device_id, property_id, dedup_key, active_dedup_key, "
-        + "severity, state, consecutive_count, trigger_value, threshold_snapshot, start_ts, firing_ts, "
-        + "resolved_ts, acked_ts, acked_by, last_notified_ts, notify_count, reason, silence_until, "
-        + "create_user, create_time, update_user, update_time, status, is_deleted";
+        + "severity, state, consecutive_count, trigger_value, threshold_snapshot, condition_snapshot, "
+        + "start_ts, firing_ts, resolved_ts, acked_ts, acked_by, last_notified_ts, notify_count, reason, "
+        + "silence_until, create_user, create_time, update_user, update_time, status, is_deleted";
 
     /**
      * 本租户**全部活动实例**（{@code active_dedup_key IS NOT NULL}）。
@@ -93,14 +93,16 @@ public interface IotAlertInstanceMapper extends BaseMapper<IotAlertInstance> {
     @Insert("<script>"
         + "INSERT INTO iot_alert_instance"
         + " (id, tenant_id, rule_id, device_id, property_id, dedup_key, active_dedup_key, severity, state,"
-        + "  consecutive_count, trigger_value, threshold_snapshot, start_ts, firing_ts, resolved_ts,"
+        + "  consecutive_count, trigger_value, threshold_snapshot, condition_snapshot, start_ts, firing_ts,"
+        + "  resolved_ts,"
         + "  acked_ts, acked_by, last_notified_ts, notify_count, reason, silence_until,"
         + "  create_user, create_time, update_user, update_time, status, is_deleted)"
         + " VALUES "
         + "<foreach collection='instances' item='i' separator=','>"
         + " (#{i.id}, #{i.tenantId}, #{i.ruleId}, #{i.deviceId}, #{i.propertyId}, #{i.dedupKey},"
         + "  #{i.activeDedupKey}, #{i.severity}, #{i.state}, #{i.consecutiveCount}, #{i.triggerValue},"
-        + "  #{i.thresholdSnapshot}, #{i.startTs,jdbcType=TIMESTAMP}, #{i.firingTs,jdbcType=TIMESTAMP},"
+        + "  #{i.thresholdSnapshot}, #{i.conditionSnapshot},"
+        + "  #{i.startTs,jdbcType=TIMESTAMP}, #{i.firingTs,jdbcType=TIMESTAMP},"
         + "  #{i.resolvedTs,jdbcType=TIMESTAMP}, #{i.ackedTs,jdbcType=TIMESTAMP}, #{i.ackedBy},"
         + "  #{i.lastNotifiedTs,jdbcType=TIMESTAMP}, #{i.notifyCount}, #{i.reason},"
         + "  #{i.silenceUntil,jdbcType=TIMESTAMP}, #{i.createUser}, #{i.createTime,jdbcType=TIMESTAMP},"
@@ -126,6 +128,8 @@ public interface IotAlertInstanceMapper extends BaseMapper<IotAlertInstance> {
         + "WHEN #{i.id} THEN #{i.consecutiveCount,jdbcType=INTEGER} </foreach>ELSE consecutive_count END,"
         + " trigger_value = CASE id <foreach collection='instances' item='i'>"
         + "WHEN #{i.id} THEN #{i.triggerValue,jdbcType=VARCHAR} </foreach>ELSE trigger_value END,"
+        + " condition_snapshot = CASE id <foreach collection='instances' item='i'>"
+        + "WHEN #{i.id} THEN #{i.conditionSnapshot,jdbcType=VARCHAR} </foreach>ELSE condition_snapshot END,"
         + " firing_ts = CASE id <foreach collection='instances' item='i'>"
         + "WHEN #{i.id} THEN #{i.firingTs,jdbcType=TIMESTAMP} </foreach>ELSE firing_ts END,"
         + " resolved_ts = CASE id <foreach collection='instances' item='i'>"

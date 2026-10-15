@@ -54,6 +54,17 @@ public final class AlertRules {
     /** 断档去重键前缀。 */
     public static final String OUTAGE_DEDUP_PREFIX = "OUTAGE";
 
+    /**
+     * 条件组（规则类）去重键前缀（2026-10-15 真 AND 语义引入）。
+     *
+     * <p>用 {@code R} 而不是直接把 {@code ruleId} 放在首位，是为了与断档键
+     * （{@link #OUTAGE_DEDUP_PREFIX} 开头）**永不可能碰撞**：两者的首段一个是固定字母、一个是
+     * 数字或 {@code OUTAGE}，因此「断档实例」与「条件组实例」共用
+     * {@code uk_alert_active(tenant_id, active_dedup_key)} 时不会互相覆盖，
+     * 迁移也就不必触碰任何断档活动实例。</p>
+     */
+    public static final String GROUP_DEDUP_PREFIX = "R";
+
     /** 去重键里 {@code propertyId} 为空时的占位（设备级规则/断档类规则）。 */
     public static final String NO_POINT_TOKEN = "-";
 
@@ -67,19 +78,44 @@ public final class AlertRules {
     }
 
     /**
-     * 规则实例的去重键：{@code ruleId:deviceId:propertyId}（{@code propertyId} 为空时用
-     * {@link #NO_POINT_TOKEN}）。
+     * **存量**规则实例去重键形态：{@code ruleId:deviceId:propertyId}（{@code propertyId} 为空时用
+     * {@link #NO_POINT_TOKEN}）——即 2026-10-15 真 AND 改造**之前**的形态。
      *
-     * <p>规范化是必要的：它同时进 {@code dedup_key}（留痕）与 {@code active_dedup_key}（唯一键），
-     * 两处必须逐字一致，否则「去重生效与否」会随拼接点而漂移。</p>
+     * <p><b>为什么保留它</b>：① 迁移脚本要把它规范化成 {@link #groupDedupKey(long, long)}，这里是该
+     * 「源形态」的可执行定义（文档与用例据此逐字钉住，避免迁移写成另一种拼法）；
+     * ② 既有用例（{@code AlertRulesTest} / {@code AlertInstanceServiceImplTest}）钉住历史形态不被改写。
+     * <b>新代码一律用 {@link #groupDedupKey(long, long)}</b>，不得再用本方法生成活动去重键。</p>
      *
      * @param ruleId     规则 ID
      * @param deviceId   设备 ID
      * @param propertyId 点位标识（可空）
-     * @return 去重键
+     * @return 存量去重键
      */
     public static String dedupKey(long ruleId, long deviceId, String propertyId) {
         return ruleId + DEDUP_SEPARATOR + deviceId + DEDUP_SEPARATOR + normalizePropertyId(propertyId);
+    }
+
+    /**
+     * **条件组**实例的去重键：{@code R:ruleId:deviceId}（真 AND 语义，2026-10-15）。
+     *
+     * <p><b>为什么 propertyId 不再进键</b>：真 AND 之后一条规则的多个点位条件是**同一个合取条件组**，
+     * 对「规则 × 设备」只应存在**一条**活动实例。若仍把 propertyId 放进键，同一设备的多个同时越界条件
+     * 会各自建实例——那既把 AND 又拆回 OR，也让「任一条回落时才恢复」的逻辑无法表达（实例不知自己属于哪一组）。
+     * 反过来，若把「条件组内容指纹」放进键，则用户增删一个条件行就会导致旧实例占住旧键、
+     * 新键另建一条实例 ⇒ 编辑规则后留下**两条活动实例**（且旧的那条永远收不了口）——这是本任务
+     * 要防的僵尸形态，故键里不含条件内容。</p>
+     *
+     * <p>键里**不含 tenantId**：库唯一键是 {@code uk_alert_active(tenant_id, active_dedup_key)}，
+     * 租户维度已由索引承载；把 tenantId 拼进来只会让键更长，并强迫全部活动实例无条件重写一遍
+     * （而这一步正是本次迁移风险最高的部分）。{@code ruleId} 是 BIGINT 自增、断档键首段是
+     * {@link #OUTAGE_DEDUP_PREFIX}，两者不可能相等，因此与断档键的隔离是**结构性**的。</p>
+     *
+     * @param ruleId   规则 ID
+     * @param deviceId 设备 ID
+     * @return 条件组去重键
+     */
+    public static String groupDedupKey(long ruleId, long deviceId) {
+        return GROUP_DEDUP_PREFIX + DEDUP_SEPARATOR + ruleId + DEDUP_SEPARATOR + deviceId;
     }
 
     /**

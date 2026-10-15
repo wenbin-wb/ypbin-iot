@@ -13,12 +13,14 @@ import cn.ypbin.starter.iot.availability.AvailabilityRules;
 import cn.ypbin.admin.iot.entity.IotAlertInstance;
 import cn.ypbin.admin.iot.entity.IotAlertNotification;
 import cn.ypbin.admin.iot.entity.IotAlertRule;
+import cn.ypbin.admin.iot.entity.IotAlertRulePoint;
 import cn.ypbin.admin.iot.entity.IotDevice;
 import cn.ypbin.admin.iot.enums.AlertNotifyEvent;
 import cn.ypbin.admin.iot.enums.AlertNotifyStatus;
 import cn.ypbin.admin.iot.mapper.IotAlertInstanceMapper;
 import cn.ypbin.admin.iot.mapper.IotAlertNotificationMapper;
 import cn.ypbin.admin.iot.mapper.IotAlertRuleMapper;
+import cn.ypbin.admin.iot.mapper.IotAlertRulePointMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import java.time.Instant;
@@ -41,6 +43,10 @@ import org.springframework.stereotype.Component;
  * 告警状态是**事实**，通知是**尽力而为**。因此这里不做事务包裹：每次 Mapper 调用各自落库，
  * 「同一轮内所有状态变更一次批量提交」由单条 {@code batchUpdate} 保证。</p>
  *
+ * <p><b>通知文案的条件行</b>：真 AND 之后一条实例代表整个条件组，正文要逐条件列出「阈值 vs 读到多少」。
+ * 条件行在这里**一次批量查回**（{@code selectByRuleIds}）再传给发送器，而不是在循环里逐条查
+ * （仓内禁止循环内 DB 调用），也不需要为通知文案新增任何投递列。</p>
+ *
  * <p><b>防重复投递</b>：先 {@code claim}（CAS 把 {@code next_retry_ts} 推到租约之后）再发送，
  * 因此滚动重启期间新旧实例不会同时发同一条。租约很短（{@value #CLAIM_LEASE_MINUTES} 分钟），
  * 它只覆盖「发送 + 落库」这段窗口，不会推迟正常的重试节奏。</p>
@@ -59,6 +65,7 @@ public class AlertTenantNotifier {
     private final IotAlertNotificationMapper notificationMapper;
     private final IotAlertInstanceMapper instanceMapper;
     private final IotAlertRuleMapper ruleMapper;
+    private final IotAlertRulePointMapper pointMapper;
     private final IotDeviceMapper deviceMapper;
     private final SystemAlertNotificationSender sender;
     private final AlertNotifyThrottle throttle;
@@ -67,12 +74,14 @@ public class AlertTenantNotifier {
 
     public AlertTenantNotifier(IotAlertNotificationMapper notificationMapper,
                                IotAlertInstanceMapper instanceMapper, IotAlertRuleMapper ruleMapper,
-                               IotDeviceMapper deviceMapper, SystemAlertNotificationSender sender,
+                               IotAlertRulePointMapper pointMapper, IotDeviceMapper deviceMapper,
+                               SystemAlertNotificationSender sender,
                                AlertNotifyThrottle throttle, AlertMetrics metrics,
                                AlertProperties properties) {
         this.notificationMapper = notificationMapper;
         this.instanceMapper = instanceMapper;
         this.ruleMapper = ruleMapper;
+        this.pointMapper = pointMapper;
         this.deviceMapper = deviceMapper;
         this.sender = sender;
         this.throttle = throttle;
@@ -138,6 +147,8 @@ public class AlertTenantNotifier {
             }
         }
 
+        // 规则当前条件行（一次批量查询）：真 AND 下通知正文要逐条件列出。**不做**则多条件通知只说一个点位
+        Map<Long, List<IotAlertRulePoint>> pointsByRule = loadPoints(rules.keySet());
         long nowMs = now.atZone(AvailabilityRules.PLATFORM_ZONE).toInstant().toEpochMilli();
         List<IotAlertNotification> changed = new ArrayList<>();
         int sent = 0;
@@ -145,7 +156,7 @@ public class AlertTenantNotifier {
         int givenUp = 0;
         int throttled = 0;
         for (IotAlertNotification item : due) {
-            DeliveryOutcome outcome = deliverOne(item, instances, devices, rules, now, nowMs);
+            DeliveryOutcome outcome = deliverOne(item, instances, devices, rules, pointsByRule, now, nowMs);
             switch (outcome) {
                 case SENT -> sent++;
                 case FAILED -> failed++;
@@ -192,6 +203,7 @@ public class AlertTenantNotifier {
      */
     private DeliveryOutcome deliverOne(IotAlertNotification item, Map<Long, IotAlertInstance> instances,
                                        Map<Long, IotDevice> devices, Map<Long, IotAlertRule> rules,
+                                       Map<Long, List<IotAlertRulePoint>> pointsByRule,
                                        LocalDateTime now, long nowMs) {
         IotAlertInstance instance = instances.get(item.getInstanceId());
         if (instance == null) {
@@ -221,7 +233,8 @@ public class AlertTenantNotifier {
             event = AlertNotifyEvent.FIRING;
         }
         SystemAlertNotificationSender.SendResult result = sender.send(item, instance,
-            devices.get(instance.getDeviceId()), rules.get(instance.getRuleId()), event);
+            devices.get(instance.getDeviceId()), rules.get(instance.getRuleId()), event,
+            pointsOf(pointsByRule, instance.getRuleId()));
         if (result.success()) {
             item.setNotifyStatus(AlertNotifyStatus.SENT.getCode());
             item.setNextRetryTs(null);
@@ -254,6 +267,32 @@ public class AlertTenantNotifier {
         int index = Math.min(Math.max(attempt, 1), backoff.size()) - 1;
         Long value = backoff.get(index);
         return value == null || value <= 0 ? 30L : value;
+    }
+
+    /**
+     * 批量取规则的条件行（一次查询；空集合先判空短路，避免生成 {@code IN ()}）。
+     *
+     * @param ruleIds 规则 ID（断档类实例的 rule_id=0 已在调用方排除）
+     * @return 规则 ID → 条件行（无条件行的规则不出现在 map 里）
+     */
+    private Map<Long, List<IotAlertRulePoint>> loadPoints(Set<Long> ruleIds) {
+        Map<Long, List<IotAlertRulePoint>> grouped = new LinkedHashMap<>();
+        if (ruleIds == null || ruleIds.isEmpty()) {
+            return grouped;
+        }
+        for (IotAlertRulePoint point : pointMapper.selectByRuleIds(new ArrayList<>(ruleIds))) {
+            grouped.computeIfAbsent(point.getRuleId(), key -> new ArrayList<>()).add(point);
+        }
+        return grouped;
+    }
+
+    /** 取某规则的条件行（缺省为空列表；**不返回 null**）。 */
+    private static List<IotAlertRulePoint> pointsOf(Map<Long, List<IotAlertRulePoint>> pointsByRule,
+                                                    Long ruleId) {
+        if (ruleId == null || pointsByRule == null) {
+            return List.of();
+        }
+        return pointsByRule.getOrDefault(ruleId, List.of());
     }
 
     /** 错误信息截断到列宽以内（不美化内容，只截长度）。 */
