@@ -15,6 +15,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -26,12 +27,16 @@ import cn.ypbin.admin.iot.mapper.IotDeviceGroupMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceGroupMemberMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.IotProductMapper;
+import cn.ypbin.admin.iot.model.req.IotDeviceGroupMemberBatchReq;
 import cn.ypbin.admin.iot.model.req.IotDeviceGroupReq;
+import cn.ypbin.admin.iot.model.resp.BatchMemberAddResp;
 import cn.ypbin.admin.iot.model.resp.IotDeviceGroupMemberResp;
 import cn.ypbin.starter.core.exception.BusinessException;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import java.time.LocalDateTime;
+import java.util.Arrays;
+import java.util.stream.IntStream;
 import java.util.List;
 import java.util.Set;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
@@ -292,6 +297,116 @@ class IotDeviceGroupServiceImplTest {
         assertThat(captor.getValue().getParentId()).isEqualTo(2L);
     }
 
+    @Test
+    @DisplayName("批量加入：去重后仅新增未入组的，一次 insertBatch；已存在计 skipped")
+    void addMembersShouldInsertOnlyNewOnesInOneBatch() {
+        when(groupMapper.selectById(1L)).thenReturn(group(1L, null));
+        when(deviceMapper.selectBatchIds(List.of(100L, 101L, 102L)))
+            .thenReturn(List.of(device(100L), device(101L), device(102L)));
+        // 101 已在组内
+        when(memberMapper.selectList(any())).thenReturn(List.of(member(11L, 1L, 101L)));
+
+        BatchMemberAddResp resp = service.addMembers(1L, List.of(100L, 101L, 102L, 100L));
+
+        assertThat(resp.getAdded()).as("重复的 100 去重后只算一次新增").isEqualTo(2);
+        assertThat(resp.getSkipped()).isEqualTo(1);
+        assertThat(resp.getMissingDeviceIds()).isEmpty();
+
+        ArgumentCaptor<List<IotDeviceGroupMember>> captor = listCaptor();
+        verify(memberMapper, times(1)).insertBatch(captor.capture());
+        assertThat(captor.getValue()).extracting(IotDeviceGroupMember::getDeviceId)
+            .containsExactly(100L, 102L);
+        assertThat(captor.getValue()).allSatisfy(row -> {
+            assertThat(row.getId()).isNotNull();
+            assertThat(row.getTenantId()).isEqualTo(7L);
+            assertThat(row.getGroupId()).isEqualTo(1L);
+        });
+        // 设备与已有成员各一次 IN，批量插入一次：没有循环内查库
+        verify(deviceMapper, times(1)).selectBatchIds(List.of(100L, 101L, 102L));
+        verify(memberMapper, times(1)).selectList(any());
+    }
+
+    @Test
+    @DisplayName("批量加入：全部已在组内 ⇒ added=0/skipped=N，不产生插入")
+    void addMembersWhenAllExistMustNotInsert() {
+        when(groupMapper.selectById(1L)).thenReturn(group(1L, null));
+        when(deviceMapper.selectBatchIds(List.of(100L, 101L)))
+            .thenReturn(List.of(device(100L), device(101L)));
+        when(memberMapper.selectList(any()))
+            .thenReturn(List.of(member(11L, 1L, 100L), member(12L, 1L, 101L)));
+
+        BatchMemberAddResp resp = service.addMembers(1L, List.of(100L, 101L));
+
+        assertThat(resp.getAdded()).isZero();
+        assertThat(resp.getSkipped()).isEqualTo(2);
+        assertThat(resp.getMissingDeviceIds()).isEmpty();
+        verify(memberMapper, never()).insertBatch(any());
+    }
+
+    @Test
+    @DisplayName("🔴 缺失设备：整批拒绝，错误信息一次性列出全部缺失 ID，且不插任何行")
+    void addMembersWithMissingDeviceMustRejectWholeBatch() {
+        when(groupMapper.selectById(1L)).thenReturn(group(1L, null));
+        when(deviceMapper.selectBatchIds(List.of(100L, 404L, 405L)))
+            .thenReturn(List.of(device(100L)));
+
+        assertThatThrownBy(() -> service.addMembers(1L, List.of(100L, 404L, 405L)))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("设备不存在")
+            .hasMessageContaining("404")
+            .hasMessageContaining("405");
+        verify(memberMapper, never()).insertBatch(any());
+        verify(memberMapper, never()).selectList(any());
+    }
+
+    @Test
+    @DisplayName("批量加入校验：分组不存在/空清单/含 null/去重后超 200 一律拒绝，且不查设备不插行")
+    void addMembersMustValidateGroupIdsAndLimit() {
+        when(groupMapper.selectById(99L)).thenReturn(null);
+        assertThatThrownBy(() -> service.addMembers(99L, List.of(100L)))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("分组不存在");
+
+        when(groupMapper.selectById(1L)).thenReturn(group(1L, null));
+        assertThatThrownBy(() -> service.addMembers(1L, null))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("不能为空");
+        assertThatThrownBy(() -> service.addMembers(1L, List.of()))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("不能为空");
+        assertThatThrownBy(() -> service.addMembers(1L, Arrays.asList(100L, null)))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("不能为空");
+        List<Long> tooMany = IntStream.rangeClosed(1, IotDeviceGroupMemberBatchReq.MAX_BATCH_SIZE + 1)
+            .mapToObj(Long::valueOf)
+            .toList();
+        assertThatThrownBy(() -> service.addMembers(1L, tooMany))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("不能超过 200");
+
+        verify(deviceMapper, never()).selectBatchIds(any());
+        verify(memberMapper, never()).insertBatch(any());
+    }
+
+    @Test
+    @DisplayName("🔴 分组行缺租户：拒绝批量写入（不能落出 tenant_id 为空的成员行）")
+    void addMembersWithoutGroupTenantMustReject() {
+        IotDeviceGroup noTenant = group(1L, null);
+        noTenant.setTenantId(null);
+        when(groupMapper.selectById(1L)).thenReturn(noTenant);
+
+        assertThatThrownBy(() -> service.addMembers(1L, List.of(100L)))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("租户");
+        verify(deviceMapper, never()).selectBatchIds(any());
+        verify(memberMapper, never()).insertBatch(any());
+    }
+
+    @SuppressWarnings("unchecked")
+    private ArgumentCaptor<List<IotDeviceGroupMember>> listCaptor() {
+        return ArgumentCaptor.forClass(List.class);
+    }
+
     private static IotDeviceGroupReq groupReq(Long parentId) {
         IotDeviceGroupReq req = new IotDeviceGroupReq();
         req.setGroupName("子分组");
@@ -304,6 +419,22 @@ class IotDeviceGroupServiceImplTest {
         group.setId(id);
         group.setGroupName("G" + id);
         group.setParentId(parentId);
+        // 模拟从库读出的行：批量 insertBatch 用分组租户给成员行显式赋 tenant_id
+        group.setTenantId(7L);
         return group;
+    }
+
+    private static IotDevice device(Long id) {
+        IotDevice device = new IotDevice();
+        device.setId(id);
+        return device;
+    }
+
+    private static IotDeviceGroupMember member(Long id, Long groupId, Long deviceId) {
+        IotDeviceGroupMember member = new IotDeviceGroupMember();
+        member.setId(id);
+        member.setGroupId(groupId);
+        member.setDeviceId(deviceId);
+        return member;
     }
 }

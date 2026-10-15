@@ -11,6 +11,7 @@ package cn.ypbin.admin.iot.service.impl;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -19,6 +20,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import cn.ypbin.admin.iot.entity.IotAlertInstance;
+import cn.ypbin.admin.iot.entity.IotDashboardDailySnapshot;
 import cn.ypbin.admin.iot.entity.IotAlertRule;
 import cn.ypbin.admin.iot.entity.IotDevice;
 import cn.ypbin.admin.iot.entity.IotProduct;
@@ -30,6 +32,7 @@ import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.IotMqttIngestReceiptMapper;
 import cn.ypbin.admin.iot.mapper.IotProductMapper;
 import cn.ypbin.admin.iot.mapper.IotPropertyMapper;
+import cn.ypbin.admin.iot.service.IotDashboardSnapshotService;
 import cn.ypbin.admin.iot.model.resp.DashboardOverviewResp;
 import cn.ypbin.admin.iot.model.resp.DashboardOverviewResp.AlertTrendPoint;
 import cn.ypbin.admin.iot.model.resp.DashboardOverviewResp.DeviceGrowthTrendPoint;
@@ -84,8 +87,11 @@ class IotDashboardServiceImplTest {
 
     private final IotAlertRuleMapper ruleMapper = mock(IotAlertRuleMapper.class);
 
+    private final IotDashboardSnapshotService snapshotService = mock(IotDashboardSnapshotService.class);
+
     private final IotDashboardServiceImpl service = new IotDashboardServiceImpl(
-        deviceMapper, productMapper, propertyMapper, receiptMapper, commandMapper, alertMapper, ruleMapper);
+        deviceMapper, productMapper, propertyMapper, receiptMapper, commandMapper, alertMapper, ruleMapper,
+        snapshotService);
 
     @Test
     @DisplayName("完整数据：设备/消息/告警计数、30 日趋势合并、协议/级别/产品 TOP 与最近告警")
@@ -153,6 +159,9 @@ class IotDashboardServiceImplTest {
         when(deviceMapper.selectByIds(any())).thenReturn(List.of(
             device(DEVICE_ID_1, "电表-A3-0172"), device(DEVICE_ID_2, "冷链-仓B-008")));
         when(ruleMapper.selectByIds(any())).thenReturn(List.of(rule(RULE_ID, "电流超上限")));
+        when(snapshotService.loadRecent(anyInt())).thenReturn(List.of(
+            snapshot(today.minusDays(2), 1970, 141),
+            snapshot(today, 1976, 135)));
 
         DashboardOverviewResp resp = service.overview();
 
@@ -183,7 +192,14 @@ class IotDashboardServiceImplTest {
         assertThat(resp.getMessageTrend().get(29).getUplink()).isEqualTo(1_284_506);
         assertThat(resp.getMessageTrend().get(29).getDownlink()).isEqualTo(96_420);
 
-        assertThat(resp.getOnlineTrend()).isEmpty();
+        assertThat(resp.getOnlineTrend()).hasSize(2);
+        assertThat(resp.getOnlineTrend().get(0).getDate()).isEqualTo(today.minusDays(2).toString());
+        assertThat(resp.getOnlineTrend().get(0).getOnline()).isEqualTo(1970);
+        assertThat(resp.getOnlineTrend().get(0).getOffline()).isEqualTo(141);
+        assertThat(resp.getOnlineTrend().get(1).getDate()).isEqualTo(today.toString());
+        assertThat(resp.getOnlineTrend().get(1).getOnline()).isEqualTo(1976);
+        assertThat(resp.getOnlineTrend().get(1).getOffline()).isEqualTo(135);
+        verify(snapshotService).captureCurrentTenant();
 
         assertThat(resp.getProtocolDistribution()).hasSize(2);
         assertThat(resp.getProtocolDistribution().get(0).getName()).isEqualTo("mqtt");
@@ -524,6 +540,14 @@ class IotDashboardServiceImplTest {
             .filter(point -> day.toString().equals(point.getDate()))
             .findFirst()
             .orElseThrow();
+    }
+
+    private static IotDashboardDailySnapshot snapshot(LocalDate date, int online, int offline) {
+        IotDashboardDailySnapshot snapshot = new IotDashboardDailySnapshot();
+        snapshot.setSnapshotDate(date);
+        snapshot.setDeviceOnline(online);
+        snapshot.setDeviceOffline(offline);
+        return snapshot;
     }
 
     private static IotDevice device(long id, String deviceName) {

@@ -35,3 +35,4 @@
 2026-10-13-iot-modbus-register-schema.sql
 2026-10-13-iot-modbus-v2-register-format-schema.sql
 2026-10-13-iot-mqtt-ingest-receipt-trace.sql
+2026-10-15-iot-dashboard-snapshot.sql

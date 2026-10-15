@@ -17,8 +17,10 @@ import cn.ypbin.admin.iot.mapper.IotDeviceGroupMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceGroupMemberMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.IotProductMapper;
+import cn.ypbin.admin.iot.model.req.IotDeviceGroupMemberBatchReq;
 import cn.ypbin.admin.iot.model.req.IotDeviceGroupMemberReq;
 import cn.ypbin.admin.iot.model.req.IotDeviceGroupReq;
+import cn.ypbin.admin.iot.model.resp.BatchMemberAddResp;
 import cn.ypbin.admin.iot.model.resp.IotDeviceGroupMemberResp;
 import cn.ypbin.admin.iot.model.resp.IotDeviceGroupResp;
 import cn.ypbin.admin.iot.service.IotDeviceGroupService;
@@ -26,6 +28,7 @@ import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.core.exception.GlobalErrorCode;
 import cn.ypbin.starter.crud.service.BaseServiceImpl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.toolkit.IdWorker;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -55,6 +58,9 @@ public class IotDeviceGroupServiceImpl extends BaseServiceImpl<IotDeviceGroupMap
      * 保证查询次数有界、不会无界循环。</p>
      */
     private static final int MAX_PARENT_DEPTH = 100;
+
+    /** 单次批量加入设备数上限（与请求 DTO 的 {@code @Size} 同一口径）。 */
+    private static final int MAX_BATCH_SIZE = IotDeviceGroupMemberBatchReq.MAX_BATCH_SIZE;
 
     private final IotDeviceGroupMemberMapper iotDeviceGroupMemberMapper;
     private final IotDeviceMapper iotDeviceMapper;
@@ -216,6 +222,82 @@ public class IotDeviceGroupServiceImpl extends BaseServiceImpl<IotDeviceGroupMap
         member.setDeviceId(req.getDeviceId());
         iotDeviceGroupMemberMapper.insert(member);
         return member.getId();
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public BatchMemberAddResp addMembers(Long groupId, List<Long> deviceIds) {
+        IotDeviceGroup group = requireGroup(groupId);
+        List<Long> idList = requireDeviceIds(deviceIds);
+        // 批量 insertBatch 走原生 SQL，不经注入器补 tenant_id；用分组行自身的租户（与查询同源）显式赋值，
+        // 缺租户直接拒绝，绝不写出 tenant_id 为空的成员行（DB 列 NOT NULL，静默半写更糟）。
+        Long tenantId = group.getTenantId();
+        if (tenantId == null) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "分组缺少租户信息，拒绝批量加入设备");
+        }
+        // 一次 IN 确认设备都存在（租户插件会追加 tenant_id 条件，跨租户设备等同缺失）。
+        Set<Long> foundDeviceIds = iotDeviceMapper.selectBatchIds(idList).stream()
+            .map(IotDevice::getId)
+            .collect(Collectors.toSet());
+        List<Long> missingIds = idList.stream()
+            .filter(id -> !foundDeviceIds.contains(id))
+            .toList();
+        if (!missingIds.isEmpty()) {
+            // 整批拒绝：列出全部缺失 ID，不做「部分加入」——部分成功会让调用方误以为整批成功。
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "设备不存在（共 " + missingIds.size() + " 台）：" + missingIds);
+        }
+        // 一次 IN 查已有成员，过滤已加入（幂等命中）——不逐台 selectCount。
+        Set<Long> memberDeviceIds = iotDeviceGroupMemberMapper.selectList(
+                new LambdaQueryWrapper<IotDeviceGroupMember>()
+                    .eq(IotDeviceGroupMember::getGroupId, groupId)
+                    .in(IotDeviceGroupMember::getDeviceId, idList))
+            .stream()
+            .map(IotDeviceGroupMember::getDeviceId)
+            .collect(Collectors.toSet());
+        List<Long> newDeviceIds = idList.stream()
+            .filter(id -> !memberDeviceIds.contains(id))
+            .toList();
+        BatchMemberAddResp resp = new BatchMemberAddResp();
+        resp.setSkipped(memberDeviceIds.size());
+        resp.setMissingDeviceIds(List.of());
+        if (newDeviceIds.isEmpty()) {
+            resp.setAdded(0);
+            return resp;
+        }
+        List<IotDeviceGroupMember> members = newDeviceIds.stream().map(deviceId -> {
+            IotDeviceGroupMember member = new IotDeviceGroupMember();
+            member.setId(IdWorker.getId());
+            member.setTenantId(tenantId);
+            member.setGroupId(groupId);
+            member.setDeviceId(deviceId);
+            return member;
+        }).toList();
+        // 一次批量插入（原生 SQL 显式写 create_time/update_time/status/is_deleted 由 Mapper 负责）
+        iotDeviceGroupMemberMapper.insertBatch(members);
+        resp.setAdded(members.size());
+        return resp;
+    }
+
+    /**
+     * 批量设备 ID 校验：非空、去重后不超上限、无 {@code null} 元素。
+     *
+     * @param deviceIds 原始设备 ID 清单
+     * @return 去重后的不可变清单（保持首次出现顺序）
+     */
+    private List<Long> requireDeviceIds(List<Long> deviceIds) {
+        if (deviceIds == null || deviceIds.isEmpty()) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "设备 ID 列表不能为空");
+        }
+        if (deviceIds.stream().anyMatch(Objects::isNull)) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "设备 ID 不能为空");
+        }
+        List<Long> distinct = deviceIds.stream().distinct().toList();
+        if (distinct.size() > MAX_BATCH_SIZE) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "单次批量加入设备数不能超过 " + MAX_BATCH_SIZE + "：实际 " + distinct.size());
+        }
+        return distinct;
     }
 
     @Override

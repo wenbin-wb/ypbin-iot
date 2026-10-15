@@ -13,6 +13,7 @@ import cn.ypbin.admin.iot.alert.AlertRules;
 import cn.ypbin.admin.iot.entity.IotAlertInstance;
 import cn.ypbin.admin.iot.entity.IotAlertRule;
 import cn.ypbin.admin.iot.entity.IotCommandInstance;
+import cn.ypbin.admin.iot.entity.IotDashboardDailySnapshot;
 import cn.ypbin.admin.iot.entity.IotDevice;
 import cn.ypbin.admin.iot.entity.IotMqttIngestReceipt;
 import cn.ypbin.admin.iot.entity.IotProduct;
@@ -29,9 +30,11 @@ import cn.ypbin.admin.iot.model.resp.DashboardOverviewResp;
 import cn.ypbin.admin.iot.model.resp.DashboardOverviewResp.AlertTrendPoint;
 import cn.ypbin.admin.iot.model.resp.DashboardOverviewResp.DeviceGrowthTrendPoint;
 import cn.ypbin.admin.iot.model.resp.DashboardOverviewResp.MessageTrendPoint;
+import cn.ypbin.admin.iot.model.resp.DashboardOverviewResp.OnlineTrendPoint;
 import cn.ypbin.admin.iot.model.resp.DashboardOverviewResp.NameValue;
 import cn.ypbin.admin.iot.model.resp.DashboardOverviewResp.RecentAlert;
 import cn.ypbin.admin.iot.service.IotDashboardService;
+import cn.ypbin.admin.iot.service.IotDashboardSnapshotService;
 import cn.ypbin.starter.data.core.EntityStatus;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
@@ -85,10 +88,10 @@ import org.springframework.stereotype.Service;
  *       （断档类 rule_id=0 不计），规则名一次批量解析，规则不可见时回落规则 ID。</li>
  * </ul>
  *
- * <p><b>为什么 {@code onlineTrend} 返回空数组</b>：当前没有任何可信的「逐日在线/离线快照」数据源——
- * {@code iot_device.online_status} 只是当下的覆盖值，{@code outage_event} 只表达断档事件，用
- * 「当天有断档的设备数」冒充离线数会把停用、未知、从未接入的设备算错（即编造趋势）。因此这里不猜测，
- * 返回空数组并由前端展示空态；将来若落库在线快照表，再在此补充真实口径。</p>
+ * <p><b>onlineTrend 口径</b>：在线趋势来自每日快照 {@code iot_dashboard_daily_snapshot}。总览请求先调
+ * {@link IotDashboardSnapshotService#captureCurrentTenant()} 落当天快照，再读近 14 天（含今日）按日期
+ * 升序返回；历史不足 14 天时只返回已有天数 —— {@code iot_device.online_status} 只是当下覆盖值，
+ * 没有快照的日期绝不插值或补造。</p>
  *
  * @author wenbin
  * @since 2026-10-14
@@ -105,6 +108,9 @@ public class IotDashboardServiceImpl implements IotDashboardService {
 
     /** 设备增长趋势窗口（天，含今日）。 */
     private static final int DEVICE_GROWTH_TREND_DAYS = 14;
+
+    /** 在线趋势窗口（天，含今日）；数据源为每日快照，历史不足时只返回已有天数。 */
+    private static final int ONLINE_TREND_DAYS = 14;
 
     /** 规则 TOP 统计窗口（天，含今日）。 */
     private static final int ALERT_RULE_TOP_WINDOW_DAYS = 30;
@@ -141,11 +147,16 @@ public class IotDashboardServiceImpl implements IotDashboardService {
 
     private final IotAlertRuleMapper iotAlertRuleMapper;
 
+    private final IotDashboardSnapshotService iotDashboardSnapshotService;
+
     @Override
     public DashboardOverviewResp overview() {
         LocalDate today = LocalDate.now();
         LocalDateTime todayStart = today.atStartOfDay();
         LocalDateTime tomorrowStart = today.plusDays(1).atStartOfDay();
+
+        // 先把当天快照落库（已有则刷新计数）：在线趋势只能来自真实快照，历史不足不补造
+        iotDashboardSnapshotService.captureCurrentTenant();
 
         int deviceOnline = countToInt(iotDeviceMapper.selectCount(new QueryWrapper<IotDevice>()
             .eq("online_status", OnlineStatus.ONLINE.getCode())));
@@ -178,7 +189,7 @@ public class IotDashboardServiceImpl implements IotDashboardService {
                 .ge("resolved_ts", todayStart)
                 .lt("resolved_ts", tomorrowStart))));
         resp.setMessageTrend(loadMessageTrend(today));
-        resp.setOnlineTrend(List.of());
+        resp.setOnlineTrend(loadOnlineTrend());
         resp.setAlertTrend(loadAlertTrend(today));
         resp.setDeviceGrowthTrend(loadDeviceGrowthTrend(today));
         resp.setProtocolDistribution(loadProtocolDistribution());
@@ -277,6 +288,33 @@ public class IotDashboardServiceImpl implements IotDashboardService {
             DeviceGrowthTrendPoint point = new DeviceGrowthTrendPoint();
             point.setDate(day.toString());
             point.setAdded(dailyAdded.getOrDefault(day, 0));
+            points.add(point);
+        }
+        return points;
+    }
+
+    /**
+     * 近 14 天在线趋势：读取每日快照并映射为响应点；不足 14 天只返回已有天数（不插值、不补造）。
+     *
+     * @return 按日期升序的在线/离线趋势点；尚无快照为空 List
+     */
+    private List<OnlineTrendPoint> loadOnlineTrend() {
+        List<IotDashboardDailySnapshot> snapshots = iotDashboardSnapshotService.loadRecent(ONLINE_TREND_DAYS);
+        if (snapshots == null || snapshots.isEmpty()) {
+            return List.of();
+        }
+        List<OnlineTrendPoint> points = new ArrayList<>(snapshots.size());
+        for (IotDashboardDailySnapshot snapshot : snapshots) {
+            if (snapshot.getSnapshotDate() == null || snapshot.getDeviceOnline() == null
+                || snapshot.getDeviceOffline() == null) {
+                // 列均为 NOT NULL；缺失说明数据异常或映射漂移，显式失败而不是补 0 掩盖
+                throw new IllegalStateException("仪表盘快照数据缺失（snapshot_date/device_online/device_offline）：snapshotId="
+                    + snapshot.getId());
+            }
+            OnlineTrendPoint point = new OnlineTrendPoint();
+            point.setDate(snapshot.getSnapshotDate().toString());
+            point.setOnline(snapshot.getDeviceOnline());
+            point.setOffline(snapshot.getDeviceOffline());
             points.add(point);
         }
         return points;
