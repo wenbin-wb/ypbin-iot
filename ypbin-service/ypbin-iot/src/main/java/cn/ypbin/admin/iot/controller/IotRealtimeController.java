@@ -25,6 +25,15 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
  * 租户用户只收本租户事件，平台用户（无租户上下文）收全量。仅要求登录（{@link SaCheckLogin}）：
  * 数据面已按租户过滤，不需要额外业务权限码。</p>
  *
+ * <p><b>路径与鉴权口径**保持不变**</b>（`GET /iot/realtime/stream` + `@SaCheckLogin`）：
+ * 2026-10-15 task-18 把连接管理/心跳/跨实例扇出上收到 ypbin-starter，但**对外契约一字未变**——
+ * 前端 `EventSource` 连的仍是本路径，事件名仍为 latest / device-status / alert。</p>
+ *
+ * <p><b>为什么不复用 starter 的通用订阅端点</b>：starter 的 `/ypbin/sse/subscribe` 由它能识别的
+ * `SseUserIdResolver` 鉴权，与 IoT 的业务契约（本路径 + Sa-Token 登录）不同。同时暴露两个端点
+ * 会多出一个绕过业务鉴权口径的入口，故在 `deploy/nacos/ypbin-iot.yaml` 里显式设置
+ * `ypbin.sse.register-endpoint=false`，只保留本控制器。</p>
+ *
  * @author wenbin
  * @since 2026-10-14
  */

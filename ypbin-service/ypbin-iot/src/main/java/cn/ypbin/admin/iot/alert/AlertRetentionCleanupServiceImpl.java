@@ -9,12 +9,11 @@
  */
 package cn.ypbin.admin.iot.alert;
 
-import cn.ypbin.admin.iot.lock.LockNames;
-import cn.ypbin.admin.iot.lock.LockOutcome;
-import cn.ypbin.admin.iot.lock.TaskLockGuard;
 import cn.ypbin.admin.iot.mapper.DeviceLivenessMapper;
 import cn.ypbin.admin.iot.mapper.IotAlertInstanceMapper;
 import cn.ypbin.admin.iot.mapper.IotAlertNotificationMapper;
+import cn.ypbin.starter.tools.lock.LeaseLockGuard;
+import cn.ypbin.starter.tools.lock.LeaseLockOutcome;
 import cn.ypbin.starter.tenant.core.TenantContext;
 import java.time.LocalDateTime;
 import java.util.List;
@@ -49,24 +48,27 @@ public class AlertRetentionCleanupServiceImpl implements AlertRetentionCleanupSe
     /** 单轮最多迭代批次数（防配置异常导致无限循环把库拖住；正常情况下远用不到）。 */
     private static final int MAX_BATCHES_PER_ROUND = 100;
 
+    /** 分布式锁名（业务语义；2026-10-15 task-18 起改用 starter 租约锁）。 */
+    public static final String LOCK_NAME = "alert-retention-cleanup";
+
     private final IotAlertInstanceMapper instanceMapper;
     private final IotAlertNotificationMapper notificationMapper;
     private final DeviceLivenessMapper livenessMapper;
     private final AlertProperties properties;
     private final AlertMetrics metrics;
-    private final TaskLockGuard taskLockGuard;
+    private final LeaseLockGuard leaseLockGuard;
 
     public AlertRetentionCleanupServiceImpl(IotAlertInstanceMapper instanceMapper,
                                             IotAlertNotificationMapper notificationMapper,
                                             DeviceLivenessMapper livenessMapper,
                                             AlertProperties properties, AlertMetrics metrics,
-                                            TaskLockGuard taskLockGuard) {
+                                            LeaseLockGuard leaseLockGuard) {
         this.instanceMapper = instanceMapper;
         this.notificationMapper = notificationMapper;
         this.livenessMapper = livenessMapper;
         this.properties = properties;
         this.metrics = metrics;
-        this.taskLockGuard = taskLockGuard;
+        this.leaseLockGuard = leaseLockGuard;
     }
 
     @Override
@@ -74,8 +76,8 @@ public class AlertRetentionCleanupServiceImpl implements AlertRetentionCleanupSe
         initialDelayString = "${ypbin.alert.retention-initial-delay-ms:300000}")
     public CleanupResult cleanupOnce() {
         // 跨实例互斥（#220）：抢不到锁 = 另一副本正在清理，本轮不跑（下一轮再来）
-        LockOutcome<CleanupResult> outcome = taskLockGuard.callExclusively(
-            LockNames.ALERT_RETENTION_CLEANUP, this::cleanupRound);
+        LeaseLockOutcome<CleanupResult> outcome = leaseLockGuard.callExclusively(
+            LOCK_NAME, this::cleanupRound);
         return outcome.executed() ? outcome.result() : CleanupResult.skippedResult();
     }
 

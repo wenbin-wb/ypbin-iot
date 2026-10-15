@@ -19,10 +19,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import cn.ypbin.admin.iot.lock.DistributedLock;
-import cn.ypbin.admin.iot.lock.LockNames;
-import cn.ypbin.admin.iot.lock.LockTestSupport;
-import cn.ypbin.admin.iot.lock.TaskLockGuard;
+import cn.ypbin.admin.iot.lock.IotLockTestSupport;
 import cn.ypbin.admin.iot.mapper.DeviceLivenessMapper;
 import cn.ypbin.admin.iot.mapper.IotAlertInstanceMapper;
 import cn.ypbin.admin.iot.mapper.IotAlertNotificationMapper;
@@ -66,21 +63,20 @@ class AlertRetentionCleanupServiceImplTest {
         registry = new SimpleMeterRegistry();
         service = new AlertRetentionCleanupServiceImpl(instanceMapper, notificationMapper, livenessMapper,
             properties, new AlertMetrics(registry),
-            LockTestSupport.guard(LockTestSupport.properties(), registry));
+            IotLockTestSupport.guard(IotLockTestSupport.properties(), registry));
     }
 
     @Test
     @DisplayName("★ 多节点（#220）：锁被另一实例持有时本轮跳过，不删任何数据")
     void skipsWhenLockHeldByAnotherInstance() {
-        cn.ypbin.admin.iot.lock.LockProperties lockProperties = LockTestSupport.properties();
-        DistributedLock sharedLock = LockTestSupport.inMemoryLock(lockProperties,
-            new LockTestSupport.MutableClock(0L));
+        cn.ypbin.starter.tools.lock.LeaseLockProperties lockProperties = IotLockTestSupport.properties();
+        cn.ypbin.starter.tools.lock.LeaseLockService sharedLock = IotLockTestSupport.sharedLockService();
         org.assertj.core.api.Assertions.assertThat(
-            sharedLock.tryAcquire(lockProperties.getKeyPrefix() + LockNames.ALERT_RETENTION_CLEANUP))
-            .isNotNull();
+            sharedLock.tryAcquire(lockProperties.getKeyPrefix() + AlertRetentionCleanupServiceImpl.LOCK_NAME))
+            .as("另一实例已持锁").isNotNull();
         AlertRetentionCleanupServiceImpl locked = new AlertRetentionCleanupServiceImpl(
             instanceMapper, notificationMapper, mock(DeviceLivenessMapper.class), properties,
-            new AlertMetrics(registry), LockTestSupport.guard(sharedLock, lockProperties, registry));
+            new AlertMetrics(registry), IotLockTestSupport.guard(sharedLock, lockProperties, registry));
 
         assertThat(locked.cleanupOnce().skipped()).isTrue();
         verify(instanceMapper, never()).deleteResolvedByIds(anyList());

@@ -9,9 +9,8 @@
  */
 package cn.ypbin.admin.iot.retention;
 
-import cn.ypbin.admin.iot.lock.LockNames;
-import cn.ypbin.admin.iot.lock.LockOutcome;
-import cn.ypbin.admin.iot.lock.TaskLockGuard;
+import cn.ypbin.starter.tools.lock.LeaseLockGuard;
+import cn.ypbin.starter.tools.lock.LeaseLockOutcome;
 import cn.ypbin.admin.iot.mapper.DeviceLivenessMapper;
 import cn.ypbin.admin.iot.mapper.IotPointMappingMapper;
 import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
@@ -43,7 +42,7 @@ import org.springframework.scheduling.annotation.Scheduled;
  *       （见 {@link #inspectOrphanMappings()}）。</li>
  *   <li><b>防重入</b>（#227 → #220）：定时任务与手工触发端点共用 {@link #cleanupOnce()}。
  *       #227 用 JVM 内 {@code AtomicBoolean}，只覆盖单实例；#220 已把它升级为
- *       {@link TaskLockGuard} 包裹的**跨实例互斥锁**（Redis 租约；无 Redis 时退化为进程内，
+ *       {@link LeaseLockGuard} 包裹的**跨实例互斥锁**（Redis 租约；无 Redis 时退化为进程内，
  *       并打 WARN 暴露边界），抢不到锁直接跳过本轮。</li>
  * </ol>
  *
@@ -53,6 +52,14 @@ import org.springframework.scheduling.annotation.Scheduled;
 public class RetentionCleanupServiceImpl implements RetentionCleanupService {
 
     private static final Logger log = LoggerFactory.getLogger(RetentionCleanupServiceImpl.class);
+
+    /**
+     * 分布式锁名（**业务语义**：哪些任务互斥）。
+     *
+     * <p>2026-10-15 task-18 起 IoT 自建锁实现已删除、改用 ypbin-starter 的租约锁；锁名仍属业务语义，
+     * 故留在各自任务身边（每个锁名恰好一处使用）。同时是运维观测键：{@code ypbin.lock.*} 按 task 标签区分。</p>
+     */
+    public static final String LOCK_NAME = "retention-cleanup";
 
     /** 清理计数（按表打 tag，便于分别观察）。 */
     public static final String METRIC_DELETED = "iot.retention.deleted";
@@ -81,23 +88,24 @@ public class RetentionCleanupServiceImpl implements RetentionCleanupService {
      * 跨实例互斥守卫（#220）：定时任务与手工触发端点共用本服务，同一时刻全体副本只允许一轮清理在跑。
      *
      * <p>#227 的 {@code AtomicBoolean} 只能挡住同一 JVM 内的并发；多副本部署下两个副本各持一个
-     * {@code AtomicBoolean}，谁也挡不住谁。这里换成 {@link TaskLockGuard}（Redis 租约 + 看门狗续期 +
-     * 异常必释放），抢不到锁直接返回 {@link RetentionSkipReason#LOCK_HELD_BY_OTHER}。</p>
+     * {@code AtomicBoolean}，谁也挡不住谁。这里换成 {@link LeaseLockGuard}（Redis 租约 + 看门狗续期 +
+     * 异常必释放；2026-10-15 task-18 起由 ypbin-starter 提供，IoT 侧不再自建），抢不到锁直接返回
+     * {@link RetentionSkipReason#LOCK_HELD_BY_OTHER}。</p>
      */
-    private final TaskLockGuard taskLockGuard;
+    private final LeaseLockGuard leaseLockGuard;
 
     public RetentionCleanupServiceImpl(OutageEventMapper outageEventMapper,
                                        MaintenanceWindowMapper maintenanceWindowMapper,
                                        DeviceLivenessMapper livenessMapper,
                                        IotPointMappingMapper pointMappingMapper,
                                        RetentionProperties properties, MeterRegistry meterRegistry,
-                                       TaskLockGuard taskLockGuard) {
+                                       LeaseLockGuard leaseLockGuard) {
         this.outageEventMapper = outageEventMapper;
         this.maintenanceWindowMapper = maintenanceWindowMapper;
         this.livenessMapper = livenessMapper;
         this.pointMappingMapper = pointMappingMapper;
         this.properties = properties;
-        this.taskLockGuard = taskLockGuard;
+        this.leaseLockGuard = leaseLockGuard;
         this.outageCounter = Counter.builder(METRIC_DELETED).tag("table", "outage_event")
             .description("保留清理删除的行数").register(meterRegistry);
         this.windowCounter = Counter.builder(METRIC_DELETED).tag("table", "maintenance_window")
@@ -127,8 +135,8 @@ public class RetentionCleanupServiceImpl implements RetentionCleanupService {
     public RetentionCleanupResult cleanupOnce() {
         long startedNanos = System.nanoTime();
         // 跨实例互斥（#220）：抢不到锁 = 另一副本正在清理，本轮**不跑**，如实返回原因。
-        LockOutcome<RetentionCleanupResult> outcome = taskLockGuard.callExclusively(
-            LockNames.RETENTION_CLEANUP, () -> runCleanupRound(startedNanos));
+        LeaseLockOutcome<RetentionCleanupResult> outcome = leaseLockGuard.callExclusively(
+            LOCK_NAME, () -> runCleanupRound(startedNanos));
         if (!outcome.executed()) {
             log.warn("[iot] 保留清理未取得分布式锁（另一实例正在执行），本次触发跳过");
             return RetentionCleanupResult.skipped(RetentionSkipReason.LOCK_HELD_BY_OTHER,

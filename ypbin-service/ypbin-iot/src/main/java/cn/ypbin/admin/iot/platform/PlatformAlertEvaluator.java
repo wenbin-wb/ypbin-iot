@@ -9,8 +9,7 @@
  */
 package cn.ypbin.admin.iot.platform;
 
-import cn.ypbin.admin.iot.lock.LockNames;
-import cn.ypbin.admin.iot.lock.TaskLockGuard;
+import cn.ypbin.starter.tools.lock.LeaseLockGuard;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -38,18 +37,21 @@ public class PlatformAlertEvaluator {
 
     private final PlatformAlertService alertService;
 
-    private final TaskLockGuard taskLockGuard;
+    /** 分布式锁名（业务语义；2026-10-15 task-18 起改用 starter 租约锁）。 */
+    public static final String LOCK_NAME = "platform-alert-evaluate";
 
-    public PlatformAlertEvaluator(PlatformAlertService alertService, TaskLockGuard taskLockGuard) {
+    private final LeaseLockGuard leaseLockGuard;
+
+    public PlatformAlertEvaluator(PlatformAlertService alertService, LeaseLockGuard leaseLockGuard) {
         this.alertService = alertService;
-        this.taskLockGuard = taskLockGuard;
+        this.leaseLockGuard = leaseLockGuard;
     }
 
     /** 周期判定（间隔由 `ypbin.platform-alert.evaluate-interval-ms` 控制，默认 30s）。 */
     @Scheduled(fixedDelayString = "${ypbin.platform-alert.evaluate-interval-ms:30000}",
         initialDelayString = "${ypbin.platform-alert.initial-delay-ms:20000}")
     public void evaluate() {
-        taskLockGuard.runExclusively(LockNames.PLATFORM_ALERT_EVALUATE, () -> {
+        leaseLockGuard.runExclusively(LOCK_NAME, () -> {
             alertService.evaluateOnce();
         });
     }

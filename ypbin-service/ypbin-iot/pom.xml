@@ -92,10 +92,17 @@
             <groupId>io.micrometer</groupId>
             <artifactId>context-propagation</artifactId>
         </dependency>
-        <!-- 显式声明：@Idempotent 等来自 tools（原本只是传递依赖，传递链一变就断） -->
+        <!-- 显式声明：@Idempotent 等来自 tools（原本只是传递依赖，传递链一变就断）。
+             2026-10-15 追加：租约锁（LeaseLockGuard/LeaseLockService）也来自本模块（task-18 能力上收）。 -->
         <dependency>
             <groupId>cn.ypbin</groupId>
             <artifactId>ypbin-starter-tools</artifactId>
+        </dependency>
+        <!-- 显式声明：SSE 连接管理/心跳/跨实例扇出（SseEmitterManager/SseFanoutCodec）来自 messaging。
+             原本只经 security 传递依赖引入，传递链一变就断；task-18 起本仓直接消费其公开 API，故显式声明。 -->
+        <dependency>
+            <groupId>cn.ypbin</groupId>
+            <artifactId>ypbin-starter-messaging</artifactId>
         </dependency>
         <!-- 显式声明：@Async 线程池（不声明会静默降级成同步执行，见 ai 的同款注释） -->
         <dependency>

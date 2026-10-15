@@ -99,6 +99,46 @@ ypbin:
     cleanup-interval-ms: 86400000
     initial-delay-ms: 300000
 
+  # ---------------------------------------------------------------------------
+  # 分布式锁（2026-10-15 task-18：IoT 自建实现已删除，改为消费 ypbin-starter-tools 的租约锁）
+  #
+  # ⚠️⚠️ **key-prefix 变了，且这是滚动升级窗口内的真实风险**：
+  #   改造前 IoT 自建实现的默认前缀是 `ypbin:iot:lock:`，starter 的默认前缀是 `ypbin:lease-lock:`。
+  #   键一变，**新旧实例在滚动升级期间会各锁各的**（旧实例锁 A 键、新实例锁 B 键）⇒ 同一任务可能被
+  #   两个副本同时执行。处置：① 优先「停旧实例 → 起新实例」而非滚动共存；② 若必须滚动，请在切换窗口内
+  #   接受一次重复执行（各后台任务都是幂等的，见 docs/MULTINODE-OPS.md §「滚动升级」）；
+  #   ③ 也可在升级窗口内把本键**显式设为旧值** `ypbin:iot:lock:` 让新旧实例继续互斥，升级完成后再改回。
+  #
+  # 其余键沿用 starter 默认：ttl=60s、renew-interval=20s、fail-open=true、metrics 前缀 ypbin.lock。
+  # ⚠️ 指标名同时变了：iot.lock.* → ypbin.lock.*（由 ypbin.lock.metric-prefix 控制，默认 ypbin.lock）。
+  #    监控面板/告警规则需同步改名，否则会静默失去观测；指标判读见 docs/MULTINODE-OPS.md 第四节。
+  # ---------------------------------------------------------------------------
+  lock:
+    # ⚠️ 必须加引号：值以冒号结尾（ypbin:lease-lock:），裸写会被 YAML 解析成嵌套映射
+    #    （实测报 "mapping values are not allowed here"，NacosTenantIgnoreConfigTest 等 4 个门禁转红）
+    key-prefix: "ypbin:lease-lock:"
+
+  # ---------------------------------------------------------------------------
+  # SSE 实时事件流（2026-10-15 task-18：IoT 自建连接管理/心跳/扇出已删除，改为消费 ypbin-starter-messaging）
+  #
+  # ⚠️ **为什么必须显式写 enabled + register-endpoint**：
+  #   starter 的 SSE 自动配置以 `ypbin.sse.enabled=true` 为条件（默认 false）⇒ 不写则 `SseEmitterManager`
+  #   根本不装配，IoT 的 /iot/realtime/stream 会在启动期报「缺 Bean」。
+  #   `register-endpoint: false` 是**刻意的安全选择**：starter 的通用订阅端点 `/ypbin/sse/subscribe`
+  #   靠它自己的 SseUserIdResolver 鉴权，而 IoT 的业务契约是「/iot/realtime/stream + @SaCheckLogin」——
+  #   同时暴露两个端点会多出一个绕过业务鉴权口径的入口，故关掉通用端点、只用 IoT 自己的控制器。
+  #
+  # 心跳：starter 默认 30s，这里显式设为 **15s**，与改造前 IoT 自建心跳同频（低于常见网关 60s 空闲超时，
+  #   且前端 EventSource 的既有行为不受影响）。timeout=0 = 不主动断连（靠心跳保活 + 客户端重连）。
+  # 扇出：有 Redis 时自动启用跨实例扇出（多实例下事件可达任意实例的连接）；
+  #   结构化事件载荷由 IoT 的 IotSseFanoutCodec 承载（starter 默认 codec 只支持标量）。
+  # ---------------------------------------------------------------------------
+  sse:
+    enabled: true
+    register-endpoint: false
+    heartbeat-interval-seconds: 15
+    timeout: 0
+
   # 告警与阈值（设计 docs/ALERTING-DESIGN.md；用户已批准口径见任务回执）。
   # ⚠️ `enabled=false` 时**接口返回明确失败而不是空列表**（空列表会被读成「没有告警」= 最危险的假阴性）。
   # 下面的数值都是「开箱可用」的那一档；改任何一个都会改变线上行为，故全部显式写出而不是靠代码默认值。

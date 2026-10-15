@@ -9,8 +9,7 @@
  */
 package cn.ypbin.admin.iot.alert;
 
-import cn.ypbin.admin.iot.lock.LockNames;
-import cn.ypbin.admin.iot.lock.TaskLockGuard;
+import cn.ypbin.starter.tools.lock.LeaseLockGuard;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -29,13 +28,17 @@ import org.springframework.stereotype.Component;
     matchIfMissing = true)
 public class AlertNotifyDispatcher {
 
+    /** 分布式锁名（业务语义；2026-10-15 task-18 起改用 starter 租约锁）。 */
+    public static final String LOCK_NAME = "alert-notify-dispatch";
+
     private final AlertNotifyDispatchService dispatchService;
 
-    private final TaskLockGuard taskLockGuard;
+    private final LeaseLockGuard leaseLockGuard;
 
-    public AlertNotifyDispatcher(AlertNotifyDispatchService dispatchService, TaskLockGuard taskLockGuard) {
+    public AlertNotifyDispatcher(AlertNotifyDispatchService dispatchService,
+                                 LeaseLockGuard leaseLockGuard) {
         this.dispatchService = dispatchService;
-        this.taskLockGuard = taskLockGuard;
+        this.leaseLockGuard = leaseLockGuard;
     }
 
     /**
@@ -47,7 +50,7 @@ public class AlertNotifyDispatcher {
     @Scheduled(fixedDelayString = "${ypbin.alert.notify-dispatch-interval-ms:10000}",
         initialDelayString = "${ypbin.alert.notify-initial-delay-ms:15000}")
     public void dispatch() {
-        taskLockGuard.runExclusively(LockNames.ALERT_NOTIFY_DISPATCH, () -> {
+        leaseLockGuard.runExclusively(LOCK_NAME, () -> {
             dispatchService.dispatchOnce();
         });
     }
