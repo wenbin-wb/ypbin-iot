@@ -34,7 +34,7 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 > 只会被当噪音忽略。现在：白名单内冲突 = warning + summary 列出；白名单外冲突 = 判红（那才是
 > 「分歧面失控」的信号）。
 
-> **白名单膨胀要记账**：目前 **22** 个文件（权威清单 = `tools/sync-whitelist-regex.sh`；本表与它必须逐项一致）。
+> **白名单膨胀要记账**：目前 **24** 个文件（权威清单 = `tools/sync-whitelist-regex.sh`；本表与它必须逐项一致）。
 > 2026-10-12：**加第 21 项 `CHANGELOG.md`**（本批 deploy/IoT 修复需要写发布台账；无法用新文件表达，
 > 与 upstream 冲突时整体取本仓版本，代价同 README.md）。
 > 2026-10-09：**移除 2 个死条目**（`deploy/sql/007-iot-data.sql`、`deploy/sql/migration/2026-10-05-iot-platform-alert-schema.sql`）——
@@ -66,6 +66,7 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 | `deploy/nacos/ypbin-common.yaml` | 在既有 `ypbin.security.identity` 节下**补一行** `trusted-source-token: ${GATEWAY_SIGN_TOKEN}`（+ 注释） | **2026-09-29 加**（#6b 部署阻塞面，P0）：starter **3.6.0 起**，`ypbin.security.identity.enabled: true`（**本文件既有行**）会强制要求同节的 `trusted-source-token`，缺失即**启动失败**（jar 内 `IdentityAutoConfiguration#identityHeaderFilterRegistration` 抛 `IllegalStateException`）。**为什么不能用新文件**：问题就在**这一行**——`enabled=true` 已经写在这个既有文件里，约束是「给这个既有键补一个兄弟键」；另立 `ypbin-common-iot.yaml` 之类**不会**让既有 Key 的缺配消失（`ypbin-common.yaml` 仍会被 `install.sh` 导入 Nacos，且这是**共享**配置，所有 Servlet 服务都吃它）。**为什么必须进仓而不是只改运行中的 Nacos**：`install.sh` 会把 `deploy/nacos/*.yaml` **整体覆盖**到 Nacos ⇒ 只在实例上手工补键必然在下次重跑时退化（这正是上一轮的临时处置留下的风险）。**代价如实登记**：多一个 merge 冲突点（该文件上游改动频率低，且本次是纯加法一行，代价可接受）。⚠️ **更好的长期做法是改上游 admin 仓**（本仓下次同步自然继承、分歧面回到 18）——本轮受「改动落在 ypbin-iot」的范围约束才走白名单。回归由 `tools/check-identity-config.sh` 在 `Sync Whitelist` 门禁里守住（5 条变异均已实测转红） |
 | `ypbin-gateway/src/main/resources/application.yml` | 路由/清洗/免登录段并入本地配置 | **2026-10-01 加**（#11 第 1 批网关侧）：nacos 3.x 服务端脚本化读写 API 已移除（一手实测 GET/POST 全 404）⇒ 网关配置只能随 jar 发布，routes/exclude 必须落在网关既有 application.yml。可审计：若未来 nacos 支持 API，可回退到 nacos 配置（SYNC 分歧面 +1）。长期应反哺 admin 仓（网关工程属 upstream）。<br>**⚠️ 2026-10-08 更正**：本条当时的理由"nacos 3.x 服务端脚本化读写 API 已移除（全 404）"**不成立**——v1 确实全 404，但 **v3 admin API 读写均可用**（`/nacos/v3/auth/user/login` + `/nacos/v3/admin/cs/config` GET/POST，2026-10-08 实测；工具 `tools/set-nacos-flag.py`）⇒ 触发条件"若未来 nacos 支持 API"**已满足**，"网关配置回退到 Nacos"从"不可行"变成"**可行性已成立、决策未做**"。本白名单条目**暂不变**（未回退前仍需改该 application.yml），待另立评估 | 
 | `CHANGELOG.md` | 在 `## [未发布]` 段追加本批 deploy/IoT 修复条目 | **2026-10-12 加**：发布台账/对外门面，GitHub 与发布流程只认根 `CHANGELOG.md`，另写一份不会被看到（同 README.md 的理由）。**代价如实登记**：与 upstream 该文件冲突时**整体取本仓版本**（不是逐行合并）。改的是「允许改这个既有文件」，不改变任何门禁判据。 |
+| `deploy/nginx-microservice.conf` | 在 `/api/` location 加 `proxy_http_version 1.1` / `Connection ''` / `proxy_buffering off` / `proxy_cache off` | **2026-10-15 加**：SSE 实时流必须关闭代理缓冲，否则事件被攒在 proxy buffer 里、用户看到「实时流不动」。问题就在既有的 `/api/` location 上（无缓冲只能改这个文件），无法用新文件表达。**代价如实登记**：与 upstream 该文件冲突时按语义合并（保留 SSE 三行 + 采纳上游其它改动）。 |
 | `deploy/sql/006-iot-schema.sql`、`007-iot-data.sql` | **新文件** | 全新安装用 |
 | `deploy/sql/migration/*-iot-*.sql` | **新文件**（命名必须含 `-iot-`） | 已上线库用；按文件名排序拼接后与 `006+007` **语句等价**（有 CI 校验）。顺序即结构演进顺序：`device-schema` → `lease-schema` → `menu-data` |
 | `admin-ui`（后续） | 路由/菜单注册 | 前端增量时再补清单 |

@@ -41,6 +41,7 @@ import cn.ypbin.admin.iot.mapper.IotAlertNotificationMapper;
 import cn.ypbin.admin.iot.mapper.IotAlertRuleMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
+import cn.ypbin.admin.iot.realtime.IotRealtimeService;
 import cn.ypbin.admin.iot.model.req.AlertInstanceQuery;
 import cn.ypbin.admin.iot.model.resp.AlertInstanceResp;
 import cn.ypbin.admin.iot.model.resp.AlertSummaryResp;
@@ -119,7 +120,7 @@ class AlertInstanceServiceImplTest {
         service = new AlertInstanceServiceImpl(instanceMapper, notificationMapper, ruleMapper, deviceMapper,
             livenessMapper, silencePolicy, new AlertNotifyPlanner(properties),
             new AlertNotifyScheduler(silencePolicy, new AlertNotifyPlanner(properties), metrics, properties),
-            metrics, new AlertGate(properties), properties);
+            metrics, new AlertGate(properties), mock(IotRealtimeService.class), properties);
     }
 
     private static IotAlertInstance instance(AlertState state) {
@@ -307,7 +308,7 @@ class AlertInstanceServiceImplTest {
             new AlertNotifyPlanner(disabled),
             new AlertNotifyScheduler(disabledSilence, new AlertNotifyPlanner(disabled), disabledMetrics,
                 disabled),
-            disabledMetrics, new AlertGate(disabled), disabled);
+            disabledMetrics, new AlertGate(disabled), mock(IotRealtimeService.class), disabled);
         assertThatThrownBy(() -> gated.page(new AlertInstanceQuery()))
             .isInstanceOf(BusinessException.class).hasMessageContaining("告警能力未启用");
         assertThatThrownBy(() -> gated.summary(null)).isInstanceOf(BusinessException.class);
@@ -327,7 +328,7 @@ class AlertInstanceServiceImplTest {
         return new AlertInstanceServiceImpl(instanceMapper, notificationMapper, ruleMapper, deviceMapper,
             livenessMapper, silencePolicy, new AlertNotifyPlanner(properties),
             new AlertNotifyScheduler(silencePolicy, new AlertNotifyPlanner(properties), metrics, properties),
-            metrics, new AlertGate(properties), properties);
+            metrics, new AlertGate(properties), mock(IotRealtimeService.class), properties);
     }
 
     private static IotDevice device() {

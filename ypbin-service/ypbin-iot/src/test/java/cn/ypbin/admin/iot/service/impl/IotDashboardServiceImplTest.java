@@ -14,6 +14,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -30,6 +31,8 @@ import cn.ypbin.admin.iot.mapper.IotMqttIngestReceiptMapper;
 import cn.ypbin.admin.iot.mapper.IotProductMapper;
 import cn.ypbin.admin.iot.mapper.IotPropertyMapper;
 import cn.ypbin.admin.iot.model.resp.DashboardOverviewResp;
+import cn.ypbin.admin.iot.model.resp.DashboardOverviewResp.AlertTrendPoint;
+import cn.ypbin.admin.iot.model.resp.DashboardOverviewResp.DeviceGrowthTrendPoint;
 import cn.ypbin.admin.iot.model.resp.DashboardOverviewResp.MessageTrendPoint;
 import cn.ypbin.admin.iot.model.resp.DashboardOverviewResp.RecentAlert;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
@@ -46,8 +49,9 @@ import org.junit.jupiter.api.Test;
  *
  * <p><b>为什么用 mock 而不是真实 SQL</b>：本类只负责「查什么口径 + 结果怎么合并」，
  * 分页/租户条件/SQL 生成由 MyBatis-Plus 与租户插件承担；真实库上的租户隔离与分组 SQL
- * 由集成测试面覆盖。这里钉住的是回归风险最高的四处：计数的租户无关正确性、30 日趋势的
- * 补零与上下行合并、空数据回落、recentAlerts 的批量名称解析与触发时间回落。</p>
+ * 由集成测试面覆盖。这里钉住的是回归风险最高的几处：计数的租户无关正确性、30 日趋势的
+ * 补零与上下行合并、告警趋势的 severity 透视、设备增长趋势补零、规则 TOP5 排序与名称解析、
+ * 空数据回落、recentAlerts 的批量名称解析与触发时间回落。</p>
  *
  * @author wenbin
  * @since 2026-10-14
@@ -59,6 +63,8 @@ class IotDashboardServiceImplTest {
     private static final long DEVICE_ID_2 = 9300013L;
 
     private static final long RULE_ID = 9200001L;
+
+    private static final long RULE_ID_2 = 9200002L;
 
     private static final long PRODUCT_ID = 9100001L;
 
@@ -106,7 +112,13 @@ class IotDashboardServiceImplTest {
             row("day", today.toString(), "total", downlinkToday)));
 
         when(deviceMapper.selectMaps(any())).thenAnswer(invocation -> {
-            if (sqlSelectOf(invocation.getArgument(0)).contains("protocol")) {
+            String select = sqlSelectOf(invocation.getArgument(0));
+            if (select.contains("DATE(create_time)")) {
+                return List.of(
+                    row("day", today.minusDays(1).toString(), "total", 5L),
+                    row("day", today.toString(), "total", 2L));
+            }
+            if (select.contains("protocol")) {
                 return List.of(row("name", "mqtt", "value", 986L), row("name", "modbus", "value", 512L));
             }
             return List.of(row("product_id", PRODUCT_ID, "device_count", 428L));
@@ -114,11 +126,24 @@ class IotDashboardServiceImplTest {
         when(productMapper.selectByIds(any())).thenReturn(List.of(product(PRODUCT_ID, "智能电表 · 三相")));
 
         stubAlertCounts(71L, 58L, 34L);
-        // 库内是大写码，总览响应要按前端 i18n key 口径转小写
-        when(alertMapper.selectMaps(any())).thenReturn(List.of(
-            row("name", "INFO", "value", 41L),
-            row("name", "WARNING", "value", 23L),
-            row("name", "CRITICAL", "value", 7L)));
+        when(alertMapper.selectMaps(any())).thenAnswer(invocation -> {
+            String select = sqlSelectOf(invocation.getArgument(0));
+            if (select.contains("rule_id")) {
+                return List.of(row("rule_id", RULE_ID, "alert_count", 12L));
+            }
+            if (select.contains("DATE(create_time)")) {
+                return List.of(
+                    row("day", today.minusDays(40).toString(), "severity", "CRITICAL", "total", 99L),
+                    row("day", today.minusDays(2).toString(), "severity", "CRITICAL", "total", 3L),
+                    row("day", today.minusDays(2).toString(), "severity", "WARNING", "total", 1L),
+                    row("day", today.toString(), "severity", "INFO", "total", 5L));
+            }
+            // 库内是大写码，总览响应要按前端 i18n key 口径转小写
+            return List.of(
+                row("name", "INFO", "value", 41L),
+                row("name", "WARNING", "value", 23L),
+                row("name", "CRITICAL", "value", 7L));
+        });
 
         IotAlertInstance first = alert(9001L, DEVICE_ID_1, RULE_ID, "CRITICAL", "FIRING",
             LocalDateTime.of(2026, 10, 14, 10, 30), LocalDateTime.of(2026, 10, 14, 10, 0));
@@ -171,6 +196,31 @@ class IotDashboardServiceImplTest {
         assertThat(resp.getProductTop().get(0).getName()).isEqualTo("智能电表 · 三相");
         assertThat(resp.getProductTop().get(0).getValue()).isEqualTo(428);
 
+        assertThat(resp.getAlertTrend()).hasSize(30);
+        assertThat(resp.getAlertTrend().get(0).getDate()).isEqualTo(today.minusDays(29).toString());
+        assertThat(resp.getAlertTrend().get(29).getDate()).isEqualTo(today.toString());
+        AlertTrendPoint alertTwoDaysAgo = alertPointAt(resp, today.minusDays(2));
+        assertThat(alertTwoDaysAgo.getCritical()).isEqualTo(3);
+        assertThat(alertTwoDaysAgo.getWarning()).isEqualTo(1);
+        assertThat(alertTwoDaysAgo.getInfo()).isZero();
+        AlertTrendPoint alertNoDataDay = alertPointAt(resp, today.minusDays(10));
+        assertThat(alertNoDataDay.getCritical()).isZero();
+        assertThat(alertNoDataDay.getWarning()).isZero();
+        assertThat(alertNoDataDay.getInfo()).isZero();
+        assertThat(alertPointAt(resp, today).getInfo()).isEqualTo(5);
+        assertThat(alertPointAt(resp, today).getCritical()).isZero();
+
+        assertThat(resp.getDeviceGrowthTrend()).hasSize(14);
+        assertThat(resp.getDeviceGrowthTrend().get(0).getDate()).isEqualTo(today.minusDays(13).toString());
+        assertThat(resp.getDeviceGrowthTrend().get(13).getDate()).isEqualTo(today.toString());
+        assertThat(growthAt(resp, today.minusDays(1)).getAdded()).isEqualTo(5);
+        assertThat(growthAt(resp, today).getAdded()).isEqualTo(2);
+        assertThat(growthAt(resp, today.minusDays(5)).getAdded()).isZero();
+
+        assertThat(resp.getAlertRuleTop()).hasSize(1);
+        assertThat(resp.getAlertRuleTop().get(0).getName()).isEqualTo("电流超上限");
+        assertThat(resp.getAlertRuleTop().get(0).getValue()).isEqualTo(12);
+
         assertThat(resp.getRecentAlerts()).hasSize(2);
         RecentAlert firstResp = resp.getRecentAlerts().get(0);
         assertThat(firstResp.getId()).isEqualTo("9001");
@@ -185,7 +235,8 @@ class IotDashboardServiceImplTest {
 
         verify(deviceMapper).selectByIds(argThat(ids -> ids.size() == 2
             && ids.contains(DEVICE_ID_1) && ids.contains(DEVICE_ID_2)));
-        verify(ruleMapper).selectByIds(argThat(ids -> ids.size() == 1 && ids.contains(RULE_ID)));
+        // 最近告警与规则 TOP 各解析一次规则名（同一个规则 ID）
+        verify(ruleMapper, times(2)).selectByIds(argThat(ids -> ids.size() == 1 && ids.contains(RULE_ID)));
         verify(productMapper).selectByIds(argThat(ids -> ids.size() == 1 && ids.contains(PRODUCT_ID)));
     }
 
@@ -221,9 +272,94 @@ class IotDashboardServiceImplTest {
         assertThat(resp.getProductTop()).isEmpty();
         assertThat(resp.getRecentAlerts()).isEmpty();
 
+        assertThat(resp.getAlertTrend()).hasSize(30)
+            .allSatisfy(point -> {
+                assertThat(point.getCritical()).isZero();
+                assertThat(point.getWarning()).isZero();
+                assertThat(point.getInfo()).isZero();
+            });
+        assertThat(resp.getAlertTrend().get(29).getDate()).isEqualTo(LocalDate.now().toString());
+        assertThat(resp.getDeviceGrowthTrend()).hasSize(14)
+            .allSatisfy(point -> assertThat(point.getAdded()).isZero());
+        assertThat(resp.getDeviceGrowthTrend().get(0).getDate())
+            .isEqualTo(LocalDate.now().minusDays(13).toString());
+        assertThat(resp.getAlertRuleTop()).isEmpty();
+
         verify(deviceMapper, never()).selectByIds(any());
         verify(ruleMapper, never()).selectByIds(any());
         verify(productMapper, never()).selectByIds(any());
+    }
+
+    @Test
+    @DisplayName("新增趋势：告警按 severity 透视并逐日补 0、设备增长按日补 0")
+    void newTrendsShouldPivotSeveritiesAndFillMissingDays() {
+        LocalDate today = LocalDate.now();
+        when(alertMapper.selectMaps(any())).thenAnswer(invocation -> {
+            if (sqlSelectOf(invocation.getArgument(0)).contains("DATE(create_time)")) {
+                return List.of(
+                    row("day", today.minusDays(2).toString(), "severity", "CRITICAL", "total", 3L),
+                    row("day", today.minusDays(2).toString(), "severity", "WARNING", "total", 1L),
+                    row("day", today.toString(), "severity", "INFO", "total", 5L));
+            }
+            return List.of();
+        });
+        when(deviceMapper.selectMaps(any())).thenAnswer(invocation -> {
+            if (sqlSelectOf(invocation.getArgument(0)).contains("DATE(create_time)")) {
+                return List.of(row("day", today.minusDays(1).toString(), "total", 4L));
+            }
+            return List.of();
+        });
+
+        DashboardOverviewResp resp = service.overview();
+
+        assertThat(resp.getAlertTrend()).hasSize(30);
+        assertThat(resp.getAlertTrend().get(0).getDate()).isEqualTo(today.minusDays(29).toString());
+        assertThat(resp.getAlertTrend().get(29).getDate()).isEqualTo(today.toString());
+        AlertTrendPoint twoDaysAgo = alertPointAt(resp, today.minusDays(2));
+        assertThat(twoDaysAgo.getCritical()).isEqualTo(3);
+        assertThat(twoDaysAgo.getWarning()).isEqualTo(1);
+        assertThat(twoDaysAgo.getInfo()).isZero();
+        AlertTrendPoint todayPoint = alertPointAt(resp, today);
+        assertThat(todayPoint.getCritical()).isZero();
+        assertThat(todayPoint.getWarning()).isZero();
+        assertThat(todayPoint.getInfo()).isEqualTo(5);
+        AlertTrendPoint missingDay = alertPointAt(resp, today.minusDays(10));
+        assertThat(missingDay.getCritical()).isZero();
+        assertThat(missingDay.getWarning()).isZero();
+        assertThat(missingDay.getInfo()).isZero();
+
+        assertThat(resp.getDeviceGrowthTrend()).hasSize(14);
+        assertThat(resp.getDeviceGrowthTrend().get(0).getDate()).isEqualTo(today.minusDays(13).toString());
+        assertThat(resp.getDeviceGrowthTrend().get(13).getDate()).isEqualTo(today.toString());
+        assertThat(growthAt(resp, today.minusDays(1)).getAdded()).isEqualTo(4);
+        assertThat(growthAt(resp, today).getAdded()).isZero();
+        assertThat(growthAt(resp, today.minusDays(5)).getAdded()).isZero();
+    }
+
+    @Test
+    @DisplayName("规则 TOP：近 30 天告警数降序、名称一次批量解析、缺失回落规则 ID")
+    void alertRuleTopShouldSortAndResolveRuleNames() {
+        when(alertMapper.selectMaps(any())).thenAnswer(invocation -> {
+            if (sqlSelectOf(invocation.getArgument(0)).contains("rule_id")) {
+                return List.of(
+                    row("rule_id", RULE_ID, "alert_count", 5L),
+                    row("rule_id", RULE_ID_2, "alert_count", 9L));
+            }
+            return List.of();
+        });
+        when(ruleMapper.selectByIds(any())).thenReturn(List.of(rule(RULE_ID_2, "温度过高")));
+
+        DashboardOverviewResp resp = service.overview();
+
+        assertThat(resp.getAlertRuleTop()).hasSize(2);
+        assertThat(resp.getAlertRuleTop().get(0).getName()).isEqualTo("温度过高");
+        assertThat(resp.getAlertRuleTop().get(0).getValue()).isEqualTo(9);
+        assertThat(resp.getAlertRuleTop().get(1).getName()).as("规则不可见时回落规则 ID").isEqualTo(
+            String.valueOf(RULE_ID));
+        assertThat(resp.getAlertRuleTop().get(1).getValue()).isEqualTo(5);
+        // 一次批量（不是每条规则一查）
+        verify(ruleMapper).selectByIds(argThat(ids -> ids.size() == 2
+            && ids.contains(RULE_ID) && ids.contains(RULE_ID_2)));
     }
 
     @Test
@@ -292,7 +428,11 @@ class IotDashboardServiceImplTest {
     @DisplayName("产品 TOP：按设备数降序，产品不可见时名称回落产品 ID（可见兜底、不编造）")
     void productTopShouldSortByDeviceCountAndFallBackToProductId() {
         when(deviceMapper.selectMaps(any())).thenAnswer(invocation -> {
-            if (sqlSelectOf(invocation.getArgument(0)).contains("protocol")) {
+            String select = sqlSelectOf(invocation.getArgument(0));
+            if (select.contains("DATE(create_time)")) {
+                return List.of();
+            }
+            if (select.contains("protocol")) {
                 return List.of();
             }
             return List.of(
@@ -360,6 +500,22 @@ class IotDashboardServiceImplTest {
             row.put((String) keyValues[index], keyValues[index + 1]);
         }
         return row;
+    }
+
+    /** 告警趋势中指定日期的点。 */
+    private static AlertTrendPoint alertPointAt(DashboardOverviewResp resp, LocalDate day) {
+        return resp.getAlertTrend().stream()
+            .filter(point -> day.toString().equals(point.getDate()))
+            .findFirst()
+            .orElseThrow();
+    }
+
+    /** 设备增长趋势中指定日期的点。 */
+    private static DeviceGrowthTrendPoint growthAt(DashboardOverviewResp resp, LocalDate day) {
+        return resp.getDeviceGrowthTrend().stream()
+            .filter(point -> day.toString().equals(point.getDate()))
+            .findFirst()
+            .orElseThrow();
     }
 
     /** 趋势中指定日期的点。 */

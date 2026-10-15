@@ -60,6 +60,10 @@ ALLOWED+='ypbin-gateway/src/main/resources/application\.yml|'
 # 无法用新文件表达——GitHub 渲染与发布流程都只认根 `CHANGELOG.md`，另写一份不会被看到。
 # **代价如实登记**：与 upstream 该文件冲突时整体取本仓版本（同 README.md 的处理方式）。
 ALLOWED+='CHANGELOG\.md|'
+# 第 24 项（2026-10-15 加）：SSE 实时流必须关闭 nginx 代理缓冲，否则事件会被攒在
+# proxy buffer 里、用户看到「实时流不动」。问题就在既有的 /api/ location 上（无缓冲 = 改这个文件），
+# 无法用新文件表达。代价：与 upstream 该文件冲突时按语义合并（保留 SSE 三行 + 采纳上游其它改动）。
+ALLOWED+='deploy/nginx-microservice\.conf|'
 ALLOWED+=')$'
 
 printf '%s' "$ALLOWED"

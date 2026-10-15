@@ -75,6 +75,12 @@ public class DashboardOverviewResp {
     /** 近 14 日在线趋势；当前无可信历史快照来源，恒为空数组（详见服务实现说明）。 */
     private List<OnlineTrendPoint> onlineTrend = List.of();
 
+    /** 近 30 日告警趋势（按日升序；critical/warning/info 三级分别补齐为 0）。 */
+    private List<AlertTrendPoint> alertTrend = List.of();
+
+    /** 近 14 日设备增长趋势（按日升序，缺数据日期补 0；{@code added} = 当日新增设备数）。 */
+    private List<DeviceGrowthTrendPoint> deviceGrowthTrend = List.of();
+
     /** 接入协议分布（按设备数降序）。 */
     private List<NameValue> protocolDistribution = List.of();
 
@@ -83,6 +89,9 @@ public class DashboardOverviewResp {
 
     /** 设备数 TOP 5 产品（按设备数降序）。 */
     private List<NameValue> productTop = List.of();
+
+    /** 近 30 天告警数 TOP 5 规则（按告警数降序；不含断档类 ruleId=0）。 */
+    private List<NameValue> alertRuleTop = List.of();
 
     /** 最近 10 条告警（按触发时间倒序）。 */
     private List<RecentAlert> recentAlerts = List.of();
@@ -122,6 +131,46 @@ public class DashboardOverviewResp {
 
         /** 当日下行消息量。 */
         private Integer downlink;
+    }
+
+    /**
+     * 按日告警趋势点（新建告警，按级别透视）。
+     *
+     * @author wenbin
+     * @since 2026-10-14
+     */
+    @Getter
+    @Setter
+    public static class AlertTrendPoint {
+
+        /** 日期（yyyy-MM-dd）。 */
+        private String date;
+
+        /** 当日新建的严重告警数。 */
+        private Integer critical;
+
+        /** 当日新建的警告告警数。 */
+        private Integer warning;
+
+        /** 当日新建的提示告警数。 */
+        private Integer info;
+    }
+
+    /**
+     * 按日设备增长趋势点。
+     *
+     * @author wenbin
+     * @since 2026-10-14
+     */
+    @Getter
+    @Setter
+    public static class DeviceGrowthTrendPoint {
+
+        /** 日期（yyyy-MM-dd）。 */
+        private String date;
+
+        /** 当日新增设备数。 */
+        private Integer added;
     }
 
     /**

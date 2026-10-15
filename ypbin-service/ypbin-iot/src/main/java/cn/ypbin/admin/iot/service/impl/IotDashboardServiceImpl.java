@@ -26,6 +26,8 @@ import cn.ypbin.admin.iot.mapper.IotMqttIngestReceiptMapper;
 import cn.ypbin.admin.iot.mapper.IotProductMapper;
 import cn.ypbin.admin.iot.mapper.IotPropertyMapper;
 import cn.ypbin.admin.iot.model.resp.DashboardOverviewResp;
+import cn.ypbin.admin.iot.model.resp.DashboardOverviewResp.AlertTrendPoint;
+import cn.ypbin.admin.iot.model.resp.DashboardOverviewResp.DeviceGrowthTrendPoint;
 import cn.ypbin.admin.iot.model.resp.DashboardOverviewResp.MessageTrendPoint;
 import cn.ypbin.admin.iot.model.resp.DashboardOverviewResp.NameValue;
 import cn.ypbin.admin.iot.model.resp.DashboardOverviewResp.RecentAlert;
@@ -50,6 +52,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import lombok.RequiredArgsConstructor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 /**
@@ -74,6 +78,11 @@ import org.springframework.stereotype.Service;
  *       告警中心接口仍保持库内大写码值，两处不互相改动。</li>
  *   <li>趋势按 {@code DATE(create_time)} 分组，近 30 天升序、缺失日期补 0；MySQL 的
  *       {@code DATE()} 使用数据库时区，与应用 JVM 时区的差异只在跨时区部署时出现（本仓部署同区）。</li>
+ *   <li>告警趋势 {@code alertTrend}：近 30 日按 {@code DATE(create_time) + severity} 分组，
+ *       内存透视成 critical/warning/info 三列并逐日补 0（库内 severity 为大写码，透视前转小写对齐）。</li>
+ *   <li>设备增长 {@code deviceGrowthTrend}：近 14 日 {@code DATE(create_time)} 分组计数，缺日补 0。</li>
+ *   <li>规则 TOP {@code alertRuleTop}：近 30 天 {@code rule_id > 0} 的告警数分组 TOP5
+ *       （断档类 rule_id=0 不计），规则名一次批量解析，规则不可见时回落规则 ID。</li>
  * </ul>
  *
  * <p><b>为什么 {@code onlineTrend} 返回空数组</b>：当前没有任何可信的「逐日在线/离线快照」数据源——
@@ -91,6 +100,18 @@ public class IotDashboardServiceImpl implements IotDashboardService {
     /** 消息趋势窗口（天，含今日）。 */
     private static final int MESSAGE_TREND_DAYS = 30;
 
+    /** 告警趋势窗口（天，含今日）。 */
+    private static final int ALERT_TREND_DAYS = 30;
+
+    /** 设备增长趋势窗口（天，含今日）。 */
+    private static final int DEVICE_GROWTH_TREND_DAYS = 14;
+
+    /** 规则 TOP 统计窗口（天，含今日）。 */
+    private static final int ALERT_RULE_TOP_WINDOW_DAYS = 30;
+
+    /** 规则 TOP 数量。 */
+    private static final int ALERT_RULE_TOP_LIMIT = 5;
+
     /** 新增设备窗口（天，含今日）。 */
     private static final int NEW_DEVICE_WINDOW_DAYS = 7;
 
@@ -103,6 +124,8 @@ public class IotDashboardServiceImpl implements IotDashboardService {
     /** 触发时间展示格式（契约固定为 yyyy-MM-dd HH:mm）。 */
     private static final DateTimeFormatter TRIGGERED_AT_FORMATTER =
         DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+
+    private static final Logger log = LoggerFactory.getLogger(IotDashboardServiceImpl.class);
 
     private final IotDeviceMapper iotDeviceMapper;
 
@@ -156,9 +179,12 @@ public class IotDashboardServiceImpl implements IotDashboardService {
                 .lt("resolved_ts", tomorrowStart))));
         resp.setMessageTrend(loadMessageTrend(today));
         resp.setOnlineTrend(List.of());
+        resp.setAlertTrend(loadAlertTrend(today));
+        resp.setDeviceGrowthTrend(loadDeviceGrowthTrend(today));
         resp.setProtocolDistribution(loadProtocolDistribution());
         resp.setSeverityDistribution(loadSeverityDistribution());
         resp.setProductTop(loadProductTop());
+        resp.setAlertRuleTop(loadAlertRuleTop(today));
         resp.setRecentAlerts(loadRecentAlerts());
         return resp;
     }
@@ -183,6 +209,74 @@ public class IotDashboardServiceImpl implements IotDashboardService {
             point.setDate(day.toString());
             point.setUplink(uplinkTotals.getOrDefault(day, 0));
             point.setDownlink(downlinkTotals.getOrDefault(day, 0));
+            points.add(point);
+        }
+        return points;
+    }
+
+    /**
+     * 近 30 日告警趋势：一次 {@code DATE(create_time) + severity} 分组，内存透视成
+     * critical/warning/info 三列并逐日补 0。
+     *
+     * @param today 今日（趋势末位日期）
+     * @return 按日升序的 30 个告警趋势点
+     */
+    private List<AlertTrendPoint> loadAlertTrend(LocalDate today) {
+        LocalDate from = today.minusDays(ALERT_TREND_DAYS - 1L);
+        QueryWrapper<IotAlertInstance> wrapper = new QueryWrapper<>();
+        wrapper.select("DATE(create_time) AS day", "severity AS severity", "COUNT(*) AS total")
+            .ge("create_time", from.atStartOfDay())
+            .isNotNull("severity")
+            .ne("severity", "")
+            .groupBy("DATE(create_time)", "severity");
+        List<Map<String, Object>> rows = iotAlertInstanceMapper.selectMaps(wrapper);
+
+        Map<LocalDate, Integer> criticalTotals = new LinkedHashMap<>();
+        Map<LocalDate, Integer> warningTotals = new LinkedHashMap<>();
+        Map<LocalDate, Integer> infoTotals = new LinkedHashMap<>();
+        if (rows != null && !rows.isEmpty()) {
+            for (Map<String, Object> row : rows) {
+                LocalDate day = toLocalDate(requireCell(row, "day"));
+                String severity = lowerCode(String.valueOf(requireCell(row, "severity")));
+                int total = toInt(requireCell(row, "total"));
+                switch (severity) {
+                    case "critical" -> criticalTotals.merge(day, total, (left, right) -> Math.addExact(left, right));
+                    case "warning" -> warningTotals.merge(day, total, (left, right) -> Math.addExact(left, right));
+                    case "info" -> infoTotals.merge(day, total, (left, right) -> Math.addExact(left, right));
+                    default -> log.warn("总览告警趋势忽略未知级别：day={}, severity={}", day, severity);
+                }
+            }
+        }
+
+        List<AlertTrendPoint> points = new ArrayList<>(ALERT_TREND_DAYS);
+        for (int offset = ALERT_TREND_DAYS - 1; offset >= 0; offset--) {
+            LocalDate day = today.minusDays(offset);
+            AlertTrendPoint point = new AlertTrendPoint();
+            point.setDate(day.toString());
+            point.setCritical(criticalTotals.getOrDefault(day, 0));
+            point.setWarning(warningTotals.getOrDefault(day, 0));
+            point.setInfo(infoTotals.getOrDefault(day, 0));
+            points.add(point);
+        }
+        return points;
+    }
+
+    /**
+     * 近 14 日设备增长趋势：{@code DATE(create_time)} 分组计数并逐日补 0。
+     *
+     * @param today 今日（趋势末位日期）
+     * @return 按日升序的 14 个设备增长点
+     */
+    private List<DeviceGrowthTrendPoint> loadDeviceGrowthTrend(LocalDate today) {
+        LocalDate from = today.minusDays(DEVICE_GROWTH_TREND_DAYS - 1L);
+        Map<LocalDate, Integer> dailyAdded = loadDailyTotals(iotDeviceMapper, "COUNT(*) AS total", from);
+
+        List<DeviceGrowthTrendPoint> points = new ArrayList<>(DEVICE_GROWTH_TREND_DAYS);
+        for (int offset = DEVICE_GROWTH_TREND_DAYS - 1; offset >= 0; offset--) {
+            LocalDate day = today.minusDays(offset);
+            DeviceGrowthTrendPoint point = new DeviceGrowthTrendPoint();
+            point.setDate(day.toString());
+            point.setAdded(dailyAdded.getOrDefault(day, 0));
             points.add(point);
         }
         return points;
@@ -280,6 +374,48 @@ public class IotDashboardServiceImpl implements IotDashboardService {
             .groupBy("severity");
         // 总览页用 page.iot.alert.severity.<小写码> 拼 i18n key，故此处统一小写（告警中心接口不受影响）
         return toNameValues(iotAlertInstanceMapper.selectMaps(wrapper), true);
+    }
+
+    /**
+     * 近 30 天告警数 TOP 5 规则：按 {@code rule_id} 分组（{@code rule_id = 0} 的断档类排除），
+     * 规则名一次批量解析；规则不可见时名称回落规则 ID（可见兜底，不编造）。
+     *
+     * @param today 今日（统计窗口末位日期）
+     * @return 规则名 → 告警数（降序）；无数据为空 List
+     */
+    private List<NameValue> loadAlertRuleTop(LocalDate today) {
+        QueryWrapper<IotAlertInstance> wrapper = new QueryWrapper<>();
+        wrapper.select("rule_id AS rule_id", "COUNT(*) AS alert_count")
+            .gt("rule_id", 0)
+            .ge("create_time", today.minusDays(ALERT_RULE_TOP_WINDOW_DAYS - 1L).atStartOfDay())
+            .groupBy("rule_id")
+            .orderByDesc("COUNT(*)")
+            .last("LIMIT " + ALERT_RULE_TOP_LIMIT);
+        List<Map<String, Object>> rows = iotAlertInstanceMapper.selectMaps(wrapper);
+        if (rows == null || rows.isEmpty()) {
+            return List.of();
+        }
+        List<Long> ruleIds = new ArrayList<>(rows.size());
+        List<Integer> counts = new ArrayList<>(rows.size());
+        for (Map<String, Object> row : rows) {
+            ruleIds.add(toLong(requireCell(row, "rule_id")));
+            counts.add(toInt(requireCell(row, "alert_count")));
+        }
+        Map<Long, String> ruleNames = loadRuleNames(ruleIds.stream().distinct().toList());
+        List<NameValue> items = new ArrayList<>(ruleIds.size());
+        for (int index = 0; index < ruleIds.size(); index++) {
+            Long ruleId = ruleIds.get(index);
+            String name = ruleNames.get(ruleId);
+            if (name == null || name.isBlank()) {
+                name = String.valueOf(ruleId);
+            }
+            NameValue item = new NameValue();
+            item.setName(name);
+            item.setValue(counts.get(index));
+            items.add(item);
+        }
+        sortByValueDesc(items);
+        return items;
     }
 
     /**

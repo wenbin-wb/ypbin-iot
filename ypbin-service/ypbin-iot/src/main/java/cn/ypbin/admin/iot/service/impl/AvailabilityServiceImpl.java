@@ -38,6 +38,7 @@ import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
 import cn.ypbin.admin.iot.mapper.OutageEventMapper;
 import cn.ypbin.admin.iot.mapping.PointMappingIndex;
+import cn.ypbin.admin.iot.realtime.IotRealtimeService;
 import cn.ypbin.admin.iot.service.AvailabilityService;
 import cn.ypbin.admin.iot.shadow.ShadowReportedUpdate;
 import cn.ypbin.admin.iot.shadow.ShadowReportedWriter;
@@ -199,13 +200,16 @@ public class AvailabilityServiceImpl implements AvailabilityService {
     /** 设备 → 点位坐标集合（P0-6c 成员校验用；一次批量查映射，见 {@link PointMappingIndex}）。 */
     private final PointMappingIndex pointMappingIndex;
 
+    /** 实时事件流（最新读数写入成功后旁路发布 latest；见 {@link IotRealtimeService}）。 */
+    private final IotRealtimeService realtimeService;
+
     public AvailabilityServiceImpl(DeviceLivenessMapper livenessMapper, OutageEventMapper outageMapper,
                                    MaintenanceWindowMapper maintenanceWindowMapper,
                                    IotDeviceMapper deviceMapper, AvailabilityProperties properties,
                                    TenantProvider tenantProvider, LatestValueWriter latestValueWriter,
                                    TimeSeriesWriter timeSeriesWriter, TimeSeriesProperties timeSeriesProperties,
                                    ShadowReportedWriter shadowReportedWriter, PointMappingIndex pointMappingIndex,
-                                   MeterRegistry meterRegistry) {
+                                   IotRealtimeService realtimeService, MeterRegistry meterRegistry) {
         this.livenessMapper = livenessMapper;
         this.outageMapper = outageMapper;
         this.maintenanceWindowMapper = maintenanceWindowMapper;
@@ -217,6 +221,7 @@ public class AvailabilityServiceImpl implements AvailabilityService {
         this.timeSeriesProperties = timeSeriesProperties;
         this.shadowReportedWriter = shadowReportedWriter;
         this.pointMappingIndex = pointMappingIndex;
+        this.realtimeService = realtimeService;
         this.invalidPropertyIdCounter = Counter.builder(METRIC_INVALID_PROPERTY_ID)
             .description("入站读数因点位标识不合法被丢弃的条数").register(meterRegistry);
         this.unmappedPropertyIdCounter = Counter.builder(METRIC_UNMAPPED_PROPERTY_ID)
@@ -755,6 +760,13 @@ public class AvailabilityServiceImpl implements AvailabilityService {
         if (!values.isEmpty()) {
             try {
                 latestValueWriter.writeAll(values);
+                try {
+                    publishLatestEvents(values);
+                } catch (RuntimeException ex) {
+                    // 实时流是旁路：发布失败只影响推送，绝不改变「上报已写入」的事实
+                    log.error("[iot] 最新值实时事件发布失败（已忽略，不影响本批上报结果）：条数={}",
+                        LogSanitizer.sanitize(values.size()), ex);
+                }
             } catch (RuntimeException ex) {
                 log.error("[iot] 最新值写入器抛出异常（已忽略，不影响本批上报结果）：条数={}",
                     LogSanitizer.sanitize(values.size()), ex);
@@ -785,6 +797,22 @@ public class AvailabilityServiceImpl implements AvailabilityService {
                 log.error("[iot] 影子上报值写入器抛出异常（已忽略，merged 缺失但上报已落库）：设备数={}",
                     LogSanitizer.sanitize(shadows.size()), ex);
             }
+        }
+    }
+
+    /**
+     * 最新值**写入成功后**发布 SSE latest 事件（按每条 {@link LatestValue#tenantId()} 精确扇出）。
+     *
+     * <p>发布顺序在写入之后：客户端收到的事件对应「已生效的最新值」。实时流是旁路，
+     * 不参与事务提交，也不改变写入结果。</p>
+     *
+     * @param values 本批写入成功的最新值
+     */
+    private void publishLatestEvents(List<LatestValue> values) {
+        for (LatestValue value : values) {
+            realtimeService.publishAfterCommit(IotRealtimeService.EVENT_LATEST, value.tenantId(),
+                new IotRealtimeService.LatestEvent(value.deviceId(), value.propertyId(), value.value(),
+                    value.quality(), value.ts()));
         }
     }
 
