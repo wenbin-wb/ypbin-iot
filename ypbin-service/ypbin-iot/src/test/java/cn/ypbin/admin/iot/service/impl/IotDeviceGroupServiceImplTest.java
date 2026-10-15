@@ -27,12 +27,14 @@ import cn.ypbin.admin.iot.mapper.IotDeviceGroupMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceGroupMemberMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.IotProductMapper;
+import cn.ypbin.admin.iot.model.req.IotDeviceGroupMemberBatchRemoveReq;
 import cn.ypbin.admin.iot.model.req.IotDeviceGroupMemberBatchReq;
 import cn.ypbin.admin.iot.model.req.IotDeviceGroupReq;
 import cn.ypbin.admin.iot.model.resp.BatchMemberAddResp;
 import cn.ypbin.admin.iot.model.resp.IotDeviceGroupMemberResp;
 import cn.ypbin.starter.core.exception.BusinessException;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import java.time.LocalDateTime;
 import java.util.Arrays;
@@ -402,9 +404,92 @@ class IotDeviceGroupServiceImplTest {
         verify(memberMapper, never()).insertBatch(any());
     }
 
+    @Test
+    @DisplayName("批量移除：去重后一次 selectBatchIds + 一次逻辑 DELETE，返回删除行数")
+    void removeMembersShouldDeleteOnceAndReturnCount() {
+        when(groupMapper.selectById(1L)).thenReturn(group(1L, null));
+        when(memberMapper.selectBatchIds(List.of(11L, 12L)))
+            .thenReturn(List.of(member(11L, 1L, 100L), member(12L, 1L, 101L)));
+        when(memberMapper.delete(any(LambdaQueryWrapper.class))).thenReturn(2);
+
+        int removed = service.removeMembers(1L, List.of(11L, 12L, 11L));
+
+        assertThat(removed).isEqualTo(2);
+        ArgumentCaptor<LambdaQueryWrapper<IotDeviceGroupMember>> captor = queryCaptor();
+        verify(memberMapper, times(1)).delete(captor.capture());
+        assertThat(captor.getValue().getSqlSegment())
+            .as("WHERE 必须同时限定成员主键与路径分组").contains("id").contains("group_id");
+        assertThat(captor.getValue().getParamNameValuePairs().values())
+            .contains(11L, 12L, 1L);
+        verify(memberMapper, times(1)).selectBatchIds(List.of(11L, 12L));
+    }
+
+    @Test
+    @DisplayName("🔴 批量移除：缺失成员整批拒绝，一次列出全部缺失 ID，不删任何行")
+    void removeMembersWithMissingMemberShouldRejectWholeBatch() {
+        when(groupMapper.selectById(1L)).thenReturn(group(1L, null));
+        when(memberMapper.selectBatchIds(List.of(11L, 404L)))
+            .thenReturn(List.of(member(11L, 1L, 100L)));
+
+        assertThatThrownBy(() -> service.removeMembers(1L, List.of(11L, 404L)))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("分组成员不存在")
+            .hasMessageContaining("404");
+        verify(memberMapper, never()).delete(any());
+    }
+
+    @Test
+    @DisplayName("🔴 批量移除：成员不属于路径分组 ⇒ 整批拒绝（不删跨组成员）")
+    void removeMembersWithCrossGroupMemberShouldRejectWholeBatch() {
+        when(groupMapper.selectById(1L)).thenReturn(group(1L, null));
+        when(memberMapper.selectBatchIds(List.of(11L, 12L)))
+            .thenReturn(List.of(member(11L, 1L, 100L), member(12L, 2L, 101L)));
+
+        assertThatThrownBy(() -> service.removeMembers(1L, List.of(11L, 12L)))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("不属于当前分组")
+            .hasMessageContaining("12");
+        verify(memberMapper, never()).delete(any());
+    }
+
+    @Test
+    @DisplayName("批量移除校验：分组不存在/空/含 null/去重后超 500 一律拒绝，且不查成员不删行")
+    void removeMembersMustValidateGroupAndIds() {
+        when(groupMapper.selectById(99L)).thenReturn(null);
+        assertThatThrownBy(() -> service.removeMembers(99L, List.of(11L)))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("分组不存在");
+
+        when(groupMapper.selectById(1L)).thenReturn(group(1L, null));
+        assertThatThrownBy(() -> service.removeMembers(1L, null))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("不能为空");
+        assertThatThrownBy(() -> service.removeMembers(1L, List.of()))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("不能为空");
+        assertThatThrownBy(() -> service.removeMembers(1L, Arrays.asList(11L, null)))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("不能为空");
+        List<Long> tooMany = IntStream
+            .rangeClosed(1, IotDeviceGroupMemberBatchRemoveReq.MAX_BATCH_SIZE + 1)
+            .mapToObj(Long::valueOf)
+            .toList();
+        assertThatThrownBy(() -> service.removeMembers(1L, tooMany))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("不能超过 500");
+
+        verify(memberMapper, never()).selectBatchIds(any());
+        verify(memberMapper, never()).delete(any());
+    }
+
     @SuppressWarnings("unchecked")
     private ArgumentCaptor<List<IotDeviceGroupMember>> listCaptor() {
         return ArgumentCaptor.forClass(List.class);
+    }
+
+    @SuppressWarnings("unchecked")
+    private ArgumentCaptor<LambdaQueryWrapper<IotDeviceGroupMember>> queryCaptor() {
+        return ArgumentCaptor.forClass(LambdaQueryWrapper.class);
     }
 
     private static IotDeviceGroupReq groupReq(Long parentId) {

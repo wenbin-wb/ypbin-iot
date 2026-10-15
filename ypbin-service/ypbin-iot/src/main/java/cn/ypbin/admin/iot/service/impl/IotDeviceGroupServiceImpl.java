@@ -17,6 +17,7 @@ import cn.ypbin.admin.iot.mapper.IotDeviceGroupMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceGroupMemberMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.IotProductMapper;
+import cn.ypbin.admin.iot.model.req.IotDeviceGroupMemberBatchRemoveReq;
 import cn.ypbin.admin.iot.model.req.IotDeviceGroupMemberBatchReq;
 import cn.ypbin.admin.iot.model.req.IotDeviceGroupMemberReq;
 import cn.ypbin.admin.iot.model.req.IotDeviceGroupReq;
@@ -61,6 +62,9 @@ public class IotDeviceGroupServiceImpl extends BaseServiceImpl<IotDeviceGroupMap
 
     /** 单次批量加入设备数上限（与请求 DTO 的 {@code @Size} 同一口径）。 */
     private static final int MAX_BATCH_SIZE = IotDeviceGroupMemberBatchReq.MAX_BATCH_SIZE;
+
+    /** 单次批量移除成员数上限（与请求 DTO 的 {@code @Size} 同一口径）。 */
+    private static final int MAX_REMOVE_BATCH_SIZE = IotDeviceGroupMemberBatchRemoveReq.MAX_BATCH_SIZE;
 
     private final IotDeviceGroupMemberMapper iotDeviceGroupMemberMapper;
     private final IotDeviceMapper iotDeviceMapper;
@@ -296,6 +300,59 @@ public class IotDeviceGroupServiceImpl extends BaseServiceImpl<IotDeviceGroupMap
         if (distinct.size() > MAX_BATCH_SIZE) {
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
                 "单次批量加入设备数不能超过 " + MAX_BATCH_SIZE + "：实际 " + distinct.size());
+        }
+        return distinct;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public int removeMembers(Long groupId, List<Long> memberIds) {
+        requireGroup(groupId);
+        List<Long> idList = requireRemoveMemberIds(memberIds);
+        // 一次 IN 查成员行（@TableLogic 自动过滤已删除行）；有缺失则整批拒绝并列全缺失主键。
+        List<IotDeviceGroupMember> members = iotDeviceGroupMemberMapper.selectBatchIds(idList);
+        Set<Long> foundIds = members.stream()
+            .map(IotDeviceGroupMember::getId)
+            .collect(Collectors.toSet());
+        List<Long> missingIds = idList.stream()
+            .filter(id -> !foundIds.contains(id))
+            .toList();
+        if (!missingIds.isEmpty()) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "分组成员不存在（共 " + missingIds.size() + " 个）：" + missingIds);
+        }
+        // 一次内存校验全部成员归属路径分组；跨组整批拒绝，绝不「按路径分组删别人组成员」。
+        List<Long> crossGroupIds = members.stream()
+            .filter(member -> !groupId.equals(member.getGroupId()))
+            .map(IotDeviceGroupMember::getId)
+            .toList();
+        if (!crossGroupIds.isEmpty()) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "分组成员不属于当前分组（共 " + crossGroupIds.size() + " 个）：" + crossGroupIds);
+        }
+        // 一条 DELETE（逻辑删除由 MyBatis-Plus 注入为 UPDATE is_deleted=1）；WHERE 同时限定分组做纵深防御。
+        return iotDeviceGroupMemberMapper.delete(new LambdaQueryWrapper<IotDeviceGroupMember>()
+            .eq(IotDeviceGroupMember::getGroupId, groupId)
+            .in(IotDeviceGroupMember::getId, idList));
+    }
+
+    /**
+     * 待移除成员 ID 校验：非空、去重后不超上限、无 {@code null} 元素。
+     *
+     * @param memberIds 原始成员主键清单
+     * @return 去重后的不可变清单（保持首次出现顺序）
+     */
+    private List<Long> requireRemoveMemberIds(List<Long> memberIds) {
+        if (memberIds == null || memberIds.isEmpty()) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "成员 ID 列表不能为空");
+        }
+        if (memberIds.stream().anyMatch(Objects::isNull)) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "成员 ID 不能为空");
+        }
+        List<Long> distinct = memberIds.stream().distinct().toList();
+        if (distinct.size() > MAX_REMOVE_BATCH_SIZE) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "单次批量移除成员数不能超过 " + MAX_REMOVE_BATCH_SIZE + "：实际 " + distinct.size());
         }
         return distinct;
     }

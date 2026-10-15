@@ -9,6 +9,7 @@
  */
 package cn.ypbin.admin.iot.controller;
 
+import cn.ypbin.admin.iot.model.req.IotDeviceGroupMemberBatchRemoveReq;
 import cn.ypbin.admin.iot.model.req.IotDeviceGroupMemberBatchReq;
 import cn.ypbin.admin.iot.model.req.IotDeviceGroupMemberReq;
 import cn.ypbin.admin.iot.model.req.IotDeviceGroupReq;
@@ -144,6 +145,24 @@ public class IotDeviceGroupController {
     public R<BatchMemberAddResp> addMembers(@PathVariable Long id,
                                             @Valid @RequestBody IotDeviceGroupMemberBatchReq req) {
         return R.ok(iotDeviceGroupService.addMembers(id, req.getDeviceIds()));
+    }
+
+    /**
+     * 批量移除分组成员（列表页多选，单次最多 500 个）。
+     *
+     * <p>成员缺失或不属于路径分组时整批拒绝，错误信息一次列出全部非法 ID。</p>
+     *
+     * @param id  分组主键
+     * @param req 批量成员 ID
+     * @return 实际移除条数
+     */
+    @PostMapping("/{id}/members/batch-remove")
+    @SaCheckPermission("iot:group:update")
+    @Idempotent
+    @Log("批量移除 IoT 设备分组成员")
+    public R<Integer> removeMembers(@PathVariable Long id,
+                                    @Valid @RequestBody IotDeviceGroupMemberBatchRemoveReq req) {
+        return R.ok(iotDeviceGroupService.removeMembers(id, req.getMemberIds()));
     }
 
     /**

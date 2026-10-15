@@ -16,9 +16,17 @@ import cn.ypbin.admin.iot.mapper.IotDashboardDailySnapshotMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.service.IotDashboardSnapshotService;
 import cn.ypbin.starter.data.core.EntityStatus;
+import cn.ypbin.starter.tenant.core.TenantContext;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.core.toolkit.IdWorker;
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,6 +42,10 @@ import org.springframework.transaction.annotation.Transactional;
  *
  * <p><b>并发</b>：同租户同一天只有一行（唯一键兜底）。「先查后写」在并发首写时会撞唯一键，此时捕获
  * {@link DuplicateKeyException} 回退为更新；若冲突后仍查不到行则原样抛出，不静默吞异常。</p>
+ *
+ * <p><b>两条采集路径</b>：{@link #captureCurrentTenant()} 服务单请求（总览页实时落当天）；
+ * {@link #captureAllTenants()} 服务每日定时任务——{@code executeIgnore} 下一次 {@code GROUP BY tenant_id}
+ * 聚合全平台租户，再一条 {@code upsertBatch} 批量写入，不做逐租户往返。</p>
  *
  * @author wenbin
  * @since 2026-10-15
@@ -87,6 +99,47 @@ public class IotDashboardSnapshotServiceImpl implements IotDashboardSnapshotServ
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void captureAllTenants() {
+        LocalDate today = LocalDate.now();
+        List<Map<String, Object>> stats = TenantContext.executeIgnore(() ->
+            iotDeviceMapper.selectMaps(new QueryWrapper<IotDevice>()
+                .select("tenant_id AS tenant_id",
+                    "COUNT(*) AS device_total",
+                    "COALESCE(SUM(CASE WHEN online_status = '" + OnlineStatus.ONLINE.getCode()
+                        + "' THEN 1 ELSE 0 END), 0) AS device_online",
+                    "COALESCE(SUM(CASE WHEN online_status = '" + OnlineStatus.OFFLINE.getCode()
+                        + "' THEN 1 ELSE 0 END), 0) AS device_offline",
+                    "COALESCE(SUM(CASE WHEN status = " + EntityStatus.DISABLED.getCode()
+                        + " THEN 1 ELSE 0 END), 0) AS device_disabled")
+                .groupBy("tenant_id")));
+        if (stats == null || stats.isEmpty()) {
+            return;
+        }
+
+        LocalDateTime now = LocalDateTime.now();
+        List<IotDashboardDailySnapshot> snapshots = new ArrayList<>(stats.size());
+        for (Map<String, Object> stat : stats) {
+            IotDashboardDailySnapshot snapshot = new IotDashboardDailySnapshot();
+            // 跨租户批处理：自定义 upsert SQL 在 ignore 作用域下不会被插件补 tenant_id，必须逐行显式给
+            snapshot.setId(IdWorker.getId());
+            snapshot.setTenantId(toLong(cell(stat, "tenant_id")));
+            snapshot.setSnapshotDate(today);
+            snapshot.setDeviceTotal(toInt(cell(stat, "device_total")));
+            snapshot.setDeviceOnline(toInt(cell(stat, "device_online")));
+            snapshot.setDeviceOffline(toInt(cell(stat, "device_offline")));
+            snapshot.setDeviceDisabled(toInt(cell(stat, "device_disabled")));
+            snapshot.setCreateTime(now);
+            snapshot.setUpdateTime(now);
+            snapshot.setStatus(EntityStatus.ENABLED.getCode());
+            snapshot.setIsDeleted(0);
+            snapshots.add(snapshot);
+        }
+        // 自定义 SQL 自带 tenant_id，按仓内跨租户批量写范式在 runIgnore 下执行
+        TenantContext.runIgnore(() -> iotDashboardDailySnapshotMapper.upsertBatch(snapshots));
+    }
+
+    @Override
     public List<IotDashboardDailySnapshot> loadRecent(int days) {
         if (days <= 0) {
             return List.of();
@@ -99,6 +152,80 @@ public class IotDashboardSnapshotServiceImpl implements IotDashboardSnapshotServ
                 .le("snapshot_date", today)
                 .orderByAsc("snapshot_date"));
         return rows == null ? List.of() : rows;
+    }
+
+    /**
+     * 取分组统计单元格（别名大小写/下划线不敏感）：缺列或值为 null 显式失败，不静默当 0。
+     *
+     * @param row   聚合行
+     * @param alias 列别名
+     * @return 单元格值
+     */
+    private static Object cell(Map<String, Object> row, String alias) {
+        if (row != null && !row.isEmpty()) {
+            String target = normalizeAlias(alias);
+            for (Map.Entry<String, Object> entry : row.entrySet()) {
+                if (normalizeAlias(entry.getKey()).equals(target)) {
+                    Object value = entry.getValue();
+                    if (value == null) {
+                        throw new IllegalStateException("租户在线统计单元格为 null：" + alias);
+                    }
+                    return value;
+                }
+            }
+        }
+        throw new IllegalStateException("租户在线统计结果缺少列：" + alias);
+    }
+
+    /**
+     * 列别名归一化：小写 + 去下划线/反引号（MySQL、驱动与 MyBatis 对别名大小写保留不一致）。
+     *
+     * @param alias 原始别名
+     * @return 归一化别名
+     */
+    private static String normalizeAlias(String alias) {
+        if (alias == null) {
+            return "";
+        }
+        return alias.replace("_", "").replace("`", "").trim().toLowerCase(Locale.ROOT);
+    }
+
+    /**
+     * 聚合值转 {@code int}：兼容 MySQL 的 COUNT（Long）与 SUM（BigDecimal）；不可精确转换显式失败。
+     *
+     * @param value 聚合值
+     * @return int 值
+     */
+    private static int toInt(Object value) {
+        if (value instanceof BigDecimal decimal) {
+            return decimal.intValueExact();
+        }
+        if (value instanceof BigInteger integer) {
+            return integer.intValueExact();
+        }
+        if (value instanceof Number number) {
+            return Math.toIntExact(number.longValue());
+        }
+        return new BigDecimal(value.toString().trim()).intValueExact();
+    }
+
+    /**
+     * 聚合值转 {@code long}（tenant_id 列）。
+     *
+     * @param value 聚合值
+     * @return long 值
+     */
+    private static long toLong(Object value) {
+        if (value instanceof BigDecimal decimal) {
+            return decimal.longValueExact();
+        }
+        if (value instanceof BigInteger integer) {
+            return integer.longValueExact();
+        }
+        if (value instanceof Number number) {
+            return number.longValue();
+        }
+        return Long.parseLong(value.toString().trim());
     }
 
     /**
