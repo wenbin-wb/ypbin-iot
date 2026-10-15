@@ -32,6 +32,17 @@ public interface IotDashboardSnapshotService {
     void captureCurrentTenant();
 
     /**
+     * 采集**全平台所有租户**今天的设备在线快照（每日定时任务用）。
+     *
+     * <p>跨租户批处理：{@link cn.ypbin.starter.tenant.core.TenantContext#executeIgnore} 内一次
+     * {@code GROUP BY tenant_id} 聚合出每租户的 total/online/offline/disabled，再通过
+     * {@code IotDashboardDailySnapshotMapper#upsertBatch} 一条语句批量 upsert。没有任何租户设备时
+     * 短路返回（不空打 upsert）。本方法与 {@link #captureCurrentTenant()} 并存且互不影响：后者仍是
+     * 单请求租户路径的实时采集。</p>
+     */
+    void captureAllTenants();
+
+    /**
      * 读取最近 {@code days} 天（含今天）的快照，按 {@code snapshot_date} 升序。
      *
      * @param days 天数；{@code <= 0} 直接返回空 List

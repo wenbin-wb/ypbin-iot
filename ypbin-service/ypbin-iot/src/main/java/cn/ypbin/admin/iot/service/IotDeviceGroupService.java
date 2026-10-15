@@ -9,6 +9,7 @@
  */
 package cn.ypbin.admin.iot.service;
 
+import cn.ypbin.admin.iot.model.req.IotDeviceGroupMemberBatchRemoveReq;
 import cn.ypbin.admin.iot.model.req.IotDeviceGroupMemberBatchReq;
 import cn.ypbin.admin.iot.model.req.IotDeviceGroupMemberReq;
 import cn.ypbin.admin.iot.model.req.IotDeviceGroupReq;
@@ -84,6 +85,20 @@ public interface IotDeviceGroupService {
      * @return 新增/跳过计数（及缺失设备列表，正常成功时为空）
      */
     BatchMemberAddResp addMembers(Long groupId, List<Long> deviceIds);
+
+    /**
+     * 批量移除分组成员（序号 ID 而非设备 ID；单次去重后最多
+     * {@link IotDeviceGroupMemberBatchRemoveReq#MAX_BATCH_SIZE} 个）。
+     *
+     * <p>先一次批量查成员：有缺失则整批拒绝并列全缺失主键；再校验所有成员的 {@code groupId}
+     * 与路径分组一致，跨组则整批拒绝；最后一条逻辑删除 SQL 移除。成员 ID 与分组是强绑定，
+     * 不做「部分删除」，避免调用方误以为整批成功。</p>
+     *
+     * @param groupId   分组主键
+     * @param memberIds 成员主键（去重后非空且不超上限）
+     * @return 实际逻辑删除行数
+     */
+    int removeMembers(Long groupId, List<Long> memberIds);
 
     /**
      * 移除分组设备成员。
