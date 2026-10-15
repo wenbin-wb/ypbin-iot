@@ -77,6 +77,17 @@ ypbin:
     command-scan-interval-ms: 15000
     command-scan-batch-size: 200
 
+    # 批量下发（POST /iot/devices/commands/batch）：一个命令模板应用到多台设备。
+    # 与上面几项同在 ypbin.emqx 命名空间（不新造第三个"命令相关"前缀），由 CommandBatchProperties 绑定。
+    command-batch:
+      # 单批设备数上限（去重后计）。下行是**逐台 MQTT 往返**且占住一个同步请求线程，故比
+      # 设备台账批量运维的 500 更保守；下限 1、上限 1000，非法值由 @Min/@Max 在启动期拒绝。
+      max-devices: 50
+      # 「是否继续下发」的判定阈值（毫秒）：每台设备开跑**之前**判一次，超阈值则剩余设备逐条返回
+      # BATCH_BUDGET_EXCEEDED（已发出的命令不回滚）。⚠️ 它是**循环入口检查点、不是硬中断**：
+      # 实际总耗时可超出本值最多约一台设备的耗时（≈ 单台 EMQX 写超时），估算请求时长时须计入。
+      total-budget-ms: 30000
+
   # 数据保留（D0.8）：断档事件与维护窗口按 13 个月清理（**不可逆**，天数必须为正，启动自检会拒绝非法值）。
   # 只删**已闭合**的行：进行中的断档/维护窗口是活数据，删掉会让可用率 fail-open。
   # ⚠️ 本开关同时约束**手工触发**端点 POST /internal/retention/cleanup（关闭时不执行并如实返回 disabled；

@@ -35,11 +35,16 @@ import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.IotPointMappingMapper;
 import cn.ypbin.admin.iot.mapper.IotPropertyMapper;
 import cn.ypbin.admin.iot.mapper.IotServiceMapper;
+import cn.ypbin.admin.iot.model.req.CommandBatchSendReq;
 import cn.ypbin.admin.iot.model.req.CommandQuery;
 import cn.ypbin.admin.iot.model.req.CommandSendReq;
+import cn.ypbin.admin.iot.model.resp.CommandBatchItemResult;
+import cn.ypbin.admin.iot.model.resp.CommandBatchResp;
 import cn.ypbin.admin.iot.model.resp.CommandInstanceResp;
+import cn.ypbin.admin.iot.service.CommandBatchProperties;
 import cn.ypbin.admin.iot.service.CommandInstanceService;
 import cn.ypbin.admin.iot.service.IotShadowService;
+import cn.ypbin.starter.data.core.EntityStatus;
 import cn.ypbin.starter.iot.validate.PropertyIdRules;
 import cn.ypbin.starter.iot.validate.RequestIdRules;
 import cn.ypbin.starter.core.exception.BusinessException;
@@ -55,11 +60,16 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
-import java.time.LocalDateTime;import java.util.ArrayList;
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DuplicateKeyException;
@@ -124,6 +134,9 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
     /** {@code error_msg} 列宽（超长截断，避免一次脏回执把行写坏）。 */
     private static final int MAX_ERROR_MSG_LENGTH = 500;
 
+    /** 纳秒/毫秒（"是否继续下发"阈值用单调时钟计算，避免系统时钟回拨影响判定）。 */
+    private static final long NANOS_PER_MILLISECOND = 1_000_000L;
+
     /** 可读属性的访问模式（读属性请求的合法目标）。 */
     private static final List<String> READABLE_MODES = List.of(AccessMode.READ.getCode(),
         AccessMode.READ_WRITE.getCode());
@@ -131,6 +144,30 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
     /** 可写属性的访问模式（属性设置请求的合法目标）。 */
     private static final List<String> WRITABLE_MODES = List.of(AccessMode.WRITE.getCode(),
         AccessMode.READ_WRITE.getCode());
+
+    /** 未受理原因码：设备不存在（跨租户与不存在同语义，不区分）。 */
+    private static final String REASON_DEVICE_NOT_FOUND = "DEVICE_NOT_FOUND";
+
+    /** 未受理原因码：设备已停用（批量运维只对在网设备下发）。 */
+    private static final String REASON_DEVICE_DISABLED = "DEVICE_DISABLED";
+
+    /** 未受理原因码：设备未绑定产品。 */
+    private static final String REASON_DEVICE_WITHOUT_PRODUCT = "DEVICE_WITHOUT_PRODUCT";
+
+    /** 未受理原因码：物模型为空/无服务定义。 */
+    private static final String REASON_THING_MODEL_EMPTY = "THING_MODEL_EMPTY";
+
+    /** 未受理原因码：物模型加载失败（查询异常；与"物模型为空"是两回事）。 */
+    private static final String REASON_THING_MODEL_LOAD_FAILED = "THING_MODEL_LOAD_FAILED";
+
+    /** 未受理原因码：模板校验未通过（标识不在物模型/属性不可写/params 形态非法等）。 */
+    private static final String REASON_COMMAND_REJECTED = "COMMAND_REJECTED";
+
+    /** 未受理原因码：循环入口的"继续下发"阈值已用尽（该台未下发）。 */
+    private static final String REASON_BATCH_BUDGET_EXCEEDED = "BATCH_BUDGET_EXCEEDED";
+
+    /** 未受理原因码：单台处理时抛出非业务异常（内部错误；已落完整堆栈日志）。 */
+    private static final String REASON_INTERNAL_ERROR = "INTERNAL_ERROR";
 
     private final IotDeviceMapper deviceMapper;
 
@@ -152,6 +189,8 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
 
     private final IotShadowService shadowService;
 
+    private final CommandBatchProperties batchProperties;
+
     private final Counter sentCounter;
 
     private final Counter failedCounter;
@@ -170,6 +209,7 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
                                       IotPointMappingMapper pointMappingMapper,
                                       EmqxAdminClient emqxAdminClient, EmqxProperties emqxProperties,
                                       ObjectMapper objectMapper, IotShadowService shadowService,
+                                      CommandBatchProperties batchProperties,
                                       MeterRegistry meterRegistry) {
         this.deviceMapper = deviceMapper;
         this.serviceMapper = serviceMapper;
@@ -181,6 +221,7 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
         this.emqxProperties = emqxProperties;
         this.objectMapper = objectMapper;
         this.shadowService = shadowService;
+        this.batchProperties = batchProperties;
         this.sentCounter = Counter.builder(METRIC_SENT).description("下行命令实例创建并投递成功")
             .register(meterRegistry);
         this.failedCounter = Counter.builder(METRIC_FAILED).description("下行命令投递即失败")
@@ -205,7 +246,35 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
         IotDevice device = requireDevice(deviceId);
         CommandKind kind = requireKind(req.getKind());
         requireWriteDesiredScope(kind, req.getWriteDesired());
-        String clientKey = normalizeClientKey(req.getClientRequestId());
+        // 单台路径与批量路径**共用同一个** {@link #sendWithModel}：校验、payload 构造、落库、投递、
+        // 影子写入的规则只有一份（不复制粘贴出第二份，避免两条路径日后漂移）。
+        // 物模型**惰性加载**（{@code prepareCommandForDevice} 在幂等检查**之后**才被调用）：
+        // 幂等命中时不查库，与改造前逐字一致。
+        return sendWithModel(device, req, source, operatorUserId, req.getClientRequestId(), kind,
+            () -> prepareCommandForDevice(device, req, kind));
+    }
+
+    /**
+     * 单台下发的公共实现（**唯一**的校验/构造/落库/投递出口）。
+     *
+     * <p>单台与批量唯一的差别是「设备与物模型从哪来」：单台从 {@link #requireDevice} 与
+     * {@link #loadThingModel} 惰性取；批量从循环外一次预取好的上下文取（见 {@link #sendBatch}）。
+     * 其余步骤逐字一致。</p>
+     *
+     * @param device            设备（已解析，租户范围内）
+     * @param req               下发请求（批量时为模板；{@code clientRequestId} 字段**不在此处读取**）
+     * @param source            来源
+     * @param operatorUserId    下发人
+     * @param rawClientKey      已派生好的幂等键原文（批量入口传入派生键；单台传入请求原值）
+     * @param kind              已解析的命令类型
+     * @param preparedSupplier  物模型/目标/点位的供应器（单台惰性加载；批量返回预取结果）
+     * @return 实例视图
+     */
+    private CommandInstanceResp sendWithModel(IotDevice device, CommandSendReq req, CommandSource source,
+                                              Long operatorUserId, String rawClientKey, CommandKind kind,
+                                              Supplier<PreparedCommand> preparedSupplier) {
+        Long deviceId = device.getId();
+        String clientKey = normalizeClientKey(rawClientKey);
         if (clientKey != null) {
             IotCommandInstance existing = instanceMapper.selectByClientKey(deviceId, clientKey);
             if (existing != null) {
@@ -220,10 +289,10 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
         String paramsJson = toJsonText(req.getParams());
         // 解析结果为「必须是对象 + ≤64KB」；payload 仍走文本重建，但 writeDesired 要用这棵树的 value。
         JsonNode paramsNode = CommandPayloads.readObjectOrNull(paramsJson, objectMapper);
-        ThingModel model = loadThingModel(device.getProductId());
-        Target target = resolveTarget(kind, model, req.getIdentifier());
+        PreparedCommand prepared = preparedSupplier.get();
+        Target target = prepared.target();
         // M-3：service_call 命中命令点位映射时，把目标协议物理点随下行 payload 携带（未配置则为 null）
-        CommandPayloads.ResolvedPoint point = resolveCommandPoint(kind, deviceId, target.commandId());
+        CommandPayloads.ResolvedPoint point = prepared.point();
         int timeoutMs = req.getTimeoutMs() == null
             ? emqxProperties.getDefaultCommandTimeoutMs() : req.getTimeoutMs();
         String requestId = nextRequestId();
@@ -274,6 +343,475 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
             LogSanitizer.sanitize(deviceId), kind.getCode(), LogSanitizer.sanitize(target.identifier()),
             LogSanitizer.sanitize(requestId), row.getStatusCode());
         return toResp(row);
+    }
+
+    /**
+     * 单台路径的物模型/目标/点位准备（**惰性**调用：幂等命中时不会触发查询）。
+     *
+     * @param device 设备
+     * @param req    下发请求
+     * @param kind   已解析类型
+     * @return 预解析结果
+     */
+    private PreparedCommand prepareCommandForDevice(IotDevice device, CommandSendReq req, CommandKind kind) {
+        ThingModel model = loadThingModel(device.getProductId());
+        Target target = resolveTarget(kind, model, req.getIdentifier());
+        CommandPayloads.ResolvedPoint point = resolveCommandPoint(kind, device.getId(), target.commandId());
+        return new PreparedCommand(target, point);
+    }
+
+    @Override
+    public CommandBatchResp sendBatch(CommandBatchSendReq req, CommandSource source, Long operatorUserId) {
+        List<Long> deviceIds = normalizeBatchDeviceIds(req);
+        // @Valid 在 HTTP 入口挡住了空模板；但服务层可能被**直接调用**（自测/其它服务），
+        // 这里再挡一次，避免 NPE 变成 500（与单台端点"服务层是第二道闸"的口径一致）。
+        CommandSendReq template = req.getCommand();
+        if (template == null) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "命令模板不能为空");
+        }
+        // ── 批量级前置校验（与设备无关的规则只判一次；失败整批拒绝）──────────────────────────
+        // 模板的 kind/writeDesired/params 形态若非法，是**调用方把请求写错了**：整批拒绝比返回 N 条
+        // 一模一样的错误更有用（也与单台端点"校验失败绝不发布"的口径一致）。
+        CommandKind kind = requireKind(template.getKind());
+        requireWriteDesiredScope(kind, template.getWriteDesired());
+        String paramsJson = toJsonText(template.getParams());
+        CommandPayloads.readObjectOrNull(paramsJson, objectMapper);
+        String batchKey = normalizeClientKey(req.getClientRequestId());
+        requireDerivedClientKeyFits(batchKey, deviceIds);
+
+        // ── 批量预取（**所有查询都在循环之外**；这是本方法满足「循环内禁 DB/RPC」门禁的关键）──────
+        // ① 一次 IN 查全部设备：租户插件自动注入 tenant_id ⇒ 别的租户/已删除的设备**根本查不出来**，
+        //    与"设备不存在"同语义（不泄露"该 ID 在别的租户存在"）。
+        Map<Long, IotDevice> devicesById = loadBatchDevices(deviceIds);
+        // ② 按 productId 去重后，一次批量装载物模型：**共 3 条 IN**（服务 / 属性 / 命令各一次；
+        //    见 loadThingModels），与设备数、产品数都无关——不是"每个 productId 各一条 IN"。
+        //    ⚠️ 查询本身失败（库/网络）时**不能**把结果当成"物模型为空"这种确定结论——两者要修的东西
+        //    完全不同（修连接 vs 修产品配置）。批量查询无法逐产品归因，故该产品集合下的设备**逐条**
+        //    报"物模型加载失败：<原因>"，且原因进日志时带完整堆栈。
+        Map<Long, ThingModel> modelsByProduct;
+        Map<Long, PreRejection> preRejections = new LinkedHashMap<>();
+        try {
+            modelsByProduct = loadThingModels(productIdsOf(devicesById.values()));
+        } catch (RuntimeException ex) {
+            log.error("[iot] 批量下发物模型装载失败（受影响设备逐条归因，不再尝试下发）", ex);
+            modelsByProduct = Map.of();
+            for (IotDevice device : devicesById.values()) {
+                if (device.getProductId() != null) {
+                    preRejections.put(device.getId(), new PreRejection(REASON_THING_MODEL_LOAD_FAILED,
+                        "物模型加载失败：" + ex.getMessage()));
+                }
+            }
+        }
+        // ③ 逐台的目标在**内存里**预解析（resolveTarget 是纯函数，不查库）：这样既能一次性拿到
+        //    service_call 需要的 commandId（供第 ④ 步批量取点位映射），也能把"标识不在物模型/
+        //    属性不可写"这类**确定结论**在循环前算好。
+        Map<Long, Target> targets = new LinkedHashMap<>();
+        resolveTargetsForBatch(deviceIds, devicesById, modelsByProduct, kind, template.getIdentifier(),
+            targets, preRejections);
+        // ④ service_call 才需要命令点位映射：用「设备 + 命令定义」批量一次查完（循环内不再查库）。
+        Map<PointKey, List<IotPointMapping>> mappingsByDeviceCommand =
+            resolveCommandPointMappings(kind, targets);
+
+        // ── 逐台下发 ───────────────────────────────────────────────────────────────────────
+        // ⚠️ **这里的循环为什么是必要的**：每次下发都要向 EMQX **发布一条独立的 MQTT 报文**
+        // （topic 按设备不同、payload 的 requestId 也不同），且每台各自落一条命令实例——这是 N 个
+        // 不可合并的外部动作。被批量化的是它**之外**的全部查询：设备（1 次 IN）、物模型（3 次 IN）、
+        // 命令点位映射（1 次 IN）。循环体内只调用自研服务的 sendWithModel，不再出现任何查询。
+        // 逐台 try/catch：一台失败只影响它自己，其余照常下发（部分失败如实逐条返回）。
+        long deadlineNanos = System.nanoTime()
+            + batchProperties.getTotalBudgetMs() * NANOS_PER_MILLISECOND;
+        List<CommandBatchItemResult> results = new ArrayList<>(deviceIds.size());
+        int accepted = 0;
+        int delivered = 0;
+        for (Long deviceId : deviceIds) {
+            CommandBatchItemResult result = new CommandBatchItemResult();
+            result.setDeviceId(deviceId);
+            if (System.nanoTime() > deadlineNanos) {
+                // ⚠️ 这是**循环入口检查点**，不是硬中断：只保证"已超阈值的设备不再开跑"，
+                //    故实际总耗时上界 ≈ 阈值 + 最后一台被放行设备的耗时（单台耗时上界 ≈ EMQX 写超时）。
+                // 阈值用尽：**如实**告诉调用方"这些没发"，而不是让请求挂到被网关掐断（那时"发了哪些"
+                // 就成了未知数）。已发出的命令不受影响（无回滚）。
+                reject(result, REASON_BATCH_BUDGET_EXCEEDED,
+                    "整批下发耗时超过预算 " + batchProperties.getTotalBudgetMs()
+                        + "ms，本设备未下发；请缩小批量或调大 "
+                        + CommandBatchProperties.PREFIX + ".total-budget-ms");
+                results.add(result);
+                continue;
+            }
+            PreRejection preRejection = preRejections.get(deviceId);
+            if (preRejection != null) {
+                // 预取/预解析阶段已能确定的结论（设备不存在/停用/物模型为空/标识不在该产品物模型）：
+                // 逐条如实给出，**不**在循环里再查一次库。
+                reject(result, preRejection.code(), preRejection.message());
+                results.add(result);
+                continue;
+            }
+            IotDevice device = devicesById.get(deviceId);
+            Target target = targets.get(deviceId);
+            try {
+                CommandInstanceResp resp = sendWithModel(device, template, source, operatorUserId,
+                    deriveClientKey(batchKey, deviceId), kind,
+                    () -> new PreparedCommand(target, toResolvedPoint(deviceId, target,
+                        mappingsByDeviceCommand.get(new PointKey(deviceId, target.commandId())))));
+                result.setAccepted(Boolean.TRUE);
+                result.setRequestId(resp.getRequestId());
+                result.setStatusCode(resp.getStatusCode());
+                result.setErrorCode(resp.getErrorCode());
+                boolean ok = CommandInstanceStatus.SENT.getCode().equals(resp.getStatusCode());
+                result.setOk(ok);
+                result.setMessage(ok
+                    ? "已下发，等待设备回执"
+                    : "平台已受理但未送达（" + describeDeliveryFailure(resp) + "），可按 requestId 重发");
+                accepted++;
+                if (ok) {
+                    delivered++;
+                }
+            } catch (BusinessException ex) {
+                // 业务性拒绝（物模型不可写/点位映射歧义/超长 payload/…）：**逐台归因**，不整体失败
+                reject(result, REASON_COMMAND_REJECTED, ex.getMessage());
+            } catch (RuntimeException ex) {
+                // 非预期异常：单台隔离 + **完整堆栈**进日志（禁吞异常、禁静默降级）；
+                // 其余设备继续下发，绝不让一台的意外拖垮整批。
+                // ⚠️ 措辞必须诚实：异常可能发生在"实例已落库、投递尚未返回"之间（共享流水线是先 insert
+                //    再 publish），因此该设备**可能已有一条命令记录**（PENDING，会被超时扫描收敛）。
+                //    不能简单说"没下发"——那会让运维漏掉一条真实存在的命令。
+                log.error("[iot] 批量下发单台失败（其余设备继续）：deviceId={} identifier={}",
+                    LogSanitizer.sanitize(deviceId), LogSanitizer.sanitize(template.getIdentifier()), ex);
+                reject(result, REASON_INTERNAL_ERROR,
+                    "单台下发异常（已记录完整堆栈）：" + ex.getMessage()
+                        + "；该设备可能已生成命令记录，请到该设备的命令历史核对");
+            }
+            results.add(result);
+        }
+        CommandBatchResp resp = new CommandBatchResp();
+        resp.setTotal(deviceIds.size());
+        resp.setAccepted(accepted);
+        resp.setRejected(deviceIds.size() - accepted);
+        resp.setDelivered(delivered);
+        resp.setResults(results);
+        log.info("[iot] 批量下发完成：total={} accepted={} delivered={} rejected={} kind={} identifier={}",
+            deviceIds.size(), accepted, delivered, resp.getRejected(), kind.getCode(),
+            LogSanitizer.sanitize(template.getIdentifier()));
+        return resp;
+    }
+
+    /**
+     * 批量设备清单归一化（非空、元素非空、去重保序、按配置上限判定）。
+     *
+     * <p>这些是**整批级**错误（请求本身不成立），因此抛业务错误拒绝整批——与"逐台设备的问题"
+     * （设备不存在/停用/物模型不可用）必须逐条返回的口径区分开。</p>
+     *
+     * @param req 批量请求
+     * @return 去重后保序的设备清单
+     */
+    private List<Long> normalizeBatchDeviceIds(CommandBatchSendReq req) {
+        List<Long> raw = req.getDeviceIds();
+        if (raw == null || raw.isEmpty()) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "设备 ID 列表不能为空");
+        }
+        if (raw.stream().anyMatch(Objects::isNull)) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "设备 ID 不能为空");
+        }
+        List<Long> deduped = List.copyOf(new LinkedHashSet<>(raw));
+        int maxDevices = batchProperties.getMaxDevices();
+        if (deduped.size() > maxDevices) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "单次批量下发设备数不能超过 " + maxDevices + "（去重后 " + deduped.size()
+                    + "；可调整 " + CommandBatchProperties.PREFIX + ".max-devices）");
+        }
+        return deduped;
+    }
+
+    /**
+     * 校验「请求级幂等键 + 设备 ID」派生后的键不超 {@code request_id} 列宽。
+     *
+     * <p>派生格式 {@code <key>:<deviceId>} 最长 = 请求级键长 + 1 + 设备 ID 十进制位数。
+     * 超限时**整批拒绝并说清原因**，绝不截断——截断会把不同设备/不同批次压成同一个键，
+     * 造成"以为去重、实际串单"（与单台端点拒绝非法幂等键同一理由）。</p>
+     *
+     * @param batchKey  归一化后的请求级键（可空）
+     * @param deviceIds 去重后的设备清单
+     */
+    private static void requireDerivedClientKeyFits(String batchKey, List<Long> deviceIds) {
+        if (batchKey == null) {
+            return;
+        }
+        long maxDigits = 1;
+        for (Long deviceId : deviceIds) {
+            maxDigits = Math.max(maxDigits, String.valueOf(deviceId).length());
+        }
+        long maxLength = batchKey.length() + 1L + maxDigits;
+        if (maxLength > RequestIdRules.MAX_LENGTH) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "请求级幂等键过长：逐设备派生后最长 " + maxLength + " 字符，超过上限 "
+                    + RequestIdRules.MAX_LENGTH + "（派生规则为 \"<clientRequestId>:<deviceId>\"）");
+        }
+    }
+
+    /**
+     * 逐设备派生幂等键（{@code <请求级键>:<设备 ID>}）。
+     *
+     * <p><b>为什么必须逐设备派生</b>：命令实例的幂等唯一口径是
+     * {@code uk_command_client_key(tenant_id, device_id, client_request_id)}——「同租户 + 同设备」。
+     * 若整批共用一个键，则 A 设备命中已有实例时会连带把 B 设备也短路掉（B 明明没下发过却不发），
+     * 而数据库唯一键也会在第二台插入时冲突。派生后每台各自去重：A 命中只影响 A。</p>
+     *
+     * @param batchKey 请求级键（可空 = 不做幂等，每台都是新命令）
+     * @param deviceId 设备 ID
+     * @return 派生键；请求级键为空时返回 {@code null}
+     */
+    private static String deriveClientKey(String batchKey, Long deviceId) {
+        return batchKey == null ? null : batchKey + ":" + deviceId;
+    }
+
+    /**
+     * 一次批量查设备（租户条件由插件注入；不手写 tenant_id）。
+     *
+     * @param deviceIds 去重后的设备清单（非空）
+     * @return deviceId → 设备（查不到的不在结果里）
+     */
+    private Map<Long, IotDevice> loadBatchDevices(List<Long> deviceIds) {
+        Map<Long, IotDevice> byId = new LinkedHashMap<>();
+        for (IotDevice device : deviceMapper.selectBatchIds(deviceIds)) {
+            byId.put(device.getId(), device);
+        }
+        return byId;
+    }
+
+    /**
+     * 收集设备清单里出现过的 productId（去重、剔除空值）。
+     *
+     * @param devices 设备集合
+     * @return productId 清单
+     */
+    private static List<Long> productIdsOf(Collection<IotDevice> devices) {
+        Set<Long> productIds = new LinkedHashSet<>();
+        for (IotDevice device : devices) {
+            if (device.getProductId() != null) {
+                productIds.add(device.getProductId());
+            }
+        }
+        return List.copyOf(productIds);
+    }
+
+    /**
+     * 一次批量装载多个产品的物模型（**3 条 IN 查询**，与设备数、产品数无关）。
+     *
+     * <p>这是批量下发相对"逐台调 send"的全部优化所在：物模型装载原是每台设备 2 条 SQL
+     * （服务 + 属性/命令），50 台同产品会放大成 100 次往返；这里按 productId 去重后一次取回，
+     * 无论多少台/多少个产品都固定为 **3 条 IN**（{@code iot_service} → {@code iot_property}
+     * → {@code iot_command}，后两者按前者的 serviceId 集合查询）。</p>
+     *
+     * <p><b>生命周期</b>：返回的物模型索引只在**本次请求内**有效并复用（不放进任何缓存、不跨请求），
+     * 因此不会让"改了物模型但缓存没刷新"变成新的静默故障。</p>
+     *
+     * @param productIds 产品 ID 清单（可空/空 = 返回空 Map，且**不发起查询**）
+     * @return productId → 物模型索引（含"无服务定义"的空索引）
+     */
+    private Map<Long, ThingModel> loadThingModels(List<Long> productIds) {
+        if (productIds.isEmpty()) {
+            // 批量 IN 前先判空短路（仓内铁律：空集合会生成 IN () 语法错误）
+            return Map.of();
+        }
+        // 每个产品先放一个**空索引**：这样"该产品没有服务定义"（物模型为空）与"产品根本没预取到"
+        // 在循环里可区分——前者逐条报 THING_MODEL_EMPTY，后者是内部错误。
+        Map<Long, ThingModel> byProduct = new LinkedHashMap<>();
+        for (Long productId : productIds) {
+            byProduct.put(productId, new ThingModel(new LinkedHashMap<>(), new LinkedHashMap<>()));
+        }
+        List<IotService> services = serviceMapper.selectList(
+            Wrappers.<IotService>lambdaQuery().in(IotService::getProductId, productIds));
+        if (services.isEmpty()) {
+            return byProduct;
+        }
+        Map<Long, Long> productIdByServiceId = new LinkedHashMap<>();
+        List<Long> serviceIds = new ArrayList<>(services.size());
+        for (IotService service : services) {
+            serviceIds.add(service.getId());
+            productIdByServiceId.put(service.getId(), service.getProductId());
+        }
+        for (IotProperty property : propertyMapper.selectList(
+            Wrappers.<IotProperty>lambdaQuery().in(IotProperty::getServiceId, serviceIds))) {
+            ThingModel model = byProduct.get(productIdByServiceId.get(property.getServiceId()));
+            if (model != null) {
+                model.properties().putIfAbsent(property.getIdentifier(), property);
+            }
+        }
+        for (IotCommand command : commandMapper.selectList(
+            Wrappers.<IotCommand>lambdaQuery().in(IotCommand::getServiceId, serviceIds))) {
+            ThingModel model = byProduct.get(productIdByServiceId.get(command.getServiceId()));
+            if (model != null) {
+                model.commands().putIfAbsent(command.getIdentifier(), command);
+            }
+        }
+        return byProduct;
+    }
+
+    /**
+     * 循环前逐台预解析目标（把"确定结论"提前算好，循环里不再查库/不再重复物模型判定）。
+     *
+     * <p>能在这里定论的：设备不存在、设备停用、未绑定产品、物模型为空、标识不在该产品物模型
+     * （含属性不可写/不可读）。判不出而必须在循环里做的只剩"点位映射"与"实际投递"。</p>
+     *
+     * @param deviceIds       去重后的设备清单（顺序即回执顺序）
+     * @param devicesById     预取的设备
+     * @param modelsByProduct 预取的物模型
+     * @param kind            已解析类型
+     * @param identifier      模板标识
+     * @param targets         出参：deviceId → 目标（仅预解析成功的设备）
+     * @param preRejections   出/入参：deviceId → 预置拒绝（含原因码与人话）；已预置的（如物模型装载失败）
+     *                        不再重复判定，保证"加载失败"的归因不被后面的"物模型为空"覆盖
+     */
+    private void resolveTargetsForBatch(List<Long> deviceIds, Map<Long, IotDevice> devicesById,
+                                        Map<Long, ThingModel> modelsByProduct, CommandKind kind,
+                                        String identifier, Map<Long, Target> targets,
+                                        Map<Long, PreRejection> preRejections) {
+        for (Long deviceId : deviceIds) {
+            if (preRejections.containsKey(deviceId)) {
+                continue;
+            }
+            IotDevice device = devicesById.get(deviceId);
+            if (device == null) {
+                // 跨租户与不存在同语义（租户插件已过滤）：不泄露"该 ID 在别的租户存在"
+                preRejections.put(deviceId, new PreRejection(REASON_DEVICE_NOT_FOUND,
+                    "设备不存在或不属于当前租户"));
+                continue;
+            }
+            if (!EntityStatus.ENABLED.getCode().equals(device.getStatus())) {
+                preRejections.put(deviceId, new PreRejection(REASON_DEVICE_DISABLED,
+                    "设备已停用，不参与批量下发（如需下发请先在设备台账启用）"));
+                continue;
+            }
+            if (device.getProductId() == null) {
+                preRejections.put(deviceId, new PreRejection(REASON_DEVICE_WITHOUT_PRODUCT,
+                    "设备未绑定产品，无法下发命令"));
+                continue;
+            }
+            ThingModel model = modelsByProduct.get(device.getProductId());
+            if (model == null) {
+                // 预取结果里没有该产品（内部不一致）：**不能**谎报成"物模型为空"这种确定结论
+                preRejections.put(deviceId, new PreRejection(REASON_INTERNAL_ERROR,
+                    "物模型预取结果缺少该设备的产品（内部错误，请联系管理员）"));
+                continue;
+            }
+            if (model.properties().isEmpty() && model.commands().isEmpty()) {
+                preRejections.put(deviceId, new PreRejection(REASON_THING_MODEL_EMPTY,
+                    "该设备所属产品没有物模型定义（无属性/无命令），无法下发命令"));
+                continue;
+            }
+            try {
+                targets.put(deviceId, resolveTarget(kind, model, identifier));
+            } catch (BusinessException ex) {
+                // 模板在该设备物模型上不成立（标识缺失/不可写）——**确定结论**，逐条归因
+                preRejections.put(deviceId, new PreRejection(REASON_COMMAND_REJECTED, ex.getMessage()));
+            }
+        }
+    }
+
+    /**
+     * 循环前一次批量取命令点位映射（仅 {@code service_call} 需要；其它类型不查库）。
+     *
+     * <p>语义与单台的 {@link #resolveCommandPoint} 完全一致：未配置 ⇒ 无点位；
+     * 多条启用映射 ⇒ 该设备**逐条**报"映射不唯一"（配置歧义不能静默挑一条写错寄存器）。</p>
+     *
+     * @param kind    已解析类型
+     * @param targets 预解析出的目标（含 commandId）
+     * @return (deviceId, commandId) → 唯一映射（未配置的键不存在；歧义的键也不进结果）
+     */
+    private Map<PointKey, List<IotPointMapping>> resolveCommandPointMappings(CommandKind kind,
+                                                                             Map<Long, Target> targets) {
+        if (kind != CommandKind.SERVICE_CALL) {
+            return Map.of();
+        }
+        Set<PointKey> wanted = new LinkedHashSet<>();
+        List<Long> deviceIds = new ArrayList<>();
+        List<Long> definitionIds = new ArrayList<>();
+        for (Map.Entry<Long, Target> entry : targets.entrySet()) {
+            if (entry.getValue().commandId() == null) {
+                continue;
+            }
+            PointKey key = new PointKey(entry.getKey(), entry.getValue().commandId());
+            if (wanted.add(key)) {
+                deviceIds.add(key.deviceId());
+                definitionIds.add(key.commandId());
+            }
+        }
+        if (wanted.isEmpty()) {
+            return Map.of();
+        }
+        List<IotPointMapping> mappings = pointMappingMapper.selectList(
+            Wrappers.<IotPointMapping>lambdaQuery()
+                .in(IotPointMapping::getDeviceId, deviceIds)
+                .in(IotPointMapping::getPropertyId, definitionIds)
+                .eq(IotPointMapping::getRefType, PointRefType.COMMAND.getCode())
+                .eq(IotPointMapping::getEnabled, Boolean.TRUE)
+                .orderByAsc(IotPointMapping::getId));
+        Map<PointKey, List<IotPointMapping>> byKey = new LinkedHashMap<>();
+        for (IotPointMapping mapping : mappings) {
+            PointKey key = new PointKey(mapping.getDeviceId(), mapping.getPropertyId());
+            if (!wanted.contains(key)) {
+                // 两列各自 IN 是笛卡尔上界：这里收回到真正的 (device, command) 组合，
+                // 避免"设备 A 的点位映射被算到设备 B 的同一个 commandId 上"这种串台
+                continue;
+            }
+            byKey.computeIfAbsent(key, ignored -> new ArrayList<>()).add(mapping);
+        }
+        return byKey;
+    }
+
+    /**
+     * 把预取的映射按单台口径转成点位（与 {@link #resolveCommandPoint} 的返回语义一致）。
+     *
+     * @param deviceId 设备
+     * @param target   预解析目标（非服务调用时 commandId 为空）
+     * @param mapping  预取的唯一映射（可空 = 未配置）
+     * @return 点位；未配置返回 {@code null}
+     */
+    private static CommandPayloads.ResolvedPoint toResolvedPoint(Long deviceId, Target target,
+                                                                 List<IotPointMapping> mappings) {
+        if (target.commandId() == null || mappings == null || mappings.isEmpty()) {
+            // 非服务调用、或该设备未配命令点位 ⇒ 无点位（payload 保持 §7.6 B2 契约不变）
+            return null;
+        }
+        if (mappings.size() > 1) {
+            // 歧义：不静默挑一条（与单台 resolveCommandPoint 同一口径）⇒ 逐台报错
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "设备 " + deviceId + " 的命令点位映射不唯一（" + mappings.size()
+                    + " 条启用映射），无法确定下发地址；请清理重复映射");
+        }
+        IotPointMapping mapping = mappings.get(0);
+        return new CommandPayloads.ResolvedPoint(mapping.getRawAddress(), mapping.getAddressType(),
+            mapping.getRw());
+    }
+
+    /**
+     * 描述"已受理但未送达"的原因（面向运维的人话）。
+     *
+     * @param resp 实例视图
+     * @return 说明文本
+     */
+    private static String describeDeliveryFailure(CommandInstanceResp resp) {
+        if (CommandErrorCode.NO_SUBSCRIBER.getCode().equals(resp.getErrorCode())) {
+            return "设备未连接";
+        }
+        if (resp.getErrorMsg() != null && !resp.getErrorMsg().isBlank()) {
+            return resp.getErrorMsg();
+        }
+        return "原因码 " + resp.getErrorCode();
+    }
+
+    /**
+     * 标注一条"未受理"结果（不创建实例）。
+     *
+     * @param result  结果
+     * @param code    原因码
+     * @param message 人话说明
+     */
+    private static void reject(CommandBatchItemResult result, String code, String message) {
+        result.setAccepted(Boolean.FALSE);
+        result.setOk(Boolean.FALSE);
+        result.setCode(code);
+        result.setMessage(message);
     }
 
     /**
@@ -872,12 +1410,42 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
     }
 
     /**
-     * 物模型索引（标识 → 属性/命令；两条批量查询的结果）。
+     * 物模型索引（标识 → 属性/命令；批量预取的结果）。
+     *
+     * <p>两个 Map **可变**：批量装载时按产品逐条归集（先建空索引、再填充），避免为每个产品
+     * 复制一份不可变 Map。装载完成后本请求内只读。</p>
      *
      * @param properties 属性
      * @param commands   命令
      */
     private record ThingModel(Map<String, IotProperty> properties, Map<String, IotCommand> commands) {
+    }
+
+    /**
+     * 单台下发的预解析结果（物模型目标 + 命令点位）。
+     *
+     * @param target 目标
+     * @param point  命令点位（非服务调用/未配置时为 {@code null}）
+     */
+    private record PreparedCommand(Target target, CommandPayloads.ResolvedPoint point) {
+    }
+
+    /**
+     * 循环前已能确定的"未受理"结论（原因码 + 人话）。
+     *
+     * @param code    原因码
+     * @param message 人话说明
+     */
+    private record PreRejection(String code, String message) {
+    }
+
+    /**
+     * 「设备 + 物模型命令定义」组合键（命令点位映射按这个组合批量取）。
+     *
+     * @param deviceId  设备
+     * @param commandId 命令定义 ID
+     */
+    private record PointKey(Long deviceId, Long commandId) {
     }
 
     /**
