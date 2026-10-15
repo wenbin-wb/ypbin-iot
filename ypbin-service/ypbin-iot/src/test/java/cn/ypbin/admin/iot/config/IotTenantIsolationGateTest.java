@@ -77,7 +77,11 @@ class IotTenantIsolationGateTest {
         "iot_platform_alert",
         // 仪表盘在线趋势快照（2026-10-15 追加）：实体 extends TenantBaseEntity，
         // 必须进本清单；否则「快照按租户隔离」这条会脱离清单式门禁覆盖。
-        "iot_dashboard_daily_snapshot");
+        "iot_dashboard_daily_snapshot",
+        // 组态看板配置（2026-10-15 追加，与快照同批）：实体 extends TenantBaseEntity，
+        // 存的是本租户的看板组件配置；漏登记 ⇒ 本清单式门禁的「逐表 ignoreTable=false」
+        // 对它失效（独立验收任务 verify-backend/task-8 发现的覆盖缺口，已补）。
+        "iot_dashboard_board_config");
 
     /** 平台表（不继承租户基类，必须被忽略——作为「ignoreTable 能返回 true」的自检锚点）。 */
     /**

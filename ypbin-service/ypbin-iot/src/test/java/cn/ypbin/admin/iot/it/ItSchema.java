@@ -57,7 +57,11 @@ final class ItSchema {
         "deploy/sql/migration/2026-10-13-iot-modbus-register-schema.sql",
         // Modbus 寄存器解码 v2（2026-10-13）：新增 register_format/bit_offset/bit_length；
         // 顺序与目录字典序一致（v1 之后），不登记 ⇒ 真库 IT 会撞 Unknown column。
-        "deploy/sql/migration/2026-10-13-iot-modbus-v2-register-format-schema.sql");
+        "deploy/sql/migration/2026-10-13-iot-modbus-v2-register-format-schema.sql",
+        // 组态看板配置（2026-10-15）：新建 iot_dashboard_board_config；
+        // 顺序与目录字典序一致（board-config 在 dashboard-snapshot 之前）；
+        // 不登记 ⇒ 任何按实体读该表的真库 IT 会撞 Table doesn't exist。
+        "deploy/sql/migration/2026-10-15-iot-board-config.sql");
 
     private ItSchema() {
     }
