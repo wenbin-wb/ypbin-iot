@@ -21,7 +21,13 @@ import cn.ypbin.starter.log.annotation.Log;
 import cn.ypbin.starter.tools.idempotent.Idempotent;
 import cn.dev33.satoken.annotation.SaCheckPermission;
 import jakarta.validation.Valid;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -46,6 +52,12 @@ import org.springframework.web.bind.annotation.RestController;
 @RequiredArgsConstructor
 public class IotDeviceController {
 
+    /** 导出附件固定文件名。 */
+    private static final String DEVICE_EXPORT_FILE_NAME = "iot-devices.csv";
+
+    /** CSV MIME（带 charset：与导入模板下载一致，避免表格软件按本机编码解读）。 */
+    private static final String CSV_CONTENT_TYPE = "text/csv;charset=UTF-8";
+
     private final IotDeviceService iotDeviceService;
 
     /**
@@ -58,6 +70,21 @@ public class IotDeviceController {
     @SaCheckPermission("iot:device:list")
     public R<PageResult<IotDeviceResp>> page(IotDeviceQuery query) {
         return R.ok(iotDeviceService.pageDevices(query));
+    }
+
+    /**
+     * 导出设备台账 CSV（复用列表筛选条件；单次最多 10000 条，超限由服务层明确拒绝并提示先筛选）。
+     *
+     * <p>文件下载直接返回 {@link ResponseEntity} 字节：若返回 {@code R<String>}，浏览器拿到的是
+     * 被引号包裹的 JSON，用户点「导出」会得到一个打不开的 .csv。</p>
+     *
+     * @param query 查询条件（keyword/protocol/productId）
+     * @return CSV 附件
+     */
+    @GetMapping("/export")
+    @SaCheckPermission("iot:device:list")
+    public ResponseEntity<byte[]> export(IotDeviceQuery query) {
+        return csvResponse(DEVICE_EXPORT_FILE_NAME, iotDeviceService.exportCsv(query));
     }
 
     /**
@@ -156,5 +183,27 @@ public class IotDeviceController {
     @Log("批量删除 IoT 设备")
     public R<Integer> batchRemove(@Valid @RequestBody IotDeviceBatchDeleteReq req) {
         return R.ok(iotDeviceService.batchRemove(req.getIds()));
+    }
+
+    /**
+     * 构造 CSV 下载响应（UTF-8、BOM 由 CSV 文本自带、文件名 RFC 5987 编码、禁缓存）。
+     *
+     * <p>与批量导入模板下载同构：文件名走 {@code filename*=UTF-8''} 避免中文/特殊字符在
+     * 不同浏览器下编码歧义；{@code no-store} 防止中间层缓存住某个租户的导出结果。</p>
+     *
+     * @param fileName 文件名
+     * @param content  CSV 文本
+     * @return 字节响应
+     */
+    private static ResponseEntity<byte[]> csvResponse(String fileName, String content) {
+        byte[] body = content.getBytes(StandardCharsets.UTF_8);
+        String encodedName = URLEncoder.encode(fileName, StandardCharsets.UTF_8).replace("+", "%20");
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.parseMediaType(CSV_CONTENT_TYPE));
+        headers.setContentLength(body.length);
+        headers.set(HttpHeaders.CONTENT_DISPOSITION,
+            "attachment; filename=\"" + encodedName + "\"; filename*=UTF-8''" + encodedName);
+        headers.setCacheControl("no-store");
+        return new ResponseEntity<>(body, headers, HttpStatus.OK);
     }
 }

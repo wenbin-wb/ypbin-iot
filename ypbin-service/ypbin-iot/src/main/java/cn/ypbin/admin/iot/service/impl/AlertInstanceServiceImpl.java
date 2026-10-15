@@ -24,6 +24,7 @@ import cn.ypbin.admin.iot.entity.IotDevice;
 import cn.ypbin.admin.iot.entity.MaintenanceWindow;
 import cn.ypbin.admin.iot.enums.AlertNotifyEvent;
 import cn.ypbin.admin.iot.enums.AlertReason;
+import cn.ypbin.admin.iot.enums.AlertSeverity;
 import cn.ypbin.admin.iot.enums.AlertState;
 import cn.ypbin.admin.iot.mapper.DeviceLivenessMapper;
 import cn.ypbin.admin.iot.mapper.IotAlertInstanceMapper;
@@ -36,6 +37,7 @@ import cn.ypbin.admin.iot.model.resp.AlertNotificationResp;
 import cn.ypbin.admin.iot.model.resp.AlertSummaryResp;
 import cn.ypbin.admin.iot.realtime.IotRealtimeService;
 import cn.ypbin.admin.iot.service.AlertInstanceService;
+import cn.ypbin.admin.iot.support.IotCsvExportUtils;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.crud.model.PageResult;
 import cn.ypbin.starter.security.core.UserContext;
@@ -75,6 +77,10 @@ public class AlertInstanceServiceImpl implements AlertInstanceService {
 
     /** 产品筛选时反查设备数量的上限（防「一个大产品下上万台设备」把 IN 撑爆）。 */
     private static final int MAX_PRODUCT_DEVICES = 2_000;
+
+    /** 告警导出列（顺序即 CSV 列顺序）。 */
+    private static final List<String> ALERT_EXPORT_HEADERS = List.of(
+        "设备名称", "规则", "级别", "状态", "点位", "触发值", "阈值", "开始", "恢复", "持续秒数", "原因");
 
     private final IotAlertInstanceMapper instanceMapper;
     private final IotAlertNotificationMapper notificationMapper;
@@ -118,6 +124,45 @@ public class AlertInstanceServiceImpl implements AlertInstanceService {
         gate.requireEnabled();
         int pageNo = positive(query.getPage(), 1);
         int pageSize = Math.min(positive(query.getPageSize(), 10), properties.getMaxPageSize());
+        LambdaQueryWrapper<IotAlertInstance> wrapper = buildQueryWrapper(query);
+        if (wrapper == null) {
+            // 该产品下没有设备 ⇒ 结果必然为空；直接返回空页（不生成 `IN ()`，也不查实例表）
+            return PageResult.of(List.of(), 0L, pageNo, pageSize);
+        }
+        IPage<IotAlertInstance> source = instanceMapper.selectPage(new Page<>(pageNo, pageSize), wrapper);
+        return PageResult.of(toRespList(source.getRecords(), true), source.getTotal(),
+            source.getCurrent(), source.getSize());
+    }
+
+    @Override
+    public String exportCsv(AlertInstanceQuery query) {
+        gate.requireEnabled();
+        LambdaQueryWrapper<IotAlertInstance> wrapper = buildQueryWrapper(query);
+        if (wrapper == null) {
+            return IotCsvExportUtils.toCsv(ALERT_EXPORT_HEADERS, List.of());
+        }
+        // 只取上限 +1 条判定超限：不静默截断成「看起来完整的 10000 条」
+        List<IotAlertInstance> instances = instanceMapper.selectPage(
+            new Page<>(1, IotCsvExportUtils.MAX_EXPORT_ROWS + 1, false), wrapper).getRecords();
+        if (instances.size() > IotCsvExportUtils.MAX_EXPORT_ROWS) {
+            throw new BusinessException("告警导出条数超过 " + IotCsvExportUtils.MAX_EXPORT_ROWS
+                + " 条，请先按状态/级别/设备/时间范围筛选后再导出");
+        }
+        List<AlertInstanceResp> views = toRespList(instances, false);
+        List<List<String>> rows = new ArrayList<>(views.size());
+        for (AlertInstanceResp view : views) {
+            rows.add(alertExportRow(view));
+        }
+        return IotCsvExportUtils.toCsv(ALERT_EXPORT_HEADERS, rows);
+    }
+
+    /**
+     * 构造告警查询条件（分页与导出共用，避免两处筛选口径漂移）。
+     *
+     * @param query 查询条件
+     * @return 条件构造器；产品筛选命中 0 台设备时返回 {@code null}（调用方产出空结果，不查实例表）
+     */
+    private LambdaQueryWrapper<IotAlertInstance> buildQueryWrapper(AlertInstanceQuery query) {
         LambdaQueryWrapper<IotAlertInstance> wrapper = new LambdaQueryWrapper<>();
         Set<String> states = parseStates(query.getState());
         if (!states.isEmpty()) {
@@ -146,15 +191,66 @@ public class AlertInstanceServiceImpl implements AlertInstanceService {
         if (query.getProductId() != null) {
             List<Long> deviceIds = deviceIdsOfProduct(query.getProductId());
             if (deviceIds.isEmpty()) {
-                // 该产品下没有设备 ⇒ 结果必然为空；直接返回空页（不生成 `IN ()`，也不查实例表）
-                return PageResult.of(List.of(), 0L, pageNo, pageSize);
+                return null;
             }
             wrapper.in(IotAlertInstance::getDeviceId, deviceIds);
         }
         wrapper.orderByDesc(IotAlertInstance::getStartTs).orderByDesc(IotAlertInstance::getId);
-        IPage<IotAlertInstance> source = instanceMapper.selectPage(new Page<>(pageNo, pageSize), wrapper);
-        return PageResult.of(toRespList(source.getRecords(), true), source.getTotal(),
-            source.getCurrent(), source.getSize());
+        return wrapper;
+    }
+
+    /** 告警视图 → CSV 行（级别/状态/原因走枚举中文；空值由 CSV 工具落成空单元格）。 */
+    private static List<String> alertExportRow(AlertInstanceResp view) {
+        List<String> row = new ArrayList<>(ALERT_EXPORT_HEADERS.size());
+        row.add(deviceText(view));
+        row.add(ruleText(view));
+        row.add(severityText(view.getSeverity()));
+        row.add(stateText(view.getState()));
+        row.add(view.getPropertyId());
+        row.add(view.getTriggerValue());
+        row.add(view.getThresholdSnapshot());
+        row.add(IotCsvExportUtils.formatDateTime(view.getStartTs()));
+        row.add(IotCsvExportUtils.formatDateTime(view.getResolvedTs()));
+        row.add(view.getDurationSeconds() == null ? null : String.valueOf(view.getDurationSeconds()));
+        row.add(reasonText(view.getReason()));
+        return row;
+    }
+
+    /** 设备名缺失（设备被删）时回落「设备#ID」，不静默留空。 */
+    private static String deviceText(AlertInstanceResp view) {
+        if (view.getDeviceName() != null && !view.getDeviceName().isBlank()) {
+            return view.getDeviceName();
+        }
+        return view.getDeviceId() == null ? null : "设备#" + view.getDeviceId();
+    }
+
+    /** 规则名：断档类实例没有规则行，用平台口径的中文说明；规则被删时回落「规则#ID」。 */
+    private static String ruleText(AlertInstanceResp view) {
+        if (Boolean.TRUE.equals(view.getOutage())) {
+            return "设备离线（平台断档链路）";
+        }
+        if (view.getRuleName() != null && !view.getRuleName().isBlank()) {
+            return view.getRuleName();
+        }
+        return view.getRuleId() == null ? null : "规则#" + view.getRuleId();
+    }
+
+    /** 级别码 → 中文；未知码原样保留（不静默改成空）。 */
+    private static String severityText(String code) {
+        AlertSeverity severity = AlertSeverity.of(code);
+        return severity == null ? code : severity.getDesc();
+    }
+
+    /** 状态码 → 中文；未知码原样保留。 */
+    private static String stateText(String code) {
+        AlertState state = AlertState.of(code);
+        return state == null ? code : state.getDesc();
+    }
+
+    /** 结束原因码 → 中文；活动告警原因为空，输出空单元格。 */
+    private static String reasonText(String code) {
+        AlertReason reason = AlertReason.of(code);
+        return reason == null ? code : reason.getDesc();
     }
 
     @Override

@@ -84,4 +84,16 @@ public interface AlertInstanceService {
      * @return 收口的实例数
      */
     int resolveByRuleIds(List<Long> ruleIds);
+
+    /**
+     * 导出告警实例 CSV（复用列表筛选条件：state/activeOnly/severity/deviceId/productId/
+     * propertyId/ruleId/from/to；分页参数忽略）。
+     *
+     * <p>单租户最多导出 <b>10000</b> 条：超过抛业务异常提示先筛选，<b>不静默截断</b>。
+     * 列值全部转中文可读文本（级别/状态/原因走枚举 desc），并对 CSV 公式注入做中和。</p>
+     *
+     * @param query 查询条件
+     * @return CSV 文本
+     */
+    String exportCsv(AlertInstanceQuery query);
 }
