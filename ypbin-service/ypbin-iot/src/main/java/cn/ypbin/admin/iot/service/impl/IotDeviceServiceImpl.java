@@ -11,7 +11,9 @@ package cn.ypbin.admin.iot.service.impl;
 
 import cn.ypbin.admin.iot.entity.IotDevice;
 import cn.ypbin.admin.iot.entity.IotProduct;
+import cn.ypbin.admin.iot.enums.IotProtocol;
 import cn.ypbin.admin.iot.enums.ModelStatus;
+import cn.ypbin.admin.iot.enums.OnlineStatus;
 import cn.ypbin.admin.iot.lease.TenantLedgerService;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.IotProductMapper;
@@ -20,6 +22,7 @@ import cn.ypbin.admin.iot.model.req.IotDeviceReq;
 import cn.ypbin.admin.iot.model.resp.IotDeviceResp;
 import cn.ypbin.admin.iot.realtime.IotRealtimeService;
 import cn.ypbin.admin.iot.service.IotDeviceService;
+import cn.ypbin.admin.iot.support.IotCsvExportUtils;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.core.exception.GlobalErrorCode;
 import cn.ypbin.starter.crud.model.PageResult;
@@ -27,8 +30,14 @@ import cn.ypbin.starter.crud.service.BaseServiceImpl;
 import cn.ypbin.starter.data.core.EntityStatus;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -51,6 +60,10 @@ public class IotDeviceServiceImpl extends BaseServiceImpl<IotDeviceMapper, IotDe
 
     /** 单次批量操作设备数上限（服务层兜底；请求 DTO 的 {@code @Size} 是接口层第一道闸）。 */
     private static final int MAX_BATCH_SIZE = 500;
+
+    /** 设备导出列（顺序即 CSV 列顺序）。 */
+    private static final List<String> DEVICE_EXPORT_HEADERS = List.of(
+        "设备编码", "设备名称", "接入协议", "端点", "所属产品", "在线状态", "启停", "最近在线", "创建时间", "备注");
 
     private final IotProductMapper iotProductMapper;
     private final TenantLedgerService tenantLedgerService;
@@ -192,6 +205,95 @@ public class IotDeviceServiceImpl extends BaseServiceImpl<IotDeviceMapper, IotDe
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "设备 ID 不能为空");
         }
         return ids.stream().distinct().toList();
+    }
+
+    @Override
+    public String exportCsv(IotDeviceQuery query) {
+        // 只取上限 +1 条用于判定是否超限；不把全表拉进内存，也绝不静默截断成「看起来完整的 10000 条」
+        List<IotDevice> devices = baseMapper.selectPage(
+            new Page<>(1, IotCsvExportUtils.MAX_EXPORT_ROWS + 1, false),
+            buildWrapper(query).orderByAsc(IotDevice::getId)).getRecords();
+        if (devices.size() > IotCsvExportUtils.MAX_EXPORT_ROWS) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "设备导出条数超过 " + IotCsvExportUtils.MAX_EXPORT_ROWS
+                    + " 条，请先按关键字/协议/产品筛选后再导出");
+        }
+        Map<Long, String> productNames = loadProductNames(devices);
+        List<List<String>> rows = new ArrayList<>(devices.size());
+        for (IotDevice device : devices) {
+            rows.add(deviceExportRow(device, productNames));
+        }
+        return IotCsvExportUtils.toCsv(DEVICE_EXPORT_HEADERS, rows);
+    }
+
+    /**
+     * 批量解析所属产品名（一次 IN；空集合短路，不拼 {@code IN ()}）。
+     *
+     * <p>产品行缺失（被删）时回落显示产品 ID 而不是空白——导出列不静默丢信息。</p>
+     */
+    private Map<Long, String> loadProductNames(List<IotDevice> devices) {
+        Set<Long> productIds = new LinkedHashSet<>();
+        for (IotDevice device : devices) {
+            if (device.getProductId() != null) {
+                productIds.add(device.getProductId());
+            }
+        }
+        Map<Long, String> productNames = new LinkedHashMap<>();
+        if (productIds.isEmpty()) {
+            return productNames;
+        }
+        for (IotProduct product : iotProductMapper.selectByIds(new ArrayList<>(productIds))) {
+            productNames.put(product.getId(), product.getProductName());
+        }
+        return productNames;
+    }
+
+    /** 设备实体 → CSV 行（值全部转中文可读文本；null 由 CSV 工具落成空单元格）。 */
+    private static List<String> deviceExportRow(IotDevice device, Map<Long, String> productNames) {
+        List<String> row = new ArrayList<>(DEVICE_EXPORT_HEADERS.size());
+        row.add(device.getDeviceCode());
+        row.add(device.getDeviceName());
+        row.add(protocolText(device.getProtocol()));
+        row.add(device.getEndpoint());
+        row.add(productText(device.getProductId(), productNames));
+        row.add(onlineStatusText(device.getOnlineStatus()));
+        row.add(entityStatusText(device.getStatus()));
+        row.add(IotCsvExportUtils.formatDateTime(device.getLastSeenAt()));
+        row.add(IotCsvExportUtils.formatDateTime(device.getCreateTime()));
+        row.add(device.getRemark());
+        return row;
+    }
+
+    /** 协议码 → 中文；未知码原样保留（不静默改成空）。 */
+    private static String protocolText(String code) {
+        IotProtocol protocol = IotProtocol.of(code);
+        return protocol == null ? code : protocol.getDesc();
+    }
+
+    /** 在线状态码 → 中文；未知码原样保留。 */
+    private static String onlineStatusText(String code) {
+        OnlineStatus status = OnlineStatus.of(code);
+        return status == null ? code : status.getDesc();
+    }
+
+    /** 启停位 → 中文；第三态原样保留数字（正常不应出现，出现要让导出可见）。 */
+    private static String entityStatusText(Integer status) {
+        if (EntityStatus.ENABLED.getCode().equals(status)) {
+            return EntityStatus.ENABLED.getDesc();
+        }
+        if (EntityStatus.DISABLED.getCode().equals(status)) {
+            return EntityStatus.DISABLED.getDesc();
+        }
+        return status == null ? null : String.valueOf(status);
+    }
+
+    /** 所属产品名；产品被删时回落产品 ID，不静默留空。 */
+    private static String productText(Long productId, Map<Long, String> productNames) {
+        if (productId == null) {
+            return null;
+        }
+        String productName = productNames.get(productId);
+        return productName == null ? String.valueOf(productId) : productName;
     }
 
     /**

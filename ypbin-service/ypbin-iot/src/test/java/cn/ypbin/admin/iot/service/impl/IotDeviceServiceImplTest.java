@@ -19,6 +19,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import cn.ypbin.admin.iot.entity.IotDevice;
+import cn.ypbin.admin.iot.entity.IotProduct;
 import cn.ypbin.admin.iot.lease.TenantLedgerService;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.IotProductMapper;
@@ -26,12 +27,14 @@ import cn.ypbin.admin.iot.model.req.IotDeviceReq;
 import cn.ypbin.admin.iot.realtime.IotRealtimeService;
 import cn.ypbin.admin.iot.model.query.IotDeviceQuery;
 import cn.ypbin.admin.iot.model.resp.IotDeviceResp;
+import cn.ypbin.admin.iot.support.IotCsvExportUtils;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.data.core.EntityStatus;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import java.time.LocalDateTime;
 import java.util.Arrays;
 import java.util.List;
@@ -339,6 +342,103 @@ class IotDeviceServiceImplTest {
         assertThat(rows).isEqualTo(500);
         verify(mapper, times(1)).delete(any(LambdaQueryWrapper.class));
         verify(ledgerService, times(1)).bumpConfigEpochOfCurrentTenant();
+    }
+
+    @Test
+    @DisplayName("★ 设备导出：复用 keyword/protocol/productId 条件；中文可读列 + 产品名批量解析 + BOM")
+    void exportCsvShouldApplyQueryAndRenderReadableColumns() {
+        IotDeviceMapper mapper = mock(IotDeviceMapper.class);
+        ReflectionTestUtils.setField(service, "baseMapper", mapper);
+        IotDeviceQuery query = new IotDeviceQuery();
+        query.setKeyword("  网关  ");
+        query.setProtocol("tcp");
+        query.setProductId(2001L);
+        when(mapper.selectPage(any(), any())).thenReturn(pageOf(List.of(exportedDevice())));
+        IotProduct product = new IotProduct();
+        product.setId(2001L);
+        product.setProductName("温湿度产品");
+        when(productMapper.selectByIds(any())).thenReturn(List.of(product));
+
+        String csv = service.exportCsv(query);
+
+        assertThat(csv).startsWith(IotCsvExportUtils.UTF8_BOM);
+        assertThat(csv).contains("设备编码,设备名称,接入协议").contains("TCP").contains("在线")
+            .contains("温湿度产品").contains("启用").contains("2026-09-20 09:30:00");
+        ArgumentCaptor<LambdaQueryWrapper<IotDevice>> captor =
+            ArgumentCaptor.forClass(LambdaQueryWrapper.class);
+        verify(mapper).selectPage(any(Page.class), captor.capture());
+        assertThat(captor.getValue().getSqlSegment())
+            .as("导出必须复用列表筛选条件，不能另写一套").contains("device_name")
+            .contains("protocol").contains("product_id");
+        assertThat(captor.getValue().getParamNameValuePairs().values())
+            .contains("%网关%", "tcp", 2001L);
+        verify(productMapper).selectByIds(any());
+    }
+
+    @Test
+    @DisplayName("★ 设备导出：超过 10000 条必须拒绝（提示先筛选，不静默截断）")
+    void exportCsvShouldRejectOverLimit() {
+        IotDeviceMapper mapper = mock(IotDeviceMapper.class);
+        ReflectionTestUtils.setField(service, "baseMapper", mapper);
+        when(mapper.selectPage(any(), any())).thenReturn(pageOf(manyDevices(10001)));
+
+        assertThatThrownBy(() -> service.exportCsv(new IotDeviceQuery()))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("10000")
+            .hasMessageContaining("筛选");
+        verify(productMapper, never()).selectByIds(any());
+    }
+
+    @Test
+    @DisplayName("设备导出：10000 条边界放行，且空结果只输出 BOM + 表头")
+    void exportCsvShouldAllowBoundaryAndHandleEmptyResult() {
+        IotDeviceMapper mapper = mock(IotDeviceMapper.class);
+        ReflectionTestUtils.setField(service, "baseMapper", mapper);
+
+        when(mapper.selectPage(any(), any())).thenReturn(pageOf(manyDevices(10000)));
+        assertThat(service.exportCsv(new IotDeviceQuery()))
+            .as("恰好 10000 条必须放行").startsWith(IotCsvExportUtils.UTF8_BOM);
+
+        when(mapper.selectPage(any(), any())).thenReturn(pageOf(List.of()));
+        String empty = service.exportCsv(new IotDeviceQuery());
+        assertThat(empty).startsWith(IotCsvExportUtils.UTF8_BOM).endsWith("\r\n");
+        assertThat(empty.split("\r\n", -1)).as("空数据只有表头行 + 结尾换行").hasSize(2);
+        assertThat(empty).contains("设备编码");
+    }
+
+    /** 构造 n 个连续设备（用于导出上限边界用例）。 */
+    private static List<IotDevice> manyDevices(int size) {
+        return IntStream.rangeClosed(1, size).mapToObj(index -> {
+            IotDevice device = new IotDevice();
+            device.setId((long) index);
+            device.setDeviceCode("DEV-" + index);
+            device.setDeviceName("设备-" + index);
+            return device;
+        }).toList();
+    }
+
+    /** 导出用例的 MyBatis-Plus 分页返回桩。 */
+    private static Page<IotDevice> pageOf(List<IotDevice> devices) {
+        Page<IotDevice> page = new Page<>(1, devices.size() + 1L, false);
+        page.setRecords(devices);
+        return page;
+    }
+
+    /** 含全部导出列的设备。 */
+    private static IotDevice exportedDevice() {
+        IotDevice device = new IotDevice();
+        device.setId(1L);
+        device.setDeviceCode("DEV-1");
+        device.setDeviceName("水表-1");
+        device.setProtocol("tcp");
+        device.setEndpoint("tcp://127.0.0.1:15002");
+        device.setProductId(2001L);
+        device.setOnlineStatus("online");
+        device.setStatus(EntityStatus.ENABLED.getCode());
+        device.setLastSeenAt(LocalDateTime.of(2026, 9, 20, 9, 30));
+        device.setCreateTime(LocalDateTime.of(2026, 9, 19, 10, 0));
+        device.setRemark("测试");
+        return device;
     }
 
     /** 构造 n 个连续主键（用于批量边界用例）。 */

@@ -14,6 +14,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -22,11 +23,17 @@ import cn.ypbin.admin.iot.entity.IotDeviceTag;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.IotDeviceTagMapper;
 import cn.ypbin.admin.iot.model.req.IotDeviceTagReq;
+import cn.ypbin.admin.iot.model.resp.BatchTagResp;
 import cn.ypbin.admin.iot.model.resp.IotDeviceTagResp;
 import cn.ypbin.starter.core.exception.BusinessException;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import java.time.LocalDateTime;
+import java.util.Arrays;
+import java.util.List;
+import java.util.stream.IntStream;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.BeforeAll;
@@ -119,6 +126,197 @@ class IotDeviceTagServiceImplTest {
         assertThat(resp.getTagKey()).isEqualTo("location");
         assertThat(resp.getTagValue()).isEqualTo("A 区");
         assertThat(resp.getCreateTime()).isEqualTo(LocalDateTime.of(2026, 9, 20, 10, 0));
+    }
+
+    @Test
+    @DisplayName("批量打标签-全新增：去重后一次 insertBatch，ID/tenantId/键值正确")
+    void batchUpsertAllNewShouldInsertOnce() {
+        when(deviceMapper.selectBatchIds(List.of(1L, 2L)))
+            .thenReturn(List.of(device(1L, 7L), device(2L, 7L)));
+        when(tagMapper.selectList(any())).thenReturn(List.of());
+
+        BatchTagResp resp = service.batchUpsertTag(List.of(1L, 2L, 1L), "region", "east");
+
+        assertThat(resp.getCreated()).as("重复的 1 去重后只算一次新增").isEqualTo(2);
+        assertThat(resp.getUpdated()).isZero();
+        assertThat(resp.getRemoved()).isZero();
+        verify(tagMapper, never()).update(any(LambdaUpdateWrapper.class));
+
+        ArgumentCaptor<List<IotDeviceTag>> captor = listCaptor();
+        verify(tagMapper, times(1)).insertBatch(captor.capture());
+        assertThat(captor.getValue()).hasSize(2);
+        assertThat(captor.getValue()).extracting(IotDeviceTag::getDeviceId).containsExactly(1L, 2L);
+        assertThat(captor.getValue()).allSatisfy(row -> {
+            assertThat(row.getId()).isNotNull();
+            assertThat(row.getTenantId()).isEqualTo(7L);
+            assertThat(row.getTagKey()).isEqualTo("region");
+            assertThat(row.getTagValue()).isEqualTo("east");
+        });
+        // 设备一次 IN、已有标签一次 IN、插入一次：无循环内查库
+        verify(deviceMapper, times(1)).selectBatchIds(List.of(1L, 2L));
+        verify(tagMapper, times(1)).selectList(any());
+    }
+
+    @Test
+    @DisplayName("批量打标签-混合：已有行一次 UPDATE 新值，缺失行一次 insertBatch")
+    void batchUpsertMixedShouldUpdateExistingOnceAndInsertRest() {
+        when(deviceMapper.selectBatchIds(List.of(1L, 2L, 3L)))
+            .thenReturn(List.of(device(1L, 7L), device(2L, 7L), device(3L, 7L)));
+        when(tagMapper.selectList(any())).thenReturn(List.of(
+            tag(50L, 1L, "region", "west"), tag(51L, 2L, "region", "west")));
+        when(tagMapper.update(any(LambdaUpdateWrapper.class))).thenReturn(2);
+
+        BatchTagResp resp = service.batchUpsertTag(List.of(1L, 2L, 3L), "region", "east");
+
+        assertThat(resp.getCreated()).isEqualTo(1);
+        assertThat(resp.getUpdated()).isEqualTo(2);
+        assertThat(resp.getRemoved()).isZero();
+
+        ArgumentCaptor<LambdaUpdateWrapper<IotDeviceTag>> updateCaptor = wrapperCaptor();
+        verify(tagMapper, times(1)).update(updateCaptor.capture());
+        assertThat(updateCaptor.getValue().getSqlSet()).contains("tag_value");
+        assertThat(updateCaptor.getValue().getSqlSegment()).contains("id");
+        assertThat(updateCaptor.getValue().getParamNameValuePairs().values())
+            .contains("east", 50L, 51L);
+
+        ArgumentCaptor<List<IotDeviceTag>> insertCaptor = listCaptor();
+        verify(tagMapper, times(1)).insertBatch(insertCaptor.capture());
+        assertThat(insertCaptor.getValue()).extracting(IotDeviceTag::getDeviceId).containsExactly(3L);
+    }
+
+    @Test
+    @DisplayName("批量打标签-全部已存在：只 UPDATE，不 INSERT")
+    void batchUpsertAllExistingShouldUpdateOnly() {
+        when(deviceMapper.selectBatchIds(List.of(1L, 2L)))
+            .thenReturn(List.of(device(1L, 7L), device(2L, 7L)));
+        when(tagMapper.selectList(any())).thenReturn(List.of(
+            tag(50L, 1L, "region", "west"), tag(51L, 2L, "region", "west")));
+        when(tagMapper.update(any(LambdaUpdateWrapper.class))).thenReturn(2);
+
+        BatchTagResp resp = service.batchUpsertTag(List.of(1L, 2L), "region", "east");
+
+        assertThat(resp.getCreated()).isZero();
+        assertThat(resp.getUpdated()).isEqualTo(2);
+        verify(tagMapper, times(1)).update(any(LambdaUpdateWrapper.class));
+        verify(tagMapper, never()).insertBatch(any());
+    }
+
+    @Test
+    @DisplayName("🔴 批量打标签-缺失设备：整批拒绝并列全缺失 ID，不查标签不写库")
+    void batchUpsertMissingDeviceShouldRejectWholeBatch() {
+        when(deviceMapper.selectBatchIds(List.of(1L, 404L, 405L)))
+            .thenReturn(List.of(device(1L, 7L)));
+
+        assertThatThrownBy(() -> service.batchUpsertTag(List.of(1L, 404L, 405L), "region", "east"))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("设备不存在")
+            .hasMessageContaining("404")
+            .hasMessageContaining("405");
+        verify(tagMapper, never()).selectList(any());
+        verify(tagMapper, never()).update(any(LambdaUpdateWrapper.class));
+        verify(tagMapper, never()).insertBatch(any());
+    }
+
+    @Test
+    @DisplayName("批量打标签-空/含 null/超 500/键值非法：一律拒绝且不查设备不写库")
+    void batchUpsertEmptyOrOverLimitShouldReject() {
+        assertThatThrownBy(() -> service.batchUpsertTag(null, "region", "east"))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("不能为空");
+        assertThatThrownBy(() -> service.batchUpsertTag(List.of(), "region", "east"))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("不能为空");
+        assertThatThrownBy(() -> service.batchUpsertTag(Arrays.asList(1L, null), "region", "east"))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("不能为空");
+        assertThatThrownBy(() -> service.batchUpsertTag(manyDeviceIds(501), "region", "east"))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("不能超过 500");
+        assertThatThrownBy(() -> service.batchUpsertTag(List.of(1L), "  ", "east"))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("标签键不能为空");
+        assertThatThrownBy(() -> service.batchUpsertTag(List.of(1L), "region", " "))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("标签值不能为空");
+        assertThatThrownBy(() -> service.batchUpsertTag(List.of(1L), "x".repeat(65), "east"))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("标签键长度不能超过 64");
+        assertThatThrownBy(() -> service.batchUpsertTag(List.of(1L), "region", "x".repeat(256)))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("标签值长度不能超过 255");
+
+        verify(deviceMapper, never()).selectBatchIds(any());
+        verify(tagMapper, never()).insertBatch(any());
+    }
+
+    @Test
+    @DisplayName("批量移除：去重后一次 DELETE（设备×键一次 IN），返回删除行数")
+    void batchRemoveShouldDeleteOnceAndReturnCount() {
+        when(tagMapper.delete(any(LambdaQueryWrapper.class))).thenReturn(3);
+
+        BatchTagResp resp = service.batchRemoveTags(List.of(1L, 2L, 1L),
+            List.of("region", "env", "region"));
+
+        assertThat(resp.getRemoved()).isEqualTo(3);
+        assertThat(resp.getCreated()).isZero();
+        assertThat(resp.getUpdated()).isZero();
+
+        ArgumentCaptor<LambdaQueryWrapper<IotDeviceTag>> captor = queryCaptor();
+        verify(tagMapper, times(1)).delete(captor.capture());
+        assertThat(captor.getValue().getSqlSegment())
+            .as("WHERE 必须同时限定设备与标签键").contains("device_id").contains("tag_key");
+        assertThat(captor.getValue().getParamNameValuePairs().values())
+            .contains(1L, 2L, "region", "env");
+        // 移除语义幂等：不需要先查设备/标签，一条 DELETE 完成
+        verify(deviceMapper, never()).selectBatchIds(any());
+        verify(tagMapper, never()).selectList(any());
+        verify(tagMapper, never()).insertBatch(any());
+    }
+
+    @Test
+    @DisplayName("批量移除-空/含空白键/超限/键超长：一律拒绝且不删")
+    void batchRemoveEmptyOrInvalidShouldReject() {
+        assertThatThrownBy(() -> service.batchRemoveTags(null, List.of("region")))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("不能为空");
+        assertThatThrownBy(() -> service.batchRemoveTags(List.of(1L), null))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("不能为空");
+        assertThatThrownBy(() -> service.batchRemoveTags(List.of(1L), List.of()))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("不能为空");
+        assertThatThrownBy(() -> service.batchRemoveTags(List.of(1L), Arrays.asList("region", " ")))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("标签键不能为空");
+        assertThatThrownBy(() -> service.batchRemoveTags(List.of(1L), List.of("x".repeat(65))))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("标签键长度不能超过 64");
+        assertThatThrownBy(() -> service.batchRemoveTags(manyDeviceIds(501), List.of("region")))
+            .isInstanceOf(BusinessException.class).hasMessageContaining("不能超过 500");
+
+        verify(tagMapper, never()).delete(any());
+    }
+
+    private static List<Long> manyDeviceIds(int size) {
+        return IntStream.rangeClosed(1, size).mapToObj(Long::valueOf).toList();
+    }
+
+    private static IotDevice device(Long id, Long tenantId) {
+        IotDevice device = new IotDevice();
+        device.setId(id);
+        device.setTenantId(tenantId);
+        return device;
+    }
+
+    private static IotDeviceTag tag(Long id, Long deviceId, String key, String value) {
+        IotDeviceTag tag = new IotDeviceTag();
+        tag.setId(id);
+        tag.setDeviceId(deviceId);
+        tag.setTagKey(key);
+        tag.setTagValue(value);
+        return tag;
+    }
+
+    @SuppressWarnings("unchecked")
+    private ArgumentCaptor<List<IotDeviceTag>> listCaptor() {
+        return ArgumentCaptor.forClass(List.class);
+    }
+
+    @SuppressWarnings("unchecked")
+    private ArgumentCaptor<LambdaUpdateWrapper<IotDeviceTag>> wrapperCaptor() {
+        return ArgumentCaptor.forClass(LambdaUpdateWrapper.class);
+    }
+
+    @SuppressWarnings("unchecked")
+    private ArgumentCaptor<LambdaQueryWrapper<IotDeviceTag>> queryCaptor() {
+        return ArgumentCaptor.forClass(LambdaQueryWrapper.class);
     }
 
     private static IotDeviceTagReq req(String key, String value) {

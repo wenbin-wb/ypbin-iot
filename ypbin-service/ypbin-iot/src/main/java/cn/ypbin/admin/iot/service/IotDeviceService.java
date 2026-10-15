@@ -94,4 +94,16 @@ public interface IotDeviceService {
      * @return 实际受影响行数
      */
     int batchRemove(List<Long> ids);
+
+    /**
+     * 导出本租户设备台账 CSV（复用列表筛选条件 {@code keyword/protocol/productId}；分页参数忽略）。
+     *
+     * <p>单租户最多导出 <b>10000</b> 条：超过抛 {@link cn.ypbin.starter.core.exception.BusinessException}
+     * 提示先筛选，<b>不静默截断</b>——否则用户会以为拿到了全量数据。CSV 带 UTF-8 BOM，
+     * 单元格做 RFC 4180 转义与公式注入中和（见 {@code IotCsvExportUtils}）。</p>
+     *
+     * @param query 查询条件（复用列表查询的 keyword/protocol/productId）
+     * @return CSV 文本
+     */
+    String exportCsv(IotDeviceQuery query);
 }

@@ -26,9 +26,15 @@ import cn.ypbin.starter.core.model.R;
 import cn.ypbin.starter.crud.model.PageResult;
 import cn.ypbin.starter.log.annotation.Log;
 import jakarta.validation.Valid;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -60,6 +66,12 @@ import org.springframework.web.bind.annotation.RestController;
 @RequiredArgsConstructor
 public class IotAlertController {
 
+    /** 导出附件固定文件名。 */
+    private static final String ALERT_EXPORT_FILE_NAME = "iot-alerts.csv";
+
+    /** CSV MIME（带 charset：与设备导出/导入模板下载一致）。 */
+    private static final String CSV_CONTENT_TYPE = "text/csv;charset=UTF-8";
+
     private final AlertInstanceService alertInstanceService;
 
     private final AlertRuleService alertRuleService;
@@ -74,6 +86,21 @@ public class IotAlertController {
     @SaCheckPermission("iot:alert:list")
     public R<PageResult<AlertInstanceResp>> page(@Valid AlertInstanceQuery query) {
         return R.ok(alertInstanceService.page(query));
+    }
+
+    /**
+     * 导出告警实例 CSV（复用列表筛选条件；单次最多 10000 条，超限明确拒绝并提示先筛选）。
+     *
+     * <p>文件下载直接返回 {@link ResponseEntity} 字节：返回 {@code R<String>} 会让浏览器拿到
+     * 被引号包裹的 JSON，用户点「导出」得到一个打不开的 .csv。</p>
+     *
+     * @param query 查询条件
+     * @return CSV 附件
+     */
+    @GetMapping("/export")
+    @SaCheckPermission("iot:alert:list")
+    public ResponseEntity<byte[]> export(@Valid AlertInstanceQuery query) {
+        return csvResponse(ALERT_EXPORT_FILE_NAME, alertInstanceService.exportCsv(query));
     }
 
     /**
@@ -211,5 +238,24 @@ public class IotAlertController {
     @Log("启停 IoT 告警规则")
     public R<Integer> setRuleEnabled(@Valid @RequestBody AlertRuleEnableReq req) {
         return R.ok(alertRuleService.setEnabled(req.getIds(), Boolean.TRUE.equals(req.getEnabled())));
+    }
+
+    /**
+     * 构造 CSV 下载响应（UTF-8、BOM 由 CSV 文本自带、文件名 RFC 5987 编码、禁缓存）。
+     *
+     * @param fileName 文件名
+     * @param content  CSV 文本
+     * @return 字节响应
+     */
+    private static ResponseEntity<byte[]> csvResponse(String fileName, String content) {
+        byte[] body = content.getBytes(StandardCharsets.UTF_8);
+        String encodedName = URLEncoder.encode(fileName, StandardCharsets.UTF_8).replace("+", "%20");
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.parseMediaType(CSV_CONTENT_TYPE));
+        headers.setContentLength(body.length);
+        headers.set(HttpHeaders.CONTENT_DISPOSITION,
+            "attachment; filename=\"" + encodedName + "\"; filename*=UTF-8''" + encodedName);
+        headers.setCacheControl("no-store");
+        return new ResponseEntity<>(body, headers, HttpStatus.OK);
     }
 }
