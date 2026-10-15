@@ -82,6 +82,14 @@ public class IotAlertInstance extends TenantBaseEntity {
     /** **触发时的阈值快照**（规则改了阈值后，仍能解释当时为何报警）。 */
     private String thresholdSnapshot;
 
+    /**
+     * **条件组逐条件快照**（真 AND 语义；2026-10-15 新增列）。
+     *
+     * <p>格式见 {@code AlertConditionSnapshot}：{@code prop|op|threshold|verdict|value} 多行以 {@code ;} 连接。
+     * 单条件规则同样写入，因此「规则从 1 个条件改成 2 个」前后，实例上都有可解释的取值留痕。</p>
+     */
+    private String conditionSnapshot;
+
     /** 首次越界时刻（= {@code PENDING} 开始时刻）。 */
     private LocalDateTime startTs;
 

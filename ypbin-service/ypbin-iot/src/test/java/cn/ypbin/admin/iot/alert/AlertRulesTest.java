@@ -200,8 +200,8 @@ class AlertRulesTest {
     }
 
     @Test
-    @DisplayName("去重键形态：规则键 ruleId:deviceId:propertyId，断档键带事件 ID")
-    void dedupKeyShape() {
+    @DisplayName("存量去重键形态：ruleId:deviceId:propertyId（迁移的源形态，供迁移脚本与历史留痕对齐）")
+    void legacyDedupKeyShape() {
         assertThat(AlertRules.dedupKey(7L, 9L, "temperature")).isEqualTo("7:9:temperature");
         assertThat(AlertRules.dedupKey(7L, 9L, null)).isEqualTo("7:9:-");
         assertThat(AlertRules.dedupKey(7L, 9L, "  ")).isEqualTo("7:9:-");
@@ -209,6 +209,21 @@ class AlertRulesTest {
         // 断档键与规则键不会互相碰撞（前缀不同）
         assertThat(AlertRules.outageDedupKey(9L, 42L))
             .isNotEqualTo(AlertRules.dedupKey(AlertRules.RULE_ID_OUTAGE, 9L, "42"));
+    }
+
+    @Test
+    @DisplayName("条件组去重键（真 AND，2026-10-15）：R:ruleId:deviceId，与点位无关、与断档键结构性隔离")
+    void groupDedupKeyShape() {
+        assertThat(AlertRules.groupDedupKey(7L, 9L)).isEqualTo("R:7:9");
+        // 同一 (规则, 设备) 无论多少条件行都只有一条实例；换规则/换设备则换键
+        assertThat(AlertRules.groupDedupKey(7L, 9L)).isEqualTo(AlertRules.groupDedupKey(7L, 9L));
+        assertThat(AlertRules.groupDedupKey(7L, 9L)).isNotEqualTo(AlertRules.groupDedupKey(8L, 9L));
+        assertThat(AlertRules.groupDedupKey(7L, 9L)).isNotEqualTo(AlertRules.groupDedupKey(7L, 10L));
+        // 与断档键永不碰撞（首段一个是固定 R、一个是 OUTAGE；ruleId 是 BIGINT 自增，不会是 OUTAGE）
+        assertThat(AlertRules.groupDedupKey(0L, 9L))
+            .isNotEqualTo(AlertRules.outageDedupKey(9L, 42L));
+        // 不含 tenantId：租户维度由 uk_alert_active(tenant_id, active_dedup_key) 承载（迁移爆炸半径最小化）
+        assertThat(AlertRules.groupDedupKey(7L, 9L).split(AlertRules.DEDUP_SEPARATOR)).hasSize(3);
     }
 
     @Test

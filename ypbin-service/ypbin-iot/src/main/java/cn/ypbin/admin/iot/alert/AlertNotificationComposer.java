@@ -11,11 +11,15 @@ package cn.ypbin.admin.iot.alert;
 
 import cn.ypbin.admin.iot.entity.IotAlertInstance;
 import cn.ypbin.admin.iot.entity.IotAlertRule;
+import cn.ypbin.admin.iot.entity.IotAlertRulePoint;
 import cn.ypbin.admin.iot.entity.IotDevice;
 import cn.ypbin.admin.iot.enums.AlertNotifyEvent;
+import cn.ypbin.admin.iot.enums.AlertOperator;
 import cn.ypbin.admin.iot.enums.AlertSeverity;
 import cn.ypbin.admin.iot.enums.AlertState;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
 import java.time.format.DateTimeFormatter;
 import org.springframework.stereotype.Component;
 
@@ -27,6 +31,10 @@ import org.springframework.stereotype.Component;
  *
  * <p><b>值原样展示</b>：设计明确要求「通知里的值原样展示原始值（不美化、不四舍五入到看不出差别）」——
  * 所以触发值直接取 {@code trigger_value} 原文，不做数字格式化。</p>
+ *
+ * <p><b>条件组（真 AND，2026-10-15）</b>：一条实例代表整个条件组，故多条件时正文**逐条件**列出
+ * 「阈值 vs 读到多少 / 各自判成什么」，数据来自实例的 {@code condition_snapshot}（触发当时的留痕）。
+ * 单条件规则的文案与改造前逐字一致。</p>
  *
  * @author wenbin
  * @since 2026-10-03
@@ -50,7 +58,7 @@ public class AlertNotificationComposer {
     }
 
     /**
-     * 组装通知文本。
+     * 组装通知文本（**无条件行上下文**：正文只写实例上落下的最严重条件）。
      *
      * @param instance 实例
      * @param device   设备（可空：设备被删或跨租户查不到时只描述 ID）
@@ -60,10 +68,30 @@ public class AlertNotificationComposer {
      */
     public AlertNotificationText compose(IotAlertInstance instance, IotDevice device, IotAlertRule rule,
                                          AlertNotifyEvent event) {
+        return compose(instance, device, rule, event, List.of());
+    }
+
+    /**
+     * 组装通知文本（**带规则当前条件行**：AND 语义下逐条件列出「阈值 vs 读到多少」）。
+     *
+     * <p><b>为什么正文要列全部条件</b>：真 AND 之后一条实例代表整个条件组，只说「temperature &gt; 30」
+     * 无法解释「为什么另一个条件也越界了」。逐条件列出的是**实例上落下的快照**
+     * （{@code condition_snapshot}，含各条件当时各自判成什么），规则当前条件行只用于补齐快照缺失的
+     * 重发/确认场景。两者都不改变「值原样展示」的既有口径。</p>
+     *
+     * @param instance 实例
+     * @param device   设备
+     * @param rule     规则（可空）
+     * @param event    通知事件
+     * @param points   规则当前的条件行（可为空：断档类/规则已删时就没有）
+     * @return 文本（标题与正文都不为空）
+     */
+    public AlertNotificationText compose(IotAlertInstance instance, IotDevice device, IotAlertRule rule,
+                                         AlertNotifyEvent event, List<IotAlertRulePoint> points) {
         boolean outage = instance.getRuleId() != null
             && instance.getRuleId() == AlertRules.RULE_ID_OUTAGE;
         String deviceLabel = deviceLabel(instance, device);
-        String target = outage ? "设备上报中断" : propertyLabel(instance);
+        String target = outage ? "设备上报中断" : groupTarget(instance, points);
         String severity = severityLabel(instance.getSeverity());
         String title = "【" + eventTitle(event, severity) + "】" + deviceLabel + " " + target;
 
@@ -77,8 +105,18 @@ public class AlertNotificationComposer {
         content.append('\n');
         content.append("对象：").append(target).append('\n');
         if (!outage) {
-            content.append("条件：").append(conditionText(instance)).append('\n');
-            content.append("触发值：").append(orDash(instance.getTriggerValue())).append('\n');
+            List<String> conditions = conditionLines(instance, points);
+            if (conditions.size() <= 1) {
+                // 单条件：沿用既有文案形态（阈值快照优先，规则改了阈值也不影响「当时为何报警」）
+                content.append("条件：").append(conditionText(instance)).append('\n');
+                content.append("触发值：").append(orDash(instance.getTriggerValue())).append('\n');
+            } else {
+                // 多条件（真 AND）：逐条件列出，值原样展示（不美化、不四舍五入）
+                content.append("条件组（全部满足才触发，共 ").append(conditions.size()).append(" 条）：\n");
+                for (String line : conditions) {
+                    content.append("  · ").append(line).append('\n');
+                }
+            }
         } else {
             content.append("原因：").append(reasonText(instance)).append('\n');
         }
@@ -117,6 +155,50 @@ public class AlertNotificationComposer {
     private static String propertyLabel(IotAlertInstance instance) {
         return instance.getPropertyId() == null || instance.getPropertyId().isBlank()
             ? "设备整体" : instance.getPropertyId();
+    }
+
+    /**
+     * 标题里的「对象」：条件组实例（真 AND）用「条件组（N 个条件）」表述，否则沿用点位名。
+     *
+     * <p>为什么不能只写最严重那条点位：一条实例现在代表整组，标题只说一个点位会让用户以为
+     * 「只有这个点位越界了」——而恰恰相反，组内**全部**条件都越界了。</p>
+     */
+    private static String groupTarget(IotAlertInstance instance, List<IotAlertRulePoint> points) {
+        int size = points == null ? 0 : points.size();
+        if (size > 1) {
+            return "条件组（" + size + " 个条件）";
+        }
+        return propertyLabel(instance);
+    }
+
+    /**
+     * 逐条件文案：优先用实例上落下的 `condition_snapshot`（**触发当时**各条件读到多少、判成什么），
+     * 快照缺失时回落到规则当前条件行 + 实例触发值（重发/确认等旧实例场景）。
+     *
+     * @return 每个条件一行；单条件或全无信息时可能只有一行
+     */
+    private static List<String> conditionLines(IotAlertInstance instance, List<IotAlertRulePoint> points) {
+        List<AlertConditionSnapshot.ConditionReading> snapshot =
+            AlertConditionSnapshot.decode(instance.getConditionSnapshot());
+        if (!snapshot.isEmpty()) {
+            List<String> lines = new ArrayList<>(snapshot.size());
+            for (AlertConditionSnapshot.ConditionReading reading : snapshot) {
+                lines.add(reading.describe());
+            }
+            return lines;
+        }
+        if (points != null && points.size() > 1) {
+            List<String> lines = new ArrayList<>(points.size());
+            for (IotAlertRulePoint point : points) {
+                AlertOperator operator = AlertOperator.of(point.getOperator());
+                String symbol = operator == null ? orDash(point.getOperator()) : operator.symbol();
+                String threshold = point.getThreshold() == null
+                    ? "-" : point.getThreshold().stripTrailingZeros().toPlainString();
+                lines.add(orDash(point.getPropertyId()) + " " + symbol + " " + threshold + "，读到 -");
+            }
+            return lines;
+        }
+        return List.of();
     }
 
     /** 条件文本：优先用触发时的阈值快照（规则改了阈值也不影响「当时为何报警」）。 */

@@ -19,6 +19,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import cn.ypbin.admin.iot.enums.AlertReason;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -41,10 +42,39 @@ class AlertDedupIndexGateTest {
 
     private static final Path REPO_ROOT = Path.of("..", "..").toAbsolutePath().normalize();
 
-    /** 全新安装脚本（告警表追加在 007 的末尾，与迁移文件等价）。 */
+    /**
+     * 「告警表结构」的两份源：007（全新安装）+ 2026-10-03（存量库建表，**已发布、严禁原地改写**）。
+     *
+     * <p>2026-10-03 保持 HEAD 原样（零 {@code condition_snapshot}）；新列只由**晚于建表**的迁移引入
+     * ——见 {@link #newColumnIntroducedByAlterNotCreate()}。</p>
+     */
     private static final List<Path> DDL_SOURCES = List.of(
         REPO_ROOT.resolve("deploy/sql/007-iot-data.sql"),
         REPO_ROOT.resolve("deploy/sql/migration/2026-10-03-iot-alert-schema.sql"));
+
+    /** **已发布**的告警结构迁移（存量库按 sha256 判「已应用」⇒ 严禁原地改写）。 */
+    private static final Path AUTHORED_MIGRATION =
+        REPO_ROOT.resolve("deploy/sql/migration/2026-10-03-iot-alert-schema.sql");
+
+    /**
+     * **声明 {@code condition_snapshot} 列**的两份源：007 末尾的追加 ALTER + 2026-10-15 的数据迁移 ALTER
+     * （两者由等价性门禁保证同形）。注意 {@link #AUTHORED_MIGRATION}（2026-10-03）**不在**此列——
+     * 它必须保持「零声明」（那正是 D2 的修复要点：已发布迁移不得原地加新列）。
+     */
+    private static final List<Path> COLUMN_SOURCES = List.of(
+        REPO_ROOT.resolve("deploy/sql/007-iot-data.sql"),
+        REPO_ROOT.resolve("deploy/sql/migration/2026-10-15-iot-alert-condition-group.sql"));
+
+    /** 真 AND 语义的数据迁移（条件组去重键 + condition_snapshot 列）。 */
+    private static final Path GROUP_MIGRATION =
+        REPO_ROOT.resolve("deploy/sql/migration/2026-10-15-iot-alert-condition-group.sql");
+
+    /** 对应的回滚脚本。 */
+    private static final Path GROUP_ROLLBACK =
+        REPO_ROOT.resolve("deploy/sql/rollback/2026-10-15-iot-alert-condition-group-rollback.sql");
+
+    /** 迁移清单（新增迁移必须同步，否则远端兜底安装会缺这一份）。 */
+    private static final Path MIGRATION_LIST = REPO_ROOT.resolve("deploy/sql/migration/iot-migrations.list");
 
     /**
      * 提取某张表的 CREATE TABLE 语句（到第一个分号为止）。
@@ -160,6 +190,144 @@ class AlertDedupIndexGateTest {
                 .as("%s：通知幂等键必须含 tenant_id", source.getFileName())
                 .isEqualTo("tenant_id,idempotent_key");
         }
+    }
+
+    @Test
+    @DisplayName("★ condition_snapshot 列必须存在且为 VARCHAR(4000) 可空（真 AND 的可解释性前提）")
+    void conditionSnapshotColumnMustExist() throws IOException {
+        for (Path source : COLUMN_SOURCES) {
+            String sql = Files.readString(source, StandardCharsets.UTF_8);
+            Matcher column = Pattern.compile(
+                "condition_snapshot\\s+VARCHAR\\((\\d+)\\)\\s+(NOT\\s+)?NULL", Pattern.CASE_INSENSITIVE)
+                .matcher(sql);
+            assertThat(column.find()).as("%s：缺少 condition_snapshot 列定义"
+                + "（真 AND 之后一条实例代表整组，逐条件取值只能落在这一列）", source.getFileName())
+                .isTrue();
+            assertThat(column.group(1)).as("%s：condition_snapshot 列宽", source.getFileName())
+                .isEqualTo(String.valueOf(AlertConditionSnapshot.MAX_LENGTH));
+            assertThat(column.group(2)).as("%s：condition_snapshot 必须可空"
+                + "（历史行与断档行没有条件组）", source.getFileName()).isNull();
+        }
+    }
+
+    @Test
+    @DisplayName("★★ 同一份安装/迁移源里 condition_snapshot 只能声明一次（防 1060 重复列的回归哨兵）")
+    void conditionSnapshotDeclaredExactlyOncePerSource() throws IOException {
+        // 背景（2026-10-15 首次交付的真实缺陷）：007 的 CREATE TABLE 与文件末尾的追加 ALTER **各声明一次**
+        //   ⇒ 全新安装 007 直接 ERROR 1060 Duplicate column，install.sh 在 set -euo pipefail 下整条中断，
+        //   中断点之后的 board-config / dashboard-snapshot 等段全部不建。
+        //   ⚠️ 等价性门禁**咬不到**这类问题（两边都是「多了一次」，拼接比对结果恰好相同），故必须单独钉住。
+        //   声明源 = 007 的追加 ALTER + 新的数据迁移 ALTER（2026-10-03 必须保持零声明）。
+        Pattern declare = Pattern.compile("condition_snapshot\\s+VARCHAR", Pattern.CASE_INSENSITIVE);
+        for (Path source : COLUMN_SOURCES) {
+            long count = declare.matcher(Files.readString(source, StandardCharsets.UTF_8)).results().count();
+            assertThat(count).as("%s：condition_snapshot 被声明了 %d 次（必须恰好 1 次；2 次会在导入时 "
+                + "ERROR 1060 Duplicate column，并中断后续所有段）", source.getFileName(), count)
+                .isEqualTo(1);
+        }
+    }
+
+    @Test
+    @DisplayName("★★ 新增列只由「晚于建表」的迁移引入 + 已发布迁移文件不得原地改写（照 mqtt 先例）")
+    void newColumnIntroducedByAlterNotCreate() throws IOException {
+        // 仓内正确先例：iot_mqtt_ingest_receipt 的 receipt_status 等 6 列在 007 里**只由 ALTER 引入**，
+        // CREATE 段里 0 处。迁移侧（migration/*.sql 拼接）天然是「CREATE TABLE → ALTER ADD COLUMN」，
+        // 007 必须与之同序（等价性脚本按语句顺序比对，两边顺序必须一致）。
+        String fresh = Files.readString(REPO_ROOT.resolve("deploy/sql/007-iot-data.sql"),
+            StandardCharsets.UTF_8);
+        assertThat(createTableOf(fresh, "iot_alert_instance"))
+            .as("007 的 CREATE TABLE iot_alert_instance 不得含 condition_snapshot"
+                + "（它只应由文件末尾的追加 ALTER 引入，否则同列声明两次）")
+            .doesNotContain("condition_snapshot");
+        assertThat(fresh).as("007 必须用 ALTER 引入该列").contains("ADD COLUMN condition_snapshot");
+        // 且**不得**把新列塞回已发布的 2026-10-03 迁移文件：migrate.sh 按文件 sha256 判「已应用」，
+        // 改了会让存量库 --status 报校验和不一致并中止升级。
+        assertThat(Files.readString(AUTHORED_MIGRATION, StandardCharsets.UTF_8))
+            .as("已发布的迁移文件不得被原地改写（否则存量库 migrate.sh 判 sha256 不一致而中止升级）")
+            .doesNotContain("condition_snapshot");
+        // 断言聚焦：AUTHORED_MIGRATION 必须是被比对的结构源之一，且两份声明源都真实存在
+        assertThat(AUTHORED_MIGRATION).as("AUTHORED_MIGRATION 必须是 DDL_SOURCES 成员").isIn(DDL_SOURCES);
+        assertThat(COLUMN_SOURCES).as("声明源必须真实存在").allSatisfy(source ->
+            assertThat(Files.exists(source)).isTrue());
+    }
+
+    @Test
+    @DisplayName("★★ 回滚脚本必须幂等：DROP COLUMN 需先查 information_schema（MySQL 8.4 无 DROP COLUMN IF EXISTS）")
+    void rollbackDropMustBeConditional() throws IOException {
+        String rollback = Files.readString(GROUP_ROLLBACK, StandardCharsets.UTF_8);
+        // 直接 DROP 会在第二次执行时 ERROR 1091；必须条件执行
+        assertThat(rollback).as("回滚删列前必须先查 information_schema.columns")
+            .contains("information_schema.columns");
+        assertThat(rollback).as("回滚删列必须用动态 SQL 条件执行").contains("PREPARE");
+        assertThat(rollback).as("还原键的 UPDATE 必须带 LIKE 'R:%' 过滤（重跑无命中）")
+            .contains("LIKE 'R:%'");
+        assertThat(rollback).as("不得出现无条件的 DROP COLUMN（第二次执行会 ERROR 1091）")
+            .doesNotContain("DROP COLUMN condition_snapshot;");
+    }
+
+    @Test
+    @DisplayName("★ 条件组键 R:ruleId:deviceId 与断档键结构性隔离、且不含 tenantId（迁移爆炸半径最小化的前提）")
+    void groupDedupKeyNamespace() {
+        // 形态：id 与 property 无关、只随 (规则, 设备) 变化 ⇒ 同规则同设备的多条件只有一条实例
+        String first = AlertRules.groupDedupKey(7L, 9L);
+        assertThat(first).isEqualTo("R:7:9");
+        assertThat(AlertRules.groupDedupKey(7L, 9L)).isEqualTo(first);
+        assertThat(AlertRules.groupDedupKey(8L, 9L)).isNotEqualTo(first);
+        assertThat(AlertRules.groupDedupKey(7L, 10L)).isNotEqualTo(first);
+        // 与断档键永不可能碰撞（首段一为固定字母 R、一为 OUTAGE；rule_id 是 BIGINT 自增）
+        for (long ruleId = 0L; ruleId < 5L; ruleId++) {
+            assertThat(AlertRules.groupDedupKey(ruleId, 9L))
+                .isNotEqualTo(AlertRules.outageDedupKey(9L, 42L));
+        }
+        // 不含 tenantId：库唯一键 uk_alert_active(tenant_id, active_dedup_key) 已承载租户维度
+        assertThat(first).doesNotContain("1");
+    }
+
+    @Test
+    @DisplayName("★ 数据迁移与回滚必须存在、进清单、且真的把旧键改写成 R: 形态并收口重复活动实例")
+    void migrationRewritesLegacyKeysAndRollbackRestores() throws IOException {
+        assertThat(Files.isRegularFile(GROUP_MIGRATION)).as("缺少迁移脚本：%s", GROUP_MIGRATION).isTrue();
+        assertThat(Files.isRegularFile(GROUP_ROLLBACK)).as("缺少回滚脚本：%s", GROUP_ROLLBACK).isTrue();
+        String migration = Files.readString(GROUP_MIGRATION, StandardCharsets.UTF_8);
+        String rollback = Files.readString(GROUP_ROLLBACK, StandardCharsets.UTF_8);
+        // ① 收口同一 (规则, 设备) 的多条旧活动实例（否则新键下会撞唯一键）
+        assertThat(migration).contains("ROW_NUMBER() OVER (PARTITION BY tenant_id, rule_id, device_id");
+        assertThat(migration).contains("CONDITION_GROUP_MERGED");
+        // ② 把剩余活动键规范化成 R:ruleId:deviceId
+        assertThat(migration).contains("CONCAT('R:', rule_id, ':', device_id)");
+        // ③ 断档类实例必须被显式排除在射程外
+        assertThat(migration).contains("rule_id <> 0");
+        // ④ 回滚：把 R: 形态还原成旧形态并删列
+        assertThat(rollback).contains("active_dedup_key LIKE 'R:%'");
+        assertThat(rollback).contains("DROP COLUMN condition_snapshot");
+        assertThat(rollback).doesNotContain("DELETE FROM iot_alert_instance");
+        // ⑤ 清单同步（check-iot-sql-equivalence.sh 也校验，这里给出更直接的失败信息）
+        String list = Files.readString(MIGRATION_LIST, StandardCharsets.UTF_8);
+        assertThat(list).contains(GROUP_MIGRATION.getFileName().toString());
+        assertThat(AlertReason.of("CONDITION_GROUP_MERGED"))
+            .as("迁移写入的原因码必须在 AlertReason 里有对应枚举（否则页面/导出显示原始码）")
+            .isNotNull();
+    }
+
+    @Test
+    @DisplayName("★ 迁移语句的收口范围：只作用于规则类活动实例（rule_id<>0），断档类一行都不改")
+    void migrationOnlyTouchesRuleAlerts() throws IOException {
+        String migration = Files.readString(GROUP_MIGRATION, StandardCharsets.UTF_8);
+        // 两条数据语句都必须带 rule_id <> 0 的界；断档键形态（OUTAGE）不得出现在迁移脚本任何地方
+        // 说明：这里按「分号切分语句」而不是嵌套正则——SQL 语句是平台自产文本，按 ; 切分足以逐条断言
+        // 先去掉全部 -- 行注释，再按 ; 切分——否则语句前面挂着的注释会让 startsWith("UPDATE") 失配
+        String executable = migration.replaceAll("--[^\\n]*", "");
+        List<String> statements = java.util.Arrays.stream(executable.split(";"))
+            .map(String::trim)
+            .filter(statement -> statement.toUpperCase(java.util.Locale.ROOT).startsWith("UPDATE"))
+            .toList();
+        assertThat(statements).as("应当有两条数据迁移语句（收口重复 + 规范化键）").hasSize(2);
+        for (String statement : statements) {
+            assertThat(statement).as("每条数据迁移语句都必须把断档实例（rule_id=0）排除在射程外：%s",
+                statement.substring(0, Math.min(60, statement.length()))).contains("rule_id <> 0");
+        }
+        // 断档键前缀只在注释里被解释，不得出现在任何 SQL 里（它不在本次射程内）
+        assertThat(migration.replaceAll("--[^\\n]*", "")).doesNotContain("OUTAGE");
     }
 
     @Test

@@ -64,6 +64,13 @@ import org.junit.jupiter.api.Test;
  * 其余全部是**生产实现**（候选解析、判定、状态机、静默、通知意图、批量写）。因此本用例覆盖的是
  * 「评估器在给定数据下真的做了那件事」，而不是「某个方法被调用过」。</p>
  *
+ * <p><b>⚠️ 语义变更（2026-10-15，task-6/task-9 真 AND）</b>：本用例原先钉住的是
+ * 「同规则同设备的多个点位条件各自独立判定、各产生一条实例」（近似 OR，去重键
+ * {@code ruleId:deviceId:propertyId}）。改造后一条规则的多个点位条件构成**一个合取条件组**，
+ * 组内全部越界才触发，去重键收紧为 {@code R:ruleId:deviceId} ⇒ 同规则同设备**至多一条**活动实例。
+ * 受影响的既有用例（N6 的实例条数、U2 的键形态、T1/T7 的键断言、非法转换的夹具键）已同步改写，
+ * 新增的 AND 三态/不可判定/收敛/排序用例见「真 AND 条件组」小节。</p>
+ *
  * <p><b>为什么假库而不是真库</b>：真库 IT 需要容器（本机低配不允许跑容器 IT，以 CI 为准），
  * 而状态机与抖动抑制的判据是**序列语义**，用假库可以把「第几轮读什么值」写得完全确定——
  * 这恰恰是真库最难稳定复现的部分。真库侧由 CI 的 {@code -Pit} 与生产演示承担。</p>
@@ -248,6 +255,32 @@ class AlertTenantEvaluatorTest {
             new AlertLatestValueReader.AlertSample("temperature", value, quality, ts)));
     }
 
+    /** 写入多个点位的当前最新值（真 AND 用例用；质量 GOOD、时刻为当前轮）。 */
+    private void latestMulti(Map<String, String> valuesByProperty) {
+        Long ts = clock.get().atZone(AvailabilityRules.PLATFORM_ZONE).toInstant().toEpochMilli();
+        Map<String, AlertLatestValueReader.AlertSample> samples = new LinkedHashMap<>();
+        for (Map.Entry<String, String> entry : valuesByProperty.entrySet()) {
+            samples.put(entry.getKey(), new AlertLatestValueReader.AlertSample(entry.getKey(),
+                entry.getValue(), AlertRules.QUALITY_GOOD, ts));
+        }
+        latest.put(DEVICE, samples);
+    }
+
+    /** 造一条指定点位/比较符/阈值的条件行（多条件用例用）。 */
+    private static IotAlertRulePoint pointOf(long id, String propertyId, String operator,
+                                             String threshold) {
+        IotAlertRulePoint point = point(operator, threshold);
+        point.setId(id);
+        point.setPropertyId(propertyId);
+        return point;
+    }
+
+    /** 用一组条件行评估（真 AND 用例的统一入口）。 */
+    private AlertTenantEvaluator.TenantOutcome evaluateGroup(IotAlertRule rule,
+                                                             List<IotAlertRulePoint> points) {
+        return evaluator.evaluateTenant(TENANT, List.of(rule), Map.of(rule.getId(), points));
+    }
+
     private void latestNow(String value) {
         latest(value, AlertRules.QUALITY_GOOD, clock.get().atZone(AvailabilityRules.PLATFORM_ZONE).toInstant().toEpochMilli());
     }
@@ -279,7 +312,8 @@ class AlertTenantEvaluatorTest {
         instance.setRuleId(7L);
         instance.setDeviceId(DEVICE);
         instance.setPropertyId("temperature");
-        instance.setDedupKey(AlertRules.dedupKey(7L, DEVICE, "temperature"));
+        // 2026-10-15 真 AND：去重键改为 (规则 × 设备) 的 R:ruleId:deviceId 形态
+        instance.setDedupKey(AlertRules.groupDedupKey(7L, DEVICE));
         instance.setActiveDedupKey(instance.getDedupKey());
         instance.setSeverity(AlertSeverity.WARNING.getCode());
         instance.setState(state.getCode());
@@ -313,7 +347,7 @@ class AlertTenantEvaluatorTest {
         assertThat(instances).hasSize(1);
         IotAlertInstance created = instances.get(0);
         assertThat(created.getState()).isEqualTo(AlertState.FIRING.getCode());
-        assertThat(created.getActiveDedupKey()).isEqualTo("7:9:temperature");
+        assertThat(created.getActiveDedupKey()).isEqualTo("R:7:9");
         assertThat(created.getTriggerValue()).isEqualTo("35");
         assertThat(created.getThresholdSnapshot()).isEqualTo("> 30");
         assertThat(created.getSeverity()).isEqualTo(AlertSeverity.WARNING.getCode());
@@ -393,7 +427,7 @@ class AlertTenantEvaluatorTest {
         assertThat(resolved.getReason()).isEqualTo(AlertReason.RECOVERED.getCode());
         // 去重键释放：同一键此后可以再开一条（「清除 ≠ 删除」的前提）
         assertThat(resolved.getActiveDedupKey()).isNull();
-        assertThat(resolved.getDedupKey()).isEqualTo("7:9:temperature");
+        assertThat(resolved.getDedupKey()).isEqualTo("R:7:9");
         assertThat(notifications).extracting(IotAlertNotification::getEvent)
             .containsOnly(AlertNotifyEvent.RESOLVED.getCode());
         assertThat(counter(AlertMetrics.METRIC_RESOLVED)).isEqualTo(1d);
@@ -709,6 +743,257 @@ class AlertTenantEvaluatorTest {
         assertThat(counter(AlertMetrics.METRIC_NOTIFY_SILENCED)).isEqualTo(1d);
     }
 
+    // -------------------------------------------- 真 AND 条件组（2026-10-15，task-6/task-9）
+
+    @Test
+    @DisplayName("★ AND 全中：两条件都越界 ⇒ 建**一条**实例（组键 R:7:9），组快照两条都记 OUT_OF_RANGE")
+    void andAllSatisfiedFiresOnce() {
+        latestMulti(Map.of("temperature", "35", "humidity", "90"));
+        AlertTenantEvaluator.TenantOutcome outcome = evaluateGroup(
+            rule(AlertTriggerMode.IMMEDIATE.getCode(), 0), List.of(
+                pointOf(11L, "temperature", "GT", "30"),
+                pointOf(12L, "humidity", "GT", "80")));
+
+        assertThat(outcome.fired()).isEqualTo(1);
+        assertThat(instances).hasSize(1);
+        IotAlertInstance created = instances.get(0);
+        assertThat(created.getActiveDedupKey()).isEqualTo("R:7:9");
+        assertThat(created.getState()).isEqualTo(AlertState.FIRING.getCode());
+        // 最严重那条：temperature 过界 5、humidity 过界 10 ⇒ 相对阈值比 10/80 > 5/30 ⇒ humidity 胜
+        assertThat(created.getPropertyId()).isEqualTo("humidity");
+        assertThat(created.getTriggerValue()).isEqualTo("90");
+        assertThat(AlertConditionSnapshot.decode(created.getConditionSnapshot()))
+            .extracting(AlertConditionSnapshot.ConditionReading::verdict)
+            .containsExactly(AlertValueVerdict.OUT_OF_RANGE, AlertValueVerdict.OUT_OF_RANGE);
+    }
+
+    @Test
+    @DisplayName("★ AND 部分中：一条越界、一条未越界 ⇒ **不触发**（旧语义会各建实例，这是本次语义变更的核心）")
+    void andPartiallySatisfiedDoesNotFire() {
+        latestMulti(Map.of("temperature", "35", "humidity", "50"));
+        AlertTenantEvaluator.TenantOutcome outcome = evaluateGroup(
+            rule(AlertTriggerMode.IMMEDIATE.getCode(), 0), List.of(
+                pointOf(11L, "temperature", "GT", "30"),
+                pointOf(12L, "humidity", "GT", "80")));
+
+        assertThat(outcome.fired()).isZero();
+        assertThat(instances).isEmpty();
+        assertThat(notifications).isEmpty();
+    }
+
+    @Test
+    @DisplayName("★ AND 全不中：两条都未越界 ⇒ 不触发")
+    void andNoneSatisfiedDoesNotFire() {
+        latestMulti(Map.of("temperature", "10", "humidity", "50"));
+        AlertTenantEvaluator.TenantOutcome outcome = evaluateGroup(
+            rule(AlertTriggerMode.IMMEDIATE.getCode(), 0), List.of(
+                pointOf(11L, "temperature", "GT", "30"),
+                pointOf(12L, "humidity", "GT", "80")));
+
+        assertThat(outcome.fired()).isZero();
+        assertThat(instances).isEmpty();
+    }
+
+    @Test
+    @DisplayName("★ 含不可判定：一条越界 + 一条无最新值 ⇒ 整组不可判定（不触发，MISSING 计入指标）")
+    void andWithUndecidableConditionIsNotFired() {
+        // humidity 没有最新值 ⇒ MISSING（不可判定）
+        latestMulti(Map.of("temperature", "35"));
+        AlertTenantEvaluator.TenantOutcome outcome = evaluateGroup(
+            rule(AlertTriggerMode.IMMEDIATE.getCode(), 0), List.of(
+                pointOf(11L, "temperature", "GT", "30"),
+                pointOf(12L, "humidity", "GT", "80")));
+
+        assertThat(outcome.fired()).as("不可判定绝不伪装成越界").isZero();
+        assertThat(instances).isEmpty();
+        assertThat(counter("iot.alert.evaluate.skipped_missing")).isEqualTo(1d);
+        assertThat(notifications).isEmpty();
+    }
+
+    @Test
+    @DisplayName("★ 不可判定单独不驱动恢复：① 未越界但被回差挡住 + 一条陈旧 ⇒ 保持 FIRING；"
+        + "② 若那条可判定条件真越过恢复门槛（回差 0）⇒ 合取被证伪，必须收口（不得被坏点位钉成僵尸）")
+    void undecidableAloneDoesNotDriveOrBlockResolve() {
+        Long nowMs = clock.get().atZone(AvailabilityRules.PLATFORM_ZONE).toInstant().toEpochMilli();
+        Long staleTs = clock.get().minusMinutes(10)
+            .atZone(AvailabilityRules.PLATFORM_ZONE).toInstant().toEpochMilli();
+
+        // ① temperature GT 30（回差 10）读到 25：未越界但**没有越过恢复门槛（< 20）** ⇒ 不算恢复；
+        //    humidity 陈旧（不可判定）⇒ 组判定不可判定、计数与状态都不动，告警保持
+        seedActive(AlertState.FIRING);
+        IotAlertRulePoint withDeadband = pointOf(11L, "temperature", "GT", "30");
+        withDeadband.setDeadband(new BigDecimal("10"));
+        latest.put(DEVICE, Map.of(
+            "temperature", new AlertLatestValueReader.AlertSample("temperature", "25",
+                AlertRules.QUALITY_GOOD, nowMs),
+            "humidity", new AlertLatestValueReader.AlertSample("humidity", "90",
+                AlertRules.QUALITY_GOOD, staleTs)));
+        AlertTenantEvaluator.TenantOutcome held = evaluateGroup(
+            rule(AlertTriggerMode.IMMEDIATE.getCode(), 0), List.of(
+                withDeadband, pointOf(12L, "humidity", "GT", "80")));
+
+        assertThat(held.resolved()).as("未越过恢复门槛（回差挡住）+ 不可判定 ⇒ 不得恢复").isZero();
+        assertThat(instances.get(0).getState()).isEqualTo(AlertState.FIRING.getCode());
+        assertThat(counter("iot.alert.evaluate.skipped_stale")).isEqualTo(1d);
+
+        // ② 同一条 FIRING：temperature 越过恢复门槛（15 < 20）、humidity 仍陈旧 ⇒ 合取被证伪 ⇒ 收口
+        clock.set(T0.plusSeconds(30));
+        Long nowMs2 = clock.get().atZone(AvailabilityRules.PLATFORM_ZONE).toInstant().toEpochMilli();
+        latest.put(DEVICE, Map.of(
+            "temperature", new AlertLatestValueReader.AlertSample("temperature", "15",
+                AlertRules.QUALITY_GOOD, nowMs2),
+            "humidity", new AlertLatestValueReader.AlertSample("humidity", "90",
+                AlertRules.QUALITY_GOOD, staleTs)));
+        AlertTenantEvaluator.TenantOutcome outcome = evaluateGroup(
+            rule(AlertTriggerMode.IMMEDIATE.getCode(), 0), List.of(
+                withDeadband, pointOf(12L, "humidity", "GT", "80")));
+
+        assertThat(outcome.resolved()).as("一条已证伪合取即应收口，不得被不可判定条件钉成僵尸")
+            .isEqualTo(1);
+        assertThat(instances.get(0).getState()).isEqualTo(AlertState.RESOLVED.getCode());
+    }
+
+    @Test
+    @DisplayName("★ 组键去重：同规则同设备的多条件只建一条实例；第二条已 FIRING 时不重复建")
+    void groupKeyDeduplicatesAcrossConditions() {
+        latestMulti(Map.of("temperature", "35", "humidity", "90"));
+        IotAlertRule rule = rule(AlertTriggerMode.IMMEDIATE.getCode(), 0);
+        List<IotAlertRulePoint> points = List.of(
+            pointOf(11L, "temperature", "GT", "30"),
+            pointOf(12L, "humidity", "GT", "80"));
+        evaluateGroup(rule, points);
+        assertThat(instances).hasSize(1);
+
+        // 第二轮（值仍越界）⇒ 不新建实例，只更新当前值
+        clock.set(T0.plusSeconds(15));
+        latestMulti(Map.of("temperature", "36", "humidity", "91"));
+        AlertTenantEvaluator.TenantOutcome second = evaluateGroup(rule, points);
+        assertThat(second.fired()).isZero();
+        assertThat(instances).hasSize(1);
+        assertThat(instances.get(0).getTriggerValue()).isEqualTo("91");
+    }
+
+    @Test
+    @DisplayName("★ 编辑规则收敛（防僵尸）：2 个条件删成 1 个后，既有 AND 实例仍能正常恢复")
+    void editingConditionCountStillAllowsResolve() {
+        // 第一轮：两条件都越界 ⇒ 建一条 AND 实例
+        latestMulti(Map.of("temperature", "35", "humidity", "90"));
+        IotAlertRule rule = rule(AlertTriggerMode.IMMEDIATE.getCode(), 0);
+        evaluateGroup(rule, List.of(
+            pointOf(11L, "temperature", "GT", "30"),
+            pointOf(12L, "humidity", "GT", "80")));
+        assertThat(instances).hasSize(1);
+        assertThat(instances.get(0).getState()).isEqualTo(AlertState.FIRING.getCode());
+
+        // 用户把规则改成只剩 1 个条件，且该条件本轮未越界 ⇒ 实例必须能恢复（去重键不含条件内容）
+        clock.set(T0.plusSeconds(30));
+        latestMulti(Map.of("temperature", "10"));
+        AlertTenantEvaluator.TenantOutcome outcome = evaluateGroup(rule,
+            List.of(pointOf(11L, "temperature", "GT", "30")));
+
+        assertThat(outcome.resolved()).as("编辑条件数后既有实例必须能收口，不得留下僵尸").isEqualTo(1);
+        assertThat(instances.get(0).getState()).isEqualTo(AlertState.RESOLVED.getCode());
+        assertThat(instances.get(0).getActiveDedupKey()).isNull();
+        assertThat(instances.get(0).getReason()).isEqualTo(AlertReason.RECOVERED.getCode());
+    }
+
+    @Test
+    @DisplayName("★ 反向编辑同样收敛：1 个条件加成 2 个，既有实例按组判定推进/恢复")
+    void addingConditionCountKeepsConvergence() {
+        latestMulti(Map.of("temperature", "35"));
+        IotAlertRule rule = rule(AlertTriggerMode.IMMEDIATE.getCode(), 0);
+        evaluateGroup(rule, List.of(pointOf(11L, "temperature", "GT", "30")));
+        assertThat(instances).hasSize(1);
+
+        // 加一个条件（humidity 50 < 80 ⇒ 未越界）⇒ 组判定 IN_RANGE ⇒ 恢复
+        clock.set(T0.plusSeconds(30));
+        latestMulti(Map.of("temperature", "35", "humidity", "50"));
+        AlertTenantEvaluator.TenantOutcome outcome = evaluateGroup(rule, List.of(
+            pointOf(11L, "temperature", "GT", "30"),
+            pointOf(12L, "humidity", "GT", "80")));
+
+        assertThat(outcome.resolved()).as("组内一条未越界即合取不成立 ⇒ 收口").isEqualTo(1);
+        assertThat(instances).hasSize(1);
+        assertThat(instances.get(0).getState()).isEqualTo(AlertState.RESOLVED.getCode());
+    }
+
+    @Test
+    @DisplayName("★ 旧键僵尸收敛：遗留 rule:device:prop 活动实例在本轮命中新键时被显式收口（不删行）")
+    void legacyKeyOrphanIsConverged() {
+        IotAlertInstance legacy = new IotAlertInstance();
+        legacy.setId(902L);
+        legacy.setTenantId(TENANT);
+        legacy.setRuleId(7L);
+        legacy.setDeviceId(DEVICE);
+        legacy.setPropertyId("temperature");
+        legacy.setDedupKey(AlertRules.dedupKey(7L, DEVICE, "temperature"));
+        legacy.setActiveDedupKey(legacy.getDedupKey());
+        legacy.setState(AlertState.FIRING.getCode());
+        legacy.setConsecutiveCount(1);
+        legacy.setSeverity(AlertSeverity.WARNING.getCode());
+        legacy.setStartTs(T0.minusMinutes(10));
+        instances.add(legacy);
+
+        latestNow("35");
+        evaluate(rule(AlertTriggerMode.IMMEDIATE.getCode(), 0), point("GT", "30"));
+
+        // 旧键行被收口为 RESOLVED + 明确原因码（不是「已恢复」），行本身保留
+        assertThat(instances).hasSize(2);
+        assertThat(legacy.getState()).isEqualTo(AlertState.RESOLVED.getCode());
+        assertThat(legacy.getReason()).isEqualTo(AlertReason.CONDITION_GROUP_MERGED.getCode());
+        assertThat(legacy.getActiveDedupKey()).isNull();
+        // 新键实例照常建立
+        assertThat(activeInstances()).hasSize(1);
+        assertThat(activeInstances().get(0).getActiveDedupKey()).isEqualTo("R:7:9");
+    }
+
+    @Test
+    @DisplayName("★ 最严重条件排序：过界幅度相同 ⇒ 相对阈值比大者胜（阈值越小越严重）")
+    void mostSevereFallsBackToRatio() {
+        // temperature: GT 10，读到 20（过界 10，比值 1.0）；humidity: GT 100，读到 110（过界 10，比值 0.1）
+        latestMulti(Map.of("temperature", "20", "humidity", "110"));
+        evaluateGroup(rule(AlertTriggerMode.IMMEDIATE.getCode(), 0), List.of(
+            pointOf(11L, "temperature", "GT", "10"),
+            pointOf(12L, "humidity", "GT", "100")));
+
+        assertThat(instances).hasSize(1);
+        assertThat(instances.get(0).getPropertyId()).isEqualTo("temperature");
+        assertThat(instances.get(0).getThresholdSnapshot()).isEqualTo("> 10");
+    }
+
+    @Test
+    @DisplayName("★ 最严重条件排序：幅度与比值都相同 ⇒ propertyId 字典序小者胜（确定性可复现）")
+    void mostSevereFallsBackToPropertyIdOrder() {
+        latestMulti(Map.of("aaa", "20", "zzz", "20"));
+        evaluateGroup(rule(AlertTriggerMode.IMMEDIATE.getCode(), 0), List.of(
+            pointOf(11L, "zzz", "GT", "10"),
+            pointOf(12L, "aaa", "GT", "10")));
+
+        assertThat(instances).hasSize(1);
+        assertThat(instances.get(0).getPropertyId()).as("同分取字典序最小，保证每轮结果一致")
+            .isEqualTo("aaa");
+    }
+
+    @Test
+    @DisplayName("★ 组状态机：连续 N 次模式下任一条件回落 ⇒ 计数清零并丢弃候选（组整体抖动抑制）")
+    void groupFlapIsAbsorbed() {
+        IotAlertRule rule = rule(AlertTriggerMode.CONSECUTIVE_COUNT.getCode(), 3);
+        List<IotAlertRulePoint> points = List.of(
+            pointOf(11L, "temperature", "GT", "30"),
+            pointOf(12L, "humidity", "GT", "80"));
+        latestMulti(Map.of("temperature", "35", "humidity", "90"));
+        evaluateGroup(rule, points);
+        assertThat(instances.get(0).getConsecutiveCount()).isEqualTo(1);
+
+        // humidity 回落 ⇒ 组判定 IN_RANGE ⇒ 候选被丢弃（与单条件口径一致）
+        clock.set(T0.plusSeconds(15));
+        latestMulti(Map.of("temperature", "35", "humidity", "50"));
+        evaluateGroup(rule, points);
+
+        assertThat(instances).isEmpty();
+        assertThat(counter(AlertMetrics.METRIC_FLAPPED)).isEqualTo(1d);
+    }
+
     // ---------------------------------------------------------------- N 系列
 
     @Test
@@ -717,7 +1002,8 @@ class AlertTenantEvaluatorTest {
         latestNow("35");
         IotAlertRule rule = rule(AlertTriggerMode.IMMEDIATE.getCode(), 0);
         Map<Long, List<IotAlertRulePoint>> points = new LinkedHashMap<>();
-        points.put(rule.getId(), List.of(point("GT", "30"), point("LT", "5"), point("GTE", "1")));
+        // 三条条件**全部越界**（35 > 30、35 >= 1、35 不 < 40）⇒ 真 AND 成立，只建一条实例
+        points.put(rule.getId(), List.of(point("GT", "30"), point("GTE", "1"), point("LT", "40")));
         evaluator.evaluateTenant(TENANT, List.of(rule), points);
 
         // 设备解析统一走 **selectPage**（游标跨轮滚动）；顺序无关的一次批量查询，与候选数无关
@@ -726,10 +1012,11 @@ class AlertTenantEvaluatorTest {
         verify(instanceMapper, times(1)).selectActiveInTenant();
         verify(livenessMapper, times(1)).selectList(any());
         verify(windowMapper, times(1)).selectList(any());
-        // 三个点位条件全部在**一轮内**判定完（不是每个点位一次查询）：
-        // GT 30 → 越界、GTE 1 → 越界、LT 5 → 未越界 ⇒ 两条实例（第三条确实不该建）
-        assertThat(instances).hasSize(2);
+        // 三个点位条件全部在**一轮内**判定完（不是每个点位一次查询）；真 AND 下同规则同设备
+        // 只产生**一条**实例（旧语义是「每个越界条件各一条」——本用例已随语义变更改写）
+        assertThat(instances).hasSize(1);
         assertThat(instances).extracting(IotAlertInstance::getPropertyId).containsOnly("temperature");
+        assertThat(AlertConditionSnapshot.decode(instances.get(0).getConditionSnapshot())).hasSize(3);
     }
 
     @Test
@@ -749,8 +1036,8 @@ class AlertTenantEvaluatorTest {
     @Test
     @DisplayName("★ U2 并发插入撞唯一键 ⇒ 重同步后**只重试剩余部分**（一条语句，不逐行插）")
     void u2DedupConflictResyncsAndRetries() {
-        // 两条规则覆盖同一台设备的同一点位 ⇒ 两条实例（去重键不同）：
-        // 规则 7 的键（7:9:temperature）已被「另一轮」创建，规则 8 的键还没有
+        // 两条规则覆盖同一台设备的同一点位 ⇒ 两条实例（去重键按规则区分）：
+        // 规则 7 的键（R:7:9）已被「另一轮」创建，规则 8 的键（R:8:9）还没有
         IotAlertRule second = rule(AlertTriggerMode.IMMEDIATE.getCode(), 0);
         second.setId(8L);
         IotAlertRulePoint point = point("GT", "30");
@@ -760,7 +1047,7 @@ class AlertTenantEvaluatorTest {
         latestNow("35");
         insertConflicts = 1;
         when(instanceMapper.selectByActiveDedupKeys(anyList()))
-            .thenReturn(List.of(existingKey("7:9:temperature")));
+            .thenReturn(List.of(existingKey("R:7:9")));
 
         AlertTenantEvaluator.TenantOutcome outcome =
             evaluator.evaluateTenant(TENANT, List.of(rule(AlertTriggerMode.IMMEDIATE.getCode(), 0), second),
@@ -769,7 +1056,7 @@ class AlertTenantEvaluatorTest {
         assertThat(outcome.fired()).isEqualTo(2);
         // 第一条实例被唯一键挡住（并发去重生效），剩余那条被**第二次单语句批量插入**
         assertThat(instances).hasSize(1);
-        assertThat(instances.get(0).getDedupKey()).isEqualTo("8:9:temperature");
+        assertThat(instances.get(0).getDedupKey()).isEqualTo("R:8:9");
         assertThat(notifications).as("剩余实例的通知照常入队").isNotEmpty();
         // 去重冲突必须被计数（否则「重复告警刷屏／漏建」都无从发现）
         assertThat(registry.find(AlertMetrics.METRIC_DEDUP_CONFLICT).counter().count()).isEqualTo(1d);
@@ -789,7 +1076,7 @@ class AlertTenantEvaluatorTest {
         latestNow("35");
         insertConflicts = 1;
         when(instanceMapper.selectByActiveDedupKeys(anyList())).thenReturn(List.of(
-            existingKey("7:9:temperature"), existingKey("8:9:temperature")));
+            existingKey("R:7:9"), existingKey("R:8:9")));
 
         evaluator.evaluateTenant(TENANT,
             List.of(rule(AlertTriggerMode.IMMEDIATE.getCode(), 0), second), points);
@@ -873,7 +1160,7 @@ class AlertTenantEvaluatorTest {
         broken.setRuleId(7L);
         broken.setDeviceId(DEVICE);
         broken.setPropertyId("temperature");
-        broken.setDedupKey(AlertRules.dedupKey(7L, DEVICE, "temperature"));
+        broken.setDedupKey(AlertRules.groupDedupKey(7L, DEVICE));
         broken.setActiveDedupKey(broken.getDedupKey());
         broken.setState("SOMETHING_ELSE");
         broken.setStartTs(T0.minusMinutes(1));

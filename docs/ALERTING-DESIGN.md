@@ -204,12 +204,13 @@
 | `rule_id` | BIGINT | 触发它的规则（规则改名/改阈值**不影响**已产生的实例） |
 | `device_id` | BIGINT | 设备 |
 | `property_id` | VARCHAR(64) NULL | 点位（设备级/产品级规则触发的实例此处为空） |
-| `dedup_key` | VARCHAR(191) | **去重键**：`rule_id + device_id + property_id` 规范化后的字符串（历史留痕用，**不**进唯一索引） |
-| `active_dedup_key` | VARCHAR(191) NULL | **只在活动期间非 NULL**（= `dedup_key` 的值）；恢复时置 NULL。它与 `tenant_id` 组成 `uk_alert_active`，实现「同键至多一条活动告警」——**注意不能把 `resolved_ts` 放进唯一索引**，理由见本表下方说明 |
+| `dedup_key` | VARCHAR(191) | **去重键**：`rule_id + device_id + property_id` 规范化后的字符串（历史留痕用，**不**进唯一索引；2026-10-15 起它只记录「当时触发点位」这一审计事实，活动去重改用下面的形态） |
+| `active_dedup_key` | VARCHAR(191) NULL | **只在活动期间非 NULL**；恢复时置 NULL。它与 `tenant_id` 组成 `uk_alert_active`，实现「同键至多一条活动告警」——**注意不能把 `resolved_ts` 放进唯一索引**，理由见本表下方说明。取值形态见 §7.9：条件组实例 = `R:rule_id:device_id`、断档实例 = `OUTAGE:device_id:event_id` |
 | `severity` | VARCHAR(16) | **冗余存下触发时的级别**（规则后来改了级别，历史实例的级别不能被改写） |
 | `state` | VARCHAR(16) | 状态**码**：`PENDING` / `FIRING` / `ACKED` / `RESOLVED`（**4 态**；`SUPPRESSED` 不是状态，见 §2.3） |
 | `trigger_value` | VARCHAR(64) NULL | 触发时读到的**原始值**（字符串，原样存；用于「当时到底是多少」） |
-| `threshold_snapshot` | VARCHAR(64) NULL | **触发时的阈值快照**（规则改了阈值后，仍能解释当时为何报警） |
+| `threshold_snapshot` | VARCHAR(64) NULL | **触发时的阈值快照**（规则改了阈值后，仍能解释当时为何报警；多条件时 = 最严重条件的阈值） |
+| `condition_snapshot` | VARCHAR(4000) NULL | **条件组逐条件快照**（2026-10-15 真 AND 新增，见 §7.9）：每条件一行，行内按竖线分隔 `点位 / 比较符 / 阈值 / 判定码 / 读数`，行间以 `;` 连接；单条件规则同样写入。它是「为什么这条告警响了」的逐条件证据 |
 | `start_ts` | DATETIME | 首次越界时刻（= `pending` 开始时刻） |
 | `firing_ts` | DATETIME NULL | 满足持续条件、正式 `FIRING` 的时刻 |
 | `resolved_ts` | DATETIME NULL | 恢复时刻（NULL = 仍活动） |
@@ -336,7 +337,7 @@ MySQL 的唯一索引对**含 NULL 的行不做约束**——只要索引涉及�
 
 ### 2.3 ③ 状态机
 
-```
+`
                     ┌──────────── 越界（首次）─────────────┐
                     ▼                                      │
               ┌───────────┐  连续 N 次 / 持续 T 秒满足   ┌───┴──────┐
@@ -353,7 +354,7 @@ MySQL 的唯一索引对**含 NULL 的行不做约束**——只要索引涉及�
               ┌────────────┐
               │  RESOLVED  │  终态（保留记录，不删除）
               └────────────┘
-```
+`
 
 **状态说明**
 
@@ -453,7 +454,7 @@ MySQL 的唯一索引对**含 NULL 的行不做约束**——只要索引涉及�
 |---|---|
 | **AI / 机器学习异常检测** | ① 需要历史基线训练与持续回填，本平台的时间序列数据量与历史长度都还没到能做可靠基线的程度；② 结果**不可解释**，而告警的第一诉求是「用户看得懂为什么报警」——平台现在连**确定性阈值告警**都还没有，先补确定性的那一层；③ 误报成本高（告警疲劳比没有告警更糟）。**但**：状态机与实例表的设计**为它留了位置**（`severity` + `reason` + `trigger_value`/`threshold_snapshot`，将来加一个 `rule_type=ANOMALY` 即可，不需要改表结构） |
 | **Webhook 通知渠道** | 见 §2.4：这是本设计**唯一**的 SSRF 面（平台主动出站到用户提供的 URL），需要 URL 白名单、DNS 重绑定防护、超时、重试退避、签名、限流一整套；本仓当前无任何 webhook 能力，属**独立课题**，不应塞进首个告警版本 |
-| **复合条件（多点位 AND/OR 表达式）** | 规则表达式语言一旦引入就有「解析器 + 校验 + 注入面 + 版本兼容」的成本。本期用「一条规则一个点位条件」的形态；表结构（`iot_alert_rule_point` 是独立行表）已为复合条件留位 |
+| ~~**复合条件（多点位 AND/OR 表达式）**~~ **已于 2026-10-15 实现（AND 子集，见 §7.9）** | 原理由：规则表达式语言一旦引入就有「解析器 + 校验 + 注入面 + 版本兼容」的成本。**当前口径**：只做**合取（AND）条件组**——同一条规则的多个点位条件对同一台设备构成一个条件组，**全部越界**才触发；**不引入**通用表达式语言（无 OR / 无嵌套 / 无优先级 / 无括号），因此解析器、注入面与版本兼容三项成本都不存在。OR 与任意布尔表达式**仍然不做**：那需要真正的表达式解析器与求值器，属独立课题 |
 | **设备离线 / 断档类告警** | 本平台**已经有** `outage_event` + `device_liveness` + `OutageScanner`（15s）在做断档判定，前端「事件与断档」页签已经在展示。**再做一个「离线告警」会造成两套口径**。正确做法是**把既有断档事件接入告警的通知链路**，而不是新造判定——这是**后续增量**，不是本设计的一部分（见 §5 决策 4） |
 | **告警通知的完整分组路由树 / 升级链（escalation）** | Alertmanager 那套路由树 + `continue` + 抑制（inhibition）+ Silence（按 matcher）是一个**完整子系统**。本期只做「规则自带的渠道 + 收件人 + 重复抑制 + 最小合并」。升级链（无人确认就升级到上级）**留待**有真实运维流程时再做——没有运维流程的升级链只是噪音 |
 | **抑制（inhibition，如「断档」抑制「温度告警」）** | 有价值，但需要先有「哪类告警抑制哪类」的**领域共识**。先做基础的，抑制规则等有两类以上告警后再谈 |
@@ -801,3 +802,249 @@ DB 拒绝路径。
 （「没有租户上下文」判真、普通业务错误不误诊）。同类页面（设备台账/产品/分组/维护窗口/规则/告警）
 已逐一核对：**读**都走既有路径（无租户可跨租户只读，生产实测 200），**写**里只有告警域由本能力新增、
 已接守卫；既有域的写行为未改动（不属本增量范围）。
+
+---
+
+### 7.9 真 AND 条件组：语义、去重键与数据迁移（2026-10-15，task-6 / task-9）
+
+> 本节回应 §2.6 中原「复合条件本期不做」的条目。**它是一条行为变更**，升级前必须读完。
+
+#### 7.9.1 语义决策：合取（AND），不做通用表达式
+
+**结论**：一条规则的多个点位条件构成**同一设备上的一个合取条件组**。只有组内**全部**条件对**同一轮**
+最新值都判定为越界时才产生触发；任一条未越界即不触发；任一条**不可判定**（`MISSING` / `STALE` /
+`NON_NUMERIC` / `BAD_QUALITY` / `INVALID_CONDITION`）且无「未越界」时，**整组本轮不可判定**
+——不触发、也不恢复，**绝不把「读不到」伪装成「未越界」或「越界」**（§2.2.3 的口径在组维度上的延续）。
+
+**组判定表（唯一实现：`AlertTenantEvaluator#groupVerdict`）**
+
+| 组内情形 | 组判定 | 状态机行为 |
+|---|---|---|
+| 任一条 `IN_RANGE` | `IN_RANGE` | PENDING 期吸收抖动（丢弃候选、计入 `flapped`）；活动期进入恢复判定 |
+| 无 `IN_RANGE`，且全部条件都 `OUT_OF_RANGE` | `OUT_OF_RANGE` | 计数 +1 / 立即触发 / 维持活动 |
+| 无 `IN_RANGE`，且存在不可判定条件（无论是否部分越界） | 取第一个不可判定结果的码 | `AlertStateMachine` 对非 OUT/IN 一律「计数与状态都不动」 |
+
+**恢复 = 合取被证伪即可收口**（`AlertTenantEvaluator#recoverySatisfied`）：只要**存在任一条可判定条件
+越过自己的恢复门槛（含回差）**，整条规则就不再成立，活动告警转 `RESOLVED`。理由：告警条件是 AND，
+一条被合格读数证伪即足以推翻整个合取。若反过来要求「全部条件都越过恢复门槛」，残留在越界区的某一条
+就会把告警永久钉住——那等于把 AND 又退化成 OR。**回差在这里照常生效**：「未越界但仍在回差带内」不算
+恢复，阈值附近的抖动不会产生「触发/恢复」通知风暴。
+
+**不可判定条件的位置**：两个方向上都不参与——既不能充当「已恢复」的证据（不伪装成恢复，与 §2.2.4
+及既有 T6 判据一致），**也不能阻挡**其它条件提供的恢复证据（否则一个坏点位就是永不消解的僵尸告警）。
+组内没有任何可判定条件时不敢声称恢复。
+
+**为什么不做 OR / 任意布尔表达式**：那需要真正的表达式解析器与求值器（解析、校验、注入面、版本兼容、
+迁移期历史解释五件事一起变），属独立课题。AND 子集不需要任何新语法：条件行表 `iot_alert_rule_point`
+本来就是逐行存的，一条规则的多行**天然**就是合取组，前端契约（`RuleSaveReq.points`）零改动。
+
+#### 7.9.2 去重键：`(规则 × 设备)`
+
+| | 改造前 | 改造后 |
+|---|---|---|
+| 形态（规则类） | `ruleId:deviceId:propertyId` | **`R:ruleId:deviceId`**（`AlertRules#groupDedupKey`） |
+| 形态（断档类） | `OUTAGE:deviceId:outageEventId` | **一字不改**（不在本次射程内，一行数据都不迁移） |
+| 同规则同设备的活动实例 | 每个越界条件各一条（近似 OR），撞唯一键的还会被 `insertWithRetry` **静默剔除** | **至多一条** |
+
+- **`propertyId` 不再进键**：真 AND 下「规则 × 设备」只应有一条活动实例；否则实例不知自己属于哪一组，
+  「任一条回落时才恢复」也无法表达——那既把 AND 又拆回 OR。
+- **不引入条件组内容指纹**：把条件内容放进键，用户增删一个条件行就会让旧键实例收不了口、新键另建一条
+  ⇒ 编辑规则后留下**两条活动实例**，正是本任务要防的僵尸形态。
+- **键里不含 `tenantId`**：`uk_alert_active(tenant_id, active_dedup_key)` 已承载租户维度；拼进去只会让键
+  更长，并强迫全部活动实例无条件重写一遍（迁移风险最高的部分）。
+- **与断档键结构性隔离**：首段一个是固定字母 `R`、一个是 `OUTAGE`；`rule_id` 是 BIGINT 自增，
+  永不可能等于 `OUTAGE`。因此两类实例共用同一个唯一键也不会互相覆盖。
+- **实例列保留**：`property_id` / `trigger_value` / `threshold_snapshot` 保留，写入的是**最严重**那条越界
+  条件（排序规则见 7.9.3）；组内**逐条件**的取值落在新增列 `condition_snapshot`。
+- **`dedup_key` 列不改写**：它是历史留痕，记录了旧语义下「当时的触发点位」，属审计证据。
+
+#### 7.9.3 「最严重」条件的排序（写入实例的 `property_id`）
+
+完全确定性、不依赖遍历顺序，保证同一份数据每轮得到同一条（`AlertTenantEvaluator#mostSevereIndex`）：
+
+1. 候选集 = 组内全部 `OUT_OF_RANGE` 条件；一个都没有时取组内第一条（保证点位列非空且稳定）；
+2. 过界**幅度**大者胜：上界类（`GT`/`GTE`/`EQ`）为 `value − threshold`，下界类（`LT`/`LTE`）为
+   `threshold − value`，`NE` 无方向取 0；
+3. 幅度相同 ⇒ 相对阈值比 `幅度 / |threshold|` 大者胜（阈值 100 越 1 与阈值 10 越 1，后者更严重）；
+4. 仍相同 ⇒ `propertyId` **字典序小者**胜。
+
+#### 7.9.4 抖动抑制与状态机：计数对象从「单条件」变为「条件组」
+
+`AlertStateMachine` 的判定表**未改动**（它已被 18 条以上用例钉死）：组判定结果直接喂给它，
+非 OUT/IN 的语义天然就是「计数与状态都不动」。`IMMEDIATE` / `CONSECUTIVE_COUNT` / `DURATION` 三种模式的
+计数对象统一变为**组整体命中**：
+
+- `CONSECUTIVE_COUNT`：连续 N **轮**「组内全部条件越界」才触发；中途任一条回落 ⇒ 组判定 `IN_RANGE`
+  ⇒ 候选丢弃（计入 `flapped`）；任一条不可判定 ⇒ 该轮计数不变；
+- `DURATION`：窗口按**整组**校验（`verifyDurationWindow`）——窗口内**每个采样时刻**都必须满足
+  「全部条件越界」。若组内各点位的上报频率不同（采样时刻对不齐），一律判为**不可求值**并保持 PENDING，
+  不做「就近取点」的近似；任一点上任一条件不可判定同样不可求值。
+
+#### 7.9.5 编辑规则（增删条件行）后的实例收敛 —— 防僵尸
+
+这是 AND 改造**最容易漏**的路径，本实现有三道防线：
+
+1. **去重键不含条件内容** ⇒ 增删条件行**不会**另起实例，既有活动实例按新条件组继续推进/恢复；
+2. **旧键残留收敛**（`orphanActives`）：某规则某设备**本轮确实命中新键**（正在建/正在推进）时，
+   同 (规则, 设备) 的旧键活动实例被显式收口为 `RESOLVED` + `reason=CONDITION_GROUP_MERGED`
+   （不是「已恢复」），**不删行**（「清除 ≠ 删除」）；
+3. **一次性数据迁移**（见 7.9.6）把存量旧键直接规范化掉。
+
+用例钉住：`AlertTenantEvaluatorTest#editingConditionCountStillAllowsResolve`（2 条件→1 条件仍能恢复）、
+`#addingConditionCountKeepsConvergence`（1 条件→2 条件按组判定恢复）、`#legacyKeyOrphanIsConverged`（旧键收口）。
+
+#### 7.9.6 迁移与回滚
+
+**迁移**：`deploy/sql/migration/2026-10-15-iot-alert-condition-group.sql`（与 `007-iot-data.sql` 的追加段
+逐语句等价，由 `tools/check-iot-sql-equivalence.sh` 校验；已同步 `iot-migrations.list`）。两步：
+
+1. 同一 `(tenant_id, rule_id, device_id)` 的多条旧活动实例收口为至多一条（保留优先级
+   `FIRING > ACKED > PENDING`，同级取 id 最小），被收口行写 `RESOLVED` + `reason=CONDITION_GROUP_MERGED`；
+2. 剩余活动实例的 `active_dedup_key` 规范化为 `CONCAT('R:', rule_id, ':', device_id)`。
+   断档实例（`rule_id = 0`）由 `rule_id <> 0` 显式排除在射程外。
+
+**回滚**：`deploy/sql/rollback/2026-10-15-iot-alert-condition-group-rollback.sql`。
+顺序：① 先关 `ypbin.alert.enabled=false` 并重启 → ② 执行回滚 → ③ 部署旧版 jar。
+回滚把 `R:` 键还原成旧形态并删列，**不删任何行**；但迁移中因「同 (规则, 设备) 多条活动实例」被收口的行
+**不会**恢复为活动（旧语义下它们本就是同键重复项，恢复反而会撞 `uk_alert_active`）——这是**如实登记的
+不可逆部分**，回滚前应先导出 `SELECT * FROM iot_alert_instance WHERE reason = 'CONDITION_GROUP_MERGED'`。
+
+**真库演练（2026-10-15，本机 `mysql:8.4` 一次性容器，可复现）**：迁移前造 5 条活动实例（规则 7 三条 +
+规则 8 一条 + 断档一条）⇒ 迁移后规则 7 只剩 `R:7:9` 一条（另一条收口为 `CONDITION_GROUP_MERGED`）、
+规则 8 为 `R:8:9`、断档键 `OUTAGE:9:42` **原样未改**、重复活动键再插入报 `ERROR 1062 ... uk_alert_active`；
+回滚后旧形态键还原、`condition_snapshot` 列删除、总行数不变（6 行）。
+
+#### 7.9.7 通知与展示：单实例 + 逐条件快照（不新增通知明细行）
+
+一条实例代表整个条件组，**不**为每个条件各写一条通知明细行（否则通知量按条件数放大，与「减少打扰」
+的目标相反）。触发时组内每个条件的「阈值 / 读到多少 / 判成什么」写入 `condition_snapshot`，通知正文
+逐条件列出（`AlertNotificationComposer`）；**单条件规则的文案与改造前逐字一致**（向后兼容的硬要求）。
+投递器（`AlertTenantNotifier`）用**一次** `selectByRuleIds` 批量取回规则条件行，不在投递循环里逐条查。
+
+#### 7.9.8 老数据的行为变化与升级须知（**运维必读**）
+
+| 受影响的规则 | 行为变化 |
+|---|---|
+| **条件行数 = 1**（绝大多数） | **逐字不变**。去重键由 `rule:device:point` 变为 `R:rule:device`，但语义一一对应（单条件组） |
+| **条件行数 > 1** | **从「任一条越界即触发」变为「全部条件都越界才触发」**（近似 OR → AND）。切换瞬间可能出现：① 原本「部分条件越界」的规则**不再触发**（这是本次改造的**预期目的**，须确认这些规则的条件组合确实该全部满足）；② 存量活动实例中「部分条件越界」的那些，下一轮按组判定转为 `IN_RANGE` ⇒ **收口为 `RESOLVED`（`RECOVERED`）**，并发一条恢复通知 |
+| **同规则同设备已有多个活动实例** | 迁移把多余的收口为 `RESOLVED` + `reason=CONDITION_GROUP_MERGED`（**不是**「已恢复」，留下可区分的原因码） |
+| **同规则同点位写了多行条件** | 旧实现按去重键**静默合并**（只留一条，`dedup_conflict` 指标 +1）；新实现是**同一个条件的 AND 冗余**（不会改变结果，但会重复出现在快照与通知里）。建议清理，见自查 SQL-B |
+
+**升级后运维自查 SQL**（迁移脚本头注释里有同一组，可复制执行）：
+
+`sql
+-- A. 行为会变化的规则（条件行数 > 1 的启用规则）：从「任一条越界即触发」变为「全部越界才触发」
+SELECT p.tenant_id, p.rule_id, r.rule_name, COUNT(*) AS point_count
+FROM iot_alert_rule_point p
+JOIN iot_alert_rule r ON r.id = p.rule_id AND r.is_deleted = 0
+WHERE p.is_deleted = 0 AND p.status = 1 AND r.enabled = 1
+GROUP BY p.tenant_id, p.rule_id, r.rule_name
+HAVING COUNT(*) > 1
+ORDER BY point_count DESC, p.rule_id ASC;
+
+-- B. 同规则同点位的重复条件行（新语义下是同一个条件写了两遍，建议清理）
+SELECT tenant_id, rule_id, property_id, COUNT(*) AS c
+FROM iot_alert_rule_point WHERE is_deleted = 0
+GROUP BY tenant_id, rule_id, property_id HAVING c > 1;
+
+-- C. 迁移前：同 (规则, 设备) 存在多条活动实例（迁移会收口多余的那些）
+SELECT tenant_id, rule_id, device_id, COUNT(*) AS c, GROUP_CONCAT(id ORDER BY id) AS instance_ids
+FROM iot_alert_instance
+WHERE is_deleted = 0 AND active_dedup_key IS NOT NULL AND rule_id <> 0
+GROUP BY tenant_id, rule_id, device_id HAVING c > 1;
+
+-- D. 迁移前：将被改写活动去重键的行数（预期 = 规则类活动实例总数）
+SELECT COUNT(*) AS to_rewrite FROM iot_alert_instance
+WHERE is_deleted = 0 AND active_dedup_key IS NOT NULL AND rule_id <> 0
+  AND active_dedup_key NOT LIKE 'R:%';
+
+-- E. 迁移后核对：不应再有同 (规则, 设备) 的多条活动实例，也不应残留旧键
+SELECT COUNT(*) AS duplicate_groups FROM (
+  SELECT 1 FROM iot_alert_instance
+  WHERE is_deleted = 0 AND active_dedup_key IS NOT NULL AND rule_id <> 0
+  GROUP BY tenant_id, rule_id, device_id HAVING COUNT(*) > 1) t;
+SELECT COUNT(*) AS legacy_keys_left FROM iot_alert_instance
+WHERE is_deleted = 0 AND active_dedup_key IS NOT NULL AND rule_id <> 0
+  AND active_dedup_key NOT LIKE 'R:%';
+`
+
+#### 7.9.9 兼容性与影响面（如实登记）
+
+- **接口 / 权限码零改动**：`RuleSaveReq.points` 契约不变，`iot:alert:*` 权限码一个都不新增；
+- **`AlertStateMachine` 判定表零改动**；`uk_alert_active(tenant_id, active_dedup_key)` 结构不变，
+  只由新的键形态承载；
+- **新增列**：`iot_alert_instance.condition_snapshot VARCHAR(4000) NULL`（迁移 + 007 + ItSchema 真库 IT 三处同步）；
+- **新增原因码**：`AlertReason.CONDITION_GROUP_MERGED`（仅由本次数据迁移与旧键收敛写入）；
+- **新增用例**：`AlertTenantEvaluatorTest` 的「真 AND 条件组」小节 11 条、`AlertConditionSnapshotTest` 6 条、
+  `AlertNotificationComposerTest` 2 条、`AlertDedupIndexGateTest` 3 条 SQL 门禁；
+- **`AlertTenantEvaluatorTest` 既有用例的语义改写**：N6（实例条数 2 → 1）、T1/T7/U2/非法转换夹具的
+  键形态改为 `R:rule:device`，并在类注释中写明语义变更与本任务编号；
+- **未做（如实）**：OR / 任意布尔表达式、条件组内跨设备的组合、组级静默、表达式版本化 —— 均不在本次范围。
+
+---
+
+### 7.10 迁移交付的两条硬约束（2026-10-15 返工登记）
+
+> 首次交付 §7.9 时踩了两个**门禁全绿但生产会炸**的坑，等价性脚本**都咬不到**。此节把约束与「为什么门禁看不见」写清楚，防止后人再犯。
+
+#### 7.10.1 新列只由「晚于建表」的迁移引入，同一份源里不得声明两次
+
+**缺陷（D1）**：`condition_snapshot` 同时写进了 007 的 `CREATE TABLE iot_alert_instance` **和**该文件末尾
+追加段的 `ALTER TABLE ... ADD COLUMN` ⇒ 全新安装执行到追加段直接
+`ERROR 1060 (42S21): Duplicate column name 'condition_snapshot'`；而 `install.sh` 是
+`set -euo pipefail` + `die` ⇒ **一键安装整条中断**，中断点之后的 `iot_dashboard_board_config` /
+`iot_dashboard_daily_snapshot` 等段**全部不建**（实测：007 之后只存在 `iot_alert_instance` 一张表）。
+
+**正确做法（照仓内先例）**：`iot_mqtt_ingest_receipt` 的 `receipt_status` 等 6 列在 007 里**只由 ALTER 引入**，
+CREATE 段里 0 处。007 必须与迁移侧同序——迁移侧是 `migration/*.sql` 按文件名拼接，天然是
+「CREATE TABLE → ALTER ADD COLUMN」。
+
+**⚠️ 修复时的一个反直觉点**：不能只用「删掉 007 里那条 ALTER、把列留在 CREATE」这种最省事的改法。
+等价性脚本做的是**语句顺序敏感的逐语句比对**（006+007 是一侧，migration 拼接是另一侧），
+列出现在 CREATE 段与出现在 ALTER 段会得到**不同的语句序列** ⇒ 这样改会让等价门禁转红。
+必须让 007 的 CREATE 段与已发布迁移（`2026-10-03`）**逐字一致**（零列），新列只由追加 ALTER 引入。
+
+**为什么门禁看不见**：等价性只看「两侧是否一致」。D1 的形态是「两侧都多了一次」，比对结果恰好相同
+⇒ 门禁绿。`AlertDedupIndexGateTest#conditionSnapshotDeclaredExactlyOncePerSource` 与
+`#newColumnIntroducedByAlterNotCreate` 是为此新增的**专门哨兵**。
+
+#### 7.10.2 严禁原地改写「已发布/已应用」的迁移文件
+
+**缺陷（D2）**：把 `condition_snapshot` 直接加进了 **`2026-10-03-iot-alert-schema.sql`**（该文件在 HEAD 中已存在、
+且已被存量库应用过）。后果两条：
+1. `deploy/migrate.sh` 以**文件 sha256** 判定「已应用」⇒ 任何应用过该迁移的存量库跑 `migrate.sh --status`
+   会报「校验和不一致」，apply 模式**直接 `die` 且绝不自动重放**（实测 mismatch=1，新迁移根本轮不到执行）；
+2. 真库 IT 的 `ItSchema` 依次执行 `2026-10-03` + `2026-10-15` ⇒ 第二条 ALTER 撞列报 1060。
+
+**正确做法**：已发布迁移文件**保持与 HEAD 逐字一致**（零差异）；新列/新结构一律放进**新文件**
+（`2026-10-15-iot-alert-condition-group.sql`），并同步 `iot-migrations.list`。
+
+**⛔ 两条必须同时修**：只删 007 的 ALTER 而保留 2026-10-03 的原地改动，等价门禁**仍然绿**
+（因为两侧又「同时重复」），但 D2 依旧存在。本次修复把 D1+D2 一起做，并加了
+`AlertDedupIndexGateTest#newColumnIntroducedByAlterNotCreate` 钉住「已发布迁移零声明」。
+
+#### 7.10.3 迁移与回滚脚本都必须幂等
+
+**缺陷（D3）**：回滚脚本末尾直接 `ALTER TABLE iot_alert_instance DROP COLUMN condition_snapshot;`
+⇒ 第一次 exit=0，**第二次**报 `ERROR 1091 (42000): Can't DROP 'condition_snapshot'`。
+
+**关键事实（本机 mysql:8.4 实测）**：MySQL **不支持** `ALTER TABLE ... DROP COLUMN IF EXISTS`
+（报 `ERROR 1064 语法错误`）——这一点与 `DROP TABLE IF EXISTS`（DDL 原生支持 IF EXISTS）不同，
+后者的先例**不能照抄**。正确写法是「先查 `information_schema.columns` 再用 `PREPARE` 条件执行」
+（见 `2026-10-15-iot-alert-condition-group-rollback.sql`）：列不存在时执行 `DO 0`。
+`AlertDedupIndexGateTest#rollbackDropMustBeConditional` 钉住该形态，真库探针则实测「连跑两次都 exit=0」。
+
+#### 7.10.4 本轮返工的验收证据（真库，mysql:8.4 一次性容器）
+
+| 探针 | 命令 | 结果 |
+|---|---|---|
+| 全新安装路径 | 001→007 顺序导入 | 每条 exit=0；三表齐备；`condition_snapshot` 有且仅 1 列 |
+| 存量库路径 | 006 + HEAD 版 2026-10-03 + 新迁移 | 三条 exit=0；列数=1 |
+| 迁移登记 | `deploy/migrate.sh --status` | `校验和不一致(mismatch) : 0`（登记表 sha256 与目录逐文件 MATCH） |
+| 回滚幂等 | rollback 连跑两次 | 两次 exit=0；之后列数=0 |
+| 等价门禁 | `tools/check-iot-sql-equivalence.sh` | `OK`（exit 0） |
+
+> **纪律提示**：`deploy/migrate.sh --status` 在**存在待应用迁移**时按设计返回退出码 1
+> （`print_status` 末尾 `AP_PENDING > 0 ⇒ return 1`），这与 mismatch 无关；判据应看
+> 「校验和不一致(mismatch)」那一行的计数，而不是脚本退出码。
+

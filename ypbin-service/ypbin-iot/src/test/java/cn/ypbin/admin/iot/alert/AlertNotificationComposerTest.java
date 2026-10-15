@@ -19,12 +19,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import cn.ypbin.admin.iot.entity.IotAlertInstance;
 import cn.ypbin.admin.iot.entity.IotAlertRule;
+import cn.ypbin.admin.iot.entity.IotAlertRulePoint;
 import cn.ypbin.admin.iot.entity.IotDevice;
 import cn.ypbin.admin.iot.enums.AlertNotifyEvent;
 import cn.ypbin.admin.iot.enums.AlertReason;
 import cn.ypbin.admin.iot.enums.AlertSeverity;
 import cn.ypbin.admin.iot.enums.AlertState;
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.List;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -103,6 +106,49 @@ class AlertNotificationComposerTest {
         assertThat(text.title()).contains("已恢复");
         assertThat(text.content()).contains("恢复时间：2026-10-03 10:20:00")
             .contains("恢复原因：RECOVERED");
+    }
+
+    @Test
+    @DisplayName("★ 条件组通知（真 AND）：多条件时逐条件列出「阈值 vs 读到多少」+ 各自判定，标题说条件组")
+    void conditionGroupVariant() {
+        IotAlertInstance instance = instance();
+        instance.setPropertyId("humidity");
+        instance.setTriggerValue("90");
+        instance.setConditionSnapshot(AlertConditionSnapshot.encode(List.of(
+            new AlertConditionSnapshot.ConditionReading("temperature", "GT", new BigDecimal("30"),
+                AlertValueVerdict.OUT_OF_RANGE, "35"),
+            new AlertConditionSnapshot.ConditionReading("humidity", "GT", new BigDecimal("80"),
+                AlertValueVerdict.OUT_OF_RANGE, "90"))));
+        IotAlertRulePoint temperature = new IotAlertRulePoint();
+        temperature.setPropertyId("temperature");
+        temperature.setOperator("GT");
+        temperature.setThreshold(new BigDecimal("30"));
+        IotAlertRulePoint humidity = new IotAlertRulePoint();
+        humidity.setPropertyId("humidity");
+        humidity.setOperator("GT");
+        humidity.setThreshold(new BigDecimal("80"));
+
+        AlertNotificationComposer.AlertNotificationText text = composer.compose(instance, device(),
+            rule(), AlertNotifyEvent.FIRING, List.of(temperature, humidity));
+
+        assertThat(text.title()).contains("条件组（2 个条件）");
+        assertThat(text.content())
+            .contains("条件组（全部满足才触发，共 2 条）：")
+            .contains("temperature > 30，读到 35（越界）")
+            .contains("humidity > 80，读到 90（越界）");
+        // 逐条件文案里不再只写单条 trigger_value
+        assertThat(text.content()).doesNotContain("触发值：90");
+    }
+
+    @Test
+    @DisplayName("单条件规则的文案与真 AND 改造前**逐字一致**（向后兼容的硬要求）")
+    void singleConditionKeepsLegacyText() {
+        AlertNotificationComposer.AlertNotificationText text = composer.compose(instance(), device(),
+            rule(), AlertNotifyEvent.FIRING, List.of());
+        assertThat(text.content())
+            .contains("条件：> 80")
+            .contains("触发值：85.5")
+            .doesNotContain("条件组");
     }
 
     @Test

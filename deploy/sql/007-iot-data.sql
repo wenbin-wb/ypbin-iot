@@ -787,6 +787,52 @@ ALTER TABLE iot_mqtt_ingest_receipt
     ADD KEY idx_iot_mqtt_ingest_receipt_time (tenant_id, device_id, create_time);
 
 -- =============================================================
+-- 告警真 AND 语义改造（2026-10-15 追加）
+-- 覆盖：iot_alert_instance 新增 condition_snapshot 列 + 「规则 × 设备」去重键的数据规范化。
+-- 背景：改造前每个点位条件各自判定、各产生实例（近似 OR），同规则同设备多条同时越界会被
+--       uk_alert_active 静默剔除多余实例；改造后组内全部条件越界才触发，一条规则对一台设备
+--       至多一条活动实例。语义与理由见 docs/ALERTING-DESIGN.md §2.6 与 §7.9。
+-- 顺序：migration 目录按文件名排序，本段（2026-10-15-iot-alert-condition-group）排在
+--       2026-10-13-iot-mqtt-ingest-receipt-trace 之后、2026-10-15-iot-board-config 之前，
+--       故本段必须夹在这两段之间，才能与迁移脚本的拼接顺序严格对齐。
+-- 等价性：本文件追加部分与 migration/2026-10-15-iot-alert-condition-group.sql 语句等价
+--       （tools/check-iot-sql-equivalence.sh 校验）。
+-- ⚠️ 本段含**数据改写**（不只是 DDL）：db 升级脚本 deploy/migrate.sh 会执行它；
+--       迁移前自查 SQL 与回滚脚本见该 migration 文件头与 deploy/sql/rollback/ 下同名回滚。
+-- 断档类实例（rule_id = 0）不在本段射程内，一行都不改。
+-- ⚠️ condition_snapshot 列**只由本段的 ALTER 引入**，iot_alert_instance 的 CREATE 段里没有它
+--       ——照 iot_mqtt_ingest_receipt 的同款先例（其 receipt_status 等 6 列在 007 里也只由 ALTER 引入）。
+--       道理：迁移侧（migration/*.sql 按文件名拼接）天然是「CREATE TABLE → ALTER ADD COLUMN」的顺序，
+--       若 007 的 CREATE 里已有该列、追加段又 ALTER 一次，会**同一列声明两次**（007 导入直接
+--       ERROR 1060 Duplicate column），而全新安装脚本遇到 1060 会在 set -euo pipefail 下整条中断，
+--       中断点之后的 board-config / dashboard-snapshot 等段全部不执行。同时**不得**把这列塞回
+--       2026-10-03 的存量迁移文件：那是已发布的迁移，改它会让 migrate.sh 的 sha256 校验判红
+--       （存量库直接中止升级）。详见 docs/ALERTING-DESIGN.md §7.10。
+-- =============================================================
+
+ALTER TABLE iot_alert_instance
+    ADD COLUMN condition_snapshot VARCHAR(4000) NULL COMMENT '条件组逐条件快照（真 AND 语义）：prop|op|threshold|verdict|value 多行以分号连接；单条件规则同样写入';
+
+UPDATE iot_alert_instance i
+JOIN (SELECT id,
+             ROW_NUMBER() OVER (PARTITION BY tenant_id, rule_id, device_id
+                                ORDER BY (state = 'FIRING') DESC, (state = 'ACKED') DESC, id ASC) AS rn
+      FROM iot_alert_instance
+      WHERE is_deleted = 0 AND active_dedup_key IS NOT NULL AND rule_id <> 0) AS ranked
+  ON ranked.id = i.id
+SET i.state = 'RESOLVED',
+    i.resolved_ts = NOW(),
+    i.reason = 'CONDITION_GROUP_MERGED',
+    i.active_dedup_key = NULL,
+    i.update_time = NOW()
+WHERE ranked.rn > 1;
+
+UPDATE iot_alert_instance
+SET active_dedup_key = CONCAT('R:', rule_id, ':', device_id),
+    update_time = NOW()
+WHERE is_deleted = 0 AND active_dedup_key IS NOT NULL AND rule_id <> 0;
+
+-- =============================================================
 -- 组态看板配置（2026-10-15 追加）
 -- 覆盖：iot_dashboard_board_config —— 组态看板按租户共享持久化的唯一落点。
 -- 背景：看板组件此前只存浏览器 localStorage，换设备/换浏览器即丢；本表把它提升为

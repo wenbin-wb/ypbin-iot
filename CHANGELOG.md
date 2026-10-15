@@ -12,6 +12,14 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
 ## [未发布]
+### 变更（2026-10-15 批次）
+
+- **告警支持真 AND 复合条件**：一条规则的多个点位条件构成**同一设备的合取条件组** —— 组内全部条件对同一轮最新值都越界才触发；任一条未越界即不触发；任一条不可判定（无最新值/陈旧/非数值/坏质量/条件非法）且无未越界时整组本轮不可判定（不触发也不恢复，不把「读不到」伪装成「未越界」）。恢复口径为**合取被证伪**：任一条可判定条件越过其恢复门槛（含回差）即收口，避免坏点位钉出僵尸告警。去重键由 `rule:device:property` 收紧为 `R:rule:device`（一条规则对一台设备至多一条活动实例；断档键 `OUTAGE:` 不变），实例新增 `condition_snapshot` 列承载逐条件「阈值 vs 读到多少 vs 判定」，通知正文多条件时逐条件列出（**不新增通知明细行**）。
+  - ⚠️ **行为变更**：条件行数 > 1 的规则从「任一条越界即触发」变为「全部越界才触发」。升级前请按 `docs/ALERTING-DESIGN.md` §7.9.8 的自查 SQL 核对受影响规则。
+  - 含一次性数据迁移（同 (规则,设备) 多条旧活动实例收口为一条，`reason=CONDITION_GROUP_MERGED`）与回滚脚本；**接口/权限码零改动，单条件规则行为逐字不变**。
+- **批量命令下发**：新增 `POST /iot/devices/commands/batch`（一个命令模板 + `deviceIds`，上限 `ypbin.emqx.command-batch.max-devices` 默认 50，`total-budget-ms` 默认 30000 为「是否继续下发」的判定阈值），权限沿用 `iot:debug:send`，返回**逐设备结果**（部分失败逐条如实返回，不整体 4xx）；幂等键按设备派生 `<clientRequestId>:<deviceId>`，**单台 `send()` 契约与行为不变**（抽共用出口 `sendWithModel`）。
+  - 语义提示：`accepted`=平台已受理（实例已落库、可按 requestId 重发）与 `ok`=设备确实收到是两个字段；停用设备在批量下**被拒**（与单台端点不同）；无新表、无新权限码。
+
 ### 变更
 
 - **Release 离线镜像 tar 资产改为按需产出（默认关闭）**：常规 tag 发版只产 jar/SBOM/GHCR digest；离线 `*.tar.gz` + `images.manifest.sha256` 仅在手动触发并勾选 `build_image_tarballs=true` 时产出（避免每次 Release 多约 700MB）。见 `docs/OPS-RELEASE-IMAGES.md` §10。

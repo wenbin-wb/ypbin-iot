@@ -79,6 +79,28 @@ public enum AlertValueVerdict {
         return metricName;
     }
 
+    /**
+     * 按码解析（忽略大小写；未知返回 {@code null}，不静默兜底）。
+     *
+     * <p>供条件组快照的解码使用：快照里的码由平台自产，但数据可被人为改动 ⇒ 未知码返回 {@code null}
+     * 并由展示层渲染成「不可判定」（**不猜一个判定结果出来**）。</p>
+     *
+     * @param code 码
+     * @return 枚举；未知返回 {@code null}
+     */
+    public static AlertValueVerdict of(String code) {
+        if (code == null) {
+            return null;
+        }
+        String normalized = code.trim();
+        for (AlertValueVerdict value : values()) {
+            if (value.code.equalsIgnoreCase(normalized)) {
+                return value;
+            }
+        }
+        return null;
+    }
+
     /** 是否可判定（越界或未越界）。 */
     public boolean isDecidable() {
         return this == OUT_OF_RANGE || this == IN_RANGE;

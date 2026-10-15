@@ -11,8 +11,9 @@ package cn.ypbin.admin.iot.alert;
 
 import cn.ypbin.admin.iot.entity.IotAlertInstance;
 import cn.ypbin.admin.iot.entity.IotAlertNotification;
-import cn.ypbin.admin.iot.entity.IotDevice;
 import cn.ypbin.admin.iot.entity.IotAlertRule;
+import cn.ypbin.admin.iot.entity.IotAlertRulePoint;
+import cn.ypbin.admin.iot.entity.IotDevice;
 import cn.ypbin.admin.iot.enums.AlertChannel;
 import cn.ypbin.admin.iot.enums.AlertNotifyEvent;
 import cn.ypbin.admin.system.api.feign.ISystemClient;
@@ -20,6 +21,7 @@ import cn.ypbin.admin.system.model.req.InboxMessageSendReq;
 import cn.ypbin.admin.system.model.req.MailSendReq;
 import cn.ypbin.starter.core.model.R;
 import cn.ypbin.starter.core.util.LogSanitizer;
+import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
@@ -35,6 +37,10 @@ import org.springframework.stereotype.Component;
  *
  * <p><b>失败必须原样带回</b>：{@code R.code != 200} 时把 {@code R.message} 记进
  * {@code last_error}，页面上能回答「为什么这条通知没送到」；**绝不**把失败当成功。</p>
+ *
+ * <p><b>条件组文案（真 AND，2026-10-15）</b>：正文由 {@link AlertNotificationComposer} 依据实例上的
+ * {@code condition_snapshot}（触发当时逐条件的取值与判定）渲染，条件行由投递器一次批量取回后传入；
+ * 单条件规则的文案与改造前逐字一致。</p>
  *
  * @author wenbin
  * @since 2026-10-03
@@ -86,12 +92,30 @@ public class SystemAlertNotificationSender {
      */
     public SendResult send(IotAlertNotification notification, IotAlertInstance instance, IotDevice device,
                            IotAlertRule rule, AlertNotifyEvent event) {
+        return send(notification, instance, device, rule, event, List.of());
+    }
+    // 说明：上面这个重载是「无条件行上下文」的兼容入口（断档/确认/收口等不关心条件组的路径用它）。
+
+    /**
+     * 投递一条通知（带规则当前条件行；真 AND 下正文逐条件展示）。
+     *
+     * @param notification 投递记录（渠道 + 收件人）
+     * @param instance     告警实例
+     * @param device       设备（可空）
+     * @param rule         规则（可空）
+     * @param event        通知事件
+     * @param points       规则当前的点位条件行（可空；无快照的旧实例靠它补齐条件列表）
+     * @return 结果（**不抛异常**：失败也要落库成可查的 FAILED/GIVEN_UP，见设计 §2.1 表 D）
+     */
+    public SendResult send(IotAlertNotification notification, IotAlertInstance instance, IotDevice device,
+                           IotAlertRule rule, AlertNotifyEvent event,
+                           List<IotAlertRulePoint> points) {
         ISystemClient systemClient = systemClientProvider.getIfAvailable();
         if (systemClient == null) {
             return SendResult.fail("系统服务客户端未装配（无法投递站内信/邮件）：请检查服务依赖与注册中心");
         }
         AlertNotificationComposer.AlertNotificationText text =
-            composer.compose(instance, device, rule, event);
+            composer.compose(instance, device, rule, event, points == null ? List.of() : points);
         try {
             R<Void> result;
             if (AlertChannel.INBOX.getCode().equals(notification.getChannel())) {
