@@ -9,8 +9,7 @@
  */
 package cn.ypbin.admin.iot.alert;
 
-import cn.ypbin.admin.iot.lock.LockNames;
-import cn.ypbin.admin.iot.lock.TaskLockGuard;
+import cn.ypbin.starter.tools.lock.LeaseLockGuard;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -30,21 +29,24 @@ import org.springframework.stereotype.Component;
     matchIfMissing = true)
 public class AlertOutageScanner {
 
+    /** 分布式锁名（业务语义；2026-10-15 task-18 起改用 starter 租约锁）。 */
+    public static final String LOCK_NAME = "alert-outage-scan";
+
     private final AlertOutageMappingService outletMappingService;
 
-    private final TaskLockGuard taskLockGuard;
+    private final LeaseLockGuard leaseLockGuard;
 
     public AlertOutageScanner(AlertOutageMappingService outletMappingService,
-                              TaskLockGuard taskLockGuard) {
+                              LeaseLockGuard leaseLockGuard) {
         this.outletMappingService = outletMappingService;
-        this.taskLockGuard = taskLockGuard;
+        this.leaseLockGuard = leaseLockGuard;
     }
 
     /** 周期映射（间隔由 {@code ypbin.alert.outage-scan-interval-ms} 控制，默认 15s）。 */
     @Scheduled(fixedDelayString = "${ypbin.alert.outage-scan-interval-ms:15000}",
         initialDelayString = "${ypbin.alert.outage-initial-delay-ms:20000}")
     public void scan() {
-        taskLockGuard.runExclusively(LockNames.ALERT_OUTAGE_SCAN, () -> {
+        leaseLockGuard.runExclusively(LOCK_NAME, () -> {
             outletMappingService.mapOnce();
         });
     }

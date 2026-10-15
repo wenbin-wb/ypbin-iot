@@ -9,8 +9,7 @@
  */
 package cn.ypbin.admin.iot.alert;
 
-import cn.ypbin.admin.iot.lock.LockNames;
-import cn.ypbin.admin.iot.lock.TaskLockGuard;
+import cn.ypbin.starter.tools.lock.LeaseLockGuard;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -37,13 +36,22 @@ import org.springframework.stereotype.Component;
     matchIfMissing = true)
 public class AlertEvaluator {
 
+    /**
+     * 分布式锁名（**业务语义**：哪些任务互斥）。
+     *
+     * <p>2026-10-15 task-18 起 IoT 自建锁实现已删除、改用 ypbin-starter 的租约锁；锁名仍属业务语义，
+     * 故留在各自任务身边（每个锁名恰好一处使用，不存在漂移）。它同时是**运维观测键**：
+     * {@code ypbin.lock.*} 指标按 {@code task} 标签区分。</p>
+     */
+    public static final String LOCK_NAME = "alert-evaluate";
+
     private final AlertEvaluatorService evaluatorService;
 
-    private final TaskLockGuard taskLockGuard;
+    private final LeaseLockGuard leaseLockGuard;
 
-    public AlertEvaluator(AlertEvaluatorService evaluatorService, TaskLockGuard taskLockGuard) {
+    public AlertEvaluator(AlertEvaluatorService evaluatorService, LeaseLockGuard leaseLockGuard) {
         this.evaluatorService = evaluatorService;
-        this.taskLockGuard = taskLockGuard;
+        this.leaseLockGuard = leaseLockGuard;
     }
 
     /**
@@ -56,7 +64,7 @@ public class AlertEvaluator {
     @Scheduled(fixedDelayString = "${ypbin.alert.evaluate-interval-ms:15000}",
         initialDelayString = "${ypbin.alert.evaluate-initial-delay-ms:10000}")
     public void evaluate() {
-        taskLockGuard.runExclusively(LockNames.ALERT_EVALUATE, () -> {
+        leaseLockGuard.runExclusively(LOCK_NAME, () -> {
             evaluatorService.evaluateOnce();
         });
     }

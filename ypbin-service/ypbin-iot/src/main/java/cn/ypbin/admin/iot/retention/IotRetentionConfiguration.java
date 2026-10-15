@@ -9,7 +9,7 @@
  */
 package cn.ypbin.admin.iot.retention;
 
-import cn.ypbin.admin.iot.lock.TaskLockGuard;
+import cn.ypbin.starter.tools.lock.LeaseLockGuard;
 import cn.ypbin.admin.iot.mapper.DeviceLivenessMapper;
 import cn.ypbin.admin.iot.mapper.IotPointMappingMapper;
 import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
@@ -75,7 +75,7 @@ public class IotRetentionConfiguration implements InitializingBean {
      * @param livenessMapper         提供数据库时钟
      * @param pointMappingMapper     孤儿映射巡检（只读计数，不删）
      * @param registry               指标
-     * @param taskLockGuard          跨实例互斥守卫（#220）
+     * @param leaseLockGuard         跨实例互斥守卫（#220；2026-10-15 task-18 起由 ypbin-starter 提供）
      * @return 清理服务
      */
     @Bean
@@ -84,8 +84,8 @@ public class IotRetentionConfiguration implements InitializingBean {
                                                            DeviceLivenessMapper livenessMapper,
                                                            IotPointMappingMapper pointMappingMapper,
                                                            MeterRegistry registry,
-                                                           TaskLockGuard taskLockGuard) {
+                                                           LeaseLockGuard leaseLockGuard) {
         return new RetentionCleanupServiceImpl(outageEventMapper, maintenanceWindowMapper, livenessMapper,
-            pointMappingMapper, properties, registry, taskLockGuard);
+            pointMappingMapper, properties, registry, leaseLockGuard);
     }
 }

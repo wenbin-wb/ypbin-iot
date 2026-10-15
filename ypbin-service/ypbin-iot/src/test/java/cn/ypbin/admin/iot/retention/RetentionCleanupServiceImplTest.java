@@ -19,10 +19,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
-import cn.ypbin.admin.iot.lock.DistributedLock;
-import cn.ypbin.admin.iot.lock.LockNames;
-import cn.ypbin.admin.iot.lock.LockTestSupport;
-import cn.ypbin.admin.iot.lock.TaskLockGuard;
+import cn.ypbin.admin.iot.lock.IotLockTestSupport;
 import cn.ypbin.admin.iot.mapper.DeviceLivenessMapper;
 import cn.ypbin.admin.iot.mapper.IotPointMappingMapper;
 import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
@@ -60,12 +57,14 @@ class RetentionCleanupServiceImplTest {
 
     private RetentionCleanupServiceImpl service(RetentionProperties properties) {
         when(livenessMapper.selectNow()).thenReturn(DB_NOW);
-        TaskLockGuard guard = LockTestSupport.guard(LockTestSupport.properties(), registry);
+        cn.ypbin.starter.tools.lock.LeaseLockGuard guard =
+            IotLockTestSupport.guard(IotLockTestSupport.properties(), registry);
         return new RetentionCleanupServiceImpl(outageEventMapper, maintenanceWindowMapper, livenessMapper,
             pointMappingMapper, properties, registry, guard);
     }
 
-    private RetentionCleanupServiceImpl service(RetentionProperties properties, TaskLockGuard guard) {
+    private RetentionCleanupServiceImpl service(RetentionProperties properties,
+                                               cn.ypbin.starter.tools.lock.LeaseLockGuard guard) {
         when(livenessMapper.selectNow()).thenReturn(DB_NOW);
         return new RetentionCleanupServiceImpl(outageEventMapper, maintenanceWindowMapper, livenessMapper,
             pointMappingMapper, properties, registry, guard);
@@ -171,13 +170,14 @@ class RetentionCleanupServiceImplTest {
     @Test
     @DisplayName("★ 多节点（#220）：锁被另一实例持有时本轮**跳过**，如实返回 lock-held-by-other")
     void mustSkipWhenLockHeldByAnotherInstance() {
-        cn.ypbin.admin.iot.lock.LockProperties lockProperties = LockTestSupport.properties();
-        DistributedLock sharedLock = LockTestSupport.inMemoryLock(lockProperties,
-            new LockTestSupport.MutableClock(0L));
+        cn.ypbin.starter.tools.lock.LeaseLockProperties lockProperties = IotLockTestSupport.properties();
+        cn.ypbin.starter.tools.lock.LeaseLockService sharedLock = IotLockTestSupport.sharedLockService();
         // 另一实例先抢到锁（模拟另一个节点正在清理）
         org.assertj.core.api.Assertions.assertThat(
-            sharedLock.tryAcquire(lockProperties.getKeyPrefix() + LockNames.RETENTION_CLEANUP)).isNotNull();
-        TaskLockGuard guard = LockTestSupport.guard(sharedLock, lockProperties, registry);
+            sharedLock.tryAcquire(lockProperties.getKeyPrefix()
+                + RetentionCleanupServiceImpl.LOCK_NAME)).isNotNull();
+        cn.ypbin.starter.tools.lock.LeaseLockGuard guard =
+            IotLockTestSupport.guard(sharedLock, lockProperties, registry);
 
         RetentionCleanupResult result = service(days(396, 396), guard).cleanupOnce();
 
