@@ -104,6 +104,28 @@ ALLOWED+='ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/service
 ALLOWED+='ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/SystemServiceApplication\.java|'
 ALLOWED+='ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/provider/DbLogProviders\.java|'
 ALLOWED+='ypbin-service-api/ypbin-system-api/src/main/java/cn/ypbin/admin/system/api/feign/ISystemClient\.java|'
+# ---------------------------------------------------------------------------
+# 第 38–46 项（2026-10-18 加）：消费 starter 4.1.0 的 **starter #100**
+# （日志/埋点跨服务上报的自动配置与落库实现上收到基座）。
+# 这一批被删/被改的都是 **admin 既有文件**：本仓原有一套自建的
+# 「上报自动配置 + 上报用 LogDao/TrackEventSink」，starter 4.1.0 把它们上收到基座后
+# 正确形态是「本仓只留 2 个 SPI 实现 + 1 个注册 SPI 的自动配置」。
+# 无法用「新建文件」表达，因为要表达的是**删除既有实现**（保留 = 与上游继续各写一份重复实现）。
+# **代价如实登记**：这 9 个文件上游若再改动，同步时会以 modify/delete 或文本冲突暴露；
+# 处置方式统一为「采纳上游的演进，并把同样的上收再落一次」——本仓的删除理由（已上收到 starter）
+# 对上游同样成立，正确解是上游也删。
+# ---------------------------------------------------------------------------
+# 删除的自建自动配置与实现（4 个主源码类）
+ALLOWED+='ypbin-common/src/main/java/cn/ypbin/admin/common/log/RemoteLogAutoConfiguration\.java|'
+ALLOWED+='ypbin-common/src/main/java/cn/ypbin/admin/common/log/RemoteLogDao\.java|'
+ALLOWED+='ypbin-common/src/main/java/cn/ypbin/admin/common/tracking/RemoteTrackAutoConfiguration\.java|'
+ALLOWED+='ypbin-common/src/main/java/cn/ypbin/admin/common/tracking/RemoteTrackEventSink\.java|'
+# 连带更新：identity provider 的注释改指新装配；LoginEventTracker 注释；两个既有单测随实现迁移
+ALLOWED+='ypbin-common/src/main/java/cn/ypbin/admin/common/log/IdentityHeaderLogUserProvider\.java|'
+ALLOWED+='ypbin-auth/src/main/java/cn/ypbin/admin/auth/service/LoginEventTracker\.java|'
+ALLOWED+='ypbin-auth/src/test/java/cn/ypbin/admin/auth/log/AuthLogIngestTest\.java|'
+ALLOWED+='ypbin-common/src/test/java/cn/ypbin/admin/common/log/RemoteLogDaoTest\.java|'
+ALLOWED+='ypbin-common/src/test/java/cn/ypbin/admin/common/log/RemoteLogWiringTest\.java|'
 ALLOWED+=')$'
 
 printf '%s' "$ALLOWED"

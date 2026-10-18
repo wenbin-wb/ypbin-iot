@@ -34,7 +34,9 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 > 只会被当噪音忽略。现在：白名单内冲突 = warning + summary 列出；白名单外冲突 = 判红（那才是
 > 「分歧面失控」的信号）。
 
-> **白名单膨胀要记账**：目前 **37** 个文件（权威清单 = `tools/sync-whitelist-regex.sh`；本表与它必须逐项一致）。
+> **白名单膨胀要记账**：目前 **45** 个文件（权威清单 = `tools/sync-whitelist-regex.sh`；本表与它必须逐项一致）。
+> 2026-10-18：**加第 38–46 项**（消费 `ypbin-starter` 4.1.0 的 starter #100：日志/埋点跨服务上报的自动配置与落库实现上收到基座），
+> 性质同第 25–34 项——**删除 admin 既有文件**（本仓自建的那套上报实现），保留 = 与上游继续各写一份重复实现。
 > 2026-10-18：**加第 25–34 项**（`ypbin-starter` 4.0.0 全量下沉，见下文「一揽子下沉」），本质是「删除 admin 既有文件」，与以往「改一行」的条目性质不同。
 > 2026-10-12：**加第 21 项 `CHANGELOG.md`**（本批 deploy/IoT 修复需要写发布台账；无法用新文件表达，
 > 与 upstream 冲突时整体取本仓版本，代价同 README.md）。
@@ -72,6 +74,8 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 | `deploy/nginx-microservice.conf` | 在 `/api/` location 加 `proxy_http_version 1.1` / `Connection ''` / `proxy_buffering off` / `proxy_cache off` | **2026-10-15 加**：SSE 实时流必须关闭代理缓冲，否则事件被攒在 proxy buffer 里、用户看到「实时流不动」。问题就在既有的 `/api/` location 上（无缓冲只能改这个文件），无法用新文件表达。**代价如实登记**：与 upstream 该文件冲突时按语义合并（保留 SSE 三行 + 采纳上游其它改动）。 |
 | `deploy/sql/006-iot-schema.sql`、`007-iot-data.sql` | **新文件** | 全新安装用 |
 | `deploy/sql/migration/*-iot-*.sql` | **新文件**（命名必须含 `-iot-`） | 已上线库用；按文件名排序拼接后与 `006+007` **语句等价**（有 CI 校验）。顺序即结构演进顺序：`device-schema` → `lease-schema` → `menu-data` |
+| `ypbin-common/.../log/RemoteLogAutoConfiguration.java`、`.../log/RemoteLogDao.java`、`.../tracking/RemoteTrackAutoConfiguration.java`、`.../tracking/RemoteTrackEventSink.java` | **删除**（4 个自建的跨服务上报自动配置与落库实现） | **2026-10-18 加（第 38–41 项）**：消费 `ypbin-starter` 4.1.0 的 starter #100 —— 基座已提供 `RemoteLogAutoConfiguration`/`RemoteTrackAutoConfiguration`（各自以 `@ConditionalOnBean(..IngestClient)` 为条件、`@Bean` 带 `@ConditionalOnMissingBean`）与 `RemoteLogDao`/`RemoteTrackEventSink`。本仓只保留 2 个 **SPI 实现**（`SystemRemoteLogIngestClient`/`SystemRemoteTrackIngestClient`）+ 1 个注册它们的自动配置（新文件）。**为什么不能用新文件表达**：要表达的是「删除既有实现」，留着就与基座重复（本仓反对的漂移面）。**代价如实登记**：上游再改这 4 个文件时，同步会以 modify/delete 暴露；正确解是上游也删（理由对上游同样成立）。 |
+| `ypbin-common/.../log/IdentityHeaderLogUserProvider.java`、`ypbin-auth/.../service/LoginEventTracker.java`、`ypbin-auth/src/test/.../log/AuthLogIngestTest.java`、`ypbin-common/src/test/.../log/RemoteLogDaoTest.java`、`ypbin-common/src/test/.../log/RemoteLogWiringTest.java` | **连带更新**（注释改指新装配；两个既有单测随实现迁移到 SPI 形态） | **2026-10-18 加（第 42–46 项）**：随上面 4 个类删除而必须同步的连带改动。两个测试的**断言口径逐条保留**（上报即采集模型本身、失败必须上抛而非静默、失败带完整堆栈、异常被监听器吸收），只把被测对象从 `RemoteLogDao` 换成 `SystemRemoteLogIngestClient`。 |
 | `admin-ui`（后续） | 路由/菜单注册 | 前端增量时再补清单 |
 
 > **为什么必须改这个上游测试文件（唯一豁免来源，不可回避）**：该类的 `LOOP_DB_EXEMPTIONS` 是

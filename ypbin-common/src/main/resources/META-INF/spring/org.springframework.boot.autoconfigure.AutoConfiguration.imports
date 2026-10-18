@@ -1,2 +1,1 @@
-cn.ypbin.admin.common.log.RemoteLogAutoConfiguration
-cn.ypbin.admin.common.tracking.RemoteTrackAutoConfiguration
+cn.ypbin.admin.common.config.RemoteIngestClientAutoConfiguration
