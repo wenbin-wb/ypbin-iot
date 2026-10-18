@@ -10,8 +10,10 @@
 package cn.ypbin.admin.iot.availability;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import cn.ypbin.admin.iot.availability.AvailabilityCalculator.Summary;
+import cn.ypbin.starter.iot.availability.AvailabilityCalculator;
+import cn.ypbin.starter.iot.availability.AvailabilityCalculator.Summary;
 import java.math.BigDecimal;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -31,6 +33,52 @@ class AvailabilityCalculatorTest {
 
     private static final long WINDOW = 10 * 3600L;
     private static final long INTERVAL_MS = 5_000L;
+
+    @Test
+    @DisplayName("★ 口径冻结：可用率落在 (0.99, 0.995) 区间时必须判不达标（咬住 TARGET 的取值，而非跟随常量）")
+    void availabilityBetweenNinetyNineAndTargetMustFail() {
+        // 变异验证（issue #296 验收第 4 条）发现的**真实测试缺口**：原用例的期望值要么引用
+        // AvailabilityRules.TARGET_AVAILABILITY（跟随常量 ⇒ 常量改了什么都不会红），要么断言的
+        // 可用率离目标值很远（0.9 / 0.996528 + 单次断档超限），于是把 starter 的
+        // TARGET_AVAILABILITY 从 0.995 改成 0.99 后，业务侧**全部用例仍然绿**——
+        // 「测试真的在测 starter 那份口径」这件事没有被咬住。
+        // 本用例把可用率钉在 0.992（= 1 − 800/100000），恰好落在 0.99 与 0.995 之间：
+        // 达标判定只要真的读了 starter 的目标值，就必然随该值翻转。
+        long window = 100_000L;
+        Summary summary = AvailabilityCalculator.summarize(window, 0L, 800L, 500L, 0L, 2, INTERVAL_MS, false);
+
+        assertThat(summary.availability()).isEqualByComparingTo(new BigDecimal("0.992000"));
+        assertThat(summary.maxAllowedOutageSeconds()).as("10×5s=50s < 600s ⇒ 取 600s 下限").isEqualTo(600L);
+        assertThat(summary.longestOutageSeconds())
+            .as("最长单次 500s ≤ 600s ⇒ 双条件的第二项满足，达标与否只取决于可用率").isEqualTo(500L);
+        assertThat(summary.meetsTarget())
+            .as("0.992 < 0.995（starter 的目标可用率）⇒ 必须不达标；若此断言失败，说明"
+                + "目标可用率口径已漂移（先确认是上游有意变更，再同步改本断言与文档）")
+            .isFalse();
+    }
+
+    @Test
+    @DisplayName("★ 来源自证：被测类必须来自 starter 制品，而不是本仓同名副本（防「测的是死副本」）")
+    void calculatorMustComeFromStarterArtifact() {
+        // issue #296 的原始缺陷：AvailabilityCalculator/OutageDetector 在 starter 与业务仓各有一份，
+        // 测试留在业务仓包内 ⇒ 编译期解析到本地副本，护栏对着空靶。删掉本地副本后，
+        // **业务仓包下的同名类**必须不存在；再用 CodeSource 断言被测类确实来自 ypbin-starter-iot
+        // 的 jar（而不是别的同名物）。
+        // 名字用「本包包名 + 简单名」拼装，不在源码里写字面量全限定名：本仓铁律是禁内联 FQN，
+        // 且验收命令要求全仓 grep 旧包名 0 命中。
+        String sameNameInBizPackage = AvailabilityCalculatorTest.class.getPackageName()
+            + ".AvailabilityCalculator";
+        assertThatThrownBy(() -> Class.forName(sameNameInBizPackage, false,
+            AvailabilityCalculatorTest.class.getClassLoader()))
+            .as("业务仓不得再有本地副本（否则测试可能又解析到它）")
+            .isInstanceOf(ClassNotFoundException.class);
+        assertThat(AvailabilityCalculator.class.getName())
+            .as("被测类必须是 starter 版全限定名，不是本仓同包副本")
+            .isEqualTo("cn.ypbin.starter.iot.availability.AvailabilityCalculator");
+        assertThat(AvailabilityCalculator.class.getProtectionDomain().getCodeSource().getLocation().toString())
+            .as("被测类必须从 ypbin-starter-iot 制品加载（同一份口径只有一个可编辑副本）")
+            .contains("ypbin-starter-iot");
+    }
 
     @Test
     @DisplayName("无断档：可用率 100% 且达标")

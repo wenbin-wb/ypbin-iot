@@ -10,11 +10,13 @@
 package cn.ypbin.admin.iot.availability;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.LocalDateTime;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import cn.ypbin.starter.iot.availability.AvailabilityRules;
+import cn.ypbin.starter.iot.availability.OutageDetector;
 
 /**
  * 断档判定纯逻辑单测（M-2）：边界必须能用可推进的时间精确断言。
@@ -25,6 +27,25 @@ import cn.ypbin.starter.iot.availability.AvailabilityRules;
 class OutageDetectorTest {
 
     private static final LocalDateTime T0 = LocalDateTime.of(2026, 9, 22, 10, 0, 0);
+
+    @Test
+    @DisplayName("★ 来源自证：被测类必须来自 starter 制品，而不是本仓同名副本（防「测的是死副本」）")
+    void detectorMustComeFromStarterArtifact() {
+        // issue #296：业务仓副本已删；本断言把「测试与生产同源」钉死——一旦有人把副本加回来，
+        // 这里会先红，而不是静默回到「护栏对着空靶」。
+        // 名字用「本包包名 + 简单名」拼装（不写字面量全限定名：本仓禁内联 FQN，且验收 grep 要求 0 命中）。
+        String sameNameInBizPackage = OutageDetectorTest.class.getPackageName() + ".OutageDetector";
+        assertThatThrownBy(() -> Class.forName(sameNameInBizPackage, false,
+            OutageDetectorTest.class.getClassLoader()))
+            .as("业务仓不得再有本地副本（否则测试可能又解析到它）")
+            .isInstanceOf(ClassNotFoundException.class);
+        assertThat(OutageDetector.class.getName())
+            .as("被测类必须是 starter 版全限定名，不是本仓同包副本")
+            .isEqualTo("cn.ypbin.starter.iot.availability.OutageDetector");
+        assertThat(OutageDetector.class.getProtectionDomain().getCodeSource().getLocation().toString())
+            .as("被测类必须从 ypbin-starter-iot 制品加载")
+            .contains("ypbin-starter-iot");
+    }
 
     @Test
     @DisplayName("★ 阈值边界：now - start 恰好等于 K×周期**不算**断档，多 1 毫秒才算")
