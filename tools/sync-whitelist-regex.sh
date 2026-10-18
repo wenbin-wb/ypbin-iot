@@ -40,6 +40,11 @@ ALLOWED+='ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/mapper/
 ALLOWED+='ypbin-service/ypbin-system/src/test/java/cn/ypbin/admin/system/feign/SystemClientImplUserByIdTest\.java|'
 ALLOWED+='ypbin-service/ypbin-system/src/test/java/cn/ypbin/admin/system/feign/SystemClientImplPlatformUserTest\.java|'
 ALLOWED+='ypbin-service/ypbin-system/src/test/java/cn/ypbin/admin/system/feign/SystemClientImplLogIngestTest\.java|'
+# 第 37 项（2026-10-19 加，#87 脱敏口径统一同步）：本文件在 admin 里由 admin 新增（#87 修复），
+# 本仓同步时因 `SystemClientImpl` 构造器比 admin 多两个依赖（`SysMessageMapper`/`MailService`，
+# 本仓独有的站内信/邮件内部端点）而**必须不同** ⇒ 与 upstream 构成 add/add 冲突。
+# 为什么不能用新文件表达：被测类构造器签名不同，测试的构造参数必须跟随本仓实现。
+ALLOWED+='ypbin-service/ypbin-system/src/test/java/cn/ypbin/admin/system/feign/SystemClientImplConfigMaskTest\.java|'
 # 第 18 项（2026-09-29 加）：README 整体重写为 IoT 版（M-6）。
 # 无法用新文件实现：GitHub 默认渲染 README.md；而 README 的能力清单属**对外陈述**，
 # 与实际不符不能用「另写一份」补救。代价：上游常改 README ⇒ 下次同步必然冲突，整体取本仓版本。
