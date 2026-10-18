@@ -56,9 +56,15 @@
 | `iot.access.spec.empty` | Counter | 上游返回空清单（该租户没有设备） | 稳态 0；增长 ⇒ 设备被误删/上游过滤错 | IotProtocolTenantLinkManager.java |
 | `iot.access.spec.failure` | Counter | 清单取数失败（与「确实没有设备」分开计数） | **增长即异常**；持续失败会进退避重试 | IotProtocolTenantLinkManager.java |
 | `iot.access.spec.backoff.skipped` | Counter | 取数失败退避窗口内跳过本轮（不打远端） | 与 `spec.failure` 成对出现属预期（防打爆下游） | IotProtocolTenantLinkManager.java |
-| `iot.access.device.rebind` | Counter | 规格变化触发的重新绑定（REMOVE/ADD） | 有变更才增长 | IotProtocolTenantLinkManager.java |
-| `iot.access.device.rebind.deferred` | Counter | 重绑被推迟（如空清单退避窗口内） | 少量正常；长期增长 ⇒ 迟迟不收敛 | IotProtocolTenantLinkManager.java |
 | `iot.access.connection.invalid` | Counter | 连接参数非法（端点/协议解析失败） | **期望 0**；增长 ⇒ 台账里的端点写错 | HttpDeviceSpecSource.java |
+
+> **已移除（2026-10-18，iot-starter #38）**：`iot.access.device.rebind` 与
+> `iot.access.device.rebind.deferred` 随「宿主的重发 ADD 退避」一起删除——该能力已上收到框架的
+> `DeviceBindRetrier`（配置 `ypbin.iot.devices.rebind-backoff-initial/-max/-max-per-cycle/-max-attempts`，
+> 含「按最早到期排序防饿死」「耗尽 WARN 带堆栈 + 事件通知」）。观测改看框架侧：
+> 同一语义由框架的重试计数与 `DeviceEventListener` 通知表达。
+> ⚠️ 这两个序列**直接从本清单删除而不是保留为 0**：它们的语义已不在本仓代码里，留着会让读者以为
+> 宿主仍在做重绑退避（与实际相反）。既有面板若引用它们，需改为查框架侧指标（见 iot-starter 的 docs/METRICS.md）。
 
 ### 2.4 订阅（G1 自愈链路）
 
