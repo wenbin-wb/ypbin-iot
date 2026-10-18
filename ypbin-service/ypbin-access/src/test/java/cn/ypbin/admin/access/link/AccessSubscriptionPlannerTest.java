@@ -24,6 +24,14 @@ import cn.ypbin.iot.core.model.PointAddress;
 import cn.ypbin.iot.core.model.SubscribeRequest;
 import cn.ypbin.iot.core.model.SubscriptionHandle;
 import cn.ypbin.iot.core.protocol.DeviceSession;
+import cn.ypbin.iot.core.protocol.ProtocolDescriptor;
+import cn.ypbin.iot.core.protocol.SubscriptionAddressing;
+import cn.ypbin.iot.spring.subscription.DefaultSubscriptionOrchestrator;
+import cn.ypbin.iot.spring.subscription.ProtocolDescriptorSource;
+import cn.ypbin.iot.spring.subscription.SubscriptionBackoffPolicy;
+import cn.ypbin.iot.spring.subscription.SubscriptionOrchestrator;
+import cn.ypbin.admin.iot.modbus.ModbusRegisterAddress;
+import cn.ypbin.iot.core.protocol.AddressExpansionExtension;
 import cn.ypbin.iot.core.protocol.ProtocolCode;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Clock;
@@ -82,7 +90,7 @@ class AccessSubscriptionPlannerTest {
     @Test
     @DisplayName("★ S5+G1：订阅失败不记跟踪，且**退避窗口内不再重发**（退避到期后必须重试）")
     void failedSubscribeMustNotBeTrackedAndMustBackOffBeforeRetry() {
-        DeviceSession session = mock(DeviceSession.class);
+        DeviceSession session = withExpansion(mock(DeviceSession.class));
         CompletableFuture<SubscriptionHandle> failed = new CompletableFuture<>();
         failed.completeExceptionally(new IllegalStateException("协议侧拒绝订阅"));
         when(session.subscribe(any(SubscribeRequest.class), any())).thenReturn(failed);
@@ -103,15 +111,72 @@ class AccessSubscriptionPlannerTest {
             .isEqualTo(1.0d);
 
         // 退避到期 ⇒ 必须重试（自愈不能被退避破坏）
-        clock.advance(AccessSubscriptionPlanner.SUBSCRIBE_BACKOFF_BASE.plusSeconds(1));
+        clock.advance(SubscriptionBackoffPolicy.DEFAULT_INITIAL_DELAY.plusSeconds(1));
         assertThat(planner.subscribe(List.of(device("d1")))).as("退避到期必须重试").isEqualTo(1);
+        verify(session, times(2)).subscribe(any(SubscribeRequest.class), any());
+    }
+
+    @Test
+    @DisplayName("★ 退避窗口内**绝不调用** session.subscribe（不只是返回 0），跨窗口后必须真的重试")
+    void backoffMustNotTouchSessionAndMustRetryAfterWindow() {
+        // lead 明确要求补的断言：只把返回值改小是不够的——必须证明「退避期间真的没有打远端」，
+        // 以及「窗口过去后确实重发了」。这两条一起才能排除「返回值骗人、实际每轮都发」。
+        DeviceSession session = withExpansion(mock(DeviceSession.class));
+        CompletableFuture<SubscriptionHandle> failed = new CompletableFuture<>();
+        failed.completeExceptionally(new IllegalStateException("协议侧拒绝订阅"));
+        when(session.subscribe(any(SubscribeRequest.class), any())).thenReturn(failed);
+        AtomicReference<Map<String, DeviceSession>> bound =
+            new AtomicReference<>(Map.of("d1", session));
+        AccessSubscriptionPlanner planner = planner(bound);
+
+        assertThat(planner.subscribe(List.of(device("d1")))).as("首次确实发起").isEqualTo(1);
+        verify(session, times(1)).subscribe(any(SubscribeRequest.class), any());
+
+        // 退避窗口内连打 5 轮：一次 session 调用都不能多
+        for (int i = 0; i < 5; i++) {
+            assertThat(planner.subscribe(List.of(device("d1")))).as("退避内不得算发起").isZero();
+        }
+        verify(session, times(1)).subscribe(any(SubscribeRequest.class), any());
+
+        // 跨过窗口 ⇒ 必须真的重发（证明恢复路径存在，不是永久卡死）
+        clock.advance(SubscriptionBackoffPolicy.DEFAULT_INITIAL_DELAY.plusSeconds(1));
+        assertThat(planner.subscribe(List.of(device("d1")))).as("跨窗口必须重试").isEqualTo(1);
+        verify(session, times(2)).subscribe(any(SubscribeRequest.class), any());
+    }
+
+    @Test
+    @DisplayName("★ key-value 退避（技术债）：框架覆盖不到的分支仍按 30s 起退避，窗口内不打远端")
+    void keyValueBackoffMustStillWork() {
+        // lead 决策 ④(b)：key-value 绕过框架编排（框架把 TCP 声明为 PER_ADDRESS），
+        // 故宿主保留 ~15 行最小退避表。本用例钉住它的真实行为，避免后来人以为已完全下沉。
+        DeviceSession session = withExpansion(mock(DeviceSession.class));
+        CompletableFuture<SubscriptionHandle> failed = new CompletableFuture<>();
+        failed.completeExceptionally(new IllegalStateException("协议侧拒绝订阅"));
+        when(session.subscribe(any(SubscribeRequest.class), any())).thenReturn(failed);
+        AtomicReference<Map<String, DeviceSession>> bound =
+            new AtomicReference<>(Map.of("d1", session));
+        AccessSubscriptionPlanner planner = plannerKeyValue(bound, new SimpleMeterRegistry());
+
+        String points = "[{\"propertyId\":\"1\",\"identifier\":\"temperature\","
+            + "\"address\":\"TEMP\",\"dataType\":\"decimal\"}]";
+        assertThat(planner.subscribe(List.of(tcpDevice("d1", points)))).as("首次发起").isEqualTo(1);
+        verify(session, times(1)).subscribe(any(SubscribeRequest.class), any());
+
+        // 退避窗口内（< 30s）不得再打远端
+        clock.advance(SubscriptionBackoffPolicy.DEFAULT_INITIAL_DELAY.minusSeconds(1));
+        assertThat(planner.subscribe(List.of(tcpDevice("d1", points)))).isZero();
+        verify(session, times(1)).subscribe(any(SubscribeRequest.class), any());
+
+        // 跨过窗口 ⇒ 重试
+        clock.advance(SubscriptionBackoffPolicy.DEFAULT_INITIAL_DELAY.plusSeconds(1));
+        assertThat(planner.subscribe(List.of(tcpDevice("d1", points)))).isEqualTo(1);
         verify(session, times(2)).subscribe(any(SubscribeRequest.class), any());
     }
 
     @Test
     @DisplayName("★ G1：在途订阅（异步未完成）不得被下一轮重复发起")
     void inFlightSubscribeMustNotBeDuplicated() {
-        DeviceSession session = mock(DeviceSession.class);
+        DeviceSession session = withExpansion(mock(DeviceSession.class));
         CompletableFuture<SubscriptionHandle> pending = new CompletableFuture<>();
         when(session.subscribe(any(SubscribeRequest.class), any())).thenReturn(pending);
         AtomicReference<Map<String, DeviceSession>> bound =
@@ -136,7 +201,7 @@ class AccessSubscriptionPlannerTest {
     @Test
     @DisplayName("★ G1：失败退避指数增长、成功后清除（也不得把「换会话」挡在退避外）")
     void failureBackoffMustGrowAndResetOnSuccess() {
-        DeviceSession failing = mock(DeviceSession.class);
+        DeviceSession failing = withExpansion(mock(DeviceSession.class));
         CompletableFuture<SubscriptionHandle> failed = new CompletableFuture<>();
         failed.completeExceptionally(new IllegalStateException("boom"));
         when(failing.subscribe(any(SubscribeRequest.class), any())).thenReturn(failed);
@@ -165,7 +230,7 @@ class AccessSubscriptionPlannerTest {
     @Test
     @DisplayName("forget 必须清掉失败退避（设备被移除后重新出现要能立刻订阅）")
     void forgetMustClearFailureBackoff() {
-        DeviceSession failing = mock(DeviceSession.class);
+        DeviceSession failing = withExpansion(mock(DeviceSession.class));
         CompletableFuture<SubscriptionHandle> failed = new CompletableFuture<>();
         failed.completeExceptionally(new IllegalStateException("boom"));
         when(failing.subscribe(any(SubscribeRequest.class), any())).thenReturn(failed);
@@ -186,7 +251,7 @@ class AccessSubscriptionPlannerTest {
     @Test
     @DisplayName("★ 同步抛出不得把设备永久锁死（在途标记必须清掉）")
     void synchronousThrowMustNotLockDeviceForever() {
-        DeviceSession flaky = mock(DeviceSession.class);
+        DeviceSession flaky = withExpansion(mock(DeviceSession.class));
         // 第一次同步抛出、第二次成功：若「在途」标记没被清掉，第二次会一直被挡 ⇒ 设备永久无法订阅
         when(flaky.subscribe(any(SubscribeRequest.class), any()))
             .thenThrow(new IllegalStateException("适配器同步抛出"))
@@ -195,13 +260,16 @@ class AccessSubscriptionPlannerTest {
             new AtomicReference<>(Map.of("d1", flaky));
         AccessSubscriptionPlanner planner = planner(bound);
 
+        // ⚠️ 口径变化（iot-starter #37 迁移，lead 决策）：框架把「适配器同步抛出」收敛成
+        // SubscriptionStatus.FAILED，而 FAILED 属于「已发起过协议层调用」⇒ 本轮计入发起（返回 1）。
+        // 迁移前该场景返回 0。**采集结果与重试行为不变**（本用例的核心断言在下面两条）。
         assertThat(planner.subscribe(List.of(device("d1"))))
-            .as("同步抛出视为发起失败").isZero();
+            .as("框架把同步抛出收敛为 FAILED（已发起过调用）").isEqualTo(1);
         assertThat(planner.subscribe(List.of(device("d1"))))
-            .as("紧接着的一轮在退避窗口内，跳过").isZero();
+            .as("紧接着的一轮在框架退避窗口内，跳过").isZero();
 
         // 退避到期后必须能再次尝试并成功：若在途标记没被清掉，这里会返回 0（永久无法订阅）
-        clock.advance(AccessSubscriptionPlanner.SUBSCRIBE_BACKOFF_BASE.plusSeconds(1));
+        clock.advance(SubscriptionBackoffPolicy.DEFAULT_INITIAL_DELAY.plusSeconds(1));
         assertThat(planner.subscribe(List.of(device("d1"))))
             .as("在途标记必须已清除，否则设备永久无法订阅").isEqualTo(1);
         verify(flaky, times(2)).subscribe(any(SubscribeRequest.class), any());
@@ -211,7 +279,7 @@ class AccessSubscriptionPlannerTest {
     @Test
     @DisplayName("★ forget 必须同时清掉在途标记（同 id 复现不得被旧在途挡住）")
     void forgetMustClearInFlight() {
-        DeviceSession pendingSession = mock(DeviceSession.class);
+        DeviceSession pendingSession = withExpansion(mock(DeviceSession.class));
         when(pendingSession.subscribe(any(SubscribeRequest.class), any()))
             .thenReturn(new CompletableFuture<>());
         AtomicReference<Map<String, DeviceSession>> bound =
@@ -230,7 +298,7 @@ class AccessSubscriptionPlannerTest {
     @Test
     @DisplayName("★ G1：失败退避必须封顶（3 次失败后恒为 2 分钟，不得无限翻倍）")
     void failureBackoffMustCapAtConfiguredMax() {
-        DeviceSession failing = mock(DeviceSession.class);
+        DeviceSession failing = withExpansion(mock(DeviceSession.class));
         CompletableFuture<SubscriptionHandle> failed = new CompletableFuture<>();
         failed.completeExceptionally(new IllegalStateException("boom"));
         when(failing.subscribe(any(SubscribeRequest.class), any())).thenReturn(failed);
@@ -246,7 +314,7 @@ class AccessSubscriptionPlannerTest {
         clock.advance(Duration.ofSeconds(121));
         planner.subscribe(List.of(device("d1")));                    // 失败 4 ⇒ 封顶 120s（不封顶会是 240s）
 
-        clock.advance(AccessSubscriptionPlanner.SUBSCRIBE_BACKOFF_MAX.minusSeconds(1));
+        clock.advance(SubscriptionBackoffPolicy.DEFAULT_MAX_DELAY.minusSeconds(1));
         assertThat(planner.subscribe(List.of(device("d1"))))
             .as("封顶窗口内（差 1 秒）不得重试").isZero();
         clock.advance(Duration.ofSeconds(2));
@@ -285,7 +353,7 @@ class AccessSubscriptionPlannerTest {
     @Test
     @DisplayName("★ UP-4：4 点位 TCP 设备必须发起 4 次**单地址**订阅（否则 starter 0.2.0 fail-fast ⇒ 整机零采集）")
     void tcpDeviceWithMultiplePointsMustSubscribePerAddress() throws Exception {
-        DeviceSession session = mock(DeviceSession.class);
+        DeviceSession session = withExpansion(mock(DeviceSession.class));
         when(session.subscribe(any(SubscribeRequest.class), any()))
             .thenReturn(CompletableFuture.completedFuture(null));
         AtomicReference<Map<String, DeviceSession>> bound =
@@ -319,15 +387,16 @@ class AccessSubscriptionPlannerTest {
         assertThat(planner.trackedSessionCount()).as("全部地址成功后记一次设备级跟踪").isEqualTo(1);
         assertThat(planner.subscribe(List.of(tcpDevice4Points("d1"))))
             .as("已订阅设备不得重复发起").isZero();
+        // 「累计单地址订阅数 = 4（无重复）」已由上面两次 verify 共同证实：
+        // 第 4 次调用后仍是 4 ⇒ 第二轮（返回 0）没有新增任何订阅。
+        // 宿主侧的 tcpStartedAddressSubscriptionCount 计数器已删（逐点位计数归框架维护）。
         verify(session, times(4)).subscribe(any(SubscribeRequest.class), any());
-        assertThat(planner.tcpStartedAddressSubscriptionCount())
-            .as("累计单地址订阅数应为 4（无重复）").isEqualTo(4);
     }
 
     @Test
     @DisplayName("★ UP-4：TCP 单点位设备仍只发 1 次单地址订阅（不得退化）")
     void tcpDeviceWithSinglePointMustSubscribeOnce() {
-        DeviceSession session = mock(DeviceSession.class);
+        DeviceSession session = withExpansion(mock(DeviceSession.class));
         when(session.subscribe(any(SubscribeRequest.class), any()))
             .thenReturn(CompletableFuture.completedFuture(null));
         AtomicReference<Map<String, DeviceSession>> bound =
@@ -344,7 +413,7 @@ class AccessSubscriptionPlannerTest {
     @Test
     @DisplayName("★ UP-4：TCP 部分地址失败 ⇒ 只重试失败地址，已成功地址绝不重复挂监听（防重复读数）")
     void tcpPartialFailureMustRetryOnlyFailedAddresses() {
-        DeviceSession session = mock(DeviceSession.class);
+        DeviceSession session = withExpansion(mock(DeviceSession.class));
         List<SubscribeRequest> seen = new CopyOnWriteArrayList<>();
         CompletableFuture<SubscriptionHandle> boom = new CompletableFuture<>();
         boom.completeExceptionally(new IllegalStateException(TcpFailFast.MULTI_BODY));
@@ -376,7 +445,7 @@ class AccessSubscriptionPlannerTest {
     @Test
     @DisplayName("★ UP-4：TCP 全部地址失败 ⇒ 每次失败各计一次、退避后整体重试、且不写设备级跟踪（S5）")
     void tcpAllFailuresMustCountAndBackoff() {
-        DeviceSession session = mock(DeviceSession.class);
+        DeviceSession session = withExpansion(mock(DeviceSession.class));
         List<SubscribeRequest> seen = new CopyOnWriteArrayList<>();
         CompletableFuture<SubscriptionHandle> boom = new CompletableFuture<>();
         boom.completeExceptionally(new IllegalStateException("拒绝订阅"));
@@ -401,7 +470,7 @@ class AccessSubscriptionPlannerTest {
         assertThat(seen).hasSize(4);
 
         // 退避到期 ⇒ 必须重试（自愈不能被退避破坏）
-        clock.advance(AccessSubscriptionPlanner.SUBSCRIBE_BACKOFF_BASE.plusSeconds(1));
+        clock.advance(SubscriptionBackoffPolicy.DEFAULT_INITIAL_DELAY.plusSeconds(1));
         assertThat(planner.subscribe(List.of(tcpDevice4Points("d1")))).isEqualTo(1);
         assertThat(seen).as("退避到期后 4 个地址都要重试").hasSize(8);
     }
@@ -409,7 +478,7 @@ class AccessSubscriptionPlannerTest {
     @Test
     @DisplayName("★ UP-4：TCP 会话实例变化 ⇒ 作废旧地址状态并逐点位重订阅")
     void tcpResubscribeOnSessionChange() {
-        DeviceSession first = mock(DeviceSession.class);
+        DeviceSession first = withExpansion(mock(DeviceSession.class));
         when(first.subscribe(any(SubscribeRequest.class), any()))
             .thenReturn(CompletableFuture.completedFuture(null));
         AtomicReference<Map<String, DeviceSession>> bound =
@@ -419,21 +488,23 @@ class AccessSubscriptionPlannerTest {
         planner.subscribe(List.of(tcpDevice4Points("d1")));
         verify(first, times(4)).subscribe(any(SubscribeRequest.class), any());
 
-        DeviceSession reconnected = mock(DeviceSession.class);
+        DeviceSession reconnected = withExpansion(mock(DeviceSession.class));
         when(reconnected.subscribe(any(SubscribeRequest.class), any()))
             .thenReturn(CompletableFuture.completedFuture(null));
         bound.set(Map.of("d1", reconnected));
 
         assertThat(planner.subscribe(List.of(tcpDevice4Points("d1"))))
             .as("换会话后必须对新会话逐点位重订阅").isEqualTo(1);
+        // 累计 8 次 = 原会话 4 次 + 新会话 4 次（宿主计数器已删，用两次 verify 直接表达）
+        verify(first, times(4)).subscribe(any(SubscribeRequest.class), any());
         verify(reconnected, times(4)).subscribe(any(SubscribeRequest.class), any());
-        assertThat(planner.tcpStartedAddressSubscriptionCount()).isEqualTo(8);
+        assertThat(planner.trackedSessionCount()).isEqualTo(1);
     }
 
     @Test
     @DisplayName("★ UP-4：非 TCP（Modbus）>1 点位仍走「一次多地址」——不得被 TCP 分支误伤")
     void nonTcpMultiPointStillUsesSingleMultiAddressRequest() {
-        DeviceSession session = mock(DeviceSession.class);
+        DeviceSession session = withExpansion(mock(DeviceSession.class));
         when(session.subscribe(any(SubscribeRequest.class), any()))
             .thenReturn(CompletableFuture.completedFuture(null));
         AtomicReference<Map<String, DeviceSession>> bound =
@@ -452,7 +523,7 @@ class AccessSubscriptionPlannerTest {
     @Test
     @DisplayName("★ UP-4：forget 必须清掉 TCP 逐点位状态（设备复现不得被旧成功集挡住）")
     void forgetMustClearTcpPerAddressState() {
-        DeviceSession session = mock(DeviceSession.class);
+        DeviceSession session = withExpansion(mock(DeviceSession.class));
         when(session.subscribe(any(SubscribeRequest.class), any()))
             .thenReturn(CompletableFuture.completedFuture(null));
         AtomicReference<Map<String, DeviceSession>> bound =
@@ -462,7 +533,7 @@ class AccessSubscriptionPlannerTest {
         planner.subscribe(List.of(tcpDevice4Points("d1")));
         planner.forget("d1");
 
-        DeviceSession healthy = mock(DeviceSession.class);
+        DeviceSession healthy = withExpansion(mock(DeviceSession.class));
         when(healthy.subscribe(any(SubscribeRequest.class), any()))
             .thenReturn(CompletableFuture.completedFuture(null));
         bound.set(Map.of("d1", healthy));
@@ -474,7 +545,7 @@ class AccessSubscriptionPlannerTest {
     @Test
     @DisplayName("★ key-value：4 点位 TCP 必须**一次**多地址订阅（1 个请求携带 4 个地址），不再 N 次单地址")
     void tcpKeyValueWithMultiplePointsMustSubscribeOnceWithAllAddresses() {
-        DeviceSession session = mock(DeviceSession.class);
+        DeviceSession session = withExpansion(mock(DeviceSession.class));
         when(session.subscribe(any(SubscribeRequest.class), any()))
             .thenReturn(CompletableFuture.completedFuture(null));
         AtomicReference<Map<String, DeviceSession>> bound =
@@ -489,9 +560,9 @@ class AccessSubscriptionPlannerTest {
         assertThat(requests.getValue().addresses().stream().map(PointAddress::raw).toList())
             .as("一次请求必须携带全部 4 个去重地址")
             .containsExactlyInAnyOrder("TEMP", "HUMI", "SN", "BAT");
-        assertThat(planner.tcpStartedAddressSubscriptionCount())
-            .as("key-value 不得走逐点位单订阅（该计数不增长）——这正是「1 次多地址」与「4 次单地址」的区分点")
-            .isZero();
+        // 「key-value 不得走逐点位单订阅」已由上面的 times(1) 直接证实：
+        // 1 次调用携带 4 个地址，而不是 4 次单地址调用。
+        verify(session, times(1)).subscribe(any(SubscribeRequest.class), any());
         assertThat(planner.trackedSessionCount()).as("成功后记设备级跟踪").isEqualTo(1);
 
         // 已订阅设备不得重复发起
@@ -502,7 +573,7 @@ class AccessSubscriptionPlannerTest {
     @Test
     @DisplayName("★ key-value：订阅失败 ⇒ **设备级 1 次**失败计数 + 不写跟踪 + 退避后整体重试")
     void tcpKeyValueFailureMustBackoffAndNotTrack() {
-        DeviceSession session = mock(DeviceSession.class);
+        DeviceSession session = withExpansion(mock(DeviceSession.class));
         List<SubscribeRequest> seen = new CopyOnWriteArrayList<>();
         CompletableFuture<SubscriptionHandle> failed = new CompletableFuture<>();
         failed.completeExceptionally(new IllegalStateException("拒绝订阅"));
@@ -528,7 +599,7 @@ class AccessSubscriptionPlannerTest {
         assertThat(seen).hasSize(1);
 
         // 退避到期 ⇒ 整体重试
-        clock.advance(AccessSubscriptionPlanner.SUBSCRIBE_BACKOFF_BASE.plusSeconds(1));
+        clock.advance(SubscriptionBackoffPolicy.DEFAULT_INITIAL_DELAY.plusSeconds(1));
         assertThat(planner.subscribe(List.of(tcpDevice4Points("d1")))).isEqualTo(1);
         assertThat(seen).hasSize(2);
     }
@@ -536,7 +607,7 @@ class AccessSubscriptionPlannerTest {
     @Test
     @DisplayName("★ key-value：单点位也只发 1 次（多地址路径的 N=1 退化）")
     void tcpKeyValueSinglePointMustSubscribeOnce() {
-        DeviceSession session = mock(DeviceSession.class);
+        DeviceSession session = withExpansion(mock(DeviceSession.class));
         when(session.subscribe(any(SubscribeRequest.class), any()))
             .thenReturn(CompletableFuture.completedFuture(null));
         AtomicReference<Map<String, DeviceSession>> bound =
@@ -571,7 +642,7 @@ class AccessSubscriptionPlannerTest {
     @Test
     @DisplayName("★ key-value：重复 raw 地址必须去重（否则 SDK 逐地址条目产出 ⇒ 同一帧重复读数）")
     void tcpKeyValueDuplicateRawAddressMustBeDeduped() {
-        DeviceSession session = mock(DeviceSession.class);
+        DeviceSession session = withExpansion(mock(DeviceSession.class));
         when(session.subscribe(any(SubscribeRequest.class), any()))
             .thenReturn(CompletableFuture.completedFuture(null));
         AtomicReference<Map<String, DeviceSession>> bound =
@@ -595,7 +666,7 @@ class AccessSubscriptionPlannerTest {
     @Test
     @DisplayName("★ Modbus word_count=2：一次订阅必须带 base 与 base+1 两个寄存器")
     void modbusWordCountTwoMustSubscribeBaseAndNext() {
-        DeviceSession session = mock(DeviceSession.class);
+        DeviceSession session = withExpansion(mock(DeviceSession.class));
         when(session.subscribe(any(SubscribeRequest.class), any()))
             .thenReturn(CompletableFuture.completedFuture(null));
         AtomicReference<Map<String, DeviceSession>> bound =
@@ -674,7 +745,7 @@ class AccessSubscriptionPlannerTest {
     @Test
     @DisplayName("★ v2 float：word_count=2 一次订阅带 base 与 base+1（复用 v1 扩地址骨架）")
     void modbusFloatMustSubscribeBaseAndNext() {
-        DeviceSession session = mock(DeviceSession.class);
+        DeviceSession session = withExpansion(mock(DeviceSession.class));
         when(session.subscribe(any(SubscribeRequest.class), any()))
             .thenReturn(CompletableFuture.completedFuture(null));
         AtomicReference<Map<String, DeviceSession>> bound =
@@ -695,7 +766,7 @@ class AccessSubscriptionPlannerTest {
     @Test
     @DisplayName("★ Modbus word_count=1：订阅地址与今天完全一致（传统 5 位编号也照常）")
     void modbusWordCountOneMustStaySingle() {
-        DeviceSession session = mock(DeviceSession.class);
+        DeviceSession session = withExpansion(mock(DeviceSession.class));
         when(session.subscribe(any(SubscribeRequest.class), any()))
             .thenReturn(CompletableFuture.completedFuture(null));
         AtomicReference<Map<String, DeviceSession>> bound =
@@ -716,7 +787,7 @@ class AccessSubscriptionPlannerTest {
     @Test
     @DisplayName("★ Modbus 寄存器重叠：扩出的 base+1 与其它点位地址重复 ⇒ 去重（不重复读数）")
     void modbusWordCountTwoSharedRegisterMustDedupe() {
-        DeviceSession session = mock(DeviceSession.class);
+        DeviceSession session = withExpansion(mock(DeviceSession.class));
         when(session.subscribe(any(SubscribeRequest.class), any()))
             .thenReturn(CompletableFuture.completedFuture(null));
         AtomicReference<Map<String, DeviceSession>> bound =
@@ -738,18 +809,26 @@ class AccessSubscriptionPlannerTest {
     @Test
     @DisplayName("★ Modbus word_count=2 但地址非法（传统 5 位编号）⇒ 跳过该设备、不抛断整轮")
     void modbusWordCountTwoInvalidAddressMustSkipDeviceNotTick() {
-        DeviceSession session = mock(DeviceSession.class);
+        DeviceSession session = withExpansion(mock(DeviceSession.class));
         when(session.subscribe(any(SubscribeRequest.class), any()))
             .thenReturn(CompletableFuture.completedFuture(null));
         AtomicReference<Map<String, DeviceSession>> bound =
             new AtomicReference<>(Map.of("d1", session));
-        AccessSubscriptionPlanner planner = planner(bound);
+        SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+        AccessSubscriptionPlanner planner = planner(bound, meterRegistry);
 
         String points = "[{\"propertyId\":\"1\",\"identifier\":\"counter\","
             + "\"address\":\"40001\",\"wordCount\":2}]";
+        // ⚠️ 口径变化（iot-starter #37 迁移，lead 决策 2）：框架把「地址扩展失败」记为
+        // 该点位的 SubscriptionFailure，设备级仍算发起（返回 1）；迁移前是「整设备跳过、返回 0」。
+        // **采集结果一致**：都不订阅该点位地址、也**不**退而只订基址（框架显式选择「宁可失败也不订半截」）。
+        // 因此本用例的核心断言改为：① session 未收到任何 subscribe 调用；② 失败可观测（计数/日志）。
         assertThat(planner.subscribe(List.of(device("d1", points))))
-            .as("地址扩展失败 ⇒ 本设备本轮跳过（映射校验应已拦住，这里防直连 DB 的坏数据）").isZero();
+            .as("框架把地址扩展失败记为点位 failure，设备级仍算发起").isEqualTo(1);
         verify(session, never()).subscribe(any(SubscribeRequest.class), any());
+        assertThat(meterRegistry.get("iot.access.subscribe.failure").counter().count())
+            .as("地址扩展失败必须可观测（否则「发起 1 次但点位永远无数据」是新的静默失效）")
+            .isEqualTo(1.0d);
     }
 
     private AccessSubscriptionPlanner planner(AtomicReference<Map<String, DeviceSession>> bound) {
@@ -760,18 +839,85 @@ class AccessSubscriptionPlannerTest {
     private AccessSubscriptionPlanner planner(AtomicReference<Map<String, DeviceSession>> bound,
                                               SimpleMeterRegistry meterRegistry) {
         return new AccessSubscriptionPlanner(bound::get, objectMapper, reading -> { },
-            meterRegistry, clock, false, BytePayloadDecoderRegistry.empty());
+            meterRegistry, orchestrator(), false, BytePayloadDecoderRegistry.empty(), clock);
     }
 
     /** **key-value** 形态：TCP 走一次多地址订阅。 */
     private AccessSubscriptionPlanner plannerKeyValue(
             AtomicReference<Map<String, DeviceSession>> bound, SimpleMeterRegistry meterRegistry) {
         return new AccessSubscriptionPlanner(bound::get, objectMapper, reading -> { },
-            meterRegistry, clock, true, BytePayloadDecoderRegistry.empty());
+            meterRegistry, orchestrator(), true, BytePayloadDecoderRegistry.empty(), clock);
+    }
+
+    /**
+     * 真实的框架订阅编排器（iot-starter #37 的 {@code DefaultSubscriptionOrchestrator}）。
+     *
+     * <p>刻意用**框架默认实现**而不是 mock：本类测试的价值就在于证明「宿主把正确输入交给框架后，
+     * 框架产出的订阅请求与迁移前等价」（分流/展开/在途/部分成功/退避全在框架里）。mock 掉它就等于
+     * 把被测逻辑抽空。</p>
+     *
+     * <p>协议描述符按本测试用到的协议给：modbus=整批（BATCH）、tcp=逐点位（PER_ADDRESS），
+     * 与框架里两个适配器的**真实声明**一致（见 {@code ModbusAdapter}/{@code TcpAdapter}）。</p>
+     */
+    private SubscriptionOrchestrator orchestrator() {
+        ProtocolDescriptor modbus = ProtocolDescriptor.builder()
+            .code(ProtocolCode.of("modbus"))
+            .name("Modbus")
+            .subscriptionAddressing(SubscriptionAddressing.BATCH)
+            .build();
+        ProtocolDescriptor tcp = ProtocolDescriptor.builder()
+            .code(ProtocolCode.of("tcp"))
+            .name("TCP")
+            .subscriptionAddressing(SubscriptionAddressing.PER_ADDRESS)
+            .build();
+        return new DefaultSubscriptionOrchestrator(ProtocolDescriptorSource.of(List.of(modbus, tcp)),
+            SubscriptionBackoffPolicy.defaults(), clock);
+    }
+
+
+    /**
+     * 建一个「像生产会话一样」的 mock：能 {@code unwrap} 出协议扩展。
+     *
+     * <p>为什么必须补这个桩：框架的 {@code DefaultSubscriptionOrchestrator} 通过
+     * {@code session.unwrap(AddressExpansionExtension.class)} 拿协议声明的地址算术
+     * （生产里 {@code ModbusSession#unwrap} 返回 {@code ModbusAddressExpansion}）。裸 mock 返回
+     * {@code Optional.empty()} ⇒ 所有 {@code wordCount>1} 的点位都会「展开失败」而不是订阅基址。
+     * 本测试要验的是宿主的翻译逻辑，故桩出一个与生产一致的扩展（modbus=+1、其它=不展开）。</p>
+     *
+     * @param <T> mock 类型
+     * @param mock 已创建的 mock
+     * @return 同一个 mock（便于内联）
+     */
+    /** 会话桩用的设备规格（只有 deviceId 会被框架读到，其余取安全默认值）。 */
+    private static DeviceSpec specForSessionStub() {
+        return new DeviceSpec("d1", "d1", ProtocolCode.of("modbus"), "t11-stub", "",
+            Duration.ofSeconds(5), Map.of());
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T extends DeviceSession> T withExpansion(T mock) {
+        // 框架的 resetIfSessionChanged / 日志会读 session.device() 与 sessionId()：生产会话必非空，
+        // 裸 mock 返回 null 会让框架抛 NPE ⇒ 这里补上与生产一致的桩。
+        DeviceSpec stubSpec = specForSessionStub();
+        when(mock.device()).thenReturn(stubSpec);
+        when(mock.sessionId()).thenReturn("sess-" + System.identityHashCode(mock));
+        when(mock.unwrap(AddressExpansionExtension.class)).thenReturn(java.util.Optional.of(
+            new AddressExpansionExtension() {
+                @Override
+                public ProtocolCode protocol() {
+                    return ProtocolCode.of("modbus");
+                }
+
+                @Override
+                public PointAddress offset(PointAddress base, int delta) {
+                    return PointAddress.of(ModbusRegisterAddress.plus(base.raw(), delta));
+                }
+            }));
+        return mock;
     }
 
     private static DeviceSession subscribeReturnsFuture() {
-        DeviceSession session = mock(DeviceSession.class);
+        DeviceSession session = withExpansion(mock(DeviceSession.class));
         when(session.subscribe(any(SubscribeRequest.class), any()))
             .thenReturn(CompletableFuture.completedFuture(null));
         return session;

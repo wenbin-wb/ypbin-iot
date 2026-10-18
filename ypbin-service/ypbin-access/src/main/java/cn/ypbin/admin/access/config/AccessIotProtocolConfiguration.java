@@ -18,6 +18,7 @@ import cn.ypbin.admin.access.link.AccessSubscriptionPlanner;
 import cn.ypbin.admin.access.link.DeviceSpecSource;
 import cn.ypbin.admin.access.link.IotProtocolTenantLinkManager;
 import cn.ypbin.admin.access.link.SubscriptionPlanner;
+import cn.ypbin.iot.spring.subscription.SubscriptionOrchestrator;
 import cn.ypbin.admin.access.link.TenantLinkManager;
 import cn.ypbin.iot.core.protocol.DeviceSession;
 import cn.ypbin.iot.core.spi.BytePayloadDecoderRegistry;
@@ -142,7 +143,8 @@ public class AccessIotProtocolConfiguration {
                                                         AccessReadingSink readingSink,
                                                         MeterRegistry meterRegistry,
                                                         ObjectProvider<TcpProperties> tcpPropertiesProvider,
-                                                        BytePayloadDecoderRegistry decoderRegistry) {
+                                                        BytePayloadDecoderRegistry decoderRegistry,
+                                                        SubscriptionOrchestrator subscriptionOrchestrator) {
         Supplier<Map<String, DeviceSession>> sessions = () -> {
             IotLifecycle lifecycle = lifecycleProvider.getIfAvailable();
             return lifecycle == null ? Map.of() : lifecycle.sessions();
@@ -153,9 +155,10 @@ public class AccessIotProtocolConfiguration {
         TcpProperties tcpProperties = tcpPropertiesProvider.getIfAvailable();
         boolean tcpKeyValuePayloadFormat = tcpProperties != null
             && tcpProperties.payloadFormat() == TcpPayloadFormat.KEY_VALUE;
-        // Clock 给系统时钟：订阅失败退避的时间基准，单测里注入可推进的假时钟
+        // 订阅编排（重订/在途去重/部分成功补订/退避/地址展开）由框架的 SubscriptionOrchestrator 承担（iot-starter #37）
         return new AccessSubscriptionPlanner(sessions, objectMapper, readingSink,
-            meterRegistry, Clock.systemUTC(), tcpKeyValuePayloadFormat, decoderRegistry);
+            meterRegistry, subscriptionOrchestrator, tcpKeyValuePayloadFormat, decoderRegistry,
+            Clock.systemUTC());
     }
 
     /**

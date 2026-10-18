@@ -17,9 +17,7 @@ import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import cn.ypbin.admin.access.config.AccessEgressProperties;
-import cn.ypbin.admin.access.decode.AccessDecodeProperties;
 import cn.ypbin.admin.access.decode.ByteDecodeMetrics;
-import cn.ypbin.admin.access.decode.MqttBinaryNumberDecoder;
 import cn.ypbin.admin.access.link.PointMappingDataListener;
 import cn.ypbin.admin.iot.availability.IReadingClient;
 import cn.ypbin.admin.iot.device.AccessPointMappingDto;
@@ -29,6 +27,7 @@ import cn.ypbin.iot.core.model.Quality;
 import cn.ypbin.iot.core.spi.BytePayloadDecoder;
 import cn.ypbin.iot.core.spi.BytePayloadDecoderRegistry;
 import cn.ypbin.iot.core.spi.DecodeContext;
+import cn.ypbin.iot.core.spi.DecodeFailure;
 import cn.ypbin.iot.core.spi.DecodeOutcome;
 import cn.ypbin.iot.runtime.registry.DefaultBytePayloadDecoderRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -228,21 +227,48 @@ class BytePayloadDecodeIntegrationTest {
         return new PointMappingDataListener(DEVICE, protocol, 5_000, points, sink, meters, registry);
     }
 
-    /** 参考解码器的默认规格：UINT big，默认为 2 字节。 */
+    /** 测试用解码器：UINT big，默认 2 字节（等价于已删除的参考实现在本测试里的行为）。 */
     private static BytePayloadDecoderRegistry registry() {
         return registry(2);
     }
 
     private static BytePayloadDecoderRegistry registry(int length) {
-        AccessDecodeProperties.NumberSpec spec = new AccessDecodeProperties.NumberSpec();
-        spec.setNumberType(AccessDecodeProperties.NumberType.UINT);
-        spec.setLength(length);
-        spec.setByteOrder(AccessDecodeProperties.Endianness.BIG);
-        AccessDecodeProperties.MqttBinary properties = new AccessDecodeProperties.MqttBinary();
-        properties.setEnabled(true);
-        properties.setDefaultSpec(spec);
-        properties.setPoints(Map.of());
-        return new DefaultBytePayloadDecoderRegistry(List.of(new MqttBinaryNumberDecoder(properties)));
+        return new DefaultBytePayloadDecoderRegistry(List.of(new UintDecoder(length)));
+    }
+
+    /**
+     * 极小测试解码器：定长大端无符号整数 → {@link Long}。
+     *
+     * <p>本测试类验的是「宿主可插解码 SPI 的链路」（注册表 → listener → 缩放 → 落列 / 失败语义），
+     * 与具体解码器无关。原参考实现（MQTT 二进制定宽数值解码）已按 iot-starter #39 a 删除
+     * （它在本仓双重不可能生效：enabled 默认 false + access 不依赖 mqtt 协议栈），
+     * 故这里用一个内联替身保住链路验证强度——<b>不是</b>把参考实现换个名字留在生产代码里。</p>
+     */
+    private record UintDecoder(int length) implements BytePayloadDecoder {
+
+        @Override
+        public String id() {
+            return "test-uint";
+        }
+
+        @Override
+        public boolean supports(DecodeContext context) {
+            // 与原参考实现同口径：只认领 mqtt 协议。这条判据是「★①b 解码器存在但不认领该协议 ⇒
+            // 落回出口闸门」用例的前提（协议是 opcua 时本解码器必须**不**认领）。
+            return "mqtt".equals(context.protocol().value());
+        }
+
+        @Override
+        public DecodeOutcome decode(byte[] payload, DecodeContext context) {
+            if (payload.length != length) {
+                return DecodeOutcome.failed(DecodeFailure.LENGTH_MISMATCH);
+            }
+            long value = 0L;
+            for (byte b : payload) {
+                value = (value << 8) | (b & 0xFFL);
+            }
+            return DecodeOutcome.ok(value);
+        }
     }
 
     private static AccessEgressProperties egressProperties() {
