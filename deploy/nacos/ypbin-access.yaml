@@ -38,7 +38,9 @@ ypbin:
   # 出站内部凭证（starter 4.0.0 官方 Feign 携带）：与 iot 的 /internal/** 守卫共用同一个值。
   # 由 ypbin-starter-cloud-core 的 FeignHeaderInterceptor 为**每个** Feign 请求写入
   # X-Internal-Token（access 侧不再手写拦截器）。未配置 ⇒ 服务端守卫 fail-closed 拒绝。
-  # ⚠️ 旧键 ypbin.internal.token 已废弃（不再被任何代码读取）。
+  # ⚠️ 旧键（本文件 ypbin 命名空间下的 internal.token）已废弃：不再被任何代码读取，写在这里不会生效。
+  #   本 Data ID 的正确键就是上面这行 ypbin.cloud.feign.internal-token；
+  #   门禁：tools/check-deprecated-config-keys.sh（废弃键清单的单一来源）。
   cloud:
     feign:
       internal-token: ${INTERNAL_TOKEN}

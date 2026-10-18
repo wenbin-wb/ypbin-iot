@@ -84,7 +84,9 @@ ypbin:
   # 出站（携带）：ypbin.cloud.feign.internal-token 让 starter 的 FeignHeaderInterceptor 为**每个**
   #   Feign 请求写入 X-Internal-Token（无需每客户端手写拦截器）。
   # 两处必须是同一个值；真值不入库：install.sh 导入 Nacos 时替换为 deploy/.env 的 INTERNAL_TOKEN。
-  # ⚠️ 旧键 ypbin.internal.token 已废弃（4.0.0 起业务仓不再读取）；保留旧键不会生效。
+  # ⚠️ 旧键（本文件 ypbin 命名空间下的 internal.token）已废弃：starter 4.0.0 起业务仓与基座
+  #   都不再有消费方，保留不会生效，还会让运维误以为「配在这里就能出站携带凭证」。
+  #   迁移去向与废弃清单见 SYNC.md「2026-10-18 一揽子下沉」；门禁：tools/check-deprecated-config-keys.sh。
   security:
     identity:
       enabled: true

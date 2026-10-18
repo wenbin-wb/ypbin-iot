@@ -102,6 +102,20 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 | `access/decode/*`（自建 `BytePayloadDecoder` SPI + 注册机 + `DecodeContext`/`DecodeOutcome`/`DecodeFailure`） | `ypbin-iot-core:0.4.0` 的 `cn.ypbin.iot.core.spi.*` + `ypbin-iot-runtime` 的 `DefaultBytePayloadDecoderRegistry` | 失败指标口径改为 `ypbin.iot.errors{type=iot.common.payload.decode-failed.<detail>}` |
 | `access/link/ModbusRegisterDecoder` | `ypbin-iot-protocol-modbus:0.4.0` 的同名工具（`decodePair` → `decodeInt32`） | 无 |
 | `access/egress/HttpAccessReadingSink` 内手写队列 + `@Scheduled` 微批 + 停机排空 | `ypbin-iot-runtime:0.4.0` 的 `BoundedBatchEgressQueue`（本类只保留业务闸门与指标） | `flush-interval-ms` 语义不变（作为基座的 flush 窗口） |
+| `iot/availability/AvailabilityCalculator` + `OutageDetector` | `ypbin-starter-iot:4.0.0` 的**同名类**（`cn.ypbin.starter.iot.availability.*`；归一化后仅版权头/包名/`@Nullable` 标注差异，无计算逻辑差异） | 无（沿用 `AvailabilityRules` 的常量口径） |
+| `access/link/ModbusRegisterDecoder` 的**测试侧假绿**（`ModbusStringDecodeTest` 无 import、靠同包解析到旧副本） | 测试显式 import starter 版；旧类已删 | 无 |
+
+> **2026-10-18 收尾（issue #295/#296/#297）**：上表的下沉条目里，`AvailabilityCalculator` / `OutageDetector` /
+> `ModbusRegisterDecoder` 这三个「已由 starter 取代」的**业务仓副本**本轮才真正删除（#291 只切了生产路径，
+> 副本与测试仍留着）。为防止「下次下沉后又忘记删副本」复现，新增架构门禁
+> `DuplicateClassNameGateTest`：**禁止 `cn.ypbin.admin.*` 下出现与 `cn.ypbin.iot.*` / `cn.ypbin.starter.*`
+> 同名的顶层类**。该门禁按本仓 pom 声明的版本扫本地仓库制品并带「防空跑」自证，另有一条已知同名豁免
+> （`RedisNonceStore`：开放 API 专用 fail-closed 实现，非旧副本）。
+>
+> **同批次配置键收尾**：`ypbin.internal.token` 在本仓已**彻底清零**（含 `ypbin-access` 本地 `application.yml`
+> 与全部文档/模板注释），并新增 `tools/check-deprecated-config-keys.sh` 挂到 fork 自有的
+> `sync-whitelist.yml`（**未改 admin 拥有的 `ci.yml`**）。门禁按 YAML 解析后的**键路径**判定，
+> 注释里的键名（本仓多处用注释记录「旧键已废弃」的教训）不算命中。
 
 **整批发布的硬约束（不做双轨）**：
 1. **SSE codec id** 由 `iot-json-v1` 变为 `json-v1` ⇒ 混版本滚动期内跨实例扇出双向丢弃；

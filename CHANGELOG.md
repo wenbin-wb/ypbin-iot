@@ -58,6 +58,32 @@
   原本把整条 `java.class.path` 拼在命令行上，Windows 单条命令行上限 8191 字符 ⇒ 长类路径直接起不来。
   改为写 Java 9+ 的 `@argfile`（JVM 自己读取，无长度上限），并在 `finally` 中清理临时文件。
 
+### 修复（2026-10-18 批次三 · issue #295/#296/#297）
+
+- **删除下沉后遗留的业务仓副本 + 新增同名类门禁（issue #295/#296）**：
+  - `ypbin-access` 的 `cn.ypbin.admin.access.link.ModbusRegisterDecoder` 删除（生产路径 #291 起已 import
+    `ypbin-iot-protocol-modbus:0.4.0`，本仓该文件**零引用、只剩测试在测**）。同时修掉一处**假绿**：
+    `ModbusStringDecodeTest` 原来**无 import**、靠同包解析到本仓旧副本 ⇒ 它绿了不代表生产路径（starter 版）
+    正确。现已显式 import starter 版并核对断言（starter 版含 `decodeStringUtf8`，冻结口径一致）。
+  - `ypbin-iot` 的 `cn.ypbin.admin.iot.availability.AvailabilityCalculator` / `OutageDetector` 删除
+    （与 `ypbin-starter-iot:4.0.0` 同名，归一化后仅版权头/包名/`@Nullable` 标注差异，**无计算逻辑差异**）；
+    `AvailabilityServiceImpl` 改 import `cn.ypbin.starter.iot.availability.*`，两个口径测试类同步迁移。
+  - **新增架构门禁** `DuplicateClassNameGateTest`（`ypbin-architecture-tests`）：禁止 `cn.ypbin.admin.*` 下出现与
+    `cn.ypbin.iot.*` / `cn.ypbin.starter.*` **同名**的顶层类，按本仓 pom **声明版本**扫本地仓库制品（不扫历史版本）；
+    带三处防「空跑绿」自证（类数下界、三个锚点制品、豁免清单消耗检测）。已知同名豁免仅 `RedisNonceStore`
+    一条（开放 API 专用 fail-closed 实现，非旧副本，理由写在代码里）。
+  - **新增的口径冻结用例**：`AvailabilityCalculatorTest#availabilityBetweenNinetyNineAndTargetMustFail`
+    钉住「可用率 0.992 ⇒ 不达标」。这条用例来自变异验证发现的**真实测试缺口**（见下）：
+    原用例的期望要么引用 `AvailabilityRules.TARGET_AVAILABILITY`（跟随常量）、要么离目标值很远，
+    把 starter 的 `TARGET_AVAILABILITY` 由 0.995 改成 0.99 后业务侧**全部用例仍然绿**。
+- **清理已废弃配置键并加门禁（issue #297）**：删除 `ypbin-access` 本地 `application.yml` 的
+  `ypbin.internal.token` 两行（starter 4.0.0 起**无任何消费方**）。留着它的真实危害是误导运维——
+  以为配在这里就能出站携带凭证，实际必须配 `ypbin.cloud.feign.internal-token`，漏配的后果是 iot 的
+  `/internal/**` 守卫 **fail-closed 全拒**（租约与读数上报全挂）。
+  新增 `tools/check-deprecated-config-keys.sh`（**按 YAML 解析后的键路径**判定，注释里的键名不算数）
+  并挂到 fork 自有的 `sync-whitelist.yml`（**不动 admin 拥有的 `ci.yml`**，零同步冲突面）；
+  仓内残留的旧键说明（`docs/*.md`、`deploy/nacos/*.yaml` 注释）一并更新为迁移后的真实键名。
+
 ### 破坏性变更
 
 - **上述条目全部不向后兼容**（类被删、配置键改名、指标改口径、SSE codec id 变更）⇒ **必须整批发布**，

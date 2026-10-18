@@ -689,7 +689,7 @@ UI/OpenAPI → business(core.device)
 | 机制 | 结论 |
 |---|---|
 | 归属 | `tenant_node_assignment`（tenant_id/access_node/lease_expire_at/epoch/state），DB CAS 单赢家 |
-| 内部端点 | `/internal/lease/**` 六端点（register/acquire/renew/release/assignment/epochs），`InternalTokenGuardInterceptor` 保护 |
+| 内部端点 | `/internal/lease/**` 六端点（register/acquire/renew/release/assignment/epochs），starter 的 `InternalTokenGuardAutoConfiguration`（`ypbin.security.internal-token.*`）保护 |
 | 失效检测 | 过期→`PENDING_TAKEOVER`；self-fencing 三路径（revoked/nodeFenced/本地过期） |
 | epoch | 归属每次转移递增（**已落地**）；`tenant_config_epoch`（台账变更同事务递增）**已落地**（M-2：落在 `tenant_ledger.config_epoch`；设备/点位映射写入口**同一事务** +1，接入侧 `ConfigEpochReconciler` 消费） |
 | 变更推送 | 事件 `$iot/svc/config/{t}/device-changed` + 周期对账（批量拉 epoch，不一致才拉全量） |
@@ -753,7 +753,7 @@ UI/OpenAPI → business(core.device)
 | 租户上下文 | 只信网关注入（A3）；`X-Tenant-Id` 等身份头在网关剥离名单（admin 既有） |
 | 落库强制 | MyBatis-Plus 租户插件 + `ignore-tables` 清单（平台表：tenant/日志/字典/全局配置/`tenant_node_assignment`；`tenant_config_epoch` 落地后同列） |
 | 越权用例 | **每服务必测**（断言口径见 **D0.5**）：A 租户 token 访问 B 租户数据 → ① 读不到对方数据；② 响应体不含对方字段；③ 跨租户写无效果；④ 列表只含本租户数据。表现为「查不到」而非 403（单条查 `R.code=409`、列表查 `R.code=200`），以**不泄露存在性**；另需测 access 跨租户订阅拒绝 |
-| 入站可信 | `InternalTokenGuardInterceptor`（fail-closed + 常量时间比较，admin 既有模式） |
+| 入站可信 | starter 的 `InternalTokenGuardAutoConfiguration`（fail-closed + 常量时间比较，`ypbin.security.internal-token.*`） |
 | EMQX ACL | spec §12.4(A) 主题×主体矩阵逐条配平；设备只能 pub 自己的 `$iot/dev/{t}/{d}/**`；除 access 外不得订阅设备树 |
 | 凭据 | `credential_ref` 本地解析、明文不下发；API Key 只存哈希 |
 | 输入校验 | 外部输入一律校验（长度/枚举/JSON 结构），输出防 XSS 与敏感泄露（母仓铁律） |

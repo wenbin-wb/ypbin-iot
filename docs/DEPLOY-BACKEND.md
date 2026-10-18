@@ -542,8 +542,8 @@ root-only；`deploy/.env` 是**刻意的凭据源**，已由 `! -name ".env"` �
 | `GATEWAY_SIGN_TOKEN` | Nacos `ypbin-gateway.yaml` → `ypbin.gateway.auth.trusted-source-token` | **签发侧**：网关在写身份头的同时写 `X-Gateway-Signed` |
 | 同上 | Nacos `ypbin-common.yaml` / `ypbin-auth.yaml` / `ypbin-system.yaml` / `ypbin-ai.yaml` / `ypbin-iot.yaml` → `ypbin.cloud.feign.trusted-source-token` | **消费侧**：入站请求带对标记才允许把身份头经 Feign 二次透传 |
 | 同上 | `deploy/.env` → `GATEWAY_SIGN_TOKEN` | 渲染源（`install.sh` 替换模板里的 `${GATEWAY_SIGN_TOKEN}`） |
-| `INTERNAL_TOKEN` | Nacos `ypbin-common.yaml` → `ypbin.internal.token` | 共享值：auth/system/iot 的携带侧 + system 的 `/internal/**` 守卫侧 |
-| 同上 | Nacos `ypbin-access.yaml` → `ypbin.internal.token` | access 出站凭证（**access 没在跑也要改**） |
+| `INTERNAL_TOKEN` | Nacos `ypbin-common.yaml` → `ypbin.security.internal-token.token`（入站守卫） | 共享值：auth/system/iot 的携带侧 + system 的 `/internal/**` 守卫侧 |
+| 同上 | Nacos `ypbin-common.yaml` / `ypbin-access.yaml` → `ypbin.cloud.feign.internal-token` | 出站携带（starter 的 `FeignHeaderInterceptor` 全局注入 `X-Internal-Token`；**access 没在跑也要改**） |
 | 同上 | `deploy/.env` → `INTERNAL_TOKEN` | 渲染源 + compose 直接注入 `ypbin-access` |
 
 四条口径（2026-09-26 逐条实测/核对，不是推断）：
@@ -759,9 +759,11 @@ bash /opt/ypbin/token-rotation-<TS>/rollback-<TS>.sh
 
 ### 6.2 手工触发：`POST /internal/retention/cleanup`
 
-- **谁能访问**：仅内网/回环 + 内部令牌。路径在 `/internal/**` 下，由 `InternalTokenGuardWebConfig` 的
-  `InternalTokenGuardInterceptor` 统一保护：必须带请求头 **`X-Internal-Token`**（值 = `ypbin.internal.token`
-  = `deploy/.env` 的 `INTERNAL_TOKEN`）；凭证未配置或错误 ⇒ fail-closed 拒绝（HTTP 200 + `R.code=401`）。
+- **谁能访问**：仅内网/回环 + 内部令牌。路径在 `/internal/**` 下，由 starter 的
+  `InternalTokenGuardAutoConfiguration`（`ypbin.security.internal-token.guard-enabled=true`）统一保护：
+  必须带请求头 **`X-Internal-Token`**（值 = `ypbin.security.internal-token.token` = `deploy/.env` 的
+  `INTERNAL_TOKEN`）；凭证未配置或错误 ⇒ fail-closed 拒绝（HTTP 200 + `R.code=401`）。
+  ⚠️ 旧键 `ypbin.internal.token` 已废弃（#297，无消费方）。
   该端点**不绑定登录态/权限码**（内部面没有登录态，与既有 `Internal*Controller` 同一约定）。
 - **语义**：**只跑一轮、同步执行**——返回响应时这一轮已经结束，不是排队/异步 fire-and-forget。
 - **防重入**：定时任务与手工触发共用同一服务方法，用 JVM 内 `AtomicBoolean` 保证**同一时刻只跑一轮**；

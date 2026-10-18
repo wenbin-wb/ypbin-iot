@@ -9,12 +9,12 @@
  */
 package cn.ypbin.admin.iot.service.impl;
 
-import cn.ypbin.admin.iot.availability.AvailabilityCalculator;
 import cn.ypbin.admin.iot.availability.AvailabilityProperties;
 import cn.ypbin.admin.iot.availability.AvailabilityResp;
 import cn.ypbin.admin.iot.availability.MaintenanceWindowDto;
+import cn.ypbin.starter.iot.availability.AvailabilityCalculator;
 import cn.ypbin.starter.iot.availability.AvailabilityRules;
-import cn.ypbin.admin.iot.availability.OutageDetector;
+import cn.ypbin.starter.iot.availability.OutageDetector;
 import cn.ypbin.admin.iot.availability.OutageEventResp;
 import cn.ypbin.admin.iot.availability.OutageReason;
 import cn.ypbin.admin.iot.availability.ReadingIngestReport;

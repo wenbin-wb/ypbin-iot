@@ -16,7 +16,6 @@ spring:
     exclude:
       - org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration
 
-# 出站内部凭证（access → iot 的 /internal/lease/**）：未配置时服务端 fail-closed
 ypbin:
   # TCP 透传入站载荷格式：key-value = SDK 按点位 selector（raw_address）从 KEY=VALUE 帧取值；
   # 宿主不再做帧解析。⚠️ 不配会退回 SDK 默认 binary（整帧 byte[]）⇒ 读数全丢（升级顺序见 DEPLOY 文档）。
@@ -24,5 +23,9 @@ ypbin:
     protocol:
       tcp:
         payload-format: key-value
-  internal:
-    token: ${INTERNAL_TOKEN:}
+  # 出站内部凭证（access → iot 的 /internal/**）**不在这里配**：starter 4.0.0 起由
+  # ypbin.cloud.feign.internal-token 经 FeignHeaderInterceptor 全局携带，配置位置是 Nacos
+  # Data ID `ypbin-access.yaml`（见 deploy/nacos/ypbin-access.yaml）。
+  # ⚠️ 旧键（ypbin 命名空间下的 internal.token）已废弃（无任何消费方），写在这里不会生效——漏配正确键的后果是
+  # iot 的 /internal/** 守卫 fail-closed 全拒（租约与读数上报全挂），而症状极易与「键写错地方」混淆。
+  # 门禁：tools/check-deprecated-config-keys.sh 会拦住这类已登记废弃键。

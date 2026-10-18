@@ -20,6 +20,7 @@ import cn.ypbin.admin.iot.modbus.ModbusRegisterAddress;
 import cn.ypbin.iot.core.model.PointAddress;
 import cn.ypbin.iot.core.model.PointValue;
 import cn.ypbin.iot.core.model.Quality;
+import cn.ypbin.iot.protocol.modbus.ModbusRegisterDecoder;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.StandardCharsets;

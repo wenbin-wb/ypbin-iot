@@ -600,7 +600,8 @@ grep -n -F "$NEW" config.yaml | grep -c ':#'       # 真值不得落进注释行
 2. **成对列出持有方**：`.env` + **所有**含该值的 live Nacos 配置（`INTERNAL_TOKEN` → `ypbin-common`/`ypbin-access`；
    `GATEWAY_SIGN_TOKEN` → 7 份配置的 `trusted-source-token`）。**漏一处就恒 401/403。**
    - **`INTERNAL_TOKEN` 的持有方清单里没有 `gateway`**（已独立核实）：`ypbin-gateway` 既不发送也不校验
-     `X-Internal-Token`，其配置里**没有** `ypbin.internal.token`，也不引用 `ypbin-common`。
+     `X-Internal-Token`，其配置里**没有**内部凭证键（旧键 `ypbin.internal.token` 已废弃，#297；新键
+     `ypbin.cloud.feign.internal-token` 由 Nacos Data ID `ypbin-access.yaml` 提供），也不引用 `ypbin-common`。
      ⇒ **不要为 `INTERNAL_TOKEN` 轮换去重启 gateway**（多做一次无用重启 = 多一次中断窗口）。
    - `GATEWAY_SIGN_TOKEN` 则**必须**含 gateway（gateway 是签名侧；其键名为 `ypbin.gateway.auth.trusted-source-token`）。
 3. **dry-run 先扫**：只打印「每份配置含旧值几处 + md5 + 指纹」，确认范围后再 `--apply`。
