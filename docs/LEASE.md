@@ -5,8 +5,10 @@
 
 ## 一、对外契约（内部端点）
 
-路径前缀 `/internal/lease`，**仅供 access 单元调用**，由 `InternalTokenGuardInterceptor`（+ `InternalTokenGuardWebConfig`）保护
-（凭证未配置一律拒绝，常量时间比较，失败转 HTTP 200 + `R.code=401`）。
+路径前缀 `/internal/lease`，**仅供 access 单元调用**，由 starter 的 `InternalTokenGuardAutoConfiguration`
+（`ypbin.security.internal-token.guard-enabled=true`，ENVELOPE 语义）保护
+（凭证未配置一律拒绝，常量时间比较，失败转 HTTP 200 + `R.code=401`）；出站携带由
+starter 的 `FeignHeaderInterceptor` 按 `ypbin.cloud.feign.internal-token` 注入 `X-Internal-Token`。
 
 > ⚠️ **网关侧的限制（已知缺口，跨仓待办）**：本仓的网关路由是 `Path=/iot/**` + `StripPrefix=1`，
 > 因此 `POST /iot/internal/lease/release` 会被转发到服务内的 `/internal/lease/release`；

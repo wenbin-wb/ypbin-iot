@@ -455,7 +455,7 @@ ALTER TABLE iot_device
 既有可复用部分（已核实）：
 
 - `InternalReadingController` 路径 `/internal/readings`、方法 `POST`、返回 `R<Integer>` —— `ypbin-service/ypbin-iot/.../controller/InternalReadingController.java:36,48-51`
-- 守卫：`registry.addInterceptor(...).addPathPatterns("/internal/**")`，请求头 `X-Internal-Token`，**凭证未配置即拒绝**（fail-closed），常量时间比较 —— `.../config/InternalTokenGuardWebConfig.java:31-33`、`InternalTokenGuardInterceptor.java:54,62-63`
+- 守卫：starter 的 `InternalTokenGuardAutoConfiguration`（`ypbin.security.internal-token.guard-enabled=true`）为 `/internal/**` 装配 ENVELOPE 拦截器、为 `raw401-path-patterns`（默认含 `/internal/mqtt/*`）装配 RAW_401 过滤器；请求头 `X-Internal-Token`，**凭证未配置即拒绝**（fail-closed），常量时间比较（实现见 `ypbin-starter-security`，本仓无副本）
 - 服务侧：`AvailabilityServiceImpl.ingest`（`@Transactional(rollbackFor = Exception.class)`）→ 活性/断档 + `afterCommit` 写最新值/时序 —— `.../service/impl/AvailabilityServiceImpl.java:120-146`（`writeDerivedAfterCommit` 在 `:220`，实际写调用在 `:246`）
 
 **规则（P0 合约：一条上行消息 = 一个点位）**
@@ -502,7 +502,7 @@ WHERE
 |---|---|---|
 | `url` | `http://ypbin-iot:18084/internal/mqtt/readings` | 同 `ypbin-net`，容器名即服务名（`docker-compose.yml` 中 ypbin-iot 有固定 IP `172.20.0.24` 与网络别名）；`url` 的 scheme/host/port 不能用模板（F24） |
 | `method` | `post`（默认） | F24 |
-| `headers` | `content-type: application/json` + `X-Internal-Token: <deploy/.env 的 INTERNAL_TOKEN 实际值>` | 守卫头名见 `InternalTokenGuardInterceptor.java:62`；header 支持模板（F24）。⚠️ **取值来源**：`deploy/nacos/ypbin-common.yaml:75-76` 的 `ypbin.internal.token: ${INTERNAL_TOKEN}` 由 `deploy/install.sh` 在导入 Nacos 前替换为 `deploy/.env` 的实际值（**生成值**在 `:1093`，**Nacos 占位符替换的 sed** 在 `:1288-1291`） ⇒ 桥接里**必须填替换后的同一个值**，不能写字面量 `${INTERNAL_TOKEN}` |
+| `headers` | `content-type: application/json` + `X-Internal-Token: <deploy/.env 的 INTERNAL_TOKEN 实际值>` | header 支持模板（F24）。⚠️ **取值来源**：`deploy/nacos/ypbin-common.yaml` 的 `ypbin.security.internal-token.token: ${INTERNAL_TOKEN}`（入站守卫）与 `ypbin.cloud.feign.internal-token`（出站携带）由 `deploy/install.sh` 在导入 Nacos 前替换为 `deploy/.env` 的实际值（**Nacos 占位符替换的 sed** 见 `install.sh` 的导入段） ⇒ 桥接里**必须填替换后的同一个值**，不能写字面量 `${INTERNAL_TOKEN}`。旧键 `ypbin.internal.token` 自 starter 4.0.0 起无消费方（#297） |
 | `body` | 上面的模板 | 官方：不提供 body 则默认发**全部字段**（F24）——那会把 `username`/`clientid` 一起发给平台，反而更好？**不**：服务端契约是 `ReadingIngestReq`，多余字段会被 Jackson 忽略，但**显式 body 更小更可控**，且避免把内部身份面暴露给未来的契约演化 |
 | `max_retries` | `2`（默认）或按压测调 | F24；重试是**重复投递的来源**，与 §6.4 直接相关 |
 | `request_ttl` | `30s`（默认 `45s`） | F27；缩短可减少「迟到重放」触发 §6.4 的窗口 |

@@ -4,7 +4,10 @@ name: Sync Whitelist
 #   1) 改动的**既有 admin 文件**必须落在白名单内（新增文件不受限——IoT 业务一律加新文件/新模块）；
 #      白名单当前 **24 个文件**（见 SYNC.md 第二节与 tools/sync-whitelist-regex.sh，三处必须一致）；
 #   2) IoT 的 SQL 迁移脚本必须与全新安装脚本语句等价；
-#   3) Nacos 身份模式配置键齐备（enabled=true ⇒ 必须配 trusted-source-token，否则 3.6.0 起启动失败）。
+#   3) Nacos 身份模式配置键齐备（enabled=true ⇒ 必须配 trusted-source-token，否则 3.6.0 起启动失败）；
+#   4) 配置里不得出现已登记**废弃**的键（#297：旧内部凭证键、以及 Sa-Token 的不存在命名空间 ——
+#      「写了但不生效」会误导运维，且漏配正确键会让 /internal/** fail-closed 全拒）。
+#      废弃键清单的**单一来源**是 tools/check-deprecated-config-keys.sh，勿在此重复列举。
 # 注意：`git diff upstream/main --stat` 的字面数字包含**新增文件**，比白名单口径大得多；
 #      本工作流检查的是「改动的既有文件」（--diff-filter=MDR），别把两者混为一谈。
 # 为什么需要：纪律只写在 SYNC.md 里没有强制力——本仓刚建立时，依赖机器人（Dependabot）的 PR
@@ -66,3 +69,11 @@ jobs:
           # 只依赖 PyYAML（出题范围小、易审计）；runner 自带 python3。
           python3 -m pip install --quiet 'pyyaml>=6,<7'
           bash tools/check-identity-config.sh
+
+      - name: 配置里不得出现已登记的废弃键（#297：防「写了但不生效」）
+        # 为什么放在本工作流而不是 ci.yml：ci.yml 是 **admin 拥有的既有文件**（SYNC.md 第二节
+        # 明确「不改 admin 既有工作流的语义」，改它要进白名单并登记代价）。本工作流是 fork 自有的
+        # 新建文件，挂在这里零同步冲突面——与本仓既有做法一致（dependency-vuln-gate 等同理）。
+        run: |
+          python3 -m pip install --quiet 'pyyaml>=6,<7'
+          bash tools/check-deprecated-config-keys.sh

@@ -82,7 +82,7 @@
 | 不开放项 | 理由 |
 |---|---|
 | 设备凭据（`/credential`、`/connection`） | **泄露即设备被冒充**。`docs/DEVICE-CREDENTIAL.md` 的明文一次性口径只给管理面；开放 API 暴露等于扩大凭据攻击面 |
-| `/internal/**` 全部 | 机器内部契约，只受 `X-Internal-Token` 保护（`InternalTokenGuardWebConfig.java:32-33`）；开放即绕过整套鉴权 |
+| `/internal/**` 全部 | 机器内部契约，只受 `X-Internal-Token` 保护（starter 的 `InternalTokenGuardAutoConfiguration`，`ypbin.security.internal-token.*`）；开放即绕过整套鉴权 |
 | `/tenant-ledger/**` | 平台表（`deploy/nacos/ypbin-iot.yaml:15-19` 的 `ignore-tables`），**不按租户隔离** ⇒ 开放等于跨租户泄露 |
 | 产品/物模型/映射/标签/分组的 **写** | 属「配置面」而非「集成面」；第三方改物模型会破坏该租户全部设备的点位语义，破坏面不可控 |
 | 告警 `ack`/`silence`、规则 CRUD | 改变平台状态且有通知副作用；首期以只读为主，后置评估 |
@@ -190,7 +190,7 @@
   - 方案 A：`SHA-256(secret)` —— 简单、可查（用 `access_key_id` 定位行后比对）；
   - 方案 B：`HMAC-SHA256(server_pepper, secret)` —— 防「库泄露后离线爆破」更强（secret 是高熵随机串，爆破实际不可行，但 pepper 可阻断跨环境彩虹表）。
   - **建议 B**，pepper 由环境变量注入（**真值不入库、不入配置文件**，同 `deploy/nacos/ypbin-iot.yaml` 现有 `${GATEWAY_SIGN_TOKEN}`/`${EMQX_API_KEY}` 占位符纪律）。
-- **比对**：必须 `MessageDigest.isEqual` **常量时间比较**（仓内既有模式：`SignChecker.java` 与 `InternalTokenGuardInterceptor.java` 均已如此）。
+- **比对**：必须 `MessageDigest.isEqual` **常量时间比较**（仓内既有模式：`SignChecker.java` 与 starter 内部凭证守卫 `InternalTokenVerifier` 均已如此）。
 - **日志**：明文 secret **绝不进日志**；`access_key_id` 打印前经 `LogSanitizer`（既有模式）。
 
 ### 2.6 吊销与轮换
@@ -313,7 +313,7 @@ iot 侧 `OpenApiSignVerifier` 对同一份参数 Map 用 starter `SignGenerator`
 |---|---|---|
 | `/open-api/v1/**`（新增） | **API Key** | 网关 `OpenApiKeyAuthFilter` |
 | 既有 `/devices`、`/products` 等管理面 | **仅登录用户**（既有会话） | 网关 Sa-Token 校验（既有） |
-| `/internal/**`（8 个 controller） | **仅机器内部** | **`X-Internal-Token` 保持不变**（`InternalTokenGuardWebConfig.java:32-33`，拦截器 fail-closed + 常量时间比较，`InternalTokenGuardInterceptor.java:52-78`） |
+| `/internal/**`（8 个 controller） | **仅机器内部** | **`X-Internal-Token` 保持不变**（starter 的 `InternalTokenGuardAutoConfiguration`，拦截器 fail-closed + 常量时间比较；配置键 `ypbin.security.internal-token.*`） |
 | `/internal/mqtt/**` | EMQX 入站 | `X-Internal-Token` + 唯一真状态码例外（`docs/IOT-PLATFORM-DESIGN.md:781,786`） |
 
 > **红线**：开放 API 的引入**不得**放宽 `/internal/**` 的保护。具体说：`OpenApiKeyAuthFilter` 的**放行/匹配路径必须只覆盖 `/iot/open-api/**`**，**绝不可**写成「凡带 API Key 即放行」——否则等于给 `/internal/**` 开了旁路。
@@ -585,7 +585,7 @@ iot 侧 `OpenApiSignVerifier` 对同一份参数 Map 用 starter `SignGenerator`
 | `/system/open-api/**` 已在免登录白名单 | `deploy/nacos/ypbin-gateway.yaml:103`；`deploy/nacos/ypbin-system.yaml:92` |
 | `@ApiSign` 示例与 `ypbin.sign` 配置 | `ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/controller/OpenApiDemoController.java:13,27,30-31`；`deploy/nacos/ypbin-system.yaml`（`ypbin.sign` 段） |
 | 4001 api-doc 菜单 | `deploy/sql/002-data.sql:180`；`deploy/sql/migration/2026-09-26-iot-platform-module-menu.sql:57` |
-| 内部守卫（fail-closed + 常量时间） | `ypbin-service/ypbin-iot/src/main/java/cn/ypbin/admin/iot/config/InternalTokenGuardWebConfig.java:32-33`；`.../InternalTokenGuardInterceptor.java:52-78` |
+| 内部守卫（fail-closed + 常量时间） | `ypbin-starter-security` 的 `InternalTokenGuardAutoConfiguration` / `InternalTokenVerifier`（本仓已无副本，装配键 `ypbin.security.internal-token.*`） |
 | 权限数据源（`userId` → `SysCache`） | `ypbin-service/ypbin-iot/src/main/java/cn/ypbin/admin/iot/core/IotPermissionProvider.java:33-48` |
 | `iot:*` 权限码清单 | `deploy/sql/007-iot-data.sql` |
 | 既有指标命名风格 | `.../timeseries/IotDbTimeSeriesWriter.java:79,82,96`；`.../service/impl/CommandInstanceServiceImpl.java:99`；`.../alert/AlertMetrics.java:45,48` |

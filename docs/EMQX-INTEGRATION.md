@@ -46,7 +46,7 @@
 
 - 过滤器只注册在 `/internal/mqtt/*`（`InternalMqttGuardWebConfig.MQTT_INGRESS_URL_PATTERN`），
   **不存在**任何放行 `/internal/**` 全体的写法；
-- 该路径仍在既有 `InternalTokenGuardInterceptor` 的 `/internal/**` 拦截范围内（纵深防御，行为一致）；
+- 该路径仍在 starter `InternalTokenGuardAutoConfiguration` 的 `/internal/**` 拦截范围内（纵深防御，行为一致）；
 - 单测直接断言 `status().isUnauthorized()` / `isBadRequest()` / `isServiceUnavailable()`
   ——断言的是**原始 HTTP 状态**而不是 `R.code`（若有人改回 200 信封，用例会转红）。
 

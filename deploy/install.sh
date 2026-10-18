@@ -1827,7 +1827,8 @@ if [ -n "$NACOS_TOKEN" ]; then
           "$cfg_file" > "$TMP_CFG"
     else
       # REDIS_PASSWORD 为空（NO_DOCKER 外部 Redis 不认证）→ 删除非注释的 password 行，等价不配置密码；
-      # INTERNAL_TOKEN 仍无条件替换（缺失/为空时 system 守卫 fail-closed，见 ypbin.internal.token 注释）
+      # INTERNAL_TOKEN 仍无条件替换（缺失/为空时 system 守卫 fail-closed，见
+      # deploy/nacos/ypbin-common.yaml 的 ypbin.security.internal-token 段注释）
       sed -e "/^[[:space:]]*#/! s/\${MYSQL_ROOT_PASSWORD}/${MYSQL_ROOT_PASSWORD}/g" \
           -e "/^[[:space:]]*#/! s/\${INTERNAL_TOKEN}/${INTERNAL_TOKEN}/g" \
           -e "/^[[:space:]]*#/! s/\${GATEWAY_SIGN_TOKEN}/${GATEWAY_SIGN_TOKEN}/g" \

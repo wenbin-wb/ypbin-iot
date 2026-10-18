@@ -63,7 +63,7 @@ iot 先就绪后 access 才起，避免启动窗口内的写入失败。access �
 | `ypbin.iot.protocol.tcp.payload-format`（`ypbin-access.yaml`） | `key-value` | 不配 ⇒ SDK 退回 `binary` ⇒ **读数全丢** | `deploy/nacos/ypbin-access.yaml`（`payload-format: key-value`）；`docs/DEPLOY-BACKEND.md` §5.8 |
 | `ypbin.timeseries.password`（`ypbin-iot.yaml`） | 占位符 `${IOTDB_PASSWORD}` 已被 install.sh 渲染成**与 IoTDB 内一致**的口令 | 三处联动漏一处 ⇒ 801 | `deploy/nacos/ypbin-iot.yaml`；`docs/DEPLOY-TIMESERIES.md` §6.1 |
 | `YPBIN_OPENAPI_SECRET_PEPPER`（**只在 `.env`/容器 env，不在 Nacos**） | 非空、≥32 字节、与上一次一致 | 换值 ⇒ 既有 OpenAPI Key 全部失效 | `deploy/.env.example`；`deploy/docker-compose.yml`（`ypbin-iot` environment） |
-| `ypbin.internal.token`（`ypbin-common.yaml` 与 `ypbin-access.yaml` 各一处） | 占位符 `${INTERNAL_TOKEN}` 已渲染、服务间同串 | 缺失/不一致 ⇒ `/internal/**` fail-closed 拒绝 | `deploy/nacos/ypbin-common.yaml`；`deploy/nacos/ypbin-access.yaml` |
+| `ypbin.security.internal-token.token`（`ypbin-common.yaml`，入站守卫）+ `ypbin.cloud.feign.internal-token`（`ypbin-common`/`ypbin-access` 等，出站携带） | 占位符 `${INTERNAL_TOKEN}` 已渲染、服务间同串 | 缺失/不一致 ⇒ `/internal/**` fail-closed 拒绝（租约/读数上报全挂） | `deploy/nacos/ypbin-common.yaml`；`deploy/nacos/ypbin-access.yaml`。⚠️ 旧键 `ypbin.internal.token` 自 starter 4.0.0 起**无任何消费方**（#297，已由 `tools/check-deprecated-config-keys.sh` 守住） |
 | `ypbin.security.identity.trusted-source-token`（`ypbin-common.yaml`）+ `ypbin.cloud.feign.trusted-source-token`（`ypbin-access.yaml`/`ypbin-iot.yaml`）+ 网关侧 `ypbin.gateway.auth.trusted-source-token`（`ypbin-gateway.yaml`） | 四处**同串**（都渲染自 `${GATEWAY_SIGN_TOKEN}`） | identity 校验为 fail-fast：`enabled=true` 且该键空 ⇒ **启动即失败** | `deploy/nacos/ypbin-common.yaml`；`deploy/nacos/ypbin-access.yaml`；`deploy/nacos/ypbin-iot.yaml`；`deploy/nacos/ypbin-gateway.yaml` |
 
 **核对命令（Nacos 回读，只读）**：

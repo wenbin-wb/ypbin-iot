@@ -35,7 +35,8 @@
     而该注解会把窗口内的重复调用判成 `R.code=409`（生产实测：秒内重复 DELETE 得到 409「请勿重复提交」）⇒ 与契约冲突。
     吊销的幂等性由服务层实现（已吊销 ⇒ 直接返回、不改写首次吊销时刻），重复调用实测返回 `code=200`。
 - 签发端点带 `@Log` 并**显式排除请求体与响应体**。
-- 内部端点在 `/internal/**` 下 ⇒ 由 `InternalTokenGuardWebConfig` 的守卫保护（凭证未配置即 fail-closed 拒绝）。
+- 内部端点在 `/internal/**` 下 ⇒ 由 starter 的 `InternalTokenGuardAutoConfiguration` 保护
+  （`ypbin.security.internal-token.*`；凭证未配置即 fail-closed 拒绝）。
   **它是为了「让吊销可验证」而开的**，同时是将来 EMQX **HTTP 认证源**（官方支持）的后端形态。
 
 ---
