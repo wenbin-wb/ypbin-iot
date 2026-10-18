@@ -78,7 +78,7 @@ class IotDbDriverRegistrarTest {
         Path classpathArgFile = Files.createTempFile("iotdb-cp-", ".args");
         try {
             Files.writeString(classpathArgFile,
-                "-cp \"" + System.getProperty("java.class.path") + "\"",
+                "-cp\n\"" + System.getProperty("java.class.path").replace('\\', '/') + "\"",
                 StandardCharsets.UTF_8);
             Process process = new ProcessBuilder(javaBinary,
                     "@" + classpathArgFile.toAbsolutePath(), ConstructorProbe.class.getName())
