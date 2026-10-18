@@ -87,6 +87,15 @@ ALLOWED+='ypbin-common/src/main/java/cn/ypbin/admin/common/provider/Microservice
 ALLOWED+='ypbin-common/src/main/resources/META-INF/spring/org\.springframework\.boot\.autoconfigure\.AutoConfiguration\.imports|'
 # 随上面删除而必须同步的**连带更新**（去掉 @EnableConfigurationProperties(InternalProperties)、
 # 改一处引用注释、Feign 客户端去掉 configuration 属性）。
+# 第 36 项（2026-10-18 加，#87 脱敏口径统一）：admin 的 SysConfigServiceImpl#toResp 用「2 个精确键 + 置空 ""」
+# 实现列表页脱敏，与 internal 端点的「6 个后缀 + ****末4位」判据不同 ⇒ 存在「internal 打码、列表页返回明文」
+# 的**真实泄露面**。修复必须改这个既有方法（脱敏判据与形态要从这里切到 ConfigValueMasker，
+# 无法用新文件表达「换掉既有方法的脱敏实现」）；同时该类的 createConfig/updateConfig/updateGroup 三条
+# 写路径要加「掩码值不落库」守卫（否则列表页回显掩码后保存会把真实密钥覆盖成 ****abcd）。
+# ConfigValueMasker 与其 3 个测试是**新文件**，不在白名单内（新文件不受限）。
+# **代价如实登记**：该文件上游若再改脱敏逻辑，同步时按语义合并——正确处理是「采纳上游演进 + 保留
+# 指向 ConfigValueMasker 的单一判据」，而非恢复旧的精确键清单（那会重新引入泄露面）。
+ALLOWED+='ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/service/impl/SysConfigServiceImpl\.java|'
 ALLOWED+='ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/SystemServiceApplication\.java|'
 ALLOWED+='ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/provider/DbLogProviders\.java|'
 ALLOWED+='ypbin-service-api/ypbin-system-api/src/main/java/cn/ypbin/admin/system/api/feign/ISystemClient\.java|'

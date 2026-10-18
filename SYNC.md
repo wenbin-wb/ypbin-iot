@@ -34,7 +34,7 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 > 只会被当噪音忽略。现在：白名单内冲突 = warning + summary 列出；白名单外冲突 = 判红（那才是
 > 「分歧面失控」的信号）。
 
-> **白名单膨胀要记账**：目前 **34** 个文件（权威清单 = `tools/sync-whitelist-regex.sh`；本表与它必须逐项一致）。
+> **白名单膨胀要记账**：目前 **35** 个文件（权威清单 = `tools/sync-whitelist-regex.sh`；本表与它必须逐项一致）。
 > 2026-10-18：**加第 25–34 项**（`ypbin-starter` 4.0.0 全量下沉，见下文「一揽子下沉」），本质是「删除 admin 既有文件」，与以往「改一行」的条目性质不同。
 > 2026-10-12：**加第 21 项 `CHANGELOG.md`**（本批 deploy/IoT 修复需要写发布台账；无法用新文件表达，
 > 与 upstream 冲突时整体取本仓版本，代价同 README.md）。
@@ -59,6 +59,7 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 | `ypbin-service-api/ypbin-system-api/src/main/java/cn/ypbin/admin/system/api/feign/ISystemClient.java` | 新增两个**内部端点**契约：`POST /inbox-message-send`（普通站内信）、`POST /mail-send`（纯文本邮件） | **2026-09-28 加**（告警段 C2 通知投递，见 `ALERTING-DESIGN.md` §7.5-M2/M4）：告警投递必须复用 admin 的 `sys_message` 表与 system 侧既有 JavaMail 能力，新增端点只能声明在**既有 Feign 契约**上——Feign 接口是契约文件，无法用「新文件」表达「给既有契约加方法」 |
 | `ypbin-service-api/ypbin-system-api/src/main/java/cn/ypbin/admin/system/api/feign/ISystemClientFallback.java` | 为上面两个新端点补熔断兜底 | 既有 fallback 必须覆盖契约的全部方法（否则熔断时降级空洞），只能改既有文件 |
 | `ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/feign/SystemClientImpl.java` | 实现两个内部端点：站内信落库（校验收件人存在且属于声明的租户，§7.5-M4）、邮件发送（复用 `MailService`）；失败如实返回 `R` | 端点实现必须落在既有 `SystemClientImpl` 上（构造器同步注入 `SysMessageMapper`/`MailService`）；「给既有 Feign 实现加方法」同样无法用新文件表达 |
+| `ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/service/impl/SysConfigServiceImpl.java` | 列表页脱敏改为调用 `ConfigValueMasker`（与 internal 端点同一判据同一形态）＋ 三条写路径加「掩码值不落库」守卫 | **第 35 项，2026-10-18 加（#87 脱敏口径统一）**：admin 原实现是「2 个精确键 + 置空 `""`」，而 internal 端点用「6 个后缀 + `****末4位`」⇒ **存在「internal 打码、列表页返回明文」的真实泄露面**（凡命中后缀但不属那 2 个精确键的配置项，管理面列表页会把密钥原文回显）。修复必须改这个既有方法的脱敏实现，无法用新文件表达；同时 `createConfig`/`updateConfig`/`updateGroup` 要识别「提交回来的是掩码」并保留库内真实值（否则管理员改其它字段保存时会把密钥静默覆盖成 `****abcd`）。`ConfigValueMasker` 与其 3 个测试是**新文件**，不在白名单内。**代价如实登记**：上游若再改脱敏逻辑，同步时按语义合并——正确解是「采纳上游演进 + 保留单一判据」，不要恢复旧的精确键清单（那会重新引入泄露面）。 |
 | `ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/mapper/SysMessageMapper.java` | 增「按收件人查站内信」与落库辅助查询 | 站内信必须复用既有 `sys_message` 表与 Mapper（不新造站内信链路），查询方法只能加在既有 Mapper 上 |
 | `ypbin-service/ypbin-system/src/test/java/cn/ypbin/admin/system/feign/SystemClientImplUserByIdTest.java`、`SystemClientImplPlatformUserTest.java`、`SystemClientImplLogIngestTest.java` | 构造参数随 `SystemClientImpl` 注入新增，同步补 `mock(SysMessageMapper.class)`/`mock(MailService.class)` | 既有 3 个单测的构造器签名随被测类变化，属**连带更新**（3 个文件共 17 行） |
 | `docs/microservice-deployment.md` | 「初始口令」一句话更正 | **2026-09-26 加**：该句原写「Nacos 控制台默认 `nacos/nacos`」，而本仓已改为随机口令 + 开 auth（`NACOS-AUTH.md`）。留着一句**已不成立**的口令说明会误导运维，故只能改既有文件（无法用新文件表达「原句作废」） |
@@ -116,6 +117,17 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 > 与全部文档/模板注释），并新增 `tools/check-deprecated-config-keys.sh` 挂到 fork 自有的
 > `sync-whitelist.yml`（**未改 admin 拥有的 `ci.yml`**）。门禁按 YAML 解析后的**键路径**判定，
 > 注释里的键名（本仓多处用注释记录「旧键已废弃」的教训）不算命中。
+
+> **2026-10-18 追加（#87 脱敏口径统一）**：白名单加第 35 项 `SysConfigServiceImpl.java`。
+> 起因是**真实泄露面**：admin 的列表页脱敏用「2 个精确键 + 置空 `""`」，internal 端点用「6 个后缀 +
+> `****末4位`」，两处判据不同 ⇒ 命中后缀但不属那 2 个精确键的配置项（如 `ALIYUN_SECRET_KEY`、
+> `DB_PASSWD`）在**管理面列表页明文回显**。本仓 fork 自 admin，此缺陷**照原样继承**（实测本仓
+> `SysConfigServiceImpl` 与 admin@origin/main 逐字节相同）。
+> 修复分两部分：① 新增**新文件** `service/support/ConfigValueMasker.java`（判据+形态单一来源）及其 3 个测试
+> ——新文件不受白名单约束；② 改**既有文件** `SysConfigServiceImpl.java` 让 `toResp` 与三条写路径改调它
+> ——这一处只能进白名单。`SystemClientImpl.java` 原本已在白名单（第 15 项），本次同期切换为同一实现。
+> **不是「为了少冲突而放过泄露面」**：只有「改既有文件」能消除该泄露面（另建新文件无法替换既有
+> `toResp` 的脱敏实现，管理面仍会读到明文）。代价已逐项登记在上表第 35 项。
 
 **整批发布的硬约束（不做双轨）**：
 1. **SSE codec id** 由 `iot-json-v1` 变为 `json-v1` ⇒ 混版本滚动期内跨实例扇出双向丢弃；
