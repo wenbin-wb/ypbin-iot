@@ -15,6 +15,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.sql.Driver;
 import java.sql.DriverManager;
@@ -70,12 +72,24 @@ class IotDbDriverRegistrarTest {
     @DisplayName("★ 全新 JVM 里只靠构造写入器/查询存储就能注册驱动（本进程全局注册表骗不了它，故必须 fork 子 JVM）")
     void constructorsMustRegisterDriverInFreshJvm() throws Exception {
         String javaBinary = Paths.get(System.getProperty("java.home"), "bin", "java").toString();
-        Process process = new ProcessBuilder(javaBinary, "-cp", System.getProperty("java.class.path"),
-                ConstructorProbe.class.getName()).redirectErrorStream(true).start();
-        String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-
-        assertThat(process.waitFor()).as("子 JVM 未正常退出，输出：%n%s", output).isZero();
-        assertThat(output).as("子 JVM 里构造后仍找不到驱动 ⇒ 构造器没注册（或驱动不在类路径）").contains(PROBE_OK);
+        // classpath 走 Java 9+ 的 @argfile，而不是直接拼在命令行上（issue #293）：
+        // Windows 的 CreateProcess 限制单条命令行 8191 字符，Maven 多模块的 java.class.path 很容易超限，
+        // 直接传会得到 `CreateProcess error=206, 文件名或扩展名太长`。argfile 由 JVM 自己读取，无长度上限。
+        Path classpathArgFile = Files.createTempFile("iotdb-cp-", ".args");
+        try {
+            Files.writeString(classpathArgFile,
+                "-cp \"" + System.getProperty("java.class.path") + "\"",
+                StandardCharsets.UTF_8);
+            Process process = new ProcessBuilder(javaBinary,
+                    "@" + classpathArgFile.toAbsolutePath(), ConstructorProbe.class.getName())
+                .redirectErrorStream(true).start();
+            String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            assertThat(process.waitFor()).as("子 JVM 未正常退出，输出：%n%s", output).isZero();
+            assertThat(output).as("子 JVM 里构造后仍找不到驱动 ⇒ 构造器没注册（或驱动不在类路径）")
+                .contains(PROBE_OK);
+        } finally {
+            Files.deleteIfExists(classpathArgFile);
+        }
     }
 
     @Test
