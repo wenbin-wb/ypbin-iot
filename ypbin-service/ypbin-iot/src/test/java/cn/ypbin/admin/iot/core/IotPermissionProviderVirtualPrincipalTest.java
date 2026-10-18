@@ -70,6 +70,23 @@ class IotPermissionProviderVirtualPrincipalTest {
     }
 
     @Test
+    @DisplayName("★ 基类上收的边界语义不变：loginId 为空/非数字/为 null ⇒ 空权限且**不查库**")
+    void malformedLoginIdMustBeDeniedWithoutTouchingDb() {
+        // starter 4.1.0（#101）把「loginId → userId 解析 + 解析失败即拒绝」上收到
+        // AbstractPermissionProvider#userIdOf。这条用例钉住「上收后行为与上收前逐字一致」：
+        // 三种非法形状都必须返回空列表、且绝不触碰 SysCache（避免用 0/异常值误查库）。
+        try (MockedStatic<SysCache> cache = mockStatic(SysCache.class)) {
+            assertThat(provider.getPermissions(null, "identity")).isEmpty();
+            assertThat(provider.getRoles(null, "identity")).isEmpty();
+            assertThat(provider.getPermissions("not-a-number", "identity")).isEmpty();
+            assertThat(provider.getRoles("  ", "identity")).isEmpty();
+
+            cache.verify(() -> SysCache.getUserPermissions(anyLong()), never());
+            cache.verify(() -> SysCache.getUserRoleCodes(anyLong()), never());
+        }
+    }
+
+    @Test
     @DisplayName("🔴 虚拟主体：scopes 生效，且**绝不查库**")
     void virtualPrincipalMustUseScopesWithoutDb() {
         givenVirtualIdentity(-1_000_000_000L, Set.of("iot:series:get"));
