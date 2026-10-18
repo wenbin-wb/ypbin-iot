@@ -13,6 +13,7 @@ import cn.ypbin.admin.access.egress.AccessReadingSink;
 import cn.ypbin.admin.iot.device.AccessPointMappingDto;
 import cn.ypbin.admin.iot.enums.IotProtocol;
 import cn.ypbin.admin.iot.modbus.ModbusRegisterAddress;
+import cn.ypbin.iot.core.util.ExponentialBackoff;
 import cn.ypbin.iot.core.model.DeviceSpec;
 import cn.ypbin.iot.core.spi.BytePayloadDecoderRegistry;
 import cn.ypbin.iot.core.model.PointAddress;
@@ -546,8 +547,9 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
     private void armFailureBackoff(String deviceId, DeviceSession session) {
         SubscriptionBackoff previous = failureBackoff.get(deviceId);
         int attempts = previous == null || previous.session() != session ? 1 : previous.attempts() + 1;
-        long millis = Math.min(SUBSCRIBE_BACKOFF_BASE.toMillis() * (1L << Math.min(attempts - 1, 20)),
-            SUBSCRIBE_BACKOFF_MAX.toMillis());
+        // 委托框架的指数退避（iot-starter #39）：算法与被替换的手写实现逐字等价
+        long millis = ExponentialBackoff.nextDelayMillis(attempts, SUBSCRIBE_BACKOFF_BASE,
+            SUBSCRIBE_BACKOFF_MAX);
         failureBackoff.put(deviceId, new SubscriptionBackoff(session, attempts,
             clock.instant().plusMillis(millis)));
     }

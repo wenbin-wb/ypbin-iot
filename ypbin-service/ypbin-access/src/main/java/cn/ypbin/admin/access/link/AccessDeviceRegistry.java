@@ -10,7 +10,9 @@
 package cn.ypbin.admin.access.link;
 
 import cn.ypbin.iot.core.model.DeviceSpec;
+import cn.ypbin.iot.core.spi.ChangeType;
 import cn.ypbin.iot.core.spi.DeviceChange;
+import cn.ypbin.iot.core.spi.DeviceRevisionAllocator;
 import cn.ypbin.iot.core.spi.DeviceRegistry;
 import cn.ypbin.iot.core.spi.ValidationResult;
 import cn.ypbin.starter.core.util.LogSanitizer;
@@ -20,7 +22,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import org.slf4j.Logger;
@@ -34,8 +35,8 @@ import org.slf4j.LoggerFactory;
  *   <li>{@link #loadAll()} 只返回<b>本节点当前持有租约</b>的租户的设备。框架在
  *       {@code ApplicationReadyEvent} 时调用它一次；返回别的租户的设备 = 采了不该采的数据。</li>
  *   <li>{@link DeviceChange#revision()} 必须<b>按设备严格递增</b>：框架按设备记录「已应用的
- *       revision」，≤ 它的变更<b>被直接丢弃且没有任何日志</b>。因此这里用 {@link AtomicLong}
- *       逐设备自增，绝不复用旧值。</li>
+ *       revision」，≤ 它的变更<b>被直接丢弃且没有任何日志</b>。因此用框架的
+ *       {@link DeviceRevisionAllocator} 逐设备自增，绝不复用旧值。</li>
  * </ol>
  *
  * <p>运行期的增删由 {@link TenantLinkManager} 驱动：它调用 {@link #emit(DeviceChange)}，
@@ -55,8 +56,15 @@ public class AccessDeviceRegistry implements DeviceRegistry {
 
     private final List<Consumer<DeviceChange>> listeners = new CopyOnWriteArrayList<>();
 
-    /** 逐设备的变更版本号，必须单调递增（框架按它去重，非递增会被静默丢弃）。 */
-    private final Map<String, AtomicLong> revisions = new ConcurrentHashMap<>();
+    /**
+     * 逐设备的变更版本号分配器（iot-starter #38：替代手写的 {@code Map<String, AtomicLong>}）。
+     *
+     * <p>框架的 {@link DeviceRevisionAllocator} 语义与手写实现逐字一致
+     * （per-device {@code AtomicLong.updateAndGet(+1)}，已用 javap 核对字节码），
+     * 且额外提供 {@code dispatch}/{@code currentRevision}/{@code forget} 与 {@code trackedDevices()}，
+     * 宿主不必再自己维护这张表。</p>
+     */
+    private final DeviceRevisionAllocator revisions = new DeviceRevisionAllocator();
 
     public AccessDeviceRegistry(DeviceSpecSource source, Supplier<Set<Long>> heldTenants) {
         this.source = source;
@@ -101,7 +109,7 @@ public class AccessDeviceRegistry implements DeviceRegistry {
     /**
      * 投递一条设备变更（供 {@link TenantLinkManager} 在租约变化时调用）。
      *
-     * @param change 变更（revision 由调用方经 {@link #nextRevision(String)} 取得）
+     * @param change 变更（请用 {@link #dispatch(ChangeType, DeviceSpec)} 构造，revision 由框架分配）
      */
     public void emit(DeviceChange change) {
         if (listeners.isEmpty()) {
@@ -116,13 +124,17 @@ public class AccessDeviceRegistry implements DeviceRegistry {
     }
 
     /**
-     * 取某设备的下一个变更版本号（严格递增）。
+     * 构造一条设备变更（版本号由框架分配器分配，严格递增）。
      *
-     * @param deviceId 设备标识
-     * @return 严格大于此前任何一次返回值的版本号
+     * <p>iot-starter #38 起不再由宿主「先取版本号再 new DeviceChange」：框架的
+     * {@link DeviceRevisionAllocator#dispatch} 一步完成，宿主不会漏掉/复用版本号。</p>
+     *
+     * @param type   变更类型
+     * @param device 设备规格
+     * @return 带严格递增 revision 的变更
      */
-    public long nextRevision(String deviceId) {
-        return revisions.computeIfAbsent(deviceId, key -> new AtomicLong()).incrementAndGet();
+    public DeviceChange dispatch(ChangeType type, DeviceSpec device) {
+        return revisions.dispatch(type, device);
     }
 
     /** 当前已注册的变更监听器数量（供自检/测试断言接线是否完成）。 */
@@ -132,7 +144,7 @@ public class AccessDeviceRegistry implements DeviceRegistry {
 
     /** 已记录版本号的设备数（供测试断言）。 */
     public int trackedRevisionCount() {
-        return revisions.size();
+        return revisions.trackedDevices();
     }
 }
 
