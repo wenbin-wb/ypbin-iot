@@ -96,7 +96,7 @@ class AvailabilityServiceImplTest {
 
     private MaintenanceWindowMapper maintenanceWindowMapper;
 
-    /** 租户提供者桩：真实请求链路上租户来自 IdentityContext（见 MicroserviceTenantProvider），这里模拟之。 */
+    /** 租户提供者桩：真实请求链路上租户来自 IdentityContext（见 starter 的 IdentityTenantProvider），这里模拟之。 */
     private TenantProvider tenantProvider;
 
     /** 最新值写入器（Q8）：断言「带点位与值的读数才写」 */

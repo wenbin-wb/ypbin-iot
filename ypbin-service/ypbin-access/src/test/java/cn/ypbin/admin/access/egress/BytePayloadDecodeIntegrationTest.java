@@ -19,10 +19,6 @@ import ch.qos.logback.core.read.ListAppender;
 import cn.ypbin.admin.access.config.AccessEgressProperties;
 import cn.ypbin.admin.access.decode.AccessDecodeProperties;
 import cn.ypbin.admin.access.decode.ByteDecodeMetrics;
-import cn.ypbin.admin.access.decode.BytePayloadDecoder;
-import cn.ypbin.admin.access.decode.BytePayloadDecoderRegistry;
-import cn.ypbin.admin.access.decode.DecodeContext;
-import cn.ypbin.admin.access.decode.DecodeOutcome;
 import cn.ypbin.admin.access.decode.MqttBinaryNumberDecoder;
 import cn.ypbin.admin.access.link.PointMappingDataListener;
 import cn.ypbin.admin.iot.availability.IReadingClient;
@@ -30,6 +26,11 @@ import cn.ypbin.admin.iot.device.AccessPointMappingDto;
 import cn.ypbin.iot.core.model.PointAddress;
 import cn.ypbin.iot.core.model.PointValue;
 import cn.ypbin.iot.core.model.Quality;
+import cn.ypbin.iot.core.spi.BytePayloadDecoder;
+import cn.ypbin.iot.core.spi.BytePayloadDecoderRegistry;
+import cn.ypbin.iot.core.spi.DecodeContext;
+import cn.ypbin.iot.core.spi.DecodeOutcome;
+import cn.ypbin.iot.runtime.registry.DefaultBytePayloadDecoderRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -46,7 +47,7 @@ import org.slf4j.LoggerFactory;
  * <ol>
  *   <li><b>未注册</b> ⇒ {@code byte[]} 仍被出口闸门丢弃并计 {@code iot.access.egress.invalid}；</li>
  *   <li><b>注册并解码成功</b> ⇒ 解出值、走既有规范化/缩放、到达出口；</li>
- *   <li><b>解码失败</b> ⇒ BAD 质量 + {@code iot.access.payload.decode.failure{reason}}；</li>
+ *   <li><b>解码失败</b> ⇒ BAD 质量 + {@code ypbin.iot.errors{type=iot.common.payload.decode-failed.<detail>}}；</li>
  *   <li><b>解码器抛异常</b> ⇒ 不吞，BAD + reason=decoder-error + ERROR 全堆栈。</li>
  * </ol>
  *
@@ -136,7 +137,7 @@ class BytePayloadDecodeIntegrationTest {
         };
         PointMappingDataListener listener = listener("mqtt",
             List.of(point(TOPIC, "counter", "int")), readings::add, meters,
-            new BytePayloadDecoderRegistry(List.of(textDecoder)));
+            new DefaultBytePayloadDecoderRegistry(List.of(textDecoder)));
 
         listener.onData(PointValue.good(PointAddress.of(TOPIC), new byte[] {0x01}, TS));
 
@@ -167,7 +168,7 @@ class BytePayloadDecodeIntegrationTest {
         });
         assertThat(listener.decodeFailureCount()).isEqualTo(1);
         assertThat(meters.get(ByteDecodeMetrics.METRIC_NAME)
-            .tag(ByteDecodeMetrics.TAG_REASON, "length-mismatch").counter().count())
+            .tag(ByteDecodeMetrics.TAG_TYPE, "iot.common.payload.decode-failed.length-mismatch").counter().count())
             .isEqualTo(1.0d);
     }
 
@@ -194,7 +195,7 @@ class BytePayloadDecodeIntegrationTest {
         };
         PointMappingDataListener listener = listener("mqtt",
             List.of(point(TOPIC, "temperature", "decimal")), readings::add, meters,
-            new BytePayloadDecoderRegistry(List.of(broken)));
+            new DefaultBytePayloadDecoderRegistry(List.of(broken)));
 
         Logger logger = (Logger) LoggerFactory.getLogger(PointMappingDataListener.class);
         ListAppender<ILoggingEvent> appender = new ListAppender<>();
@@ -207,7 +208,7 @@ class BytePayloadDecodeIntegrationTest {
                 .satisfies(reading -> assertThat(reading.quality()).isEqualTo("BAD"));
             assertThat(listener.decodeFailureCount()).isEqualTo(1);
             assertThat(meters.get(ByteDecodeMetrics.METRIC_NAME)
-                .tag(ByteDecodeMetrics.TAG_REASON, "decoder-error").counter().count())
+                .tag(ByteDecodeMetrics.TAG_TYPE, "iot.common.payload.decode-failed.decoder-error").counter().count())
                 .isEqualTo(1.0d);
 
             List<ILoggingEvent> errors = appender.list.stream()
@@ -241,7 +242,7 @@ class BytePayloadDecodeIntegrationTest {
         properties.setEnabled(true);
         properties.setDefaultSpec(spec);
         properties.setPoints(Map.of());
-        return new BytePayloadDecoderRegistry(List.of(new MqttBinaryNumberDecoder(properties)));
+        return new DefaultBytePayloadDecoderRegistry(List.of(new MqttBinaryNumberDecoder(properties)));
     }
 
     private static AccessEgressProperties egressProperties() {

@@ -26,7 +26,7 @@
 
 | 项 | 值 |
 |---|---|
-| 守卫 | 头 `X-Internal-Token`（与既有 `/internal/**` 同一凭证）；**失败返回原始 401**（`InternalMqttTokenFilter`，不走全局异常处理器） |
+| 守卫 | 头 `X-Internal-Token`（与既有 `/internal/**` 同一凭证）；**失败返回原始 401**（`ypbin.security.internal-token.raw401-path-patterns` 生效的 `InternalTokenGuard`，不走全局异常处理器） |
 | 请求体 | `{"requestId":"…","items":[{"deviceId":"9300012","propertyId":"temperature","value":"23.4","quality":"GOOD","ts":1758768000000,"pollIntervalMs":30000}]}` |
 | 约束 | `requestId` `[A-Za-z0-9_.:-]{1,64}` 必填；`items` 1–50 条且**必须同属一台设备**；`propertyId` 走 `PropertyIdRules`（1–128，字符集白名单）；`quality` 走 `ReadingQuality` 白名单（`GOOD\|UNCERTAIN\|BAD\|STALE\|NOT_CONNECTED\|CONFIG_ERROR`，**大小写敏感**）；`value` 非空且 ≤4096 字符；`ts` 为正且不超前 `RedisLatestValueWriter.MAX_FUTURE_SKEW_MS`（5 分钟，与最新值写入器同一口径）；`pollIntervalMs` 为正且 ≤24h；报文 ≤64KB |
 | 响应 | 成功/幂等重投 **200** + `R` 信封（`data.accepted/dropped/duplicated`）；契约非法 **400** + `{"code":"<原因码>","message":"…"}`；其它异常 **503**（EMQX 判 recoverable 会重试） |

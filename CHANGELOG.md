@@ -12,6 +12,43 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
 ## [未发布]
+### 变更（2026-10-18 批次）· 全量切到 starter 4.0.0 / iot-starter 0.4.0（#289/#290）
+
+> 用户决策：「**不用考虑兼容旧的服务，全部按新版重构**」⇒ 一次性删除全部自建胶水，**不做双轨过渡**。
+> 逐项映射与整批发布约束见 `SYNC.md`「2026-10-18 一揽子下沉」。
+
+- **内部调用凭证守卫改为 starter 官方装配**：删除 `ypbin-system` 的自建 `InternalTokenGuardInterceptor/WebConfig`
+  （admin 既有）与 iot 的 4 个自建类（含 MQTT 入站的原始 401 过滤器），改由
+  `ypbin.security.internal-token.guard-enabled=true` 装配（ENVELOPE `/internal/**` + RAW_401 `/internal/mqtt/*`）。
+  **配置键迁移**：`ypbin.internal.token` → `ypbin.security.internal-token.token`；出站携带改由
+  `ypbin.cloud.feign.internal-token` 全局拦截器完成（删除 system-api 与 iot-api 的 4 处手写拦截器）。
+  ⚠️ 旧键不再被读取，**新旧版本不能共用同一份 Nacos 配置**。
+- **网关内部路径阻断改为 starter 官方过滤器**：删除 `InternalEndpointBlockFilter`，用默认开启的
+  `InternalPathBlockGlobalFilter`。**安全增强**：自建实现是大小写敏感的前缀匹配，`/iot/Internal/**`、
+  `/iot/internal%5C…`、`/iot/internal%2F…` 三类变体可绕过；starter 全部拦截并在响应里返回统一 404 信封
+  （自建实现只写状态码、无响应体）。
+- **租户来源改为 starter 的 `IdentityTenantProvider`**：删除 `ypbin-common` 的 `MicroserviceTenantProvider` /
+  `MicroserviceTenantAutoConfiguration` 及其 `AutoConfiguration.imports` 登记（只删该行，RemoteLog/RemoteTrack 保留）。
+- **CSV 导出改为 `ypbin-starter-tools` 的 `CsvUtils`**：删除 `IotCsvExportUtils`；BOM / RFC 4180 / 公式注入中和
+  逐项等价（已实测），**业务配额**（单次 10000 条）移至 `IotExportLimits`。
+- **SSE 扇出 codec 改为 starter 的 `JacksonSseFanoutCodec`**：删除 `IotSseFanoutCodec`。
+  ⚠️ **协议 id 由 `iot-json-v1` 变为 `json-v1`**：混版本滚动时跨实例扇出双向丢帧 ⇒ 必须整批发布。
+- **接入层解码 SPI 改为 `ypbin-iot-core:0.4.0` 官方契约**：删除自建的 `BytePayloadDecoder` / 注册机 /
+  `DecodeContext` / `DecodeOutcome` / `DecodeFailure`（`DecodeContext` 形态变为 `(deviceId, ProtocolCode, rawAddress, connectionId)`）；
+  失败指标口径随之对齐：`iot.access.payload.decode.failure{reason=<短码>}` → **`ypbin.iot.errors{type=iot.common.payload.decode-failed.<detail>}`**。
+  MQTT binary 参考实现保留并改用官方 SPI。
+- **Modbus 寄存器解码改用 `ypbin-iot-protocol-modbus:0.4.0`**：删除自建 `ModbusRegisterDecoder`（`decodePair` → `decodeInt32`），
+  45 条宿主侧矩阵用例改为直接对官方实现断言（**证明迁移后字序/符号/UTF-8/位域/NaN 口径不变**）。
+- **读数出口队列改用 `BoundedBatchEgressQueue`**：`HttpAccessReadingSink` 的手写 `ArrayBlockingQueue` + `@Scheduled` 微批 +
+  `@PreDestroy` 循环排空全部删除，改由基座承担（非阻塞 offer / 单消费线程 / 停机循环排空 / 关闭后不再静默接受）；
+  业务闸门（原始字节、缺时刻质量、设备号非数字）与 `iot.access.egress.*` 指标口径**逐字保留**。
+- **依赖升级**：`ypbin-iot.version` 0.3.3 → **0.4.0**（新增 `ypbin-iot-protocol-modbus` 依赖）。
+
+### 破坏性变更
+
+- **上述条目全部不向后兼容**（类被删、配置键改名、指标改口径、SSE codec id 变更）⇒ **必须整批发布**，
+  不接受新旧实例混跑；回滚同样需整批回滚到上一个 Release。
+
 ### 变更（2026-10-15 批次）
 
 - **告警支持真 AND 复合条件**：一条规则的多个点位条件构成**同一设备的合取条件组** —— 组内全部条件对同一轮最新值都越界才触发；任一条未越界即不触发；任一条不可判定（无最新值/陈旧/非数值/坏质量/条件非法）且无未越界时整组本轮不可判定（不触发也不恢复，不把「读不到」伪装成「未越界」）。恢复口径为**合取被证伪**：任一条可判定条件越过其恢复门槛（含回差）即收口，避免坏点位钉出僵尸告警。去重键由 `rule:device:property` 收紧为 `R:rule:device`（一条规则对一台设备至多一条活动实例；断档键 `OUTAGE:` 不变），实例新增 `condition_snapshot` 列承载逐条件「阈值 vs 读到多少 vs 判定」，通知正文多条件时逐条件列出（**不新增通知明细行**）。

@@ -9,7 +9,6 @@
  */
 package cn.ypbin.admin.access.config;
 
-import cn.ypbin.admin.access.decode.BytePayloadDecoderRegistry;
 import cn.ypbin.admin.access.egress.AccessReadingSink;
 import cn.ypbin.admin.access.egress.LoggingDataSink;
 import cn.ypbin.admin.access.lease.AccessLeaseManager;
@@ -21,6 +20,7 @@ import cn.ypbin.admin.access.link.IotProtocolTenantLinkManager;
 import cn.ypbin.admin.access.link.SubscriptionPlanner;
 import cn.ypbin.admin.access.link.TenantLinkManager;
 import cn.ypbin.iot.core.protocol.DeviceSession;
+import cn.ypbin.iot.core.spi.BytePayloadDecoderRegistry;
 import cn.ypbin.iot.core.spi.ConnectionSpecProvider;
 import cn.ypbin.iot.core.spi.DataSink;
 import cn.ypbin.iot.core.spi.DeviceRegistry;

@@ -131,13 +131,18 @@ ypbin:
   # 心跳：starter 默认 30s，这里显式设为 **15s**，与改造前 IoT 自建心跳同频（低于常见网关 60s 空闲超时，
   #   且前端 EventSource 的既有行为不受影响）。timeout=0 = 不主动断连（靠心跳保活 + 客户端重连）。
   # 扇出：有 Redis 时自动启用跨实例扇出（多实例下事件可达任意实例的连接）；
-  #   结构化事件载荷由 IoT 的 IotSseFanoutCodec 承载（starter 默认 codec 只支持标量）。
+  #   结构化事件载荷由 starter 的 JacksonSseFanoutCodec 承载（协议 id json-v1）；本仓自建 codec 已删除。
   # ---------------------------------------------------------------------------
   sse:
     enabled: true
     register-endpoint: false
     heartbeat-interval-seconds: 15
     timeout: 0
+    # 跨实例扇出的载荷 codec：starter 4.0.0 在容器里有 ObjectMapper 时装配
+    # JacksonSseFanoutCodec（协议 id `json-v1`），本仓自建 codec 已删除（issue #289 第 5 项）。
+    # ⚠️ 协议 id 是对外契约：多个实例**混版本**滚动时双方 codecId 不一致 ⇒ 跨实例帧被整批丢弃
+    #   （含纯文本帧）。滚动发布要么整批重启，要么先在滚动窗口显式注册同 id 的 codec。
+    fanout-enabled: true
 
   # 告警与阈值（设计 docs/ALERTING-DESIGN.md；用户已批准口径见任务回执）。
   # ⚠️ `enabled=false` 时**接口返回明确失败而不是空列表**（空列表会被读成「没有告警」= 最危险的假阴性）。

@@ -34,7 +34,8 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 > 只会被当噪音忽略。现在：白名单内冲突 = warning + summary 列出；白名单外冲突 = 判红（那才是
 > 「分歧面失控」的信号）。
 
-> **白名单膨胀要记账**：目前 **24** 个文件（权威清单 = `tools/sync-whitelist-regex.sh`；本表与它必须逐项一致）。
+> **白名单膨胀要记账**：目前 **34** 个文件（权威清单 = `tools/sync-whitelist-regex.sh`；本表与它必须逐项一致）。
+> 2026-10-18：**加第 25–34 项**（`ypbin-starter` 4.0.0 全量下沉，见下文「一揽子下沉」），本质是「删除 admin 既有文件」，与以往「改一行」的条目性质不同。
 > 2026-10-12：**加第 21 项 `CHANGELOG.md`**（本批 deploy/IoT 修复需要写发布台账；无法用新文件表达，
 > 与 upstream 冲突时整体取本仓版本，代价同 README.md）。
 > 2026-10-09：**移除 2 个死条目**（`deploy/sql/007-iot-data.sql`、`deploy/sql/migration/2026-10-05-iot-platform-alert-schema.sql`）——
@@ -83,6 +84,29 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 > 换言之，改的是「这个文件允许被改」，不是「这类调用不再报错」——任何**真正**的循环内 DB/RPC 调用
 > 仍然照旧转红。要缩小这条特例，只能做真实重构（把映射前置成循环外的纯函数预处理），
 > 不能用「改成 stream/换写法绕开正则」这类利用门禁盲区的做法。
+
+### 2026-10-18 一揽子下沉（issue #289/#290）
+
+> 用户明确要求「**不用考虑兼容旧的服务，全部按新版重构**」⇒ 本仓一次性把自建胶水全部换成
+> `ypbin-starter` 4.0.0 / `ypbin-iot-starter` 0.4.0 的官方能力，**不作双轨过渡**（旧实例不兼容，需整批发布）。
+
+| 原自建 | 替代（starter） | 相关配置键迁移 |
+|---|---|---|
+| `system/config/InternalTokenGuardInterceptor` + `InternalTokenGuardWebConfig`（admin 既有） | `ypbin-starter-security` 的 `InternalTokenGuardAutoConfiguration`（ENVELOPE + RAW_401 两种语义） | `ypbin.internal.token` → **`ypbin.security.internal-token.token`**；新增 `guard-enabled`、`raw401-path-patterns: [/internal/mqtt/*]` |
+| `iot/config/InternalTokenGuard*` + `InternalMqttTokenFilter` + `InternalMqttGuardWebConfig`（本仓自建） | 同上（RAW_401 语义承接 `/internal/mqtt/*`） | 同上 |
+| `InternalTokenFeignConfiguration`（system-api，admin 既有）+ iot-api 的 3 个 `*FeignConfiguration` 里的 token 拦截器 | `ypbin-starter-cloud-core` 的 `FeignHeaderInterceptor`（全局，非「每客户端配置」） | 新增 `ypbin.cloud.feign.internal-token` |
+| `gateway/security/InternalEndpointBlockFilter` | `ypbin-starter-cloud-gateway` 的 `InternalPathBlockGlobalFilter`（**默认开启**，大小写 + `%2F`/`%5C` 加固） | 无需新键（如要关：`ypbin.gateway.internal-path-block.enabled=false`） |
+| `common/provider/MicroserviceTenant*` + 其在 `AutoConfiguration.imports` 的登记（admin 既有） | `ypbin-starter-extension-tenant` 的 `IdentityTenantProvider` | 无（沿用 `ypbin.tenant.enabled`） |
+| `iot/support/IotCsvExportUtils` | `ypbin-starter-tools` 的 `CsvUtils` | 无；**业务配额** `MAX_EXPORT_ROWS` 留在本仓 `IotExportLimits` |
+| `iot/realtime/IotSseFanoutCodec` | `ypbin-starter-messaging` 的 `JacksonSseFanoutCodec`（协议 id `json-v1`） | 无 |
+| `access/decode/*`（自建 `BytePayloadDecoder` SPI + 注册机 + `DecodeContext`/`DecodeOutcome`/`DecodeFailure`） | `ypbin-iot-core:0.4.0` 的 `cn.ypbin.iot.core.spi.*` + `ypbin-iot-runtime` 的 `DefaultBytePayloadDecoderRegistry` | 失败指标口径改为 `ypbin.iot.errors{type=iot.common.payload.decode-failed.<detail>}` |
+| `access/link/ModbusRegisterDecoder` | `ypbin-iot-protocol-modbus:0.4.0` 的同名工具（`decodePair` → `decodeInt32`） | 无 |
+| `access/egress/HttpAccessReadingSink` 内手写队列 + `@Scheduled` 微批 + 停机排空 | `ypbin-iot-runtime:0.4.0` 的 `BoundedBatchEgressQueue`（本类只保留业务闸门与指标） | `flush-interval-ms` 语义不变（作为基座的 flush 窗口） |
+
+**整批发布的硬约束（不做双轨）**：
+1. **SSE codec id** 由 `iot-json-v1` 变为 `json-v1` ⇒ 混版本滚动期内跨实例扇出双向丢弃；
+2. **内部凭证配置键**变了 ⇒ 新旧版本不能共用同一份 Nacos 配置；
+3. `ypbin-access` 的 `ypbin-iot.version` 与 `ypbin-starter.version` 必须同批发布（0.4.0 建立在 3.8.0 父链上，业务仓用 4.0.0）。
 
 **口径说明（两组数字别混）**：`git diff upstream/main --stat` 的字面数字**包含新增文件**
 （IoT 业务文件 + SYNC.md + 门禁脚本等），而本纪律关心的只有「**改动的既有文件**」——

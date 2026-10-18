@@ -15,6 +15,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import cn.ypbin.admin.access.decode.AccessDecodeProperties.Endianness;
 import cn.ypbin.admin.access.decode.AccessDecodeProperties.NumberSpec;
 import cn.ypbin.admin.access.decode.AccessDecodeProperties.NumberType;
+import cn.ypbin.iot.core.protocol.ProtocolCode;
+import cn.ypbin.iot.core.spi.DecodeContext;
+import cn.ypbin.iot.core.spi.DecodeFailure;
+import cn.ypbin.iot.core.spi.DecodeOutcome;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
@@ -216,7 +220,7 @@ class MqttBinaryNumberDecoderTest {
     }
 
     private static DecodeContext context(String protocol, String address) {
-        return new DecodeContext("100", protocol, address, "topic", "decimal", "big");
+        return new DecodeContext("100", ProtocolCode.of(protocol), address, "");
     }
 
     private static NumberSpec spec(NumberType type, Integer length, Endianness order) {

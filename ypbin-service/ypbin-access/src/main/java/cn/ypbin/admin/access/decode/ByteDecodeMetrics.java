@@ -9,30 +9,36 @@
  */
 package cn.ypbin.admin.access.decode;
 
+import cn.ypbin.iot.core.spi.DecodeFailure;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 
 /**
- * 宿主字节载荷解码失败指标（{@code iot.access.payload.decode.failure}，按 {@code reason} 打标签）。
+ * 宿主字节载荷解码失败指标（{@code ypbin.iot.errors{type}}（与 starter 0.4.0 的错误指标同一口径），`type` 取消息键）。
  *
  * <p><b>为什么需要它</b>：注册了解码器之后，{@code byte[]} 不再一律被出口闸门丢弃——若解码失败却没有
  * 专属指标，运维只能看到「闸门计数不再增长但也没数据」，无法区分「解码器没认领」与「认领了但解错了」。
  * 本指标把后者显式化，且 {@code reason} 取值有界（{@link DecodeFailure}）。</p>
  *
  * <p><b>为什么预注册</b>：Micrometer 计数器惰性创建——不预注册时「零失败」会让
- * {@code /actuator/metrics/iot.access.payload.decode.failure} 返回 404，值班无法区分「没有失败」与
- * 「指标缺失」。故启动期按 {@link DecodeFailure} 全部原因码注册值为 0 的计数器。</p>
+ * {@code /actuator/metrics/ypbin.iot.errors} 没有对应标签值，值班无法区分「没有失败」与
+ * 「指标缺失」。故启动期按 {@link DecodeFailure} 全部原因注册值为 0 的计数器。</p>
+ *
+ * <p><b>口径变更（2026-10-18）</b>：原先为 IoT 专属指标 {@code iot.access.payload.decode.failure}
+ * （label {@code reason}=短码）。接入层 SPI 下沉到 ypbin-iot-starter 0.4.0 后，框架统一用
+ * {@code ypbin.iot.errors{type=iot.common.payload.decode-failed.<detail>}}，本类随之对齐，
+ * 避免同一件事出现两套指标名。看板/告警需同步迁移。</p>
  *
  * @author wenbin
  * @since 2026-10-13
  */
 public final class ByteDecodeMetrics {
 
-    /** 指标名（对外契约：改名等于让既有看板与告警失联）。 */
-    public static final String METRIC_NAME = "iot.access.payload.decode.failure";
+    /** 指标名（与 starter 的协议层错误指标同一口径）。 */
+    public static final String METRIC_NAME = "ypbin.iot.errors";
 
-    /** 原因标签名。 */
-    public static final String TAG_REASON = "reason";
+    /** 原因标签名（值 = {@link DecodeFailure#messageKey()}）。 */
+    public static final String TAG_TYPE = "type";
 
     private ByteDecodeMetrics() {
     }
@@ -49,13 +55,13 @@ public final class ByteDecodeMetrics {
     }
 
     /**
-     * 取（缺失时创建）某个原因码的计数器。
+     * 取（缺失时创建）某个失败原因的计数器。
      *
      * @param meterRegistry 指标注册表
      * @param failure       失败原因
      * @return 计数器
      */
     public static Counter counter(MeterRegistry meterRegistry, DecodeFailure failure) {
-        return meterRegistry.counter(METRIC_NAME, TAG_REASON, failure.getCode());
+        return meterRegistry.counter(METRIC_NAME, TAG_TYPE, failure.messageKey());
     }
 }

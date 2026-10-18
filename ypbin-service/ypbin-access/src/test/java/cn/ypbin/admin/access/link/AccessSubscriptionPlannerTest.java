@@ -18,7 +18,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import org.mockito.ArgumentCaptor;
 
-import cn.ypbin.admin.access.decode.BytePayloadDecoderRegistry;
+import cn.ypbin.iot.core.spi.BytePayloadDecoderRegistry;
 import cn.ypbin.iot.core.model.DeviceSpec;
 import cn.ypbin.iot.core.model.PointAddress;
 import cn.ypbin.iot.core.model.SubscribeRequest;

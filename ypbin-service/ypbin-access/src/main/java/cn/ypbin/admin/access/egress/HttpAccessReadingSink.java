@@ -13,19 +13,17 @@ import cn.ypbin.admin.access.config.AccessEgressProperties;
 import cn.ypbin.admin.iot.availability.IReadingClient;
 import cn.ypbin.admin.iot.availability.ReadingIngestReq;
 import cn.ypbin.admin.iot.availability.ReadingObservationDto;
+import cn.ypbin.iot.runtime.egress.BoundedBatchEgressQueue;
 import cn.ypbin.starter.core.model.R;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.annotation.PreDestroy;
-import java.util.ArrayList;
+import java.time.Duration;
 import java.util.List;
-import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.scheduling.annotation.Scheduled;
 
 /**
  * 读数出口的 HTTP 实现（M-2）：**有界队列 → 微批 → 内部接口**。
@@ -39,6 +37,12 @@ import org.springframework.scheduling.annotation.Scheduled;
  *       丢一批会让缺口被算长一些，但绝不能因此把服务拖垮）——`iot.access.egress.failed` 就是它的账。</li>
  * </ol>
  *
+ * <p><b>队列基座来自 starter 0.4.0</b>：{@link BoundedBatchEgressQueue} 提供「非阻塞 offer /
+ * 单消费线程微批 / 故障隔离 / 停机循环排空」，本类只保留业务语义（读数 → 上报观察的闸门、指标口径、
+ * 单批大小不超过 {@code ReadingIngestReq.MAX_BATCH_SIZE}）。该基座另在其自身指标
+ * {@code ypbin.iot.egress.pending} 上报队列深度；本类的 {@code iot.access.egress.pending} 是既有
+ * 看板口径（两者取值相同，保留后者是为了不让运维面板失联）。</p>
+ *
  * <p>上报「设备/点位/值/质量/时刻/周期」（Q8/D0.7 起含读数**值**，值为字符串化后的规范值——
  * 数值形态由 starter 的 {@code payload-format}（TCP key-value/text/number）与宿主
  * {@code PointValueNormalizer} 保证，见 {@code docs/VALUE-DECODE-DESIGN.md}）。</p>
@@ -48,7 +52,7 @@ import org.springframework.scheduling.annotation.Scheduled;
  */
 public class HttpAccessReadingSink implements AccessReadingSink {
 
-    /** 指标前缀。 */
+    /** 指标前缀（对外契约：改名等于让既有看板与告警失联）。 */
     static final String METRIC_PREFIX = "iot.access.egress.";
 
     /** 队列满的告警最小间隔（避免爆满时把日志打爆）。 */
@@ -57,8 +61,6 @@ public class HttpAccessReadingSink implements AccessReadingSink {
     private static final Logger log = LoggerFactory.getLogger(HttpAccessReadingSink.class);
 
     private final IReadingClient client;
-    private final int batchSize;
-    private final BlockingQueue<ReadingObservationDto> queue;
     private final Counter acceptedCounter;
     private final Counter droppedCounter;
     private final Counter sentCounter;
@@ -66,18 +68,26 @@ public class HttpAccessReadingSink implements AccessReadingSink {
     private final Counter invalidCounter;
     private final AtomicLong lastDropWarnAt = new AtomicLong(Long.MIN_VALUE);
 
+    /** 有界微批出口队列（starter 0.4.0 基座：非阻塞 offer / 单消费线程 / 停机循环排空）。 */
+    private final BoundedBatchEgressQueue<ReadingObservationDto> queue;
+
     public HttpAccessReadingSink(IReadingClient client, AccessEgressProperties properties,
                                  MeterRegistry meterRegistry) {
         this.client = client;
-        this.batchSize = Math.max(1, Math.min(properties.getBatchSize(),
+        int batchSize = Math.max(1, Math.min(properties.getBatchSize(),
             ReadingIngestReq.MAX_BATCH_SIZE));
-        this.queue = new ArrayBlockingQueue<>(Math.max(this.batchSize, properties.getQueueCapacity()));
+        int capacity = Math.max(batchSize, properties.getQueueCapacity());
         this.acceptedCounter = meterRegistry.counter(METRIC_PREFIX + "accepted");
         this.droppedCounter = meterRegistry.counter(METRIC_PREFIX + "dropped");
         this.sentCounter = meterRegistry.counter(METRIC_PREFIX + "sent");
         this.failedCounter = meterRegistry.counter(METRIC_PREFIX + "failed");
         this.invalidCounter = meterRegistry.counter(METRIC_PREFIX + "invalid");
-        Gauge.builder(METRIC_PREFIX + "pending", queue, BlockingQueue::size)
+        // pending 由基座以 ypbin.iot.egress.pending 上报；本类另注册同名口径的 gauge 会重复，
+        // 故这里只保留 iot.access.egress.pending（运维既有看板引用它），取值即基座 pending。
+        this.queue = new BoundedBatchEgressQueue<>(capacity, batchSize,
+            Duration.ofMillis(Math.max(1L, properties.getFlushIntervalMs())),
+            this::deliver, null);
+        Gauge.builder(METRIC_PREFIX + "pending", this, sink -> sink.pendingCount())
             .description("待上报的读数条数").register(meterRegistry);
     }
 
@@ -96,14 +106,15 @@ public class HttpAccessReadingSink implements AccessReadingSink {
         warnDropIfNeeded();
     }
 
-    /** 微批上报（周期由 {@code ypbin.access.egress.flush-interval-ms} 控制）。 */
-    @Scheduled(fixedDelayString = "${ypbin.access.egress.flush-interval-ms:1000}")
-    public void flush() {
-        List<ReadingObservationDto> batch = new ArrayList<>(batchSize);
-        queue.drainTo(batch, batchSize);
-        if (batch.isEmpty()) {
-            return;
-        }
+    /**
+     * 微批投递（由 starter 的有界队列在**单个消费线程**上按 batchSize + flushInterval 调用）。
+     *
+     * <p>失败只影响本批：抛 {@link RuntimeException} 会由基座记 ERROR 全堆栈 + 累加失败计数，
+     * 并继续消费下一批（本批**不重投**，理由见类注释第 2 条）。</p>
+     *
+     * @param batch 本批观察（不可变、非空）
+     */
+    private void deliver(List<ReadingObservationDto> batch) {
         ReadingIngestReq req = new ReadingIngestReq();
         req.setItems(batch);
         try {
@@ -125,33 +136,21 @@ public class HttpAccessReadingSink implements AccessReadingSink {
     }
 
     /**
-     * 停机前把队列刷空（**循环**刷，直到空或达到次数上限）。
+     * 停机时把队列排空（由 starter 基座的 {@code close()} 负责：停消费线程 → 循环刷剩余 → 计入丢弃）。
      *
-     * <p>为什么不能只刷一批：队列容量（默认 10000）可以远大于微批（默认 200），只刷一批会把尾部
-     * **静默丢掉**——既不计 `dropped` 也没有日志，排查时「读数去哪了」无从回答。剩下的必须计数 + 告警。</p>
+     * <p>基座保证「关闭后再 offer 一律返回 false 并计数」，不像旧实现那样可能出现
+     * 「close 排空完又被 offer 塞进一条」的静默滞留。</p>
      */
     @PreDestroy
     public void close() {
-        int maxRounds = Math.max(1, queue.size() / batchSize + 2);
-        for (int round = 0; round < maxRounds && !queue.isEmpty(); round++) {
-            try {
-                flush();
-            } catch (RuntimeException ex) {
-                log.error("[access] 停机前刷出残留读数失败：pending={}", pendingCount(), ex);
-                break;
-            }
-        }
-        int left = queue.size();
-        if (left > 0) {
-            droppedCounter.increment(left);
-            log.warn("[access] 停机时仍有 {} 条读数未送出（已计入 iot.access.egress.dropped）", left);
-        }
+        queue.close();
     }
 
     /** 待上报条数（观测/测试用）。 */
     public int pendingCount() {
-        return queue.size();
+        return queue.pending();
     }
+
 
     /**
      * 读数 → 上报观察；不可用（设备号非数字、缺时刻/质量、**值仍是未解码的原始字节**）时计数并返回

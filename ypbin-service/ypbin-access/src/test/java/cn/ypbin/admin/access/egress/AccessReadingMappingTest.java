@@ -15,7 +15,7 @@ import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
-import cn.ypbin.admin.access.decode.BytePayloadDecoderRegistry;
+import cn.ypbin.iot.core.spi.BytePayloadDecoderRegistry;
 import cn.ypbin.admin.access.link.PointMappingDataListener;
 import cn.ypbin.admin.iot.device.AccessPointMappingDto;
 import cn.ypbin.iot.core.model.PointAddress;

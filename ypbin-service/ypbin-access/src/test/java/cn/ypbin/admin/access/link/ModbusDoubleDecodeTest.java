@@ -11,7 +11,7 @@ package cn.ypbin.admin.access.link;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import cn.ypbin.admin.access.decode.BytePayloadDecoderRegistry;
+import cn.ypbin.iot.core.spi.BytePayloadDecoderRegistry;
 import cn.ypbin.admin.access.egress.AccessReading;
 import cn.ypbin.admin.access.egress.PointValueNormalizeMetrics;
 import cn.ypbin.admin.iot.device.AccessPointMappingDto;

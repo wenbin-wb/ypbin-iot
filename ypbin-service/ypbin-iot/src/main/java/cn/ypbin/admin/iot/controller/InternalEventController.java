@@ -23,7 +23,7 @@ import org.springframework.web.bind.annotation.RestController;
 /**
  * 运行期事件上报内部端点（access → iot，G6）。
  *
- * <p>路径在 {@code /internal/**} 下 ⇒ 由 {@code InternalTokenGuardWebConfig} 的守卫统一保护
+ * <p>路径在 {@code /internal/**} 下 ⇒ 由 starter 官方内部凭证守卫（`ypbin.security.internal-token.guard-enabled`）统一保护
  * （只有 {@code X-Internal-Token}，没有租户身份；服务侧按设备解析租户后再写，见
  * {@link cn.ypbin.admin.iot.service.impl.IotEventServiceImpl} 的类注释）。</p>
  *

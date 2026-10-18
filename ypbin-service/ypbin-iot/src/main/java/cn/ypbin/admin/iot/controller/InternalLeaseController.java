@@ -37,7 +37,7 @@ import org.springframework.web.bind.annotation.RestController;
 /**
  * 租约内部端点（仅供 access 单元调用，不对外）。
  *
- * <p>路径在 {@code /internal/**} 下 ⇒ 由 {@code InternalTokenGuardWebConfig} 的守卫统一保护
+ * <p>路径在 {@code /internal/**} 下 ⇒ 由 starter 官方内部凭证守卫（`ypbin.security.internal-token.guard-enabled`）统一保护
  * （凭证未配置一律拒绝）；网关不对外暴露该前缀。</p>
  *
  * @author wenbin

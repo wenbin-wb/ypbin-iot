@@ -9,7 +9,6 @@
  */
 package cn.ypbin.admin.iot;
 
-import cn.ypbin.admin.common.config.InternalProperties;
 import org.mybatis.spring.annotation.MapperScan;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.cloud.openfeign.EnableFeignClients;
@@ -26,7 +25,6 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * @since 2026-09-19
  */
 @EnableFeignClients(basePackages = "cn.ypbin.admin.system.api.feign")
-@EnableConfigurationProperties(InternalProperties.class)
 @MapperScan("cn.ypbin.admin.iot.mapper")
 @SpringBootApplication(scanBasePackages = {"cn.ypbin.admin.iot", "cn.ypbin.admin.system.api"})
 public class IotServiceApplication {

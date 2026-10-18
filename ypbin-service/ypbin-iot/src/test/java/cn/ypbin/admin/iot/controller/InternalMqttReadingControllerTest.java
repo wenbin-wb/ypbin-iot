@@ -20,13 +20,12 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-import cn.ypbin.admin.common.config.InternalProperties;
-import cn.ypbin.admin.iot.config.InternalMqttTokenFilter;
 import cn.ypbin.admin.iot.mqtt.MqttIngestRejectReason;
 import cn.ypbin.admin.iot.mqtt.MqttIngestRejectionException;
 import cn.ypbin.admin.iot.mqtt.MqttReadingIngestReq;
 import cn.ypbin.admin.iot.mqtt.MqttReadingIngestResult;
 import cn.ypbin.admin.iot.service.MqttReadingIngestService;
+import cn.ypbin.starter.security.internal.InternalTokenGuard;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.json.JsonMapper;
 import org.junit.jupiter.api.BeforeEach;
@@ -45,7 +44,7 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders;
  * 静默失效形态。因此这里全部用 {@code status().isXxx()}，并专门包含「凭证错误必须是 401、不能是 200」
  * 的用例。</p>
  *
- * <p><b>为什么用 standalone MockMvc</b>：被验证的是「控制器 + 凭证过滤器」的组合行为，不需要起
+ * <p><b>为什么用 standalone MockMvc</b>：被验证的是「控制器 + 凭证守卫（starter 官方 `InternalTokenGuard` 的 RAW_401 语义）」的组合行为，不需要起
  * Spring 容器（也就不依赖 DB/Redis/Nacos）；起容器会把断言从「HTTP 语义」变成「整栈行为」，
  * 失败时难以定位。</p>
  *
@@ -159,17 +158,18 @@ class InternalMqttReadingControllerTest {
     }
 
     /**
-     * 构造 standalone MockMvc（本控制器 + 凭证过滤器，用本测试的服务 mock）。
+     * 构造 standalone MockMvc（本控制器 + 凭证守卫（starter 官方 `InternalTokenGuard` 的 RAW_401 语义），用本测试的服务 mock）。
+     *
+     * <p>守卫用 starter 的 {@link InternalTokenGuard}（RAW_401 语义）：过滤器只挂在本控制器上，
+     * 等价于生产配置 {@code ypbin.security.internal-token.raw401-path-patterns=[/internal/mqtt/*]}。</p>
      *
      * @param token 配置的凭证（{@code null} = 未配置 ⇒ 应 fail-closed）
      * @return MockMvc
      */
     private MockMvc buildMockMvc(String token) {
-        InternalProperties properties = new InternalProperties();
-        properties.setToken(token);
         return MockMvcBuilders
             .standaloneSetup(new InternalMqttReadingController(service, jsonMapper()))
-            .addFilters(new InternalMqttTokenFilter(properties))
+            .addFilters(new InternalTokenGuard(token, null))
             .build();
     }
 

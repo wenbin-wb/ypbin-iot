@@ -19,7 +19,8 @@ import org.springframework.web.bind.annotation.RequestParam;
 /**
  * 设备采集规格内部客户端（access → iot 服务）。
  *
- * <p>路径在 {@code /internal/**} 下，由 {@code InternalTokenGuardInterceptor} 统一保护；网关不对外暴露。</p>
+ * <p>路径在 {@code /internal/**} 下，由
+ * starter 官方内部凭证守卫（`ypbin.security.internal-token.guard-enabled`）统一保护；网关不对外暴露。</p>
  *
  * @author wenbin
  * @since 2026-09-21

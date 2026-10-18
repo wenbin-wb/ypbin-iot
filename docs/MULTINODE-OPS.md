@@ -165,7 +165,7 @@ mvn -B -o -pl ypbin-service/ypbin-iot -am test \
 > 本节保留历史实测记录，用于说明**当时的证据强度**，不代表当前仓内仍可复现该命令。
 >
 > 当前仓内可复现的跨实例验证是 **SSE 扇出**（同一能力批次的另一半）：
-> `mvn -o -pl ypbin-service/ypbin-iot -am test -Dtest='IotRealtimeServiceTest,IotSseFanoutCodecTest'`
+> `mvn -o -pl ypbin-service/ypbin-iot -am test -Dtest='IotRealtimeServiceTest,IotSseWiringTest'`
 > —— 覆盖「租户隔离（A 的连接不得收到 B 的事件）」与「结构化载荷可编码（否则跨实例静默退化为只投本实例）」。
 >
 > 历史实测（2026-10-13，当时自建实现、现已迁出）记录如下：

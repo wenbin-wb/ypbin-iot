@@ -28,7 +28,7 @@ import org.springframework.web.bind.annotation.RestController;
 /**
  * 维护窗口内部端点（M-2 / spec §12.5）：声明/关闭/查询「可用率统计要排除的计划停机」。
  *
- * <p>路径在 {@code /internal/**} 下 ⇒ 由 {@code InternalTokenGuardWebConfig} 的守卫统一保护
+ * <p>路径在 {@code /internal/**} 下 ⇒ 由 starter 官方内部凭证守卫（`ypbin.security.internal-token.guard-enabled`）统一保护
  * （只有 {@code X-Internal-Token}，没有身份/权限头）；租户从**上下文**取（网关注入），不来自请求体。</p>
  *
  * <p><b>为什么先做内部端点而不是管理台</b>：口径与数据模型是先行件（可用率报表要立刻能用），

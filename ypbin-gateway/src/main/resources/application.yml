@@ -37,8 +37,10 @@ spring:
                 - StripPrefix=1
             # 安全（M2）：/iot/internal/** 是服务间内网面，绝不对外暴露。
             # 必须在 iot 通配路由之前（order=-1）；RedirectTo 短路，永不转发到上游。
-            # 运行期硬保证在 InternalEndpointBlockFilter（WebFilter，早于路由解析）；
+            # 运行期硬保证在 **starter 4.0.0 的 InternalPathBlockGlobalFilter**（默认开启，早于鉴权与
+            # 路由匹配，大小写/编码分隔符（%2F/%5C）变体一并拦截，返回统一 404 信封）；
             # 本路由为配置层纵深防御与可见性，两处 YAML 必须保持同构。
+            # ⚠️ 4.0.0 起本仓不再保留自建 InternalEndpointBlockFilter（已删除）。
             - id: iot-internal-deny
               uri: lb://ypbin-iot
               order: -1

@@ -37,7 +37,8 @@ import cn.ypbin.admin.iot.model.resp.AlertNotificationResp;
 import cn.ypbin.admin.iot.model.resp.AlertSummaryResp;
 import cn.ypbin.admin.iot.realtime.IotRealtimeService;
 import cn.ypbin.admin.iot.service.AlertInstanceService;
-import cn.ypbin.admin.iot.support.IotCsvExportUtils;
+import cn.ypbin.admin.iot.support.IotExportLimits;
+import cn.ypbin.starter.tools.csv.CsvUtils;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.crud.model.PageResult;
 import cn.ypbin.starter.security.core.UserContext;
@@ -139,13 +140,13 @@ public class AlertInstanceServiceImpl implements AlertInstanceService {
         gate.requireEnabled();
         LambdaQueryWrapper<IotAlertInstance> wrapper = buildQueryWrapper(query);
         if (wrapper == null) {
-            return IotCsvExportUtils.toCsv(ALERT_EXPORT_HEADERS, List.of());
+            return CsvUtils.toCsv(ALERT_EXPORT_HEADERS, List.of());
         }
         // 只取上限 +1 条判定超限：不静默截断成「看起来完整的 10000 条」
         List<IotAlertInstance> instances = instanceMapper.selectPage(
-            new Page<>(1, IotCsvExportUtils.MAX_EXPORT_ROWS + 1, false), wrapper).getRecords();
-        if (instances.size() > IotCsvExportUtils.MAX_EXPORT_ROWS) {
-            throw new BusinessException("告警导出条数超过 " + IotCsvExportUtils.MAX_EXPORT_ROWS
+            new Page<>(1, IotExportLimits.MAX_EXPORT_ROWS + 1, false), wrapper).getRecords();
+        if (instances.size() > IotExportLimits.MAX_EXPORT_ROWS) {
+            throw new BusinessException("告警导出条数超过 " + IotExportLimits.MAX_EXPORT_ROWS
                 + " 条，请先按状态/级别/设备/时间范围筛选后再导出");
         }
         List<AlertInstanceResp> views = toRespList(instances, false);
@@ -153,7 +154,7 @@ public class AlertInstanceServiceImpl implements AlertInstanceService {
         for (AlertInstanceResp view : views) {
             rows.add(alertExportRow(view));
         }
-        return IotCsvExportUtils.toCsv(ALERT_EXPORT_HEADERS, rows);
+        return CsvUtils.toCsv(ALERT_EXPORT_HEADERS, rows);
     }
 
     /**
@@ -209,8 +210,8 @@ public class AlertInstanceServiceImpl implements AlertInstanceService {
         row.add(view.getPropertyId());
         row.add(view.getTriggerValue());
         row.add(view.getThresholdSnapshot());
-        row.add(IotCsvExportUtils.formatDateTime(view.getStartTs()));
-        row.add(IotCsvExportUtils.formatDateTime(view.getResolvedTs()));
+        row.add(CsvUtils.formatDateTime(view.getStartTs()));
+        row.add(CsvUtils.formatDateTime(view.getResolvedTs()));
         row.add(view.getDurationSeconds() == null ? null : String.valueOf(view.getDurationSeconds()));
         row.add(reasonText(view.getReason()));
         return row;

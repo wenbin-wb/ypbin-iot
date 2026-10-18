@@ -10,12 +10,10 @@
 package cn.ypbin.admin.iot.device.config;
 
 import feign.Request;
-import feign.RequestInterceptor;
 import feign.Retryer;
 import java.util.concurrent.TimeUnit;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.core.env.Environment;
 
 /**
  * 设备规格内部客户端的 Feign 配置。
@@ -35,12 +33,6 @@ public class DeviceSpecFeignConfiguration {
 
     /** 读超时（毫秒）：一次要返回某租户全部设备与点位，比租约端点给得宽一些。 */
     public static final int READ_TIMEOUT_MS = 5_000;
-
-    /** 内部凭证请求头（与 {@code InternalTokenConstants.TOKEN_HEADER} 必须一致）。 */
-    public static final String TOKEN_HEADER = "X-Internal-Token";
-
-    /** 内部凭证配置键（与 {@code InternalTokenConstants.TOKEN_PROPERTY} 必须一致）。 */
-    public static final String TOKEN_PROPERTY = "ypbin.internal.token";
 
     /**
      * 超时设置。
@@ -63,19 +55,4 @@ public class DeviceSpecFeignConfiguration {
         return Retryer.NEVER_RETRY;
     }
 
-    /**
-     * 带上内部凭证头：`/internal/**` 由服务端守卫统一校验，缺凭证一律拒绝。
-     *
-     * @param environment 环境（读 {@code ypbin.internal.token}）
-     * @return 请求拦截器
-     */
-    @Bean
-    public RequestInterceptor deviceSpecInternalTokenInterceptor(Environment environment) {
-        return template -> {
-            String token = environment.getProperty(TOKEN_PROPERTY);
-            if (token != null && !token.isBlank()) {
-                template.header(TOKEN_HEADER, token);
-            }
-        };
-    }
 }

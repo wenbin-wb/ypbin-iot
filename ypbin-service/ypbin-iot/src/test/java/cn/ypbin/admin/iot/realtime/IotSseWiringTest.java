@@ -13,6 +13,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import cn.ypbin.starter.messaging.autoconfigure.SseAutoConfiguration;
 import cn.ypbin.starter.messaging.sse.SseEmitterManager;
+import cn.ypbin.starter.messaging.sse.JacksonSseFanoutCodec;
 import cn.ypbin.starter.messaging.sse.SseFanoutCodec;
 import cn.ypbin.starter.tenant.core.TenantProvider;
 import java.util.Optional;
@@ -23,7 +24,6 @@ import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.WebApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import tools.jackson.databind.ObjectMapper;
 
 /**
  * SSE 装配用例（task-18 能力上收后新增）。
@@ -46,6 +46,12 @@ class IotSseWiringTest {
 
     private final WebApplicationContextRunner runner = new WebApplicationContextRunner()
         .withConfiguration(AutoConfigurations.of(SseAutoConfiguration.class))
+        // starter 的 JacksonSseFanoutCodec 只有在容器里**真有** ObjectMapper Bean 时才装配
+        // （SseAutoConfiguration#sseFanoutCodec 用 ObjectProvider 惰性取，缺席即退回 TextSseFanoutCodec）。
+        // 生产里该 Bean 由 Boot 的 Jackson 自动配置提供；本用例只加载 SSE 自动配置，故显式补一个，
+        // 否则测到的是「Text 兜底」而不是「生产装配」。
+        .withBean(tools.jackson.databind.ObjectMapper.class,
+            () -> tools.jackson.databind.json.JsonMapper.builder().build())
         .withUserConfiguration(CodecConfiguration.class);
 
     @Test
@@ -101,15 +107,25 @@ class IotSseWiringTest {
     }
 
     @Test
-    @DisplayName("★ IoT 的 IotSseFanoutCodec 覆盖 starter 默认 codec（结构化事件载荷必须能跨实例编码）")
-    void iotCodecOverridesDefault() {
-        runner.withPropertyValues("ypbin.sse.enabled=true")
+    @DisplayName("★ starter 4.0.0 的 JacksonSseFanoutCodec 承载结构化事件载荷（IoT 不再自建 codec）")
+    void starterJacksonCodecCarriesStructuredPayload() {
+        runner.withPropertyValues("ypbin.sse.enabled=true", "ypbin.sse.register-endpoint=false")
             .run(context -> {
                 assertThat(context).hasSingleBean(SseFanoutCodec.class);
-                assertThat(context.getBean(SseFanoutCodec.class))
-                    .as("必须是 IoT 的 JSON codec（starter 默认 TextSseFanoutCodec 不支持 record 载荷，"
-                        + "会把跨实例扇出静默降级为只投本实例）")
-                    .isInstanceOf(IotSseFanoutCodec.class);
+                SseFanoutCodec codec = context.getBean(SseFanoutCodec.class);
+                assertThat(codec)
+                    .as("IoT 已删除自建 IotSseFanoutCodec（issue #289 第 5 项）⇒ 必须由 starter 的 "
+                        + "JacksonSseFanoutCodec 承担结构化载荷；退化成 TextSseFanoutCodec 会让 "
+                        + "record 事件只投本实例（跨实例扇出静默失效）")
+                    .isInstanceOf(JacksonSseFanoutCodec.class);
+                assertThat(codec.id())
+                    .as("协议 id 是对外契约：多个实例混跑时必须一致（滚动升级窗口会双向丢帧）")
+                    .isEqualTo(JacksonSseFanoutCodec.ID);
+                // 形状冒烟：编码必须产出帧（具体解码形态由 starter 的单测覆盖；
+                // starter 的 j 分支解码返回 JSON 原文，不再还原为树——这是 starter 的既有契约，不是本仓要改的）
+                assertThat(codec.encode(java.util.Map.of("kind", "reading", "value", 42)))
+                    .as("结构化载荷必须能被本 codec 编码（非 empty）")
+                    .isPresent();
             });
     }
 
@@ -122,11 +138,6 @@ class IotSseWiringTest {
      */
     @Configuration(proxyBeanMethods = false)
     static class CodecConfiguration {
-
-        @Bean
-        SseFanoutCodec iotSseFanoutCodec(ObjectProvider<ObjectMapper> mapper) {
-            return new IotSseFanoutCodec(mapper);
-        }
 
         @Bean
         TenantProvider iotTenantProvider() {

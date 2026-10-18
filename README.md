@@ -78,7 +78,7 @@
 - **静默失效是头号敌人**：设备/点位变更与「推进配置版本号」在**同一事务**里，否则接入侧永远
   不知道配置变了（历史上是 G7 静默零更新）。
 - **`/internal/**` 是内网面（网关 + 服务双层防护）**：网关在路由/过滤器处**硬拒绝**
-  `/iot/internal/**`（返回 404，不向外部确认路径存在，见 `InternalEndpointBlockFilter` 与两处
+  `/iot/internal/**`（返回 404，不向外部确认路径存在，见 starter 的 `InternalPathBlockGlobalFilter` 与两处
   gateway 路由配置），服务侧再用 `X-Internal-Token` 守卫（未配置即 fail-closed）；用户侧 `/iot/**`
   与内网面在 URL 上分离。MQTT 入站是唯一用原始 HTTP 状态码的例外（EMQX 规则要按状态码决定重试）。
 
