@@ -15,6 +15,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.annotation.Bean;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
@@ -28,10 +29,14 @@ import org.springframework.data.redis.core.StringRedisTemplate;
  * `ypbin.sign` 的 servlet 链路，而本服务用的是网关透传参数的内部校验链路，
  * 两者生命周期与开关不同；此处按 iot 自身需要单独装配，语义更清晰。</p>
  *
+ * <p>同时登记 {@link OpenApiProperties}（{@code ypbin.openapi.*}）：starter #103 把该配置面从
+ * {@code @Value} 迁到 {@code @ConfigurationProperties}，需要一个装配点启用它。</p>
+ *
  * @author wenbin
  * @since 2026-10-05
  */
 @Configuration
+@EnableConfigurationProperties(OpenApiProperties.class)
 public class IotOpenApiSignConfiguration {
 
     private static final Logger log = LoggerFactory.getLogger(IotOpenApiSignConfiguration.class);

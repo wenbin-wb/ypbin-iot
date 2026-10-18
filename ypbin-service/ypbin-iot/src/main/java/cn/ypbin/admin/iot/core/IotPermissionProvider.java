@@ -13,7 +13,7 @@ import cn.ypbin.admin.iot.openapi.OpenApiPrincipal;
 import cn.ypbin.admin.system.api.cache.SysCache;
 import cn.ypbin.starter.core.util.LogSanitizer;
 import cn.ypbin.starter.security.core.LoginUser;
-import cn.ypbin.starter.security.core.PermissionProvider;
+import cn.ypbin.starter.security.core.AbstractPermissionProvider;
 import cn.ypbin.starter.security.identity.IdentityContext;
 import java.util.List;
 import java.util.Set;
@@ -46,16 +46,22 @@ import org.springframework.stereotype.Component;
  * @since 2026-09-19
  */
 @Component
-public class IotPermissionProvider implements PermissionProvider {
+public class IotPermissionProvider extends AbstractPermissionProvider {
 
     private static final Logger log = LoggerFactory.getLogger(IotPermissionProvider.class);
 
+    /**
+     * 权限码：**虚拟主体**取该请求 scopes（不查库）；真实用户走 {@link SysCache}。
+     *
+     * <p>{@code loginId → userId} 的解析与「查询结果为 null ⇒ 拒绝」的兜底已上收到基类
+     * {@link AbstractPermissionProvider}（starter 4.1.0 / starter #101），本类只保留<b>业务分流</b>：
+     * 这条分流是虚拟主体方案 B2 的核心，基座不可能知道，必须留在覆写里。</p>
+     *
+     * @param userId 已解析出的用户 ID（基类保证非 null）
+     * @return 权限码列表（**绝不返回 null**：null 会被基类判为「数据源异常」并记 ERROR）
+     */
     @Override
-    public List<String> getPermissions(Object loginId, String loginType) {
-        Long userId = resolveUserId(loginId, loginType);
-        if (userId == null) {
-            return List.of();
-        }
+    protected List<String> permissionsOf(long userId) {
         if (OpenApiPrincipal.isVirtualPrincipal(userId)) {
             return resolveVirtualPrincipalPermissions(userId);
         }
@@ -67,16 +73,18 @@ public class IotPermissionProvider implements PermissionProvider {
         return permissions;
     }
 
+    /**
+     * 角色码：**虚拟主体一律无角色**（scopes 只在「权限码」这一维表达）；真实用户走 {@link SysCache}。
+     *
+     * <p>刻意不把 scopes 同时当角色返回——否则 {@code @SaCheckRole} 会被 scopes 意外满足，
+     * 把两种语义混在一起（fail-closed：虚拟主体一律无角色）。</p>
+     *
+     * @param userId 已解析出的用户 ID（基类保证非 null）
+     * @return 角色码列表（**绝不返回 null**）
+     */
     @Override
-    public List<String> getRoles(Object loginId, String loginType) {
-        Long userId = resolveUserId(loginId, loginType);
-        if (userId == null) {
-            return List.of();
-        }
+    protected List<String> rolesOf(long userId) {
         if (OpenApiPrincipal.isVirtualPrincipal(userId)) {
-            // 虚拟主体**没有角色**：scopes 只在"权限码"这一维表达。
-            // 刻意**不**把 scopes 同时当角色返回——否则 @SaCheckRole 会被 scopes 意外满足，
-            // 把两种语义混在一起（fail-closed：虚拟主体一律无角色）。
             return List.of();
         }
         List<String> roleCodes = SysCache.getUserRoleCodes(userId);
@@ -147,24 +155,4 @@ public class IotPermissionProvider implements PermissionProvider {
         return permissions;
     }
 
-    /**
-     * 解析登录用户 ID（loginId 可能是字符串形态，非数字按无权限处理）。
-     *
-     * @param loginId   登录标识
-     * @param loginType 登录类型（仅用于日志）
-     * @return 用户 ID；无法解析时返回 {@code null}
-     */
-    private Long resolveUserId(Object loginId, String loginType) {
-        if (loginId == null) {
-            log.warn("[iot] 权限查询缺少 loginId，按无权限处理：loginType={}", loginType);
-            return null;
-        }
-        try {
-            return Long.valueOf(loginId.toString().trim());
-        } catch (NumberFormatException ex) {
-            log.warn("[iot] 权限查询的 loginId 不是合法用户 ID，按无权限处理：loginType={}, loginId={}",
-                loginType, loginId);
-            return null;
-        }
-    }
 }
