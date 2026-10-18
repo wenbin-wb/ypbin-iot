@@ -199,14 +199,16 @@ class HttpAccessReadingSinkTest {
         sink.accept(reading(DEVICE, "GOOD", 5_000));
 
         assertThatCode(() -> awaitDelivered(sink)).doesNotThrowAnyException();
+        awaitMetric("iot.access.egress.failed", 2.0d);
 
-        assertThat(meterRegistry.get("iot.access.egress.failed").counter().count()).isEqualTo(2.0d);
+        assertThat(currentCount("iot.access.egress.failed")).isEqualTo(2.0d);
         assertThat(sink.pendingCount()).as("失败不重试：本批丢弃（由指标暴露）").isZero();
 
         doReturn(R.fail(500, "boom")).when(client).ingest(any());
         sink.accept(reading(DEVICE, "GOOD", 5_000));
         assertThatCode(() -> awaitDelivered(sink)).doesNotThrowAnyException();
-        assertThat(meterRegistry.get("iot.access.egress.failed").counter().count()).isEqualTo(3.0d);
+        awaitMetric("iot.access.egress.failed", 3.0d);
+        assertThat(currentCount("iot.access.egress.failed")).isEqualTo(3.0d);
     }
 
     @Test
@@ -256,6 +258,39 @@ class HttpAccessReadingSinkTest {
      *
      * @param sink 被测出口
      */
+    /**
+     * 等到指定指标的计数达到期望值（最多 3s）。
+     *
+     * <p><b>为什么不能只等 {@code pendingCount()==0}</b>：消费线程 {@code poll} 走元素后队列即空，
+     * 但此刻它还在 {@code deliver(batch)} 里调远端——指标还没 ++。只等队列空就去断言计数，
+     * 会读到「0.0」而误判失败（真实 flaky，issue #292）。</p>
+     *
+     * @param metricName 指标名
+     * @param expected   期望的下限计数
+     */
+    private void awaitMetric(String metricName, double expected) {
+        long deadline = System.currentTimeMillis() + 3_000L;
+        while (currentCount(metricName) < expected && System.currentTimeMillis() < deadline) {
+            try {
+                Thread.sleep(10L);
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("等待指标计数被中断", ex);
+            }
+        }
+    }
+
+    /**
+     * 读指标计数（指标尚未注册时按 0 计，避免 {@code registry.get()} 抛 NotFoundException）。
+     *
+     * @param metricName 指标名
+     * @return 当前计数
+     */
+    private double currentCount(String metricName) {
+        var counter = meterRegistry.find(metricName).counter();
+        return counter == null ? 0.0d : counter.count();
+    }
+
     private static void awaitDelivered(HttpAccessReadingSink sink) {
         long deadline = System.currentTimeMillis() + 3_000L;
         while (sink.pendingCount() > 0 && System.currentTimeMillis() < deadline) {

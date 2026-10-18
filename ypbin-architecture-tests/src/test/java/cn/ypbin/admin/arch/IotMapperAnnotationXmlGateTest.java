@@ -196,12 +196,20 @@ class IotMapperAnnotationXmlGateTest {
     @Test
     @DisplayName("★ 规则自检：缺 </script> 的注解必须被判为非法，合法 XML 与非 XML 文本不得误报")
     void ruleMustActuallyDetectMissingClosingTag() {
-        // 生产事故同款：只少了结尾标签，MyBatis 抛的就是这条 SAXParseException
+        // 生产事故同款：只少了结尾标签，MyBatis 抛的就是这条 SAXParseException。
+        // ⚠️ 异常文案由 JDK 的 Xerces **按系统 Locale 本地化**（issue #293）：
+        //   英文 → "XML document structures must start and end within the same entity."
+        //   中文 → "XML 文档结构必须从头至尾包含在同一个实体内。"（实测 JDK 21 / zh_CN）
+        // 故只钉「类名 + 结构错误特征」，两者都不依赖 Locale；不能只匹配英文字面量（中文机器必红）。
         assertThat(parseFailureOf(SyntheticMalformedScriptMapper.class))
             .as("缺 </script> 必须被咬到（否则本门禁就是装饰）")
             .isNotNull()
             .contains("SAXParseException")
-            .contains("XML document structures must start and end within the same entity");
+            .satisfies(message -> assertThat(message)
+                .as("必须是「文档结构未闭合」这类错误，而不是其它解析异常：%s", message)
+                .matches(msg -> msg.contains("XML document structures must start and end")
+                    || msg.contains("文档结构必须从头至尾包含在同一个实体内")
+                    || msg.contains("同一实体内开始和结束")));
         // 合法 XML（含 foreach 等动态标签）不得误报
         assertThat(parseFailureOf(SyntheticWellFormedScriptMapper.class))
             .as("合法的 <script> 注解不得被判为违规").isNull();

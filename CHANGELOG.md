@@ -44,6 +44,20 @@
   业务闸门（原始字节、缺时刻质量、设备号非数字）与 `iot.access.egress.*` 指标口径**逐字保留**。
 - **依赖升级**：`ypbin-iot.version` 0.3.3 → **0.4.0**（新增 `ypbin-iot-protocol-modbus` 依赖）。
 
+### 修复（2026-10-18 批次二）
+
+- **`HttpAccessReadingSinkTest` 断言时序竞争（issue #292，本仓 #291 引入的 flaky）**：出口换成
+  `BoundedBatchEgressQueue` 后投递是**异步单消费线程**，`pendingCount()==0` 只表示「队列已取空」，
+  不表示「本批已投递完成」——消费线程此刻还在 `deliver(batch)` 里，指标尚未累加。测试改为
+  `awaitMetric(...)` 等指标到位再断言（实测：只等队列空时 200 轮有 8 轮读到 0；加等待后 0 轮）。
+- **架构门禁 SAX 断言依赖系统 Locale（issue #293 缺陷 1）**：`IotMapperAnnotationXmlGateTest` 原断言硬编码
+  英文 `XML document structures must start and end within the same entity`，而 JDK 的 Xerces 异常文案**按 Locale 本地化**
+  （zh_CN 下为「XML 文档结构必须从头至尾包含在同一个实体内。」）⇒ 中文机器构建必红。改为匹配「类名 + 结构未闭合特征」，
+  中英文两种文案都命中，不依赖 Locale。
+- **子 JVM 用例在 Windows 触发 `CreateProcess error=206`（issue #293 缺陷 2）**：`IotDbDriverRegistrarTest`
+  原本把整条 `java.class.path` 拼在命令行上，Windows 单条命令行上限 8191 字符 ⇒ 长类路径直接起不来。
+  改为写 Java 9+ 的 `@argfile`（JVM 自己读取，无长度上限），并在 `finally` 中清理临时文件。
+
 ### 破坏性变更
 
 - **上述条目全部不向后兼容**（类被删、配置键改名、指标改口径、SSE codec id 变更）⇒ **必须整批发布**，
