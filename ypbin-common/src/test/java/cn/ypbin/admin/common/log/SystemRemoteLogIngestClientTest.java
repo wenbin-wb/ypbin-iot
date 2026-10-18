@@ -40,13 +40,17 @@ import org.slf4j.LoggerFactory;
  *
  * <p>钉住三件事：① 上报的就是采集模型本身（不做二次字段映射）；② system 侧返回失败 {@code R}
  * 时必须<b>上抛</b>而不是静默 return（失败无痕迹＝最坏的一种降级）；③ 失败由本类<b>带完整堆栈</b>
- * 记录——不能依赖 starter 的监听器（本仓固定的 {@code ypbin-starter-log:3.3.0} 只打 message），
+ * 记录——不依赖 starter 监听器自身的日志行为（那属基座实现、会随版本变化），
  * 且异常到达监听器后被捕获，不逃逸到业务线程。</p>
+ *
+ * <p>starter 4.1.0 起本类是被测对象从 {@code RemoteLogDao} 改为
+ * {@code SystemRemoteLogIngestClient}（自建 {@code LogDao} 已上收到基座，本仓只保留
+ * {@code RemoteLogIngestClient} SPI 实现，见 starter #100）；断言口径逐条保留。</p>
  *
  * @author wenbin
  * @since 2026-09-16
  */
-class RemoteLogDaoTest {
+class SystemRemoteLogIngestClientTest {
 
     private ListAppender<ILoggingEvent> appender;
 
@@ -54,7 +58,7 @@ class RemoteLogDaoTest {
 
     @BeforeEach
     void attachAppender() {
-        daoLogger = (Logger) LoggerFactory.getLogger(RemoteLogDao.class);
+        daoLogger = (Logger) LoggerFactory.getLogger(SystemRemoteLogIngestClient.class);
         appender = new ListAppender<>();
         appender.start();
         daoLogger.addAppender(appender);
@@ -86,7 +90,7 @@ class RemoteLogDaoTest {
         when(systemClient.ingestLog(any())).thenReturn(R.ok());
         LogRecord record = fullRecord();
 
-        new RemoteLogDao(systemClient).add(record);
+        new SystemRemoteLogIngestClient(systemClient).ingestLog(record);
 
         ArgumentCaptor<LogRecord> captor = ArgumentCaptor.forClass(LogRecord.class);
         verify(systemClient).ingestLog(captor.capture());
@@ -105,7 +109,7 @@ class RemoteLogDaoTest {
         when(systemClient.ingestLog(any())).thenReturn(
             R.fail(GlobalErrorCode.UNAUTHORIZED.getCode(), "内部调用凭证校验失败"));
 
-        assertThatThrownBy(() -> new RemoteLogDao(systemClient).add(fullRecord()))
+        assertThatThrownBy(() -> new SystemRemoteLogIngestClient(systemClient).ingestLog(fullRecord()))
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining(String.valueOf(GlobalErrorCode.UNAUTHORIZED.getCode()))
             .hasMessageContaining("内部调用凭证校验失败");
@@ -125,7 +129,7 @@ class RemoteLogDaoTest {
         ISystemClient systemClient = mock(ISystemClient.class);
         when(systemClient.ingestLog(any())).thenReturn(null);
 
-        assertThatThrownBy(() -> new RemoteLogDao(systemClient).add(fullRecord()))
+        assertThatThrownBy(() -> new SystemRemoteLogIngestClient(systemClient).ingestLog(fullRecord()))
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("响应为空");
     }
@@ -139,7 +143,7 @@ class RemoteLogDaoTest {
     void failureShouldBeLoggedWithFullStackTraceAndAbsorbedByListener() {
         ISystemClient systemClient = mock(ISystemClient.class);
         when(systemClient.ingestLog(any())).thenReturn(R.fail("系统服务暂不可用，请稍后重试"));
-        LogEventListener listener = new LogEventListener(new RemoteLogDao(systemClient));
+        LogEventListener listener = new LogEventListener(dao -> new SystemRemoteLogIngestClient(systemClient).ingestLog(dao));
 
         assertThatCode(() -> listener.onLogEvent(new LogEvent(fullRecord())))
             .doesNotThrowAnyException();
@@ -161,7 +165,7 @@ class RemoteLogDaoTest {
         ISystemClient systemClient = mock(ISystemClient.class);
         when(systemClient.ingestLog(any())).thenThrow(new FeignRemoteException(500, "网关超时", 504, "ingestLog"));
 
-        assertThatThrownBy(() -> new RemoteLogDao(systemClient).add(fullRecord()))
+        assertThatThrownBy(() -> new SystemRemoteLogIngestClient(systemClient).ingestLog(fullRecord()))
             .isInstanceOf(FeignRemoteException.class);
 
         assertThat(appender.list)

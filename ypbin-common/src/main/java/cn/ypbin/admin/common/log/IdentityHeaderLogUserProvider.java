@@ -17,7 +17,7 @@ import java.util.Optional;
  * 操作人数据源（网关身份头实现）：从 {@link IdentityContext} 取当前用户。
  *
  * <p>与 {@code DbLogProviders.IdentityLogUserProvider} 语义一致，区别是<b>装配位置</b>：
- * 本类随 {@link RemoteLogAutoConfiguration} 装配，供 auth/ai 这类"没有本地落库实现"的服务使用；
+ * 本类随本仓的跨服务上报自动配置装配，供 auth/ai 这类"没有本地落库实现"的服务使用；
  * system 由自己的 {@code DbLogProviders} 提供，二者靠 {@code @ConditionalOnMissingBean} 互斥，
  * 同一容器内只会存在一个 {@link LogUserProvider}。</p>
  *

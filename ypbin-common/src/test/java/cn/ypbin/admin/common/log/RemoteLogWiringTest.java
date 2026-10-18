@@ -12,12 +12,16 @@ package cn.ypbin.admin.common.log;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
+import cn.ypbin.admin.common.config.RemoteIngestClientAutoConfiguration;
 import cn.ypbin.admin.system.api.feign.ISystemClient;
 import cn.ypbin.starter.log.autoconfigure.LogAutoConfiguration;
+import cn.ypbin.starter.log.autoconfigure.RemoteLogAutoConfiguration;
 import cn.ypbin.starter.log.core.LogClientProvider;
 import cn.ypbin.starter.log.core.LogUserProvider;
 import cn.ypbin.starter.log.dao.LogDao;
+import cn.ypbin.starter.log.dao.RemoteLogDao;
 import cn.ypbin.starter.log.model.LogRecord;
+import cn.ypbin.starter.log.spi.RemoteLogIngestClient;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.NoSuchBeanDefinitionException;
@@ -31,11 +35,17 @@ import org.springframework.context.annotation.Configuration;
  *
  * <p>这是本任务的核心静默失效点：starter 的 {@code LogAutoConfiguration.logDao()} 带
  * {@code @ConditionalOnMissingBean}，谁都没提供实现时它会安静地装上"只打印不落库"的
- * {@code DefaultLogDao}——接口照常跑、{@code sys_log} 恒为空。本测试钉住两条：
- * ① 无本地实现时 {@code RemoteLogDao} 必须<b>排在 starter 默认实现之前</b>被装配
- * （靠 {@code @AutoConfiguration(beforeName = ...})）</p>
- * ② 宿主自带实现（system 的 {@code DbLogProviders.DbLogDao}）时上报实现必须退让，
+ * {@code DefaultLogDao}——接口照常跑、{@code sys_log} 恒为空。本测试钉住三条：
+ * ① 存在本仓的 {@link RemoteLogIngestClient} 实现时，starter 的
+ * {@code RemoteLogAutoConfiguration} 会装配它自己的 {@link RemoteLogDao}（不再退回只打印）；</p>
+ * ② 本仓的 {@code LogUserProvider}/{@code LogClientProvider} 仍由本仓提供（这两个 SPI starter 没有业务实现）；</p>
+ * ③ 宿主自带实现（system 的 {@code DbLogProviders.DbLogDao}）时上报实现必须退让，
  * 全容器只能存在一个 {@link LogDao}。</p>
+ *
+ * <p><b>starter 4.1.0（#100）起的变化</b>：本仓原有的 {@code RemoteLogAutoConfiguration}/
+ * {@code RemoteLogDao} 已删（上收到基座），本仓只剩 SPI 实现 + 一个注册 SPI 的自动配置；
+ * 装配顺序与互斥改由 starter 的 {@code @AutoConfiguration(beforeName=..)}/
+ * {@code @ConditionalOnMissingBean} 承担，故本测试改为断言「SPI 存在 ⇒ 基座装配其 RemoteLogDao」。</p>
  *
  * @author wenbin
  * @since 2026-09-16
@@ -44,7 +54,7 @@ class RemoteLogWiringTest {
 
     private final WebApplicationContextRunner runner = new WebApplicationContextRunner()
         .withConfiguration(AutoConfigurations.of(LogAutoConfiguration.class,
-            RemoteLogAutoConfiguration.class))
+            RemoteLogAutoConfiguration.class, RemoteIngestClientAutoConfiguration.class))
         .withBean(ISystemClient.class, () -> mock(ISystemClient.class));
 
     @Test
@@ -53,6 +63,9 @@ class RemoteLogWiringTest {
             assertThat(context).hasNotFailed();
             assertThat(context).hasSingleBean(LogDao.class);
             assertThat(context).getBean(LogDao.class).isInstanceOf(RemoteLogDao.class);
+            // 本仓只提供 SPI 实现，LogDao 由 starter 的 RemoteLogAutoConfiguration 装配
+            assertThat(context).getBean(RemoteLogIngestClient.class)
+                .isInstanceOf(SystemRemoteLogIngestClient.class);
             assertThat(context).getBean(LogUserProvider.class)
                 .isInstanceOf(IdentityHeaderLogUserProvider.class);
             // 客户端三列（clientId/clientType/authType）的数据源：starter 默认实现恒返回空，
@@ -92,7 +105,7 @@ class RemoteLogWiringTest {
     void shouldFailFastWhenNoSystemClientBeanIsAvailable() {
         new WebApplicationContextRunner()
             .withConfiguration(AutoConfigurations.of(LogAutoConfiguration.class,
-                RemoteLogAutoConfiguration.class))
+                RemoteLogAutoConfiguration.class, RemoteIngestClientAutoConfiguration.class))
             .run(context -> {
                 assertThat(context).hasFailed();
                 assertThat(context.getStartupFailure())
