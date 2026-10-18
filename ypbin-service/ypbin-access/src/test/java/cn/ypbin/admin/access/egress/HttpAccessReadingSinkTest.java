@@ -201,14 +201,14 @@ class HttpAccessReadingSinkTest {
         assertThatCode(() -> awaitDelivered(sink)).doesNotThrowAnyException();
         awaitMetric("iot.access.egress.failed", 2.0d);
 
-        assertThat(meterRegistry.get("iot.access.egress.failed").counter().count()).isEqualTo(2.0d);
+        assertThat(currentCount("iot.access.egress.failed")).isEqualTo(2.0d);
         assertThat(sink.pendingCount()).as("失败不重试：本批丢弃（由指标暴露）").isZero();
 
         doReturn(R.fail(500, "boom")).when(client).ingest(any());
         sink.accept(reading(DEVICE, "GOOD", 5_000));
         assertThatCode(() -> awaitDelivered(sink)).doesNotThrowAnyException();
         awaitMetric("iot.access.egress.failed", 3.0d);
-        assertThat(meterRegistry.get("iot.access.egress.failed").counter().count()).isEqualTo(3.0d);
+        assertThat(currentCount("iot.access.egress.failed")).isEqualTo(3.0d);
     }
 
     @Test
