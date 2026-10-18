@@ -153,7 +153,7 @@ public class OpenApiKeyAuthFilter implements GlobalFilter, Ordered {
                     data.path("tenantId").asLong(0L), scopes,
                     data.path("rateLimitQps").asInt(10), data.path("dailyQuota").asInt(100000));
             })
-            .doOnError(ex -> log.error("[gateway] openapi verify failed: {}", ex.getMessage()))
+            .doOnError(ex -> log.error("[gateway] openapi verify failed: {}", ex.getMessage(), ex))
             .onErrorReturn(VerifyData.invalid());
     }
 

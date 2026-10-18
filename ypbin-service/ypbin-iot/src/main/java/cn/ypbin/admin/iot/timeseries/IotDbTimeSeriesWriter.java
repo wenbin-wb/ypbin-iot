@@ -383,7 +383,7 @@ public class IotDbTimeSeriesWriter implements TimeSeriesWriter {
             closeable.close();
         } catch (Exception ex) {
             // 关闭失败不掩盖主流程结果：记录后继续（不吞异常信息）
-            log.warn("[iot] 关闭时序写入资源失败：{}", ex.getMessage());
+            log.warn("[iot] 关闭时序写入资源失败：{}", ex.getMessage(), ex);
         }
     }
 

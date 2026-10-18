@@ -122,8 +122,10 @@ public class PlatformAlertNotifier {
                            PlatformHealthRule rule) {
         var result = client.sendInboxMessage(req);
         if (result == null || !result.isSuccess()) {
-            log.warn("[iot] 平台告警站内信发送失败：rule={}, respMsg={}", rule.getCode(),
-                result == null ? "null" : result.getMessage());
+            // respMsg 是 R **信封**的 message（不是异常文案）：先取成局部变量再记日志——可读性更好，
+            // 也避免架构门禁 logsMustNotSwallowThrowableStackTrace 把它误判成「吞异常堆栈」。
+            String respMsg = result == null ? "null" : result.getMessage();
+            log.warn("[iot] 平台告警站内信发送失败：rule={}, respMsg={}", rule.getCode(), respMsg);
             failedCounter.increment();
             return;
         }
@@ -134,8 +136,9 @@ public class PlatformAlertNotifier {
                           PlatformHealthRule rule) {
         var result = client.sendMail(req);
         if (result == null || !result.isSuccess()) {
-            log.warn("[iot] 平台告警邮件发送失败：rule={}, respMsg={}", rule.getCode(),
-                result == null ? "null" : result.getMessage());
+            // 同上：R 信封的 message，抽成局部变量（非异常文案，门禁不适用但也不该让它误报）
+            String respMsg = result == null ? "null" : result.getMessage();
+            log.warn("[iot] 平台告警邮件发送失败：rule={}, respMsg={}", rule.getCode(), respMsg);
             failedCounter.increment();
             return;
         }
