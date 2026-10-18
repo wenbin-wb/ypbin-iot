@@ -100,7 +100,7 @@ public interface IotDeviceService {
      *
      * <p>单租户最多导出 <b>10000</b> 条：超过抛 {@link cn.ypbin.starter.core.exception.BusinessException}
      * 提示先筛选，<b>不静默截断</b>——否则用户会以为拿到了全量数据。CSV 带 UTF-8 BOM，
-     * 单元格做 RFC 4180 转义与公式注入中和（见 {@code IotCsvExportUtils}）。</p>
+     * 单元格做 RFC 4180 转义与公式注入中和（由 {@code ypbin-starter-tools} 的 {@link cn.ypbin.starter.tools.csv.CsvUtils} 统一实现）。</p>
      *
      * @param query 查询条件（复用列表查询的 keyword/protocol/productId）
      * @return CSV 文本

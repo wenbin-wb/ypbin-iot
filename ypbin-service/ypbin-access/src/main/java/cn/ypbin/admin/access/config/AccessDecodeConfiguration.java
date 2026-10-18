@@ -10,9 +10,10 @@
 package cn.ypbin.admin.access.config;
 
 import cn.ypbin.admin.access.decode.AccessDecodeProperties;
-import cn.ypbin.admin.access.decode.BytePayloadDecoder;
-import cn.ypbin.admin.access.decode.BytePayloadDecoderRegistry;
 import cn.ypbin.admin.access.decode.MqttBinaryNumberDecoder;
+import cn.ypbin.iot.core.spi.BytePayloadDecoder;
+import cn.ypbin.iot.core.spi.BytePayloadDecoderRegistry;
+import cn.ypbin.iot.runtime.registry.DefaultBytePayloadDecoderRegistry;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -50,7 +51,8 @@ public class AccessDecodeConfiguration {
     @ConditionalOnMissingBean
     public BytePayloadDecoderRegistry bytePayloadDecoderRegistry(
             ObjectProvider<BytePayloadDecoder> decoders) {
-        return new BytePayloadDecoderRegistry(decoders.orderedStream().toList());
+        // starter 0.4.0 的注册表种子：收集宿主 @Bean 解码器，保持 Spring 的 @Order 顺序
+        return new DefaultBytePayloadDecoderRegistry(decoders.orderedStream().toList());
     }
 
     /**

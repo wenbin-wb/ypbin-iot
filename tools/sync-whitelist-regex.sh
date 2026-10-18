@@ -64,6 +64,32 @@ ALLOWED+='CHANGELOG\.md|'
 # proxy buffer 里、用户看到「实时流不动」。问题就在既有的 /api/ location 上（无缓冲 = 改这个文件），
 # 无法用新文件表达。代价：与 upstream 该文件冲突时按语义合并（保留 SSE 三行 + 采纳上游其它改动）。
 ALLOWED+='deploy/nginx-microservice\.conf|'
+# ---------------------------------------------------------------------------
+# 第 25–34 项（2026-10-18 加）：**全量切到 ypbin-starter 4.0.0 官方能力**（issue #289/#290，
+# 用户明确要求「不用考虑兼容旧的服务，全部按新版重构」）。
+# 这一批的共同点：被删/被改的都是**admin 既有文件**（fork 继承），下沉能力的替代物在 starter 里，
+# 无法用「新建文件」表达；删掉它们正是「消除重复」的**唯一**做法（保留 = 与上游继续各写一份）。
+# **代价如实登记**：这 10 个文件上游若再改动，同步时会以 modify/delete 或文本冲突暴露，
+# 处置方式统一为「**采纳上游的演进，并把同样的下沉再删一次**」——因为本仓的删除理由（已下沉到
+# starter）对上游同样成立，正确解是上游也删（见下方各条备注）。
+# ---------------------------------------------------------------------------
+# 内部凭证：自建拦截器/过滤器/常量/Feign 配置 → starter 的 InternalTokenGuardAutoConfiguration
+# + CloudFeignAutoConfiguration 全局携带（配置键 ypbin.security.internal-token.* / ypbin.cloud.feign.*）。
+ALLOWED+='ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/config/InternalTokenGuardInterceptor\.java|'
+ALLOWED+='ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/config/InternalTokenGuardWebConfig\.java|'
+ALLOWED+='ypbin-service-api/ypbin-system-api/src/main/java/cn/ypbin/admin/system/api/constant/InternalTokenConstants\.java|'
+ALLOWED+='ypbin-service-api/ypbin-system-api/src/main/java/cn/ypbin/admin/system/api/feign/config/InternalTokenFeignConfiguration\.java|'
+ALLOWED+='ypbin-common/src/main/java/cn/ypbin/admin/common/config/InternalProperties\.java|'
+# 租户来源：自建 Provider/自动装配 → starter 的 IdentityTenantProvider（4.0.0 新增）。
+# ⚠️ imports 文件是**部分编辑**（只删 MicroserviceTenantAutoConfiguration 一行，保留 RemoteLog/RemoteTrack）。
+ALLOWED+='ypbin-common/src/main/java/cn/ypbin/admin/common/provider/MicroserviceTenantProvider\.java|'
+ALLOWED+='ypbin-common/src/main/java/cn/ypbin/admin/common/provider/MicroserviceTenantAutoConfiguration\.java|'
+ALLOWED+='ypbin-common/src/main/resources/META-INF/spring/org\.springframework\.boot\.autoconfigure\.AutoConfiguration\.imports|'
+# 随上面删除而必须同步的**连带更新**（去掉 @EnableConfigurationProperties(InternalProperties)、
+# 改一处引用注释、Feign 客户端去掉 configuration 属性）。
+ALLOWED+='ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/SystemServiceApplication\.java|'
+ALLOWED+='ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/provider/DbLogProviders\.java|'
+ALLOWED+='ypbin-service-api/ypbin-system-api/src/main/java/cn/ypbin/admin/system/api/feign/ISystemClient\.java|'
 ALLOWED+=')$'
 
 printf '%s' "$ALLOWED"

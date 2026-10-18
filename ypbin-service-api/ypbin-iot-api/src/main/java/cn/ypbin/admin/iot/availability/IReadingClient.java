@@ -18,8 +18,8 @@ import org.springframework.web.bind.annotation.RequestBody;
 /**
  * 读数上报内部客户端（access → iot，M-2）。
  *
- * <p>路径在 {@code /internal/**} 下 ⇒ 服务端由内部 token 守卫保护（见 ypbin-iot 的
- * {@code InternalTokenGuardWebConfig}）；凭证头与超时由 {@link ReadingFeignConfiguration} 显式配置
+ * <p>路径在 {@code /internal/**} 下 ⇒ 服务端由 starter 官方内部凭证守卫（`ypbin.security.internal-token.guard-enabled`）保护；
+ * 凭证头由 {@code ypbin.cloud.feign.*} 统一携带，超时由 {@link ReadingFeignConfiguration} 显式配置
  * （禁止无超时的默认客户端）。</p>
  *
  * @author wenbin

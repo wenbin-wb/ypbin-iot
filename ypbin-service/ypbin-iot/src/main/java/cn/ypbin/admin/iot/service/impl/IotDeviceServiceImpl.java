@@ -22,7 +22,8 @@ import cn.ypbin.admin.iot.model.req.IotDeviceReq;
 import cn.ypbin.admin.iot.model.resp.IotDeviceResp;
 import cn.ypbin.admin.iot.realtime.IotRealtimeService;
 import cn.ypbin.admin.iot.service.IotDeviceService;
-import cn.ypbin.admin.iot.support.IotCsvExportUtils;
+import cn.ypbin.admin.iot.support.IotExportLimits;
+import cn.ypbin.starter.tools.csv.CsvUtils;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.core.exception.GlobalErrorCode;
 import cn.ypbin.starter.crud.model.PageResult;
@@ -211,11 +212,11 @@ public class IotDeviceServiceImpl extends BaseServiceImpl<IotDeviceMapper, IotDe
     public String exportCsv(IotDeviceQuery query) {
         // 只取上限 +1 条用于判定是否超限；不把全表拉进内存，也绝不静默截断成「看起来完整的 10000 条」
         List<IotDevice> devices = baseMapper.selectPage(
-            new Page<>(1, IotCsvExportUtils.MAX_EXPORT_ROWS + 1, false),
+            new Page<>(1, IotExportLimits.MAX_EXPORT_ROWS + 1, false),
             buildWrapper(query).orderByAsc(IotDevice::getId)).getRecords();
-        if (devices.size() > IotCsvExportUtils.MAX_EXPORT_ROWS) {
+        if (devices.size() > IotExportLimits.MAX_EXPORT_ROWS) {
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
-                "设备导出条数超过 " + IotCsvExportUtils.MAX_EXPORT_ROWS
+                "设备导出条数超过 " + IotExportLimits.MAX_EXPORT_ROWS
                     + " 条，请先按关键字/协议/产品筛选后再导出");
         }
         Map<Long, String> productNames = loadProductNames(devices);
@@ -223,7 +224,7 @@ public class IotDeviceServiceImpl extends BaseServiceImpl<IotDeviceMapper, IotDe
         for (IotDevice device : devices) {
             rows.add(deviceExportRow(device, productNames));
         }
-        return IotCsvExportUtils.toCsv(DEVICE_EXPORT_HEADERS, rows);
+        return CsvUtils.toCsv(DEVICE_EXPORT_HEADERS, rows);
     }
 
     /**
@@ -258,8 +259,8 @@ public class IotDeviceServiceImpl extends BaseServiceImpl<IotDeviceMapper, IotDe
         row.add(productText(device.getProductId(), productNames));
         row.add(onlineStatusText(device.getOnlineStatus()));
         row.add(entityStatusText(device.getStatus()));
-        row.add(IotCsvExportUtils.formatDateTime(device.getLastSeenAt()));
-        row.add(IotCsvExportUtils.formatDateTime(device.getCreateTime()));
+        row.add(CsvUtils.formatDateTime(device.getLastSeenAt()));
+        row.add(CsvUtils.formatDateTime(device.getCreateTime()));
         row.add(device.getRemark());
         return row;
     }

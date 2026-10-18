@@ -27,7 +27,7 @@ import cn.ypbin.admin.iot.model.req.IotDeviceReq;
 import cn.ypbin.admin.iot.realtime.IotRealtimeService;
 import cn.ypbin.admin.iot.model.query.IotDeviceQuery;
 import cn.ypbin.admin.iot.model.resp.IotDeviceResp;
-import cn.ypbin.admin.iot.support.IotCsvExportUtils;
+import cn.ypbin.starter.tools.csv.CsvUtils;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.data.core.EntityStatus;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
@@ -361,7 +361,7 @@ class IotDeviceServiceImplTest {
 
         String csv = service.exportCsv(query);
 
-        assertThat(csv).startsWith(IotCsvExportUtils.UTF8_BOM);
+        assertThat(csv).startsWith(CsvUtils.UTF8_BOM);
         assertThat(csv).contains("设备编码,设备名称,接入协议").contains("TCP").contains("在线")
             .contains("温湿度产品").contains("启用").contains("2026-09-20 09:30:00");
         ArgumentCaptor<LambdaQueryWrapper<IotDevice>> captor =
@@ -397,11 +397,11 @@ class IotDeviceServiceImplTest {
 
         when(mapper.selectPage(any(), any())).thenReturn(pageOf(manyDevices(10000)));
         assertThat(service.exportCsv(new IotDeviceQuery()))
-            .as("恰好 10000 条必须放行").startsWith(IotCsvExportUtils.UTF8_BOM);
+            .as("恰好 10000 条必须放行").startsWith(CsvUtils.UTF8_BOM);
 
         when(mapper.selectPage(any(), any())).thenReturn(pageOf(List.of()));
         String empty = service.exportCsv(new IotDeviceQuery());
-        assertThat(empty).startsWith(IotCsvExportUtils.UTF8_BOM).endsWith("\r\n");
+        assertThat(empty).startsWith(CsvUtils.UTF8_BOM).endsWith("\r\n");
         assertThat(empty.split("\r\n", -1)).as("空数据只有表头行 + 结尾换行").hasSize(2);
         assertThat(empty).contains("设备编码");
     }

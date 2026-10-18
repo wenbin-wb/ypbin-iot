@@ -10,6 +10,10 @@
 package cn.ypbin.admin.access.decode;
 
 import cn.ypbin.admin.iot.enums.IotProtocol;
+import cn.ypbin.iot.core.spi.BytePayloadDecoder;
+import cn.ypbin.iot.core.spi.DecodeContext;
+import cn.ypbin.iot.core.spi.DecodeFailure;
+import cn.ypbin.iot.core.spi.DecodeOutcome;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
@@ -75,7 +79,8 @@ public final class MqttBinaryNumberDecoder implements BytePayloadDecoder {
         if (context == null || !properties.isEnabled()) {
             return false;
         }
-        if (!IotProtocol.MQTT.getCode().equals(context.protocol())) {
+        if (!IotProtocol.MQTT.getCode().equals(context.protocol() == null
+                ? null : context.protocol().value())) {
             return false;
         }
         return specFor(context.rawAddress()) != null;

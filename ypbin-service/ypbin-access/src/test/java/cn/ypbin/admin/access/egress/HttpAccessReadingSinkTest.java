@@ -12,6 +12,7 @@ package cn.ypbin.admin.access.egress;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -28,6 +29,7 @@ import cn.ypbin.starter.core.model.R;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -58,6 +60,8 @@ class HttpAccessReadingSinkTest {
         properties = new AccessEgressProperties();
         properties.setQueueCapacity(10);
         properties.setBatchSize(3);
+        // 基座是异步单消费线程：测试里把 flush 窗口调小，避免每条用例等 1s
+        properties.setFlushIntervalMs(20);
     }
 
     @Test
@@ -65,12 +69,12 @@ class HttpAccessReadingSinkTest {
     void acceptShouldEnqueueAndEmptyFlushShouldNotCallRemote() {
         HttpAccessReadingSink sink = sink();
 
-        sink.flush();
+        awaitDelivered(sink);
         verify(client, never()).ingest(any());
 
         sink.accept(reading(DEVICE, "GOOD", 5_000));
 
-        assertThat(sink.pendingCount()).isEqualTo(1);
+        // 消费线程是异步的：pendingCount 可能在断言时已被取走 ⇒ 断「入队被接受」这一事实
         assertThat(meterRegistry.get("iot.access.egress.accepted").counter().count()).isEqualTo(1.0d);
     }
 
@@ -83,12 +87,14 @@ class HttpAccessReadingSinkTest {
         sink.accept(reading(DEVICE, "BAD", 5_000));
         sink.accept(reading("101", "GOOD", null));
 
-        sink.flush();
+        awaitDelivered(sink);
 
         ArgumentCaptor<ReadingIngestReq> captor = ArgumentCaptor.forClass(ReadingIngestReq.class);
-        verify(client, times(1)).ingest(captor.capture());
-        assertThat(captor.getValue().getItems()).hasSize(3);
-        ReadingObservationDto first = captor.getValue().getItems().getFirst();
+        verify(client, atLeastOnce()).ingest(captor.capture());
+        List<ReadingObservationDto> all = captor.getAllValues().stream()
+            .flatMap(req -> req.getItems().stream()).toList();
+        assertThat(all).as("3 条必须全部送达（可能拆成多批）").hasSize(3);
+        ReadingObservationDto first = all.getFirst();
         assertThat(first.getDeviceId()).isEqualTo(100L);
         assertThat(first.getQuality()).isEqualTo("GOOD");
         assertThat(first.getTs()).as("epoch 毫秒（跨服务不用字符串时间）").isEqualTo(TS.toEpochMilli());
@@ -107,7 +113,7 @@ class HttpAccessReadingSinkTest {
         HttpAccessReadingSink sink = sink();
         sink.accept(new AccessReading(DEVICE, "900", null, "GOOD", TS, 1_000));
 
-        sink.flush();
+        awaitDelivered(sink);
 
         ArgumentCaptor<ReadingIngestReq> captor = ArgumentCaptor.forClass(ReadingIngestReq.class);
         verify(client).ingest(captor.capture());
@@ -129,9 +135,13 @@ class HttpAccessReadingSinkTest {
             }
         }).doesNotThrowAnyException();
 
-        assertThat(meterRegistry.get("iot.access.egress.accepted").counter().count()).isEqualTo(1.0d);
-        assertThat(meterRegistry.get("iot.access.egress.dropped").counter().count()).isEqualTo(4.0d);
-        assertThat(sink.pendingCount()).isEqualTo(1);
+        // 基座由**单消费线程**边入队边消费 ⇒ 具体「几条进队列、几条被丢」是时序相关的，
+        // 断言总账守恒（不阻塞、不丢账）与「丢弃可观测」才是稳定且有业务意义的判据。
+        double accepted = meterRegistry.get("iot.access.egress.accepted").counter().count();
+        double dropped = meterRegistry.get("iot.access.egress.dropped").counter().count();
+        assertThat(accepted + dropped)
+            .as("每条读数必须恰好被接受或丢弃一次（不得静默消失）").isEqualTo(5.0d);
+        assertThat(dropped).as("容量 1 下连续 5 条必然出现丢弃（可观测的损失）").isPositive();
     }
 
     @Test
@@ -155,12 +165,13 @@ class HttpAccessReadingSinkTest {
         sink.accept(new AccessReading(DEVICE, "serial", "123456", "GOOD", TS, 5_000));
         sink.accept(new AccessReading(DEVICE, "counter", 65538, "GOOD", TS, 5_000));
 
-        sink.flush();
+        awaitDelivered(sink);
 
         ArgumentCaptor<ReadingIngestReq> captor = ArgumentCaptor.forClass(ReadingIngestReq.class);
-        verify(client).ingest(captor.capture());
-        assertThat(captor.getValue().getItems()).hasSize(2);
-        assertThat(captor.getValue().getItems()).extracting(ReadingObservationDto::getValue)
+        verify(client, atLeastOnce()).ingest(captor.capture());
+        // 异步微批可能把 2 条拆成两批（时序相关）⇒ 断言「合起来恰好是这两条、顺序不变」
+        assertThat(captor.getAllValues()).flatExtracting(ReadingIngestReq::getItems)
+            .extracting(ReadingObservationDto::getValue)
             .as("值字符串原样上报；列不由接入侧决定（DTO 无任何列/类型标记）")
             .containsExactly("123456", "65538");
     }
@@ -187,14 +198,14 @@ class HttpAccessReadingSinkTest {
         sink.accept(reading(DEVICE, "GOOD", 5_000));
         sink.accept(reading(DEVICE, "GOOD", 5_000));
 
-        assertThatCode(sink::flush).doesNotThrowAnyException();
+        assertThatCode(() -> awaitDelivered(sink)).doesNotThrowAnyException();
 
         assertThat(meterRegistry.get("iot.access.egress.failed").counter().count()).isEqualTo(2.0d);
         assertThat(sink.pendingCount()).as("失败不重试：本批丢弃（由指标暴露）").isZero();
 
         doReturn(R.fail(500, "boom")).when(client).ingest(any());
         sink.accept(reading(DEVICE, "GOOD", 5_000));
-        assertThatCode(sink::flush).doesNotThrowAnyException();
+        assertThatCode(() -> awaitDelivered(sink)).doesNotThrowAnyException();
         assertThat(meterRegistry.get("iot.access.egress.failed").counter().count()).isEqualTo(3.0d);
     }
 
@@ -237,5 +248,23 @@ class HttpAccessReadingSinkTest {
 
     private static AccessReading reading(String deviceId, String quality, Integer pollIntervalMs) {
         return new AccessReading(deviceId, "900", 1, quality, TS, pollIntervalMs);
+    }
+
+    /**
+     * 等基座把队列消费空（starter 的 BoundedBatchEgressQueue 由**单消费线程**按 batchSize +
+     * flushInterval 微批投递；测试里没有调度器，只能等）。
+     *
+     * @param sink 被测出口
+     */
+    private static void awaitDelivered(HttpAccessReadingSink sink) {
+        long deadline = System.currentTimeMillis() + 3_000L;
+        while (sink.pendingCount() > 0 && System.currentTimeMillis() < deadline) {
+            try {
+                Thread.sleep(10L);
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("等待微批投递被中断", ex);
+            }
+        }
     }
 }

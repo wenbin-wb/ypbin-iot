@@ -55,10 +55,14 @@ class IotSeamConventionTest {
      * `MqttBinaryNumberDecoder` 由 {@code AccessDecodeConfiguration} 的 {@code @Bean
      * @ConditionalOnMissingBean} 装配（业务可整体替换）。故纳入本清单，实现类不得标 {@code @Component}。</p>
      *
+     * <p><b>2026-10-18 增补 {@code BatchEgressSink}</b>（issue #289 第 4 项）：接入侧出口队列下沉到
+     * starter 的 {@code BoundedBatchEgressQueue} 后，宿主实现的投递端就是一个可替换端口；宿主若把它
+     * 标成 {@code @Component}，starter 的「单消费线程」装配语义会被静默顶掉。</p>
+     *
      * <p>自检仍由 {@code TenantLinkManager} 承担：`scanned` 必须为正，否则本规则是空跑（假绿）。</p>
      */
     private static final List<String> REPLACEABLE_PORTS =
-        List.of("TenantLinkManager", "BytePayloadDecoder");
+        List.of("TenantLinkManager", "BytePayloadDecoder", "BatchEgressSink");
 
     @Test
     @DisplayName("可替换端口的实现不得标 @Component（否则 @ConditionalOnMissingBean 会被静默顶掉）")

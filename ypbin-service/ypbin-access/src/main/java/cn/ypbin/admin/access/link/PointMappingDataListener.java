@@ -10,11 +10,6 @@
 package cn.ypbin.admin.access.link;
 
 import cn.ypbin.admin.access.decode.ByteDecodeMetrics;
-import cn.ypbin.admin.access.decode.BytePayloadDecoder;
-import cn.ypbin.admin.access.decode.BytePayloadDecoderRegistry;
-import cn.ypbin.admin.access.decode.DecodeContext;
-import cn.ypbin.admin.access.decode.DecodeFailure;
-import cn.ypbin.admin.access.decode.DecodeOutcome;
 import cn.ypbin.admin.access.egress.AccessReading;
 import cn.ypbin.admin.access.egress.AccessReadingSink;
 import cn.ypbin.admin.access.egress.NormalizeFailure;
@@ -26,6 +21,13 @@ import cn.ypbin.admin.iot.modbus.ModbusRegisterAddress;
 import cn.ypbin.iot.core.model.DataListener;
 import cn.ypbin.iot.core.model.PointValue;
 import cn.ypbin.iot.core.model.Quality;
+import cn.ypbin.iot.core.protocol.ProtocolCode;
+import cn.ypbin.iot.core.spi.BytePayloadDecoder;
+import cn.ypbin.iot.core.spi.BytePayloadDecoderRegistry;
+import cn.ypbin.iot.core.spi.DecodeContext;
+import cn.ypbin.iot.core.spi.DecodeFailure;
+import cn.ypbin.iot.core.spi.DecodeOutcome;
+import cn.ypbin.iot.protocol.modbus.ModbusRegisterDecoder;
 import cn.ypbin.starter.core.util.LogSanitizer;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.math.BigDecimal;
@@ -83,6 +85,9 @@ public class PointMappingDataListener implements DataListener {
     /** 设备级采集周期（毫秒，未知为 {@code null}）：随读数上报，并作为半字配对容差。 */
     private final Integer pollIntervalMs;
 
+    /** 链路标识（可空）：透传给字节解码 SPI 的 {@code DecodeContext}，供实现按链路区分。 */
+    private final String connectionId;
+
     /** 寄存器地址 → (点位, 第几个字)。word_count>1 时 base+i→i（i=0..N-1）。 */
     private final Map<String, RegisterTarget> registerByAddress;
 
@@ -120,9 +125,29 @@ public class PointMappingDataListener implements DataListener {
                                     List<AccessPointMappingDto> points, AccessReadingSink sink,
                                     MeterRegistry meterRegistry,
                                     BytePayloadDecoderRegistry decoderRegistry) {
+        this(deviceId, protocol, pollIntervalMs, null, points, sink, meterRegistry, decoderRegistry);
+    }
+
+    /**
+     * 全参构造：额外携带链路标识（传给字节解码 SPI 的 {@code DecodeContext}）。
+     *
+     * @param deviceId        设备标识
+     * @param protocol        接入协议码
+     * @param pollIntervalMs  采集周期（毫秒，可空）
+     * @param connectionId    链路标识（可空）
+     * @param points          点位映射
+     * @param sink            读数出口
+     * @param meterRegistry   指标注册表
+     * @param decoderRegistry 字节解码注册表（空注册表 = 不启用 SPI）
+     */
+    public PointMappingDataListener(String deviceId, String protocol, Integer pollIntervalMs,
+                                    String connectionId, List<AccessPointMappingDto> points,
+                                    AccessReadingSink sink, MeterRegistry meterRegistry,
+                                    BytePayloadDecoderRegistry decoderRegistry) {
         this.deviceId = deviceId;
         this.protocol = protocol;
         this.pollIntervalMs = pollIntervalMs;
+        this.connectionId = connectionId;
         this.sink = sink;
         this.meterRegistry = meterRegistry;
         // 空注册表与「未注册解码器」等价：byte[] 仍走出口闸门，不静默降级
@@ -359,7 +384,7 @@ public class PointMappingDataListener implements DataListener {
                 point.getScaleFactor(), point.getOffsetValue()));
             return;
         }
-        long decoded = ModbusRegisterDecoder.decodePair(first, second, point.getByteOrder(),
+        long decoded = ModbusRegisterDecoder.decodeInt32(first, second, point.getByteOrder(),
             Boolean.TRUE.equals(point.getSigned()));
         emit(point.getIdentifier(), value, AccessReading.applyScale(decoded,
             point.getScaleFactor(), point.getOffsetValue()));
@@ -477,8 +502,10 @@ public class PointMappingDataListener implements DataListener {
      */
     private void onBytePayload(String identifier, PointValue value, AccessPointMappingDto point,
                                byte[] payload) {
-        DecodeContext context = new DecodeContext(deviceId, protocol, point.getAddress(),
-            point.getAddressType(), point.getDataType(), point.getByteOrder());
+        // starter 0.4.0 的 DecodeContext 形态：(deviceId, ProtocolCode, rawAddress, connectionId)。
+        // 物模型类型/字序不再进入 SPI 上下文——解码器按 rawAddress 查自己的规格（见 SPI 契约）。
+        DecodeContext context = new DecodeContext(deviceId, ProtocolCode.of(protocol),
+            point.getAddress(), connectionId);
         Optional<BytePayloadDecoder> selected = decoderRegistry.find(context);
         if (selected.isEmpty()) {
             // 未认领：保持今天的行为，交给出口闸门（iot.access.egress.invalid）——不猜、不降级
@@ -530,17 +557,17 @@ public class PointMappingDataListener implements DataListener {
                     + "address={} decoder={} 原因={}({}) 载荷长度={} 数据类型={}",
                 ByteDecodeMetrics.METRIC_NAME, LogSanitizer.sanitize(deviceId),
                 LogSanitizer.sanitize(point.getIdentifier()), LogSanitizer.sanitize(point.getAddress()),
-                LogSanitizer.sanitize(decoder.id()), failure.getCode(), failure.getDesc(),
+                LogSanitizer.sanitize(decoder.id()), failure.getDetail(), failure.getDesc(),
                 payloadSize, LogSanitizer.sanitize(point.getDataType()));
         } else {
             log.error("[access] 宿主字节载荷解码器抛出异常（按 BAD 上报，不吞；见 {} 指标）：device={} "
                     + "property={} address={} decoder={} 原因={}({}) 载荷长度={}",
                 ByteDecodeMetrics.METRIC_NAME, LogSanitizer.sanitize(deviceId),
                 LogSanitizer.sanitize(point.getIdentifier()), LogSanitizer.sanitize(point.getAddress()),
-                LogSanitizer.sanitize(decoder.id()), failure.getCode(), failure.getDesc(), payloadSize,
+                LogSanitizer.sanitize(decoder.id()), failure.getDetail(), failure.getDesc(), payloadSize,
                 ex);
         }
-        emitBad(point.getIdentifier(), value, "decode." + failure.getCode());
+        emitBad(point.getIdentifier(), value, "decode." + failure.getDetail());
     }
 
     /** 上报一条 BAD 读数（value=null；宿主侧解码失败用，不把垃圾写进库）。 */

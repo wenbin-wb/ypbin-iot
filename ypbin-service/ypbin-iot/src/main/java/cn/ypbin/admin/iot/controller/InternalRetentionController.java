@@ -20,9 +20,10 @@ import org.springframework.web.bind.annotation.RestController;
 /**
  * 数据保留清理的**内部端点**（#227）：运维手工触发**一轮**清理，同步返回真实结果。
  *
- * <p><b>谁能访问</b>：路径在 {@code /internal/**} 下 ⇒ 由 {@code InternalTokenGuardWebConfig} 挂在
- * 该前缀上的 {@code InternalTokenGuardInterceptor} 统一保护，只认请求头 {@code X-Internal-Token}
- * （凭证未配置即 fail-closed 拒绝、常量时间比较；见 {@code InternalTokenConstants.TOKEN_HEADER}）。
+ * <p><b>谁能访问</b>：路径在 {@code /internal/**} 下 ⇒ 由
+ * starter 官方内部凭证守卫（`ypbin.security.internal-token.guard-enabled`）
+ * 统一保护，只认请求头 {@code X-Internal-Token}
+ * （凭证未配置即 fail-closed 拒绝、常量时间比较；凭证头 {@code X-Internal-Token}）。
  * 因此**不加 {@code @SaCheckPermission}**——这是内部面，没有登录态与权限头（与
  * {@code InternalMaintenanceController}/{@code InternalLeaseController} 等既有内部端点同一约定）。</p>
  *

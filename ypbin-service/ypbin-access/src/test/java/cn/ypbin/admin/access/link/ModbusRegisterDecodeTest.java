@@ -12,10 +12,11 @@ package cn.ypbin.admin.access.link;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import cn.ypbin.admin.access.decode.BytePayloadDecoderRegistry;
+import cn.ypbin.iot.core.spi.BytePayloadDecoderRegistry;
 import cn.ypbin.admin.access.egress.AccessReading;
 import cn.ypbin.admin.iot.device.AccessPointMappingDto;
 import cn.ypbin.iot.core.model.PointAddress;
+import cn.ypbin.iot.protocol.modbus.ModbusRegisterDecoder;
 import cn.ypbin.iot.core.model.PointValue;
 import cn.ypbin.iot.core.model.Quality;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -52,18 +53,18 @@ class ModbusRegisterDecodeTest {
         assertThat(ModbusRegisterDecoder.decodeSingle(0x7FFF, true)).isEqualTo(32767);
 
         // word_count=2：big=高字在前(ABCD)、little=低字在前(CDAB)
-        assertThat(ModbusRegisterDecoder.decodePair(0x1234, 0x5678, "big", false))
+        assertThat(ModbusRegisterDecoder.decodeInt32(0x1234, 0x5678, "big", false))
             .isEqualTo(0x12345678L);
-        assertThat(ModbusRegisterDecoder.decodePair(0x1234, 0x5678, "little", false))
+        assertThat(ModbusRegisterDecoder.decodeInt32(0x1234, 0x5678, "little", false))
             .isEqualTo(0x56781234L);
-        assertThat(ModbusRegisterDecoder.decodePair(0x1234, 0x5678, null, false))
+        assertThat(ModbusRegisterDecoder.decodeInt32(0x1234, 0x5678, null, false))
             .as("byte_order 为 null ⇒ 按 big").isEqualTo(0x12345678L);
-        assertThat(ModbusRegisterDecoder.decodePair(0xFFFF, 0xFFFF, "big", false))
+        assertThat(ModbusRegisterDecoder.decodeInt32(0xFFFF, 0xFFFF, "big", false))
             .as("32 位无符号上界 2^32-1 不截断").isEqualTo(4294967295L);
-        assertThat(ModbusRegisterDecoder.decodePair(0xFFFF, 0xFFFF, "big", true)).isEqualTo(-1L);
-        assertThat(ModbusRegisterDecoder.decodePair(0x8000, 0x0000, "big", true))
+        assertThat(ModbusRegisterDecoder.decodeInt32(0xFFFF, 0xFFFF, "big", true)).isEqualTo(-1L);
+        assertThat(ModbusRegisterDecoder.decodeInt32(0x8000, 0x0000, "big", true))
             .as("32 位有符号下界").isEqualTo(-2147483648L);
-        assertThat(ModbusRegisterDecoder.decodePair(0x0001, 0xFFFF, "little", true))
+        assertThat(ModbusRegisterDecoder.decodeInt32(0x0001, 0xFFFF, "little", true))
             .as("little：raw32=0xFFFF0001 ⇒ -65535").isEqualTo(-65535L);
     }
 
@@ -89,7 +90,8 @@ class ModbusRegisterDecodeTest {
 
         assertThatThrownBy(() -> ModbusRegisterDecoder.decodeDoubleBits(new int[] {1, 2, 3}, "big"))
             .isInstanceOf(IllegalArgumentException.class)
-            .hasMessageContaining("必须恰好 4 个寄存器");
+            // 文案由下沉后的 starter 提供（英文）；本用例只钉「必须 fail-fast，不猜、不补零」
+            .hasMessageContaining("exactly 4 registers");
     }
 
     private static int[] wordsOf(long bits, String byteOrder) {

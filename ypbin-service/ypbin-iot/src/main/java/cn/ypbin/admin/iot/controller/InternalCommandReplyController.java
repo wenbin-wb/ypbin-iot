@@ -24,7 +24,8 @@ import org.springframework.web.bind.annotation.RestController;
 /**
  * 设备命令回执内部端点（{@code up/reply} 回流，设计 §7.1）。
  *
- * <p>路径在 {@code /internal/**} 下 ⇒ 由既有 {@code InternalTokenGuardWebConfig} 的守卫保护
+ * <p>路径在 {@code /internal/**} 下 ⇒ 由
+ * starter 官方内部凭证守卫（`ypbin.security.internal-token.guard-enabled`）保护
  * （只有 {@code X-Internal-Token}、**没有租户身份**；服务侧按 {@code deviceId} 反查租户后再写，
  * 与 {@code AvailabilityServiceImpl}/{@code IotEventServiceImpl} 同构）。</p>
  *

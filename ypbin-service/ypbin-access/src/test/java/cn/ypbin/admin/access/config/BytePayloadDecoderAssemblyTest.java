@@ -11,11 +11,12 @@ package cn.ypbin.admin.access.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import cn.ypbin.admin.access.decode.BytePayloadDecoder;
-import cn.ypbin.admin.access.decode.BytePayloadDecoderRegistry;
-import cn.ypbin.admin.access.decode.DecodeContext;
-import cn.ypbin.admin.access.decode.DecodeOutcome;
 import cn.ypbin.admin.access.decode.MqttBinaryNumberDecoder;
+import cn.ypbin.iot.core.protocol.ProtocolCode;
+import cn.ypbin.iot.core.spi.BytePayloadDecoder;
+import cn.ypbin.iot.core.spi.BytePayloadDecoderRegistry;
+import cn.ypbin.iot.core.spi.DecodeContext;
+import cn.ypbin.iot.core.spi.DecodeOutcome;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
@@ -33,8 +34,8 @@ import org.springframework.boot.test.context.runner.ApplicationContextRunner;
  */
 class BytePayloadDecoderAssemblyTest {
 
-    private static final DecodeContext MQTT = new DecodeContext("100", "mqtt", "sensors/temp",
-        "topic", "decimal", "big");
+    private static final DecodeContext MQTT = new DecodeContext("100", ProtocolCode.of("mqtt"),
+        "sensors/temp", "");
 
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
         .withConfiguration(AutoConfigurations.of(AccessDecodeConfiguration.class));
@@ -107,7 +108,7 @@ class BytePayloadDecoderAssemblyTest {
 
         @Override
         public boolean supports(DecodeContext context) {
-            return "mqtt".equals(context.protocol());
+            return ProtocolCode.of("mqtt").equals(context.protocol());
         }
 
         @Override

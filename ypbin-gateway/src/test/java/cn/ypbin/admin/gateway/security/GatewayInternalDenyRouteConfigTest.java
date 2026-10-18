@@ -25,9 +25,16 @@ import org.yaml.snakeyaml.Yaml;
  * 网关路由配置门禁（M2）：本地 {@code application.yml} 与 Nacos 样例必须同构地拒绝
  * {@code /iot/internal/**}。
  *
- * <p><b>为什么要有这条</b>：运行期硬保证在 {@link InternalEndpointBlockFilter}，但两处 YAML 是
- * 运维实际会改的路由来源——只改一处或漏掉 {@code order} 都会让「配置层纵深」静默消失。
- * 本用例把「两处都有 deny 路由、且排在 iot 通配路由之前」变成构建失败。</p>
+ * <p><b>为什么要有这条</b>：运行期硬保证是 starter 4.0.0 的 {@code InternalPathBlockGlobalFilter}
+ * （默认开启，命中「任意层级前缀 + /internal/」即返回统一 404 信封），但两处 YAML 是运维实际会改的路由来源——
+ * 只改一处或漏掉 {@code order} 都会让「配置层纵深」静默消失。本用例把「两处都有 deny 路由、
+ * 且排在 iot 通配路由之前」变成构建失败。</p>
+ *
+ * <p><b>为什么 deny 路由仍然保留</b>（starter 已默认拦截）：它是**配置层**纵深防御与可见性
+ * （运维在 Nacos 控制台就能看到「内部面被明确拒绝」），且不依赖运行时 Bean 装配；与 starter 的
+ * 运行期过滤器是两道独立防线。注意两道的 404 **响应体不同**：starter 返回统一信封
+ * （{@code code=404 / message=接口不存在}），{@code RedirectTo} 路由返回重定向目标页——后者只在
+ * 过滤器被显式关闭（{@code ypbin.gateway.internal-path-block.enabled=false}）时才可能命中。</p>
  *
  * <p>路径基于 Maven 模块工作目录（{@code ypbin-gateway}）推导，与仓内其它源码扫描门禁同口径。</p>
  *

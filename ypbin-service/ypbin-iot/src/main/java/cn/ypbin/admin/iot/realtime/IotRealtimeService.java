@@ -56,8 +56,9 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
  *
  * <p><b>多实例扇出</b>：本类委托的 {@code sendToAudience} 会同时投本实例连接并经 Redis Pub/Sub 扇出到
  * 其它实例（无 Redis 时退化为纯单实例，行为与改造前一致）。结构化事件载荷（本类的 record）由
- * {@link IotSseFanoutCodec} 承载——starter 默认的 {@code TextSseFanoutCodec} 只支持标量，
- * 会把 record 判为「不支持」而只投本实例（显式 WARN，不静默发垃圾帧）。</p>
+ * **starter 4.0.0 的 {@code JacksonSseFanoutCodec}**（协议 id {@code json-v1}）承载——本仓自建的
+ * JSON codec 已于 issue #289 第 5 项删除；默认装配退化到 {@code TextSseFanoutCodec} 时 record 会被判
+ * 「不支持」而只投本实例（显式 WARN，不静默发垃圾帧），装配前提由 {@code IotSseWiringTest} 守住。</p>
  *
  * @author wenbin
  * @since 2026-10-14
