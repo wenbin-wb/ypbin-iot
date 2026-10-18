@@ -31,7 +31,9 @@ import org.slf4j.LoggerFactory;
  * <p>三条硬约束（协议回调线程是采集热路径，不能被网络拖住）：</p>
  * <ol>
  *   <li><b>绝不阻塞</b>：入队用 {@code offer}，队满即丢弃并计数（丢弃是可控损失，阻塞会反压到协议栈）；</li>
- *   <li><b>超时显式</b>：Feign 的 connect/read 超时与「不重试」在 {@code ReadingFeignConfiguration} 里写死
+ *   <li><b>超时显式</b>：Feign 的 connect/read 超时由配置中心
+ *       {@code spring.cloud.openfeign.client.config.readingClient.*} 提供（issue #298 起不再用
+ *       {@code @Configuration} Bean，否则会外溢成全部客户端的全局默认值）；「不重试」由 OpenFeign 默认保证
  *       （重试只会占住 flush 线程、放大远端压力）；</li>
  *   <li><b>失败可见</b>：上报失败计数 + ERROR 全堆栈；本批**丢弃不重试**（读数只用于断档/可用率，
  *       丢一批会让缺口被算长一些，但绝不能因此把服务拖垮）——`iot.access.egress.failed` 就是它的账。</li>
@@ -121,9 +123,14 @@ public class HttpAccessReadingSink implements AccessReadingSink {
             R<Integer> resp = client.ingest(req);
             if (resp == null || !resp.isSuccess()) {
                 failedCounter.increment(batch.size());
+                // 非成功**信封**（不是异常）：先取出 code/message 再记日志。
+                // 拆成局部变量而非在日志参数里写三元：① 可读性；② 架构门禁
+                // logsMustNotSwallowThrowableStackTrace 把「日志参数里出现 X.getMessage()」视为疑似吞堆栈，
+                // 这里取的是 R 的 message 而非异常文案，抽出来即消除歧义（无需为该门禁开豁免）。
+                Integer respCode = resp == null ? null : resp.getCode();
+                String respMsg = resp == null ? null : resp.getMessage();
                 log.error("[access] 读数上报返回非成功信封（本批 {} 条已丢弃，不重试）：code={} msg={}",
-                    batch.size(), resp == null ? null : resp.getCode(),
-                    resp == null ? null : resp.getMessage());
+                    batch.size(), respCode, respMsg);
                 return;
             }
             sentCounter.increment(batch.size());

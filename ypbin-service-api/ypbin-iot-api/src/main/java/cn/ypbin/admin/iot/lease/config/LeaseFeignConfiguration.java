@@ -9,27 +9,31 @@
  */
 package cn.ypbin.admin.iot.lease.config;
 
-import feign.Request;
-import feign.Retryer;
-import java.util.concurrent.TimeUnit;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-
 /**
- * 租约客户端（access → iot 的 /internal/lease/**）的 Feign 配置。
+ * 租约客户端（access → iot 的 /internal/lease/**）的 Feign 配置锚点。
  *
- * <p>三件事与平台约定一致：<b>显式超时</b>（禁止无超时默认客户端）、<b>不重试</b>
- * （租约是有时效的写操作，重试会把「以为失败其实成功」变成归属错乱）、
- * <b>出站携带内部凭证</b>——由 {@code ypbin-starter-cloud-core} 的全局 Feign 拦截器按 {@code ypbin.cloud.feign.internal-token} 统一注入（本客户端不再手写拦截器）。</p>
+ * <p><b>本类刻意不带 {@code @Configuration}（issue #298）</b>：它只作为
+ * {@code @FeignClient(configuration = LeaseFeignConfiguration.class)} 的**子上下文**配置被引用
+ * （官方文档：配置类不必标 {@code @Configuration}；若标了就必须排除组件扫描）。此前带该注解，
+ * 而本包落在宿主 {@code scanBasePackages} 内（access 显式扫 {@code cn.ypbin.admin.iot.lease}）⇒
+ * 被当普通配置类加载进**主上下文**，其声明的 {@code Request.Options} 于是成了**所有 Feign 客户端的
+ * 全局默认值**，静默覆盖 Nacos 里 {@code spring.cloud.openfeign.client.config.*} 的超时且无任何告警
+ * （实测：主上下文 {@code Request.Options} 取到 1000/3000）。</p>
  *
- * <p>⚠️ 超时值同时被 access 的启动自检使用（续约周期必须 ≥ 一次调用最坏耗时的 2 倍），
- * 改这里必须同步看 {@code AccessStartupValidator}。</p>
+ * <p><b>超时值放在配置中心</b>：{@code spring.cloud.openfeign.client.config.<contextId>.connect-timeout
+ * / read-timeout}（见 {@code deploy/nacos/ypbin-iot.yaml}）。本类只保留
+ * {@link #CONNECT_TIMEOUT_MS}/{@link #READ_TIMEOUT_MS} 两个**常量**——它们是超时口径的单一来源，
+ * 供 {@code AccessStartupValidator} 做启动自检（续约周期必须 ≥ 一次调用最坏耗时的 2 倍），
+ * 因此**不得删除**；超时若在配置中心被改动，`AccessStartupValidator` 的常量口径需同步评估。</p>
+ *
+ * <p><b>不重试</b>：租约是有时效的写操作，重试会把「以为失败其实成功」变成归属错乱。该语义由
+ * OpenFeign 默认的 {@code Retryer.NEVER_RETRY}（{@code FeignClientsConfiguration#feignRetryer}，
+ * 带 {@code @ConditionalOnMissingBean}）保证，无需本类再声明 Bean（声明反而会污染主上下文）。</p>
  *
  * @author wenbin
  * @since 2026-09-20
  */
-@Configuration
-public class LeaseFeignConfiguration {
+public final class LeaseFeignConfiguration {
 
     /** 连接超时（毫秒）。 */
     public static final int CONNECT_TIMEOUT_MS = 1_000;
@@ -37,25 +41,6 @@ public class LeaseFeignConfiguration {
     /** 读超时（毫秒）。 */
     public static final int READ_TIMEOUT_MS = 3_000;
 
-    /**
-     * 超时配置（connect/read 显式设定；不跟随重定向）。
-     *
-     * @return Feign 请求参数
-     */
-    @Bean
-    public Request.Options leaseRequestOptions() {
-        return new Request.Options(CONNECT_TIMEOUT_MS, TimeUnit.MILLISECONDS, READ_TIMEOUT_MS,
-            TimeUnit.MILLISECONDS, true);
+    private LeaseFeignConfiguration() {
     }
-
-    /**
-     * 不重试。
-     *
-     * @return 永不重试的重试器
-     */
-    @Bean
-    public Retryer leaseRetryer() {
-        return Retryer.NEVER_RETRY;
-    }
-
 }

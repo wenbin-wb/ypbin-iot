@@ -95,7 +95,7 @@ public class AccessMetricsReporter {
         } catch (RuntimeException ex) {
             // 不静默：推送失败必须计数 + 告警（否则「平台看不到 access」本身也变成不可观测）
             reportFailureCounter.increment();
-            log.warn("[access] 指标推送给 iot 失败（平台侧将对相关规则判为不可判定）：{}", ex.getMessage());
+            log.warn("[access] 指标推送给 iot 失败（平台侧将对相关规则判为不可判定）：{}", ex.getMessage(), ex);
         }
     }
 
