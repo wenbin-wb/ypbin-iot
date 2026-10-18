@@ -340,3 +340,28 @@ spring:
       pool:
         size: 4
       thread-name-prefix: ypbin-iot-sched-
+  # ---------- access → iot 的四个 Feign 客户端超时（issue #298）----------
+  # ⚠️ 键名是 **contextId**（不是服务名）：Spring Cloud OpenFeign 按
+  # FeignClientFactoryBean#contextId 去 spring.cloud.openfeign.client.config 里查配置
+  # （5.0.3 字节码核实）。四个客户端 name 都是 ypbin-iot 但 contextId 不同，
+  # 所以按 contextId 分别配才能给「读数上报（高频小批量）」与「设备规格（一次拉全量）」不同预算。
+  # 这些值必须与 LeaseFeignConfiguration/ReadingFeignConfiguration/DeviceSpecFeignConfiguration
+  # 里的 CONNECT_TIMEOUT_MS/READ_TIMEOUT_MS 常量同值：常量是 access 启动自检
+  # （AccessStartupValidator：renew-interval-ms ≥ (connect+read)×2）的口径来源，两者漂移会让自检失真。
+  cloud:
+    openfeign:
+      client:
+        config:
+          leaseClient:
+            connect-timeout: 1000
+            read-timeout: 3000
+          readingClient:
+            connect-timeout: 1000
+            read-timeout: 5000
+          deviceSpecClient:
+            connect-timeout: 1000
+            read-timeout: 5000
+          # 与租约客户端共用同一份超时预算（指标上报是同类轻量内部调用）
+          accessMetricsClient:
+            connect-timeout: 1000
+            read-timeout: 3000

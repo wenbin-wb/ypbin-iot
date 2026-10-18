@@ -72,7 +72,8 @@ public class AccessProperties {
      * （不丢：下一轮仍会重试，安全网也在）。
      *
      * <p>为什么需要（R8-2）：对账是 tick 里唯一会**串行**打远端的阶段，每个租户最坏 6s
-     * （connect 1s + read 5s，见 {@code DeviceSpecFeignConfiguration}）。一旦单 tick 超过租约 TTL（30s），
+     * （connect 1s + read 5s，见 {@code DeviceSpecFeignConfiguration} 的常量与配置中心
+     * {@code spring.cloud.openfeign.client.config.deviceSpecClient.*}）。一旦单 tick 超过租约 TTL（30s），
      * 下一轮 {@code selfFenceExpiredLocally} 会**批量自我 fence 并重领**，形成抖动。</p>
      *
      * <p>默认 15s（= TTL 的一半）而不是「实测值」：这是**从约束推导**的上界——tick 还要留出自检/续约/

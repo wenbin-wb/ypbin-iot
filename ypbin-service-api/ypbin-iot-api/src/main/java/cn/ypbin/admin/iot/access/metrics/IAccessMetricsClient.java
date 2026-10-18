@@ -17,10 +17,15 @@ import org.springframework.web.bind.annotation.RequestBody;
 /**
  * 接入节点 → iot 的**指标上报**客户端（把 access 的关键指标推给平台侧自告警）。
  *
- * <p>复用与租约客户端同源的出站配置（内部凭证、显式超时、不重试）——它们在同一个
- * {@code LeaseFeignConfiguration} 作用域内注册，`Request.Options`/`Retryer`/
- * `RequestInterceptor` 三类 bean 各唯一，因此对本客户端同样生效（由
- * {@code AccessMetricsReporterTest} 断言「同一配置来源」的契约，避免换包时静默失效）。</p>
+ * <p>复用与租约客户端同源的出站配置（内部凭证、显式超时、不重试）：
+ * ① 内部凭证由 starter 的全局 {@code FeignHeaderInterceptor} 按
+ * {@code ypbin.cloud.feign.internal-token} 统一携带；② 超时由配置中心的
+ * {@code spring.cloud.openfeign.client.config.accessMetricsClient.*} 提供（与租约客户端同预算
+ * 1000/3000，见 {@code deploy/nacos/ypbin-iot.yaml}）；③ 不重试由 OpenFeign 默认的
+ * {@code Retryer.NEVER_RETRY} 保证。
+ * <b>本客户端与租约客户端共用 {@code LeaseFeignConfiguration} 仅作为「同一超时口径」的声明</b>——
+ * 该配置类自 issue #298 起**不再声明任何 Bean**（摘掉 {@code @Configuration} 与
+ * {@code Request.Options}/{@code Retryer}，否则会污染主上下文成为全局 Feign 默认值）。</p>
  *
  * @author wenbin
  * @since 2026-10-10
