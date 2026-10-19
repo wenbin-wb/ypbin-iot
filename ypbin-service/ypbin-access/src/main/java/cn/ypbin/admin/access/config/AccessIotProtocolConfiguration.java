@@ -25,8 +25,6 @@ import cn.ypbin.iot.core.spi.BytePayloadDecoderRegistry;
 import cn.ypbin.iot.core.spi.ConnectionSpecProvider;
 import cn.ypbin.iot.core.spi.DataSink;
 import cn.ypbin.iot.core.spi.DeviceRegistry;
-import cn.ypbin.iot.protocol.tcp.TcpPayloadFormat;
-import cn.ypbin.iot.protocol.tcp.autoconfigure.TcpProperties;
 import cn.ypbin.iot.spring.autoconfigure.IotLifecycle;
 import tools.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -131,9 +129,8 @@ public class AccessIotProtocolConfiguration {
      * @param objectMapper         点位清单反序列化
      * @param readingSink          映射后读数出口
      * @param meterRegistry        指标
-     * @param tcpPropertiesProvider TCP 配置（可选：TCP 未启用时 {@code TcpAutoConfiguration} 的
-     *                             {@code @ConditionalOnProperty} 会让该 bean 缺失）
      * @param decoderRegistry       宿主可插字节载荷解码器注册表（透传给每个设备 listener）
+     * @param subscriptionOrchestrator 框架订阅编排器（分流/展开/在途/退避全由它承担）
      * @return 订阅规划器
      */
     @Bean
@@ -142,23 +139,15 @@ public class AccessIotProtocolConfiguration {
                                                         ObjectMapper objectMapper,
                                                         AccessReadingSink readingSink,
                                                         MeterRegistry meterRegistry,
-                                                        ObjectProvider<TcpProperties> tcpPropertiesProvider,
                                                         BytePayloadDecoderRegistry decoderRegistry,
                                                         SubscriptionOrchestrator subscriptionOrchestrator) {
         Supplier<Map<String, DeviceSession>> sessions = () -> {
             IotLifecycle lifecycle = lifecycleProvider.getIfAvailable();
             return lifecycle == null ? Map.of() : lifecycle.sessions();
         };
-        // 分流判据：payload-format=key-value ⇒ TCP 走一次多地址订阅；其它形态/配置不可得 ⇒
-        // 逐点位单订阅（保持今天行为，回退配置即回退订阅形态）。用 ObjectProvider 是因为
-        // TcpAutoConfiguration 带 @ConditionalOnProperty(enabled)，TCP 未启用时 TcpProperties 可能不是 bean。
-        TcpProperties tcpProperties = tcpPropertiesProvider.getIfAvailable();
-        boolean tcpKeyValuePayloadFormat = tcpProperties != null
-            && tcpProperties.payloadFormat() == TcpPayloadFormat.KEY_VALUE;
         // 订阅编排（重订/在途去重/部分成功补订/退避/地址展开）由框架的 SubscriptionOrchestrator 承担（iot-starter #37）
         return new AccessSubscriptionPlanner(sessions, objectMapper, readingSink,
-            meterRegistry, subscriptionOrchestrator, tcpKeyValuePayloadFormat, decoderRegistry,
-            Clock.systemUTC());
+            meterRegistry, subscriptionOrchestrator, decoderRegistry, Clock.systemUTC());
     }
 
     /**

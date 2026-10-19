@@ -144,11 +144,71 @@ class AccessSubscriptionPlannerTest {
         verify(session, times(2)).subscribe(any(SubscribeRequest.class), any());
     }
 
+    // ==================================================================
+    // iot-starter `release/0.5.0` 反哺 `SubscriptionAddressingPolicy` 后的新语义用例
+    // （替代被删的「宿主自建 key-value 退避」用例：退避表已删，退避改由框架承担）
+    // ==================================================================
+
     @Test
-    @DisplayName("★ key-value 退避（技术债）：框架覆盖不到的分支仍按 30s 起退避，窗口内不打远端")
-    void keyValueBackoffMustStillWork() {
-        // lead 决策 ④(b)：key-value 绕过框架编排（框架把 TCP 声明为 PER_ADDRESS），
-        // 故宿主保留 ~15 行最小退避表。本用例钉住它的真实行为，避免后来人以为已完全下沉。
+    @DisplayName("★ key-value 形态：框架按形态声明 BATCH ⇒ 3 个 selector **只调用 1 次**且带 3 个地址")
+    void keyValueVariantMustSubscribeBatchThroughFramework() {
+        // 这是「删除宿主分流分支与退避表」后必须成立的等价行为：
+        // 宿主不再判断 payload-format、不再直调 session.subscribe，但一次多地址的语义必须保留
+        // （否则 key-value 会退化成 3 次单地址订阅 ⇒ 请求数 1→3、SDK selector 行为变化）。
+        DeviceSession session = withExpansion(mock(DeviceSession.class));
+        when(session.subscribe(any(SubscribeRequest.class), any()))
+            .thenReturn(CompletableFuture.completedFuture(null));
+        AtomicReference<Map<String, DeviceSession>> bound =
+            new AtomicReference<>(Map.of("d1", session));
+        AccessSubscriptionPlanner planner = plannerKeyValue(bound, new SimpleMeterRegistry());
+
+        String points = "[{\"propertyId\":\"1\",\"identifier\":\"t\",\"address\":\"TEMP\"},"
+            + "{\"propertyId\":\"2\",\"identifier\":\"h\",\"address\":\"HUMI\"},"
+            + "{\"propertyId\":\"3\",\"identifier\":\"p\",\"address\":\"PRES\"}]";
+        assertThat(planner.subscribe(List.of(tcpDevice("d1", points)))).isEqualTo(1);
+
+        ArgumentCaptor<SubscribeRequest> requests = ArgumentCaptor.forClass(SubscribeRequest.class);
+        verify(session, times(1)).subscribe(requests.capture(), any());
+        assertThat(requests.getValue().addresses().stream().map(PointAddress::raw).toList())
+            .as("key-value 形态：一次请求必须携带全部 3 个 selector")
+            .containsExactlyInAnyOrder("TEMP", "HUMI", "PRES");
+    }
+
+    @Test
+    @DisplayName("★ binary 形态：框架按形态声明 PER_ADDRESS ⇒ 3 个点位发 **3 次单地址**（不混成整批）")
+    void binaryVariantMustSubscribePerAddressThroughFramework() {
+        // 防「把两种形态混成一种」：同一 tcp 协议，binary 形态下裸帧无寻址语义，
+        // TcpSession 对 >1 地址直接 fail-fast ⇒ 必须逐点位单订阅。
+        // 宿主的 planner() 工厂用 binary 形态的描述符（见 orchestrator(TCP_BINARY_VARIANT)）。
+        DeviceSession session = withExpansion(mock(DeviceSession.class));
+        when(session.subscribe(any(SubscribeRequest.class), any()))
+            .thenReturn(CompletableFuture.completedFuture(null));
+        AtomicReference<Map<String, DeviceSession>> bound =
+            new AtomicReference<>(Map.of("d1", session));
+        AccessSubscriptionPlanner planner = planner(bound);
+
+        String points = "[{\"propertyId\":\"1\",\"identifier\":\"t\",\"address\":\"TEMP\"},"
+            + "{\"propertyId\":\"2\",\"identifier\":\"h\",\"address\":\"HUMI\"},"
+            + "{\"propertyId\":\"3\",\"identifier\":\"p\",\"address\":\"PRES\"}]";
+        assertThat(planner.subscribe(List.of(tcpDevice("d1", points)))).isEqualTo(1);
+
+        ArgumentCaptor<SubscribeRequest> requests = ArgumentCaptor.forClass(SubscribeRequest.class);
+        verify(session, times(3)).subscribe(requests.capture(), any());
+        assertThat(requests.getAllValues().stream()
+            .map(r -> r.addresses().get(0).raw()).toList())
+            .as("binary 形态：3 个点位各 1 次单地址订阅（每次只带 1 个地址）")
+            .containsExactlyInAnyOrder("TEMP", "HUMI", "PRES");
+        assertThat(requests.getAllValues())
+            .allSatisfy(r -> assertThat(r.addresses()).as("绝不允许 >1 地址（会触发 TCP fail-fast）")
+                .hasSize(1));
+    }
+
+    @Test
+    @DisplayName("★ key-value 形态失败：退避由**框架**承担 ⇒ 窗口内 verify(session, never())")
+    void keyValueFailureBackoffMustBeHandledByFramework() {
+        // 替代被删的「宿主自建 key-value 退避」用例：宿主退避表已删除，
+        // 但「失败后不退避、每轮猛重试」是不可接受的（原退避就是为防这个）。
+        // 本用例证明退避能力没丢——只是执行者从宿主换成了框架的 SubscriptionBackoffPolicy。
         DeviceSession session = withExpansion(mock(DeviceSession.class));
         CompletableFuture<SubscriptionHandle> failed = new CompletableFuture<>();
         failed.completeExceptionally(new IllegalStateException("协议侧拒绝订阅"));
@@ -157,17 +217,19 @@ class AccessSubscriptionPlannerTest {
             new AtomicReference<>(Map.of("d1", session));
         AccessSubscriptionPlanner planner = plannerKeyValue(bound, new SimpleMeterRegistry());
 
-        String points = "[{\"propertyId\":\"1\",\"identifier\":\"temperature\","
-            + "\"address\":\"TEMP\",\"dataType\":\"decimal\"}]";
+        String points = "[{\"propertyId\":\"1\",\"identifier\":\"t\",\"address\":\"TEMP\"},"
+            + "{\"propertyId\":\"2\",\"identifier\":\"h\",\"address\":\"HUMI\"},"
+            + "{\"propertyId\":\"3\",\"identifier\":\"p\",\"address\":\"PRES\"}]";
         assertThat(planner.subscribe(List.of(tcpDevice("d1", points)))).as("首次发起").isEqualTo(1);
         verify(session, times(1)).subscribe(any(SubscribeRequest.class), any());
 
-        // 退避窗口内（< 30s）不得再打远端
-        clock.advance(SubscriptionBackoffPolicy.DEFAULT_INITIAL_DELAY.minusSeconds(1));
-        assertThat(planner.subscribe(List.of(tcpDevice("d1", points)))).isZero();
+        // 退避窗口内连打 5 轮：框架必须一次 session 调用都不再发
+        for (int i = 0; i < 5; i++) {
+            assertThat(planner.subscribe(List.of(tcpDevice("d1", points)))).isZero();
+        }
         verify(session, times(1)).subscribe(any(SubscribeRequest.class), any());
 
-        // 跨过窗口 ⇒ 重试
+        // 跨过窗口 ⇒ 框架必须重试（恢复路径存在）
         clock.advance(SubscriptionBackoffPolicy.DEFAULT_INITIAL_DELAY.plusSeconds(1));
         assertThat(planner.subscribe(List.of(tcpDevice("d1", points)))).isEqualTo(1);
         verify(session, times(2)).subscribe(any(SubscribeRequest.class), any());
@@ -589,8 +651,13 @@ class AccessSubscriptionPlannerTest {
         assertThat(planner.subscribe(List.of(tcpDevice4Points("d1")))).isEqualTo(1);
         assertThat(seen).hasSize(1);
         assertThat(seen.getFirst().addresses()).hasSize(4);
+        // ⚠️ 口径变化（lead 决策 ③）：`subscribe.failure` 统一按**地址级**累加
+        // （`outcome.failures().size()`），不再区分「整批 1 次 / 逐点位 N 次」。
+        // 理由：运维看板口径不能从地址级突变设备级（否则同一故障看起来轻 N 倍，属静默弱化）。
+        // key-value 整批 4 地址失败 ⇒ 计 4（与 binary 逐点位 4 次失败计 4 **一致**，
+        // 这反而是更自洽的口径：同一故障不论部署形态，指标值相同）。
         assertThat(meterRegistry.get("iot.access.subscribe.failure").counter().count())
-            .as("多地址订阅失败是**设备级 1 次**失败（不是 4 次）").isEqualTo(1.0d);
+            .as("4 个地址全部失败 ⇒ 地址级计 4（与 binary 形态口径一致）").isEqualTo(4.0d);
         assertThat(planner.trackedSessionCount())
             .as("失败不写跟踪（S5：写了就永不重试）").isZero();
 
@@ -831,22 +898,29 @@ class AccessSubscriptionPlannerTest {
             .isEqualTo(1.0d);
     }
 
+    /** 默认规划器：TCP 走 **binary 形态**（框架声明 PER_ADDRESS ⇒ 逐点位单订阅）。 */
     private AccessSubscriptionPlanner planner(AtomicReference<Map<String, DeviceSession>> bound) {
         return planner(bound, new SimpleMeterRegistry());
     }
 
-    /** **非 key-value** 形态（旧 UP-4 契约）：显式 false，避免用例意外走到多地址分支。 */
     private AccessSubscriptionPlanner planner(AtomicReference<Map<String, DeviceSession>> bound,
                                               SimpleMeterRegistry meterRegistry) {
         return new AccessSubscriptionPlanner(bound::get, objectMapper, reading -> { },
-            meterRegistry, orchestrator(), false, BytePayloadDecoderRegistry.empty(), clock);
+            meterRegistry, orchestrator(TCP_BINARY_VARIANT), BytePayloadDecoderRegistry.empty(), clock);
     }
 
-    /** **key-value** 形态：TCP 走一次多地址订阅。 */
+    /**
+     * **key-value 形态**的规划器。
+     *
+     * <p>iot-starter `release/0.5.0` 反哺后，key-value 由**框架**按形态声明为
+     * {@code BATCH}（{@code SubscriptionAddressingPolicy} 的 variant 表），宿主不再需要自己分流。
+     * 本工厂只是把「该部署形态」告诉编排器的描述符来源（等价于生产里 {@code TcpAdapter} 在
+     * {@code payload-format=key-value} 时构造的描述符）。</p>
+     */
     private AccessSubscriptionPlanner plannerKeyValue(
             AtomicReference<Map<String, DeviceSession>> bound, SimpleMeterRegistry meterRegistry) {
         return new AccessSubscriptionPlanner(bound::get, objectMapper, reading -> { },
-            meterRegistry, orchestrator(), true, BytePayloadDecoderRegistry.empty(), clock);
+            meterRegistry, orchestrator(TCP_KEY_VALUE_VARIANT), BytePayloadDecoderRegistry.empty(), clock);
     }
 
     /**
@@ -859,7 +933,27 @@ class AccessSubscriptionPlannerTest {
      * <p>协议描述符按本测试用到的协议给：modbus=整批（BATCH）、tcp=逐点位（PER_ADDRESS），
      * 与框架里两个适配器的**真实声明**一致（见 {@code ModbusAdapter}/{@code TcpAdapter}）。</p>
      */
-    private SubscriptionOrchestrator orchestrator() {
+    /** TCP 部署形态：{@code payload-format=binary}（框架声明 PER_ADDRESS ⇒ 逐点位）。 */
+    private static final String TCP_BINARY_VARIANT = "binary";
+
+    /** TCP 部署形态：{@code payload-format=key-value}（框架声明 BATCH ⇒ 一次多地址）。 */
+    private static final String TCP_KEY_VALUE_VARIANT = "key-value";
+
+    /**
+     * 真实的框架订阅编排器（iot-starter #37 的 {@code DefaultSubscriptionOrchestrator}）。
+     *
+     * <p>刻意用**框架默认实现**而不是 mock：本类测试的价值就在于证明「宿主把正确输入交给框架后，
+     * 框架产出的订阅请求与迁移前等价」（分流/展开/在途/部分成功/退避全在框架里）。
+     *
+     * <p>描述符按生产适配器的**真实声明**构造：Modbus = BATCH；TCP = 协议级保守侧 PER_ADDRESS +
+     * **按形态覆盖表**（`release/0.5.0` 的 {@code SubscriptionAddressingPolicy}：
+     * {@code key-value ⇒ BATCH}、其余 ⇒ PER_ADDRESS）+ 形态解析器（模拟 TcpAdapter 用实例
+     * payloadFormat 解析）。这正是宿主不再需要自己分流的依据。</p>
+     *
+     * @param tcpVariant 本次部署的 TCP 形态（二进制/键值）
+     * @return 编排器
+     */
+    private SubscriptionOrchestrator orchestrator(String tcpVariant) {
         ProtocolDescriptor modbus = ProtocolDescriptor.builder()
             .code(ProtocolCode.of("modbus"))
             .name("Modbus")
@@ -868,7 +962,14 @@ class AccessSubscriptionPlannerTest {
         ProtocolDescriptor tcp = ProtocolDescriptor.builder()
             .code(ProtocolCode.of("tcp"))
             .name("TCP")
+            // 协议级默认 = 保守侧（未取到形态时按逐点位）
             .subscriptionAddressing(SubscriptionAddressing.PER_ADDRESS)
+            // 按形态细分：只有 key-value 能一次多地址（与 TcpAdapter#buildDescriptor 一致）
+            .subscriptionAddressingByVariant(Map.of(
+                TCP_BINARY_VARIANT, SubscriptionAddressing.PER_ADDRESS,
+                TCP_KEY_VALUE_VARIANT, SubscriptionAddressing.BATCH))
+            // 形态解析器：生产里由 TcpAdapter 捕获实例的 payloadFormat；测试里固定成本次部署形态
+            .variantResolver(device -> tcpVariant)
             .build();
         return new DefaultSubscriptionOrchestrator(ProtocolDescriptorSource.of(List.of(modbus, tcp)),
             SubscriptionBackoffPolicy.defaults(), clock);
