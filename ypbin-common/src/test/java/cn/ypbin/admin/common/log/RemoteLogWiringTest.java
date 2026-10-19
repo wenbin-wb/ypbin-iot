@@ -22,6 +22,7 @@ import cn.ypbin.starter.log.dao.LogDao;
 import cn.ypbin.starter.log.dao.RemoteLogDao;
 import cn.ypbin.starter.log.model.LogRecord;
 import cn.ypbin.starter.log.spi.RemoteLogIngestClient;
+import cn.ypbin.starter.security.log.SessionLogClientProvider;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.NoSuchBeanDefinitionException;

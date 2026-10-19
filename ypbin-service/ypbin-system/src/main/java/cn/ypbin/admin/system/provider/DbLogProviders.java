@@ -47,7 +47,7 @@ import org.springframework.stereotype.Component;
  *
  * <p><strong>已知边界：</strong>① {@code LogRecord.requestHeaders/responseHeaders} 在 {@code sys_log}
  * 无对应列，直接丢弃；② {@code clientId/clientType/authType} 由 {@code LogClientProvider} 提供，
- * 本仓实现是 {@code ypbin-common} 的 {@code SessionLogClientProvider}（读登录会话中的
+ * 本仓实现是 starter 4.1.0 的 {@code cn.ypbin.starter.security.log.SessionLogClientProvider}（读登录会话中的
  * {@code LoginUser}，不扩展网关身份头契约），auth/system/ai 三服务共用同一份实现；若某服务未装配
  * provider，starter 默认实现恒返回空，这三列即为空；③ {@code location} 依赖
  * {@code IpLocationResolver}，本仓未接入离线 IP 库，故留空而非臆造。</p>

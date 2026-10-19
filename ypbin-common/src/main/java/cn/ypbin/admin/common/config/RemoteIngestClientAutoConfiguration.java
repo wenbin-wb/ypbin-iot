@@ -10,7 +10,7 @@
 package cn.ypbin.admin.common.config;
 
 import cn.ypbin.admin.common.log.IdentityHeaderLogUserProvider;
-import cn.ypbin.admin.common.log.SessionLogClientProvider;
+import cn.ypbin.starter.security.log.SessionLogClientProvider;
 import cn.ypbin.admin.common.log.SystemRemoteLogIngestClient;
 import cn.ypbin.admin.common.tracking.SystemRemoteTrackIngestClient;
 import cn.ypbin.admin.system.api.feign.ISystemClient;
@@ -83,11 +83,15 @@ public class RemoteIngestClientAutoConfiguration {
     }
 
     /**
-     * 客户端信息数据源（sa-token 登录会话实现）：取 {@code clientId/clientType/authType}。
+     * 客户端信息数据源：<b>直接用 starter 4.1.0 的实现</b>（`cn.ypbin.starter.security.log`）。
      *
-     * <p>gateway 只签发 id/username/tenantId/deptId/roles 五个身份头，<b>不含</b>客户端信息；
-     * 而登录时写入 Account-Session 的 {@code LoginUser} 本就带这三项，各服务共用同一份 Redis
-     * 会话存储 ⇒ 读会话即可，不新增请求头契约。</p>
+     * <p>本仓此前自建过同名实现，starter 4.1.0（issue #100）已把「身份头模式按 loginId 读账号会话、
+     * 单体模式读当前 token 会话」两种分支做进去，且单体模式只读 <b>1 次</b>会话（本地副本是 2 次）。
+     * 保留本地副本会让「栈帧/IDE 跳转/同包测试解析」指向错误实现，故删除并改用官方版
+     * （架构门禁 {@code DuplicateClassNameGateTest} 会拦住这类遗留副本）。</p>
+     *
+     * <p>仍保留本 Bean：宿主必须<b>显式</b>注册 SPI 适配（starter 的默认实现返回空，见
+     * {@code LogAutoConfiguration}），这里把它接到 starter 的会话实现上。</p>
      *
      * @return 客户端信息数据源
      */
