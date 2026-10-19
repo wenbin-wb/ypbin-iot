@@ -103,9 +103,7 @@ public final class SysCache {
      * 用户角色码（登录组装身份头用），永久缓存。
      */
     public static List<String> getUserRoleCodes(Long userId) {
-        return CacheUtils.getOrLoad(
-            ROLE_USER_KEY + userId,
-            (Class<List<String>>) (Class<?>) List.class,
+        return CacheUtils.getOrLoad(ROLE_USER_KEY + userId,
             () -> FeignResponses.dataOrThrow(feignClient().listRoleCodes(userId),
                 "系统服务暂不可用，请稍后重试"),
             null);
@@ -115,9 +113,7 @@ public final class SysCache {
      * 用户权限码（鉴权用），永久缓存。
      */
     public static List<String> getUserPermissions(Long userId) {
-        return CacheUtils.getOrLoad(
-            PERM_USER_KEY + userId,
-            (Class<List<String>>) (Class<?>) List.class,
+        return CacheUtils.getOrLoad(PERM_USER_KEY + userId,
             () -> FeignResponses.dataOrThrow(feignClient().listPermissions(userId),
                 "系统服务暂不可用，请稍后重试"),
             null);
@@ -235,9 +231,7 @@ public final class SysCache {
      * 全部启用第三方登录平台授权配置，永久缓存。
      */
     public static List<SocialAuthConfig> listSocialAuthConfigs() {
-        return CacheUtils.getOrLoad(
-            SOCIAL_CONFIGS_KEY,
-            (Class<List<SocialAuthConfig>>) (Class<?>) List.class,
+        return CacheUtils.getOrLoad(SOCIAL_CONFIGS_KEY,
             () -> FeignResponses.dataOrThrow(feignClient().listSocialAuthConfigs(),
                 "系统服务暂不可用，请稍后重试"),
             null);
@@ -293,9 +287,7 @@ public final class SysCache {
      * 用户已绑定的平台列表，永久缓存。
      */
     public static List<SysUserSocialDto> listSocialBindings(Long userId) {
-        return CacheUtils.getOrLoad(
-            SOCIAL_BINDINGS_USER_KEY + userId,
-            (Class<List<SysUserSocialDto>>) (Class<?>) List.class,
+        return CacheUtils.getOrLoad(SOCIAL_BINDINGS_USER_KEY + userId,
             () -> FeignResponses.dataOrThrow(feignClient().listSocialBindings(userId),
                 "系统服务暂不可用，请稍后重试"),
             null);
