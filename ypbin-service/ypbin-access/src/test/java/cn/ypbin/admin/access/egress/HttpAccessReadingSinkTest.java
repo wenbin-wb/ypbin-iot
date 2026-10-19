@@ -291,9 +291,34 @@ class HttpAccessReadingSinkTest {
         return counter == null ? 0.0d : counter.count();
     }
 
-    private static void awaitDelivered(HttpAccessReadingSink sink) {
+    /**
+     * 等待「已入队的读数**真正投递完成**」。
+     *
+     * <p><b>为什么不能只等 {@code pendingCount() == 0}</b>（2026-10-19 修 flaky，实测在未改动的
+     * origin/main 上 3 次跑 1 次失败）：队列深度归零只说明「消费线程把元素**取走**了」，从取走到
+     * {@code client.ingest(...)} 执行完之间还有窗口。断言 {@code verify(client)} / 捕获参数时若正好落在
+     * 这个窗口里，就会偶发失败（同一文件里先报 decodedStrings…、再报 nullValue…，位置随机 ⇒ 典型时序竞态）。
+     *
+     * <p>改法：等到「队列已空 <b>且</b> 静置一个 flush 周期（{@code 2 × flushIntervalMs}）」——
+     * 静置窗口内没有新的入队、消费线程也已跑完一轮，才认为投递确实结束。总等待仍有上限，
+     * 超时不静默通过（由后续断言给出失败原因）。</p>
+     *
+     * @param sink 待等待的出口
+     */
+    private void awaitDelivered(HttpAccessReadingSink sink) {
         long deadline = System.currentTimeMillis() + 3_000L;
-        while (sink.pendingCount() > 0 && System.currentTimeMillis() < deadline) {
+        long quietMillis = Math.max(40L, properties.getFlushIntervalMs() * 2L);
+        long emptySince = -1L;
+        while (System.currentTimeMillis() < deadline) {
+            if (sink.pendingCount() == 0) {
+                if (emptySince < 0) {
+                    emptySince = System.currentTimeMillis();
+                } else if (System.currentTimeMillis() - emptySince >= quietMillis) {
+                    return;
+                }
+            } else {
+                emptySince = -1L;
+            }
             try {
                 Thread.sleep(10L);
             } catch (InterruptedException ex) {
