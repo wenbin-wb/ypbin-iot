@@ -34,7 +34,12 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 > 只会被当噪音忽略。现在：白名单内冲突 = warning + summary 列出；白名单外冲突 = 判红（那才是
 > 「分歧面失控」的信号）。
 
-> **白名单膨胀要记账**：目前 **37** 个文件（权威清单 = `tools/sync-whitelist-regex.sh`；本表与它必须逐项一致）。
+> **白名单膨胀要记账**：目前 **47** 个文件（权威清单 = `tools/sync-whitelist-regex.sh`；本表与它必须逐项一致）。
+> 2026-10-19：**加第 47 项** —— `RemoteLogDaoTest.java` 的**重命名**（R086 → `SystemRemoteLogIngestClientTest.java`）。
+> 门禁比对新路径，故新名字必须单独登记（旧名字条目保留，上游改动旧文件时仍要命中）。
+
+> 2026-10-18：**加第 38–46 项**（消费 `ypbin-starter` 4.1.0 的 starter #100：日志/埋点跨服务上报的自动配置与落库实现上收到基座），
+> 性质同第 25–34 项——**删除 admin 既有文件**（本仓自建的那套上报实现），保留 = 与上游继续各写一份重复实现。
 > 2026-10-18：**加第 25–34 项**（`ypbin-starter` 4.0.0 全量下沉，见下文「一揽子下沉」），本质是「删除 admin 既有文件」，与以往「改一行」的条目性质不同。
 > 2026-10-12：**加第 21 项 `CHANGELOG.md`**（本批 deploy/IoT 修复需要写发布台账；无法用新文件表达，
 > 与 upstream 冲突时整体取本仓版本，代价同 README.md）。
@@ -70,8 +75,11 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 | `ypbin-gateway/src/main/resources/application.yml` | 路由/清洗/免登录段并入本地配置 | **2026-10-01 加**（#11 第 1 批网关侧）：nacos 3.x 服务端脚本化读写 API 已移除（一手实测 GET/POST 全 404）⇒ 网关配置只能随 jar 发布，routes/exclude 必须落在网关既有 application.yml。可审计：若未来 nacos 支持 API，可回退到 nacos 配置（SYNC 分歧面 +1）。长期应反哺 admin 仓（网关工程属 upstream）。<br>**⚠️ 2026-10-08 更正**：本条当时的理由"nacos 3.x 服务端脚本化读写 API 已移除（全 404）"**不成立**——v1 确实全 404，但 **v3 admin API 读写均可用**（`/nacos/v3/auth/user/login` + `/nacos/v3/admin/cs/config` GET/POST，2026-10-08 实测；工具 `tools/set-nacos-flag.py`）⇒ 触发条件"若未来 nacos 支持 API"**已满足**，"网关配置回退到 Nacos"从"不可行"变成"**可行性已成立、决策未做**"。本白名单条目**暂不变**（未回退前仍需改该 application.yml），待另立评估 | 
 | `CHANGELOG.md` | 在 `## [未发布]` 段追加本批 deploy/IoT 修复条目 | **2026-10-12 加**：发布台账/对外门面，GitHub 与发布流程只认根 `CHANGELOG.md`，另写一份不会被看到（同 README.md 的理由）。**代价如实登记**：与 upstream 该文件冲突时**整体取本仓版本**（不是逐行合并）。改的是「允许改这个既有文件」，不改变任何门禁判据。 |
 | `deploy/nginx-microservice.conf` | 在 `/api/` location 加 `proxy_http_version 1.1` / `Connection ''` / `proxy_buffering off` / `proxy_cache off` | **2026-10-15 加**：SSE 实时流必须关闭代理缓冲，否则事件被攒在 proxy buffer 里、用户看到「实时流不动」。问题就在既有的 `/api/` location 上（无缓冲只能改这个文件），无法用新文件表达。**代价如实登记**：与 upstream 该文件冲突时按语义合并（保留 SSE 三行 + 采纳上游其它改动）。 |
+| `ypbin-common/src/test/java/cn/ypbin/admin/common/log/SystemRemoteLogIngestClientTest.java` | **重命名**（原 `RemoteLogDaoTest.java`，R086）+ 断言口径随被测对象改名（自建 LogDao → SPI 实现） | **2026-10-19 加（第 47 项）**：随 starter #100 的上收，该测试的被测对象从 `RemoteLogDao` 换成 `SystemRemoteLogIngestClient`；Git 记为重命名但白名单门禁比对**新路径**，故需单独登记。**代价**：与旧条目同理（上游改该文件会冲突）。 |
 | `deploy/sql/006-iot-schema.sql`、`007-iot-data.sql` | **新文件** | 全新安装用 |
 | `deploy/sql/migration/*-iot-*.sql` | **新文件**（命名必须含 `-iot-`） | 已上线库用；按文件名排序拼接后与 `006+007` **语句等价**（有 CI 校验）。顺序即结构演进顺序：`device-schema` → `lease-schema` → `menu-data` |
+| `ypbin-common/.../log/RemoteLogAutoConfiguration.java`、`.../log/RemoteLogDao.java`、`.../tracking/RemoteTrackAutoConfiguration.java`、`.../tracking/RemoteTrackEventSink.java` | **删除**（4 个自建的跨服务上报自动配置与落库实现） | **2026-10-18 加（第 38–41 项）**：消费 `ypbin-starter` 4.1.0 的 starter #100 —— 基座已提供 `RemoteLogAutoConfiguration`/`RemoteTrackAutoConfiguration`（各自以 `@ConditionalOnBean(..IngestClient)` 为条件、`@Bean` 带 `@ConditionalOnMissingBean`）与 `RemoteLogDao`/`RemoteTrackEventSink`。本仓只保留 2 个 **SPI 实现**（`SystemRemoteLogIngestClient`/`SystemRemoteTrackIngestClient`）+ 1 个注册它们的自动配置（新文件）。**为什么不能用新文件表达**：要表达的是「删除既有实现」，留着就与基座重复（本仓反对的漂移面）。**代价如实登记**：上游再改这 4 个文件时，同步会以 modify/delete 暴露；正确解是上游也删（理由对上游同样成立）。 |
+| `ypbin-common/.../log/IdentityHeaderLogUserProvider.java`、`ypbin-auth/.../service/LoginEventTracker.java`、`ypbin-auth/src/test/.../log/AuthLogIngestTest.java`、`ypbin-common/src/test/.../log/RemoteLogDaoTest.java`、`ypbin-common/src/test/.../log/RemoteLogWiringTest.java` | **连带更新**（注释改指新装配；两个既有单测随实现迁移到 SPI 形态） | **2026-10-18 加（第 42–46 项）**：随上面 4 个类删除而必须同步的连带改动。两个测试的**断言口径逐条保留**（上报即采集模型本身、失败必须上抛而非静默、失败带完整堆栈、异常被监听器吸收），只把被测对象从 `RemoteLogDao` 换成 `SystemRemoteLogIngestClient`。 |
 | `admin-ui`（后续） | 路由/菜单注册 | 前端增量时再补清单 |
 
 > **为什么必须改这个上游测试文件（唯一豁免来源，不可回避）**：该类的 `LOOP_DB_EXEMPTIONS` 是

@@ -109,7 +109,7 @@ class AccessDeviceRegistryTest {
     void emitWithoutListenerShouldBeDroppedSafely() {
         AccessDeviceRegistry registry = new AccessDeviceRegistry(mock(DeviceSpecSource.class), Set::of);
 
-        registry.emit(new DeviceChange(ChangeType.ADD, device("d1"), registry.nextRevision("d1")));
+        registry.emit(registry.dispatch(ChangeType.ADD, device("d1")));
 
         assertThat(registry.listenerCount()).isZero();
     }
@@ -123,7 +123,7 @@ class AccessDeviceRegistryTest {
         registry.addChangeListener(first::add);
         registry.addChangeListener(second::add);
 
-        registry.emit(new DeviceChange(ChangeType.ADD, device("d1"), registry.nextRevision("d1")));
+        registry.emit(registry.dispatch(ChangeType.ADD, device("d1")));
 
         assertThat(first).hasSize(1);
         assertThat(second).hasSize(1);
@@ -131,13 +131,16 @@ class AccessDeviceRegistryTest {
     }
 
     @Test
-    @DisplayName("nextRevision 按设备独立严格递增（跨设备互不影响）")
-    void nextRevisionShouldBeStrictlyIncreasingPerDevice() {
+    @DisplayName("dispatch 产出的 revision 按设备独立严格递增（跨设备互不影响）——框架分配器语义")
+    void dispatchMustProduceStrictlyIncreasingRevisionPerDevice() {
+        // iot-starter #38：版本号不再由宿主自增，而是由框架的 DeviceRevisionAllocator 在
+        // dispatch 内分配（本类只转发）。框架按 revision 去重：≤ 已应用值的变更会被**静默丢弃**，
+        // 所以「严格递增」是硬契约，这条用例守的就是它。
         AccessDeviceRegistry registry = new AccessDeviceRegistry(mock(DeviceSpecSource.class), Set::of);
 
-        long d1First = registry.nextRevision("d1");
-        long d1Second = registry.nextRevision("d1");
-        long d2First = registry.nextRevision("d2");
+        long d1First = registry.dispatch(ChangeType.ADD, device("d1")).revision();
+        long d1Second = registry.dispatch(ChangeType.ADD, device("d1")).revision();
+        long d2First = registry.dispatch(ChangeType.ADD, device("d2")).revision();
 
         assertThat(d1Second).isGreaterThan(d1First);
         assertThat(d2First).isPositive();

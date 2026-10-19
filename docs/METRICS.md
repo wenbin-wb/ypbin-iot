@@ -56,28 +56,58 @@
 | `iot.access.spec.empty` | Counter | 上游返回空清单（该租户没有设备） | 稳态 0；增长 ⇒ 设备被误删/上游过滤错 | IotProtocolTenantLinkManager.java |
 | `iot.access.spec.failure` | Counter | 清单取数失败（与「确实没有设备」分开计数） | **增长即异常**；持续失败会进退避重试 | IotProtocolTenantLinkManager.java |
 | `iot.access.spec.backoff.skipped` | Counter | 取数失败退避窗口内跳过本轮（不打远端） | 与 `spec.failure` 成对出现属预期（防打爆下游） | IotProtocolTenantLinkManager.java |
-| `iot.access.device.rebind` | Counter | 规格变化触发的重新绑定（REMOVE/ADD） | 有变更才增长 | IotProtocolTenantLinkManager.java |
-| `iot.access.device.rebind.deferred` | Counter | 重绑被推迟（如空清单退避窗口内） | 少量正常；长期增长 ⇒ 迟迟不收敛 | IotProtocolTenantLinkManager.java |
 | `iot.access.connection.invalid` | Counter | 连接参数非法（端点/协议解析失败） | **期望 0**；增长 ⇒ 台账里的端点写错 | HttpDeviceSpecSource.java |
+
+> **已移除（2026-10-18，iot-starter #38）**：`iot.access.device.rebind` 与
+> `iot.access.device.rebind.deferred` 随「宿主的重发 ADD 退避」一起删除——该能力已上收到框架的
+> `DeviceBindRetrier`（配置 `ypbin.iot.devices.rebind-backoff-initial/-max/-max-per-cycle/-max-attempts`，
+> 含「按最早到期排序防饿死」「耗尽 WARN 带堆栈 + 事件通知」）。观测改看框架侧：
+> 同一语义由框架的重试计数与 `DeviceEventListener` 通知表达。
+> ⚠️ 这两个序列**直接从本清单删除而不是保留为 0**：它们的语义已不在本仓代码里，留着会让读者以为
+> 宿主仍在做重绑退避（与实际相反）。既有面板若引用它们，需改为查框架侧指标（见 iot-starter 的 docs/METRICS.md）。
 
 ### 2.4 订阅（G1 自愈链路）
 
 | 指标 | 类型 | 口径（何时变化） | 建议关注 / 阈值 | 注册文件 |
 |---|---|---|---|---|
 | `iot.access.subscribe.success` | Counter | 订阅成功（异步回调里确认后才记） | 首启/变更后增长属预期 | AccessSubscriptionPlanner.java |
-| `iot.access.subscribe.failure` | Counter | 订阅失败（同步抛或异步失败），会进指数退避 | **增长即异常**（协议栈/设备侧问题） | AccessSubscriptionPlanner.java |
-| `iot.access.subscribe.backoff.skipped` | Counter | 失败退避窗口内跳过本轮订阅 | 与 `subscribe.failure` 成对属预期 | AccessSubscriptionPlanner.java |
-| `iot.access.subscribe.inflight.skipped` | Counter | 上一轮订阅尚未完成 ⇒ 本轮不重复发起（G1 在途去重） | 少量正常（异步慢）；长期增长 = 订阅长时间不完成 | AccessSubscriptionPlanner.java |
+| `iot.access.subscribe.failure` | Counter | 订阅失败，**按地址为单位累加**（`outcome.failures().size()`；`PARTIAL` 与 `FAILED` 都计）。⚠️ 含「地址扩展失败」的点位（如 `word_count=2` 但地址是传统 5 位编号） | **增长即异常**（协议栈/设备侧问题或坏点位配置）；口径保持地址级（issue iot-starter #37 迁移后未改为设备级，避免运维看板弱化故障） | AccessSubscriptionPlanner.java |
+| `iot.access.subscribe.backoff.skipped` | Counter | 框架退避窗口内跳过本轮（宿主从 `SubscriptionStatus.SKIPPED_BACKOFF` 感知后累加） | 与 `subscribe.failure` 成对属预期 | AccessSubscriptionPlanner.java |
+| `iot.access.subscribe.inflight.skipped` | Counter | 上一轮订阅尚未完成 ⇒ 本轮不重复发起（G1 在途去重；迁移到框架后宿主仅保留轻量在途标记用于返回值口径） | 少量正常（异步慢）；长期增长 = 订阅长时间不完成 | AccessSubscriptionPlanner.java |
 
+> **订阅指标的归属（issue iot-starter #37 迁移后）**：分流、地址展开、在途去重、部分成功补订、
+> 按设备退避已下沉到框架 `SubscriptionOrchestrator`。本表里 `subscribe.success` / `subscribe.failure` /
+> `backoff.skipped` / `inflight.skipped` 仍是**宿主侧**指标（本仓看板契约不变），由宿主从框架返回的
+> `SubscriptionStatus` 与 `SubscriptionOutcome` 换算；框架自身的调用计数（`dispatchedCalls()` 等）
+> 只用于诊断。详见 `docs/SUBSCRIPTION-DOWNSTREAM.md`。
 ### 2.5 读数上报（egress 微批）
 
 | 指标 | 类型 | 口径（何时变化） | 建议关注 / 阈值 | 注册文件 |
 |---|---|---|---|---|
 | `iot.access.egress.sent` | Counter | 一批读数成功上报 | 应随采集持续增长（**不增长 = 采集或上报断了**） | HttpAccessReadingSink.java |
 | `iot.access.egress.accepted` | Counter | 上游确认接收的条数 | 与 `sent` 对照看批大小 | HttpAccessReadingSink.java |
-| `iot.access.egress.dropped` | Counter | 上报失败后**丢弃**的条数（不重试，避免拖垮服务） | **增长即数据缺口**；需与断档口径一起看 | HttpAccessReadingSink.java |
+| `iot.access.egress.dropped` | Counter | **入口丢弃**：`BoundedBatchEgressQueue#offer` 返回 false（队满/队列已关闭）时本类累加的条数 | **增长即数据缺口**；需与断档口径一起看。⚠️ 与 `ypbin.iot.errors{type=iot.common.egress.dropped}` 是**同一事件的两个视角**，口径见下方专条 | HttpAccessReadingSink.java |
 | `iot.access.egress.failed` | Counter | 上报失败的批次数 | **增长即异常**（网络/上游过载） | HttpAccessReadingSink.java |
 | `iot.access.egress.invalid` | Counter | 上报内容非法（被上游拒绝） | **期望 0**；增长 ⇒ 编码/口径 bug | HttpAccessReadingSink.java |
+
+> **口径专条（issue iot-starter #39 d，2026-10-18 写死）**：`iot.access.egress.dropped` 与
+> `ypbin.iot.errors{type=iot.common.egress.dropped}` **不是两个指标，是同一事件的两个视角**——
+> 入队失败（队满 / 队列已关闭）发生时：
+> - **框架侧**（`BoundedBatchEgressQueue#offer`，`ypbin-iot-runtime`）记
+>   `ypbin.iot.errors{type=iot.common.egress.dropped}` + 限流 WARN + `droppedCount()` 累计；
+> - **宿主侧**（`HttpAccessReadingSink#accept`）在 `offer` 返回 false 后记
+>   `iot.access.egress.dropped` + 自己的限流 WARN。
+>
+> **为什么不删宿主那个**：`iot.access.egress.dropped` 是**本仓接入侧大盘的既有查询口径**（面板/告警按名字查），
+> 而框架指标是**跨宿主统一口径**（`ypbin.iot.errors` 按 `type` 标签聚合）。两者服务不同读者：
+> 前者的分母是「access 采了多少 → 丢了多少」，后者是「平台所有 IoT 宿主的错误分类」。
+> **判据（别把双记当 bug）**：两者计数**必然同值同步增长**（同一 `offer` 调用触发）；
+> 若只涨一个 ⇒ 有一侧被改坏了，这才是异常。
+> 因此本仓**保留双记**而非二选一：删除任一都会让对应读者失去可观测性。
+> 若将来要收敛成单一口径，正确做法是把 access 面板改为查询
+> `ypbin.iot.errors{type=iot.common.egress.dropped}` **并**在 `docs/METRICS.md` 与
+> `deploy/observability/` 的 Grafana/Prometheus 规则里同步改查询，再删宿主指标——
+> 只删代码不改面板，会让面板变空（静默失明），而不是变红。
 | `iot.access.egress.pending` | Gauge | 当前缓冲区内待上报条数 | 稳态接近 0；**持续高位 = 上报跟不上采集** | HttpAccessReadingSink.java |
 
 ### 2.6 值规范化（原「解码」；2026-10-13 随 starter 0.3.0 切分职责）

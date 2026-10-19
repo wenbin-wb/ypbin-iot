@@ -12,6 +12,67 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
 ## [未发布]
+
+### 变更（2026-10-18 批次四）· 消费 starter 4.1.0 / iot-starter 0.4.1（#100/#101/#103 + #37/#38/#39）
+
+> 依赖仍是 `ypbin-starter 4.0.0` / `ypbin-iot 0.4.0`（**未改版本号**）；本批是**代码侧提前消费**，
+> 构建与验证用 `-Dypbin-starter.version=4.1.0-SNAPSHOT -Dypbin-iot.version=0.4.1-SNAPSHOT` 覆盖。
+> 整批切版本时这些改动即生效。
+
+#### starter #100 · 日志/埋点跨服务上报上收到基座
+- **删除 4 个自建类**：`RemoteLogAutoConfiguration` / `RemoteLogDao` / `RemoteTrackAutoConfiguration` /
+  `RemoteTrackEventSink`（已由 starter 4.1.0 的同名实现 + `@ConditionalOnBean(..IngestClient)` 承担）。
+- **新增 2 个 SPI 实现**：`SystemRemoteLogIngestClient` / `SystemRemoteTrackIngestClient`
+  （只做「怎么调 system」）；新增 `RemoteIngestClientAutoConfiguration` 注册它们与两个 provider。
+- **行为不变**：失败语义逐字保留——传输异常记完整堆栈后原样上抛；业务码失败显式构造异常后上抛并记 ERROR。
+
+#### starter #101 · 权限数据源继承基类
+- `IotPermissionProvider` 由 `implements PermissionProvider` 改为 `extends AbstractPermissionProvider`，
+  删本类的 `resolveUserId`（已上收）。**虚拟主体分流原样保留在 `permissionsOf/rolesOf` 覆写里**
+  （`OpenApiPrincipal.isVirtualPrincipal` ⇒ 取 scopes 不查库；虚拟主体一律无角色）。
+- 新增边界用例：`loginId` 为 null/非数字/空白 ⇒ 空权限且**不触碰 SysCache**。
+
+#### starter #103 · OpenApi 配置迁 `@ConfigurationProperties`
+- 新增 `OpenApiProperties`（`ypbin.openapi`，含 `PREFIX` 常量），`OpenApiKeyService` 的 4 处 `@Value` 归零。
+- 🔴 `secret-pepper` 是真实凭据：属性类**不覆写 `toString()`**、不进任何日志；默认值给空串（fail-closed 不变）。
+
+#### iot-starter #38 · revision 由框架分配 + 删宿主 bind 重试
+- `AccessDeviceRegistry` 的 `Map<String, AtomicLong>` 换成框架 `DeviceRevisionAllocator`；
+  7 处 `new DeviceChange(...)` 改为 `registry.dispatch(type, device)`（一步分配 + 构造）。
+- **删除**宿主自建的 bind 失败重试（`REBIND_BACKOFF_BASE/MAX`、`REBIND_MAX_PER_CYCLE`、`rebindBackoff`、
+  `retryDevicesWithoutSession()`、`backoffDelay()`）——框架 `DeviceBindRetrier` 已覆盖**含同一个饿死修复**。
+- `iot.access.device.rebind` / `.rebind.deferred` 指标随实现删除，`docs/METRICS.md` 标明「已移除 + 改看框架侧」。
+
+#### iot-starter #39 · 清理 + 口径
+- **删 `MqttBinaryNumberDecoder`（235 行）+ `AccessDecodeProperties` + `AccessDecodeConfiguration`**：
+  该解码器在本仓**双重不可能生效**——① `mqtt-binary.enabled` 默认 false；② access 模块**不依赖**
+  `ypbin-iot-protocol-mqtt`（只有 tcp/modbus）⇒ MQTT 设备根本连不上，235 行纯死代码。
+  将来接入 MQTT 时按 SPI 声明 `@Bean BytePayloadDecoder` 即可。
+- **删重复的 `BytePayloadDecoderRegistry` `@Bean`**：框架 `IotAutoConfiguration#iotBytePayloadDecoderRegistry`
+  已自动装配同一个（收集宿主 `@Bean` 解码器、保持 `@Order`）。
+- 两处手写 `1L << Math.min(...)` 指数退避改调框架 `ExponentialBackoff`（算法逐字等价，已 javap 核对）。
+- `docs/METRICS.md` 写死 `iot.access.egress.dropped` 与 `ypbin.iot.errors{type=iot.common.egress.dropped}`
+  的关系：**同一事件的两个视角**（框架侧统一口径 + 宿主侧大盘口径），双记是刻意的，判据是「同值同步增长」。
+
+#### iot-starter #37 · 订阅编排下沉（**含 4 处语义差异，详见** `docs/SUBSCRIPTION-DOWNSTREAM.md`）
+- `AccessSubscriptionPlanner`：**639 → 495 行**（其中约 200 行 javadoc）。分流、地址展开、在途去重、
+  部分成功补订、按设备退避全部交给框架 `SubscriptionOrchestrator`；宿主只留
+  「哪些设备归我 + 点位→地址映射 + 读数出口接线」。
+  ⚠️ **未达 issue 估计的 <150 行**（lead 已确认接受：不为压行数牺牲注释）。
+- **行为变化清单（逐条）**：
+  1. 退避窗口内 `subscribe()` 返回值仍为 0、`session.subscribe` 仍零调用（**行为不变**，已加用例钉住）；
+  2. **地址扩展失败**（如 `word_count=2` + 传统 5 位编号）：迁移前「整设备跳过、返回 0」；
+     现在「该点位记 failure、设备级算发起、返回 1」。**采集结果一致**（都不订该点位、也不订基址）；
+     宿主在 `PARTIAL` 分支记 WARN + 按地址级累加 `subscribe.failure` 保证可观测。
+  3. `subscribe.failure` **保持地址级口径**（未改设备级，避免看板弱化故障）。
+  4. ~~**key-value 形态的 TCP 仍由宿主退避**（技术债）~~ → **已闭环（2026-10-19）**：
+     iot-starter `release/0.5.0` 反哺 `SubscriptionAddressingPolicy`（协议级默认 + 按形态覆盖表 +
+     形态解析器），`TcpAdapter` 现在按 `payload-format` 细分声明（`key-value ⇒ BATCH`、
+     其余 ⇒ `PER_ADDRESS`）。宿主据此**删除**了 key-value 退避表、`subscribeKeyValueOnce()`、
+     `tcpKeyValuePayloadFormat` 分流字段：`AccessSubscriptionPlanner` **495 → 383 行**，
+     且 `grep "session.subscribe" ypbin-service/ypbin-access/src/main` = **0**（宿主不再直调协议层）。
+     key-value 仍一次多地址（框架 BATCH）、binary 仍逐点位（框架 PER_ADDRESS）；退避改由框架
+     `SubscriptionBackoffPolicy` 承担。详见 `docs/SUBSCRIPTION-DOWNSTREAM.md` §三·④。
 ### 变更（2026-10-18 批次）· 全量切到 starter 4.0.0 / iot-starter 0.4.0（#289/#290）
 
 > 用户决策：「**不用考虑兼容旧的服务，全部按新版重构**」⇒ 一次性删除全部自建胶水，**不做双轨过渡**。

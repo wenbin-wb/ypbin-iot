@@ -24,7 +24,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
@@ -44,8 +43,14 @@ public class OpenApiKeyService {
 
     private static final Logger log = LoggerFactory.getLogger(OpenApiKeyService.class);
 
-    /** {@code last_used_at} 落库节流默认间隔（秒）：verify 每请求同步调用，不能每请求回写热点行。 */
-    static final long DEFAULT_LAST_USED_WRITE_INTERVAL_SECONDS = 30L;
+    /**
+     * {@code last_used_at} 落库节流默认间隔（秒）：verify 每请求同步调用，不能每请求回写热点行。
+     *
+     * <p>单一事实源已移到 {@link OpenApiProperties#DEFAULT_LAST_USED_WRITE_INTERVAL_SECONDS}；
+     * 本常量保留为**转发别名**，避免既有测试与调用点断裂（值必须与属性类一致，见其用例断言）。</p>
+     */
+    static final long DEFAULT_LAST_USED_WRITE_INTERVAL_SECONDS =
+        OpenApiProperties.DEFAULT_LAST_USED_WRITE_INTERVAL_SECONDS;
 
     private final IotOpenApiKeyMapper keyMapper;
 
@@ -87,17 +92,26 @@ public class OpenApiKeyService {
     /** 两次 {@code last_used_at} 落库的最小间隔（毫秒）；0 = 不节流（每请求写）。 */
     private final long lastUsedWriteIntervalMillis;
 
+    /**
+     * Spring 装配构造：配置面统一由 {@link OpenApiProperties}（{@code ypbin.openapi}）提供。
+     *
+     * <p>starter #103：原先三个配置项用 {@code @Value} 逐个注入到构造器参数，现改为
+     * {@code @ConfigurationProperties} 对象注入（含 {@code PREFIX} 常量与默认值文档化）。
+     * <b>安全</b>：{@code properties} 只在此处读取；本类不在任何日志里打印它（{@code secretPepper}
+     * 是真实凭据）。</p>
+     *
+     * @param keyMapper              Key 表 Mapper
+     * @param properties             开放 API 配置（{@code ypbin.openapi.*}）
+     * @param nonceStoreProvider     nonce 防重放存储（缺省用内存实现）
+     * @param redisTemplateProvider  Redis 访问（可空）
+     */
     @Autowired
-    public OpenApiKeyService(IotOpenApiKeyMapper keyMapper,
-                             @Value("${ypbin.openapi.secret-pepper:}") String pepper,
-                             @Value("${ypbin.openapi.require-signature:false}") boolean localRequireSignature,
-                             @Value("${ypbin.openapi.last-used-write-interval-seconds:30}")
-                             long lastUsedWriteIntervalSeconds,
+    public OpenApiKeyService(IotOpenApiKeyMapper keyMapper, OpenApiProperties properties,
                              ObjectProvider<NonceStore> nonceStoreProvider,
                              ObjectProvider<StringRedisTemplate> redisTemplateProvider) {
-        this(keyMapper, pepper, nonceStoreProvider.getIfAvailable(
-            InMemoryNonceStore::new), localRequireSignature, redisTemplateProvider,
-            lastUsedWriteIntervalSeconds);
+        this(keyMapper, properties.getSecretPepper(), nonceStoreProvider.getIfAvailable(
+            InMemoryNonceStore::new), properties.isRequireSignature(), redisTemplateProvider,
+            properties.getLastUsedWriteIntervalSeconds());
     }
 
     /**
