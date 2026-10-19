@@ -10,6 +10,7 @@
 package cn.ypbin.admin.iot.timeseries;
 
 import cn.ypbin.starter.core.util.LogSanitizer;
+import cn.ypbin.starter.tools.warn.KeyedWarnThrottled;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.sql.Connection;
@@ -171,10 +172,12 @@ public class IotDbTimeSeriesWriter implements TimeSeriesWriter {
     private final Counter rowsNonStandardCounter;
 
     /** 「回执与提交数不符」告警的限流器（独立实例：两类告警不互相挤掉）。 */
-    private final LogThrottle mismatchWarnThrottle = new LogThrottle(WARN_MIN_INTERVAL_MS);
+    private final KeyedWarnThrottled mismatchWarnThrottle =
+        new KeyedWarnThrottled(WARN_MIN_INTERVAL_MS, log);
 
     /** 「回执为 null（驱动违约）」告警的限流器。 */
-    private final LogThrottle nullReceiptWarnThrottle = new LogThrottle(WARN_MIN_INTERVAL_MS);
+    private final KeyedWarnThrottled nullReceiptWarnThrottle =
+        new KeyedWarnThrottled(WARN_MIN_INTERVAL_MS, log);
 
     /** 首次「驱动受理」只打一条 INFO：成功路径在正常运行时保持安静，出问题时靠 WARN 与指标暴露。 */
     private final AtomicBoolean firstSuccessLogged = new AtomicBoolean(false);
@@ -275,7 +278,7 @@ public class IotDbTimeSeriesWriter implements TimeSeriesWriter {
                 // 既有语义（不抛、不改上报结果），但**必须告警**——绝不静默把未知当成已知。
                 rowsCounter.increment(chunk.size());
                 rowsUnknownCounter.increment(chunk.size());
-                warnThrottled(nullReceiptWarnThrottle,
+                warnThrottled(nullReceiptWarnThrottle, "null-receipt",
                     "[iot] 时序驱动未按 JDBC 契约返回 executeBatch 回执（按整批成功计数，"
                         + "实际落库行数未知）：表={} 提交={} 被限流抑制={}",
                     LogSanitizer.sanitize(properties.getTableName()), chunk.size());
@@ -309,7 +312,7 @@ public class IotDbTimeSeriesWriter implements TimeSeriesWriter {
             rowsNonStandardCounter.increment(Math.min(nonStandard, accounted));
             if (failed > 0 || succeeded != chunk.size()) {
                 // 暴露而不是静默：回执长度/成功数与提交数不符，说明驱动吞掉了部分行
-                warnThrottled(mismatchWarnThrottle,
+                warnThrottled(mismatchWarnThrottle, "value-mismatch",
                     "[iot] 时序写入回执与提交数不符（已计数，不影响上报落库）：表={} 提交={} 成功={} "
                         + "失败={} 回执长度={} 被限流抑制={}",
                     LogSanitizer.sanitize(properties.getTableName()), chunk.size(), succeeded, failed,
@@ -336,19 +339,27 @@ public class IotDbTimeSeriesWriter implements TimeSeriesWriter {
     /**
      * 限流告警：被限流时**不丢弃信息**，而是累计条数并在下一次放行时一并报出。
      *
-     * @param throttle 限流器
+     * <p>限流器用 starter 4.2.0 的 {@link KeyedWarnThrottled}（按 key 分桶）：
+     * 本类两个告警点各自独立开窗，一个刷屏不会抑制另一个——这正是分桶而非单一窗口的理由。
+     * {@code acquire} 的语义与本类原自建实现一致：放行时返回「此前被抑制条数」，被抑制返回 {@code -1}。</p>
+     *
+     * @param throttle 限流器（按 key 分桶）
+     * @param key      分桶键（本类用固定键，等价于「每个告警点一个窗口」）
      * @param format   日志模板（末位参数固定为「被限流抑制的条数」）
      * @param args     模板参数（不含被抑制条数）
      */
-    private static void warnThrottled(LogThrottle throttle, String format, Object... args) {
-        if (!throttle.tryAcquire()) {
+    private static void warnThrottled(KeyedWarnThrottled throttle, String key, String format,
+                                      Object... args) {
+        long suppressedBeforeAllow = throttle.acquire(key);
+        if (suppressedBeforeAllow < 0) {
             return;
         }
         Object[] full = new Object[args.length + 1];
         System.arraycopy(args, 0, full, 0, args.length);
-        full[args.length] = throttle.drainSuppressed();
+        full[args.length] = suppressedBeforeAllow;
         log.warn(format, full);
     }
+
 
     /**
      * 绑定一行（列清单由调用方选定的两条语句之一；下标 5 = 值列、6 = quality）。
@@ -387,60 +398,4 @@ public class IotDbTimeSeriesWriter implements TimeSeriesWriter {
         }
     }
 
-    /**
-     * 最小日志限流器：同一告警点每 {@link #WARN_MIN_INTERVAL_MS} 毫秒最多放行一条，并累计被抑制条数。
-     *
-     * <p>限流**不等于**静默：被抑制的条数由 {@link #drainSuppressed()} 在下一条放行的告警里一并报出。</p>
-     */
-    static final class LogThrottle {
-
-        private final long minIntervalNanos;
-        private final LongSupplier nanoClock;
-        private final AtomicLong nextAllowedNanos = new AtomicLong();
-        private final AtomicLong suppressed = new AtomicLong();
-
-        LogThrottle(long minIntervalMillis) {
-            this(minIntervalMillis, System::nanoTime);
-        }
-
-        /**
-         * 测试用构造：注入时钟以做确定性断言（生产用 {@link System#nanoTime()}）。
-         *
-         * @param minIntervalMillis 最小告警间隔（毫秒）
-         * @param nanoClock         纳秒时钟
-         */
-        LogThrottle(long minIntervalMillis, LongSupplier nanoClock) {
-            this.minIntervalNanos = Duration.ofMillis(minIntervalMillis).toNanos();
-            this.nanoClock = nanoClock;
-        }
-
-        /**
-         * 是否放行本条告警。
-         *
-         * @return true = 放行；false = 被限流（已计入被抑制条数）
-         */
-        boolean tryAcquire() {
-            long now = nanoClock.getAsLong();
-            long next = nextAllowedNanos.get();
-            if (now < next) {
-                suppressed.incrementAndGet();
-                return false;
-            }
-            if (nextAllowedNanos.compareAndSet(next, now + minIntervalNanos)) {
-                return true;
-            }
-            // CAS 竞态：本轮让给别的线程，本轮不重复告警
-            suppressed.incrementAndGet();
-            return false;
-        }
-
-        /**
-         * 取走并清零「自上次放行以来被抑制的条数」。
-         *
-         * @return 被抑制条数
-         */
-        long drainSuppressed() {
-            return suppressed.getAndSet(0L);
-        }
-    }
 }

@@ -45,6 +45,7 @@ import cn.ypbin.admin.iot.shadow.ShadowReportedWriter;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.core.exception.GlobalErrorCode;
 import cn.ypbin.starter.core.util.LogSanitizer;
+import cn.ypbin.starter.tools.warn.KeyedWarnThrottled;
 import cn.ypbin.starter.data.core.EntityStatus;
 import cn.ypbin.starter.tenant.core.TenantContext;
 import cn.ypbin.starter.tenant.core.TenantProvider;
@@ -136,7 +137,7 @@ public class AvailabilityServiceImpl implements AvailabilityService {
     public static final String METRIC_PRECISION_LOST = "iot.timeseries.value.precision_lost";
 
     /** 读数落列告警的按点位节流窗口。 */
-    private static final long SERIES_VALUE_WARN_INTERVAL_NANOS = Duration.ofMinutes(1).toNanos();
+    private static final long SERIES_VALUE_WARN_INTERVAL_MILLIS = Duration.ofMinutes(1).toMillis();
 
     private final DeviceLivenessMapper livenessMapper;
     private final OutageEventMapper outageMapper;
@@ -195,7 +196,9 @@ public class AvailabilityServiceImpl implements AvailabilityService {
     private final Counter precisionLostCounter;
 
     /** 时序落列告警的按点位节流（同一 deviceId+propertyId 每分钟最多一条，并报出被抑制条数）。 */
-    private final SeriesValueWarnThrottle seriesValueWarnThrottle = new SeriesValueWarnThrottle();
+    /** 按点位（deviceId:propertyId）分桶的 WARN 节流：一个点位刷屏不得抑制其它点位（框架类，反哺自本仓）。 */
+    private final KeyedWarnThrottled seriesValueWarnThrottle =
+        new KeyedWarnThrottled(SERIES_VALUE_WARN_INTERVAL_MILLIS, log);
 
     /** 设备 → 点位坐标集合（P0-6c 成员校验用；一次批量查映射，见 {@link PointMappingIndex}）。 */
     private final PointMappingIndex pointMappingIndex;
@@ -1285,29 +1288,4 @@ public class AvailabilityServiceImpl implements AvailabilityService {
      * 时序落列告警的按点位节流：同一 deviceId+propertyId 每分钟最多放行一条，并累计被抑制条数
      * （限流不等于静默——下一条放行的 WARN 会把被抑制条数一并报出）。
      */
-    private static final class SeriesValueWarnThrottle {
-
-        private final Map<String, Window> windows = new ConcurrentHashMap<>();
-
-        /**
-         * @param key 点位键（deviceId:propertyId）
-         * @return 本次放行返回「此前被抑制条数」（&ge;0）；本次被抑制返回 {@code -1}
-         */
-        long acquire(String key) {
-            Window window = windows.computeIfAbsent(key, ignored -> new Window());
-            long now = System.nanoTime();
-            long next = window.nextAllowedNanos.get();
-            if (now >= next && window.nextAllowedNanos.compareAndSet(next,
-                    now + SERIES_VALUE_WARN_INTERVAL_NANOS)) {
-                return window.suppressed.getAndSet(0);
-            }
-            window.suppressed.incrementAndGet();
-            return -1L;
-        }
-
-        private static final class Window {
-            private final AtomicLong nextAllowedNanos = new AtomicLong(System.nanoTime());
-            private final AtomicLong suppressed = new AtomicLong();
-        }
-    }
 }

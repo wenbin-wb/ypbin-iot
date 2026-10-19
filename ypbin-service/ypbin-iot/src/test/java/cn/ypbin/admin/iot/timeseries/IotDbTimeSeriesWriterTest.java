@@ -49,6 +49,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
+import cn.ypbin.starter.tools.warn.KeyedWarnThrottled;
 import org.slf4j.LoggerFactory;
 
 /**
@@ -689,19 +690,22 @@ class IotDbTimeSeriesWriterTest {
     @Test
     @DisplayName("★ WARN 限流：窗口内只放行一条并累计被抑制数（长期违约 ≈30 条/分，不刷屏也不丢账）")
     void mustThrottleWarnWithinWindow() {
-        AtomicLong clock = new AtomicLong(0L);
-        IotDbTimeSeriesWriter.LogThrottle throttle = new IotDbTimeSeriesWriter.LogThrottle(
-            IotDbTimeSeriesWriter.WARN_MIN_INTERVAL_MS, clock::get);
+        // 自建 LogThrottle 已删除，改用 starter 4.2.0 的 KeyedWarnThrottled（同一个 acquire 语义）。
+        // 这里继续保留该用例：它验证的是**本类的用法**（固定 key + 抑制数记账），
+        // 框架类自身的节流语义由 starter 的 KeyedWarnThrottledTest 覆盖。
+        AtomicLong clock = new AtomicLong(1_000_000_000L);
+        KeyedWarnThrottled throttle = new KeyedWarnThrottled(
+            IotDbTimeSeriesWriter.WARN_MIN_INTERVAL_MS, writerLogger, clock::get);
+        String key = "warn-throttle-test";
 
-        assertThat(throttle.tryAcquire()).as("首条放行").isTrue();
-        assertThat(throttle.tryAcquire()).as("窗口内第二条被抑制").isFalse();
+        assertThat(throttle.acquire(key)).as("首条放行（此前抑制数 0）").isZero();
+        assertThat(throttle.acquire(key)).as("窗口内第二条被抑制（返回 -1）").isEqualTo(-1L);
         clock.addAndGet(Duration.ofMillis(IotDbTimeSeriesWriter.WARN_MIN_INTERVAL_MS).toNanos() - 1L);
-        assertThat(throttle.tryAcquire()).as("窗口未满仍抑制").isFalse();
-        assertThat(throttle.drainSuppressed()).as("被抑制的条数不得丢失").isEqualTo(2L);
+        assertThat(throttle.acquire(key)).as("窗口未满仍抑制").isEqualTo(-1L);
 
         clock.addAndGet(1L);
-        assertThat(throttle.tryAcquire()).as("窗口到期放行").isTrue();
-        assertThat(throttle.drainSuppressed()).as("刚放行过，无新抑制").isZero();
+        assertThat(throttle.acquire(key)).as("窗口到期放行，并返回此前抑制的 2 条").isEqualTo(2L);
+        assertThat(throttle.acquire(key)).as("刚放行过，立即再调被抑制").isEqualTo(-1L);
     }
 
     @Test
