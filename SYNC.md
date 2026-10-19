@@ -38,6 +38,24 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 > 2026-10-19：**加第 47 项** —— `RemoteLogDaoTest.java` 的**重命名**（R086 → `SystemRemoteLogIngestClientTest.java`）。
 > 门禁比对新路径，故新名字必须单独登记（旧名字条目保留，上游改动旧文件时仍要命中）。
 
+> **2026-10-19（本轮：starter #103 / #105 第一步 / admin #89）——白名单条目数不变，仍为 47**。
+> 这三项在 admin 侧**已经合入 upstream/main**（admin@`fd4dc07`，对应 admin 提交 `6aa3a7d` / `43db116` / `b6c8e35`），
+> 因此本仓的正确做法不是「自己再实现一遍 + 登记白名单」，而是**把同样几个文件回灌成上游版本**：
+> `ypbin-service/ypbin-ai/pom.xml`、`ai/core/AiKeyCipher.java`、`ai/config/AiModelConfigProperties.java`、
+> `ai/support/AiChatSseSupport.java`、`ai/service/impl/AiChatServiceImpl.java`、
+> `ai/controller/AiModelConfigController.java`、`ai/controller/AiKnowledgeBaseController.java`、
+> `ai/core/AiKeyCipherPropertiesTest.java`、`ai/support/AiChatSseSupportTest.java`
+> —— 这 9 个文件与 `upstream/main` **逐字节一致**（实测 `git diff --quiet upstream/main HEAD -- <file>` 全部返回 0），
+> 分歧面为**零**，故**不新增任何白名单条目**。
+> ⚠️ 这也正是白名单纪律想要的结果：**能靠采纳上游消除的分歧，就不要靠「加条目 + 自己再写一份」固化下来**。
+> 本仓唯一新增的**新文件**是 `ai/config/AiModelConfigConfiguration.java`（装配点）与 3 个测试类，新文件不受白名单约束。
+> 为什么装配点要用新配置类而不是像 admin 那样改 `AiServiceApplication`：本仓启动类与 admin 已有实质分歧
+> （admin 的 `RemoteIngestClientConfiguration` 在本仓不存在，跨服务上报由 `RemoteIngestClientAutoConfiguration` 承担），
+> 在启动类上加注解等于**为了一个注解把分歧面扩大**。新配置类落在 `cn.ypbin.admin.ai` 扫描范围内，语义等价。
+> 同步期风险已用测试钉死：下次 `git merge upstream/main` 采纳上游启动类后，两处
+> `@EnableConfigurationProperties(AiModelConfigProperties.class)` 会同时存在，
+> `AiModelConfigConfigurationTest#shouldTolerateDuplicateEnablementAcrossMerge` 证明这仍是单例、不报重复 Bean。
+
 > 2026-10-18：**加第 38–46 项**（消费 `ypbin-starter` 4.1.0 的 starter #100：日志/埋点跨服务上报的自动配置与落库实现上收到基座），
 > 性质同第 25–34 项——**删除 admin 既有文件**（本仓自建的那套上报实现），保留 = 与上游继续各写一份重复实现。
 > 2026-10-18：**加第 25–34 项**（`ypbin-starter` 4.0.0 全量下沉，见下文「一揽子下沉」），本质是「删除 admin 既有文件」，与以往「改一行」的条目性质不同。
