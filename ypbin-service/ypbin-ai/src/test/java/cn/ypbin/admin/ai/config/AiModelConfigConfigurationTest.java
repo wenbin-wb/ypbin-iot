@@ -16,6 +16,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.autoconfigure.context.ConfigurationPropertiesAutoConfiguration;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -82,6 +83,31 @@ class AiModelConfigConfigurationTest {
             assertThat(context.getStartupFailure())
                 .hasStackTraceContaining(AiModelConfigProperties.PREFIX + ".secret-key");
         });
+    }
+
+    @Test
+    @DisplayName("同步期守护：同一 properties 类被两处 @EnableConfigurationProperties 启用时仍是单例")
+    void shouldTolerateDuplicateEnablementAcrossMerge() {
+        // 本仓用新配置类作为装配点（不改启动类）；admin 则把同名注解挂在 AiServiceApplication 上。
+        // 下次 `git merge upstream/main` 采纳上游启动类后，两处会**同时**启用同一个 properties 类。
+        // Spring 对同一类型的重复启用是幂等的（注册同一个 Bean 定义），本用例把这一点钉死：
+        // 若将来变成 "duplicate bean" 启动失败，同步现场就会立刻发现，而不是等部署才炸。
+        runner.withUserConfiguration(UpstreamStyleEnablement.class)
+            .withPropertyValues(AiModelConfigProperties.PREFIX + ".secret-key=" + TEST_KEY)
+            .run(context -> {
+                assertThat(context).hasNotFailed();
+                assertThat(context).hasSingleBean(AiModelConfigProperties.class);
+                assertThat(context.getBean(AiModelConfigProperties.class).getSecretKey()).isEqualTo(TEST_KEY);
+            });
+    }
+
+    /**
+     * 上游形态的装配点：admin 把 {@code @EnableConfigurationProperties(AiModelConfigProperties.class)}
+     * 挂在启动类上（本仓改用 {@link AiModelConfigConfiguration}）。本类仅用于模拟「合并后两处都在」。
+     */
+    @Configuration(proxyBeanMethods = false)
+    @EnableConfigurationProperties(AiModelConfigProperties.class)
+    static class UpstreamStyleEnablement {
     }
 
     /**
