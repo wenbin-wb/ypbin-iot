@@ -65,10 +65,14 @@
      现在「该点位记 failure、设备级算发起、返回 1」。**采集结果一致**（都不订该点位、也不订基址）；
      宿主在 `PARTIAL` 分支记 WARN + 按地址级累加 `subscribe.failure` 保证可观测。
   3. `subscribe.failure` **保持地址级口径**（未改设备级，避免看板弱化故障）。
-  4. **key-value 形态的 TCP 仍由宿主退避**（技术债）：框架 `subscriptionAddressing` 是协议级声明
-     （TCP 恒 `PER_ADDRESS`），无法随 `payload-format=key-value` 变化；为保住「一次多地址」，
-     该分支绕开框架编排并保留约 15 行最小退避表（30s 起、翻倍、封顶 2min）。
-     **删除条件**：iot-starter 支持按设备配置寻址方式后删除。**未用租约周期兜底**——那等于取消退避。
+  4. ~~**key-value 形态的 TCP 仍由宿主退避**（技术债）~~ → **已闭环（2026-10-19）**：
+     iot-starter `release/0.5.0` 反哺 `SubscriptionAddressingPolicy`（协议级默认 + 按形态覆盖表 +
+     形态解析器），`TcpAdapter` 现在按 `payload-format` 细分声明（`key-value ⇒ BATCH`、
+     其余 ⇒ `PER_ADDRESS`）。宿主据此**删除**了 key-value 退避表、`subscribeKeyValueOnce()`、
+     `tcpKeyValuePayloadFormat` 分流字段：`AccessSubscriptionPlanner` **495 → 383 行**，
+     且 `grep "session.subscribe" ypbin-service/ypbin-access/src/main` = **0**（宿主不再直调协议层）。
+     key-value 仍一次多地址（框架 BATCH）、binary 仍逐点位（框架 PER_ADDRESS）；退避改由框架
+     `SubscriptionBackoffPolicy` 承担。详见 `docs/SUBSCRIPTION-DOWNSTREAM.md` §三·④。
 ### 变更（2026-10-18 批次）· 全量切到 starter 4.0.0 / iot-starter 0.4.0（#289/#290）
 
 > 用户决策：「**不用考虑兼容旧的服务，全部按新版重构**」⇒ 一次性删除全部自建胶水，**不做双轨过渡**。

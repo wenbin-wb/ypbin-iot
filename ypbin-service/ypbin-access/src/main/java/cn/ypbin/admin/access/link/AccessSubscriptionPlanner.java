@@ -12,13 +12,9 @@ package cn.ypbin.admin.access.link;
 import cn.ypbin.admin.access.egress.AccessReadingSink;
 import cn.ypbin.admin.iot.device.AccessPointMappingDto;
 import cn.ypbin.iot.core.model.DeviceSpec;
-import cn.ypbin.iot.core.model.PointAddress;
-import cn.ypbin.iot.core.model.SubscribeRequest;
 import cn.ypbin.iot.core.protocol.DeviceSession;
 import cn.ypbin.iot.core.protocol.ProtocolCode;
 import cn.ypbin.iot.core.spi.BytePayloadDecoderRegistry;
-import cn.ypbin.iot.core.util.ExponentialBackoff;
-import cn.ypbin.iot.spring.subscription.SubscriptionBackoffPolicy;
 import cn.ypbin.iot.spring.subscription.SubscriptionBatchItem;
 import cn.ypbin.iot.spring.subscription.SubscriptionOrchestrator;
 import cn.ypbin.iot.spring.subscription.SubscriptionOutcome;
@@ -29,7 +25,6 @@ import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Clock;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -60,13 +55,14 @@ import tools.jackson.databind.ObjectMapper;
  *       落列口径都在它里面，与订阅方式正交）。</li>
  * </ol>
  *
- * <p><b>唯一保留的宿主分支</b>：{@code payload-format=key-value} 的 TCP 仍由本类直接
- * {@code session.subscribe} 一次多地址订阅。原因：框架把 TCP 声明为
- * {@link cn.ypbin.iot.core.protocol.SubscriptionAddressing#PER_ADDRESS}（**协议级**声明，无法随
- * {@code payload-format} 变化），而 key-value 形态依赖一次多地址（SDK 对每个 selector 各产出一个
- * {@code PointValue}，见 {@code docs/VALUE-DECODE-DESIGN.md} §5.5）。若改走框架声明，key-value 会退化成
- * N 次单地址订阅——<b>读数仍正确</b>（每帧被 N 个订阅各派发一次），但请求数从 1 变 N。
- * 按「行为一致优先」保留该分支，代价是本类比「纯转发」多约 20 行。</p>
+ * <p><b>本类不再直接调用协议层的订阅方法：100% 经框架编排</b>。此前
+ * {@code payload-format=key-value} 的 TCP 需要「一次多地址订阅」，而框架当时只能按**协议级**声明
+ * 寻址方式（TCP 恒 {@code PER_ADDRESS}）⇒ 宿主不得不自己分流 + 自己维护一张退避表（技术债）。
+ * iot-starter `release/0.5.0` 已反哺 {@link cn.ypbin.iot.core.protocol.SubscriptionAddressingPolicy}
+ * （协议级默认 + **按形态覆盖表** + 形态解析器），`TcpAdapter` 现在按 {@code payload-format} 细分：
+ * {@code key-value ⇒ BATCH}、{@code binary/text/number ⇒ PER_ADDRESS}。因此宿主的分流分支、
+ * key-value 专用退避表、以及那条绕开框架的「单次多地址直调」路径已**全部删除**，退避由框架
+ * {@code SubscriptionBackoffPolicy} 统一承担。详见 {@code docs/SUBSCRIPTION-DOWNSTREAM.md} §三·④。</p>
  *
  * <p><b>为什么订阅必须由宿主发起</b>：框架只负责建链（{@code IotLifecycle.bind} 创建
  * {@link DeviceSession}），采集什么点由宿主决定。故本类在
@@ -110,12 +106,6 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
 
     private final BytePayloadDecoderRegistry decoderRegistry;
 
-    /**
-     * {@code payload-format=key-value} 的 TCP：本类直接一次多地址订阅（框架声明为 PER_ADDRESS，
-     * 会拆成 N 次——见类注释「唯一保留的宿主分支」）。
-     */
-    private final boolean tcpKeyValuePayloadFormat;
-
     /** 时钟（key-value 退避的时间基准；单测注入可推进的假时钟）。 */
     private final Clock clock;
 
@@ -139,29 +129,10 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
     /** 在途中的设备（已发起、完成回调未到）：同一时刻不得重复发起（G1）。 */
     private final Set<String> inFlight = ConcurrentHashMap.newKeySet();
 
-    /**
-     * **key-value 形态**的失败退避（设备 → 下次可重试时刻）。
-     *
-     * <p>⚠️ <b>技术债（待 iot-starter 支持「按设备配置寻址方式」后删除）</b>：框架的
-     * {@code subscriptionAddressing} 是**协议级**声明（TCP 恒为 {@code PER_ADDRESS}），无法随
-     * {@code payload-format=key-value} 变化；而 key-value 依赖「一次多地址订阅」，故该形态绕过了
-     * 框架编排（见 {@link #subscribeKeyValueOnce}），也就没有框架的按设备退避。
-     * 这里保留 ~15 行的最小退避表，等价于迁移前行为（起点 30s、每次翻倍、封顶 2min）。</p>
-     *
-     * <p><b>为什么不能用租约周期兜底</b>：租约周期（默认 30s+）与退避策略不是一回事；用租约兜底
-     * 等于**取消退避**（每 tick 都重试），会对故障设备持续放大对端压力——这正是原实现要防的。</p>
-     */
-    private final Map<String, KeyValueBackoff> keyValueBackoff = new ConcurrentHashMap<>();
-
-    /** key-value 失败退避状态：连续失败次数 + 下次可重试时刻。 */
-    private record KeyValueBackoff(int attempts, Instant nextRetryAt) {
-    }
-
     public AccessSubscriptionPlanner(Supplier<Map<String, DeviceSession>> sessions,
                                      ObjectMapper objectMapper, AccessReadingSink readingSink,
                                      MeterRegistry meterRegistry,
                                      SubscriptionOrchestrator orchestrator,
-                                     boolean tcpKeyValuePayloadFormat,
                                      BytePayloadDecoderRegistry decoderRegistry,
                                      Clock clock) {
         this.sessions = sessions;
@@ -169,7 +140,6 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
         this.readingSink = readingSink;
         this.meterRegistry = meterRegistry;
         this.orchestrator = orchestrator;
-        this.tcpKeyValuePayloadFormat = tcpKeyValuePayloadFormat;
         this.clock = clock;
         this.decoderRegistry = decoderRegistry == null
             ? BytePayloadDecoderRegistry.empty() : decoderRegistry;
@@ -241,10 +211,6 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
             log.debug("[access] 订阅仍在途，本轮跳过（避免重复订阅）：deviceId={}", deviceId);
             return false;
         }
-        if (isTcp(device) && tcpKeyValuePayloadFormat) {
-            // 唯一保留的宿主分支（见类注释）：key-value 一次多地址订阅
-            return subscribeKeyValueOnce(device, session, points, listener);
-        }
         try {
             CompletableFuture<SubscriptionResult> stage = orchestrator.subscribe(
                 new SubscriptionBatchItem(device, session, toSubscriptionPoints(points), listener))
@@ -268,78 +234,6 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
             subscribedFailed(device.deviceId(), ex);
             return false;
         }
-    }
-
-    /**
-     * {@code payload-format=key-value} 的 TCP：一次订阅携带全部（按 raw 去重的）地址。
-     *
-     * <p>这条路径直连 {@code session.subscribe} 而**不经过框架编排**——框架按协议级声明把 TCP 拆成
-     * 逐点位单订阅，会改变本形态的请求数（行为变化）。退避/在途/部分成功仍按原有语义由本方法简化处理：
-     * 失败时记一次失败计数，由下一个租约周期整体重试（框架侧无该设备状态，故也无「已成功地址集」）。</p>
-     *
-     * @param device   设备规格
-     * @param session  会话
-     * @param points   点位映射
-     * @param listener 读数监听器
-     * @return 是否发起了订阅
-     */
-    private boolean subscribeKeyValueOnce(DeviceSpec device, DeviceSession session,
-                                          List<AccessPointMappingDto> points,
-                                          PointMappingDataListener listener) {
-        String kvDeviceId = device.deviceId();
-        KeyValueBackoff kvBackoff = keyValueBackoff.get(kvDeviceId);
-        if (kvBackoff != null && clock.instant().isBefore(kvBackoff.nextRetryAt())) {
-            // 退避窗口内：既不算发起，也不调用 session（与迁移前一致）
-            backoffSkipped.increment();
-            inFlight.remove(kvDeviceId);
-            log.debug("[access] key-value 订阅失败退避中，本轮跳过：deviceId={}", kvDeviceId);
-            return false;
-        }
-        Set<String> seen = new LinkedHashSet<>();
-        List<PointAddress> distinct = new ArrayList<>();
-        for (AccessPointMappingDto point : points) {
-            PointAddress address = PointAddress.of(point.getAddress());
-            if (seen.add(address.raw())) {
-                distinct.add(address);
-            }
-        }
-        SubscribeRequest request = device.pollInterval().isZero()
-            ? SubscribeRequest.of(distinct)
-            : new SubscribeRequest(distinct, device.pollInterval(), device.pollInterval(), null, Map.of());
-        try {
-            session.subscribe(request, listener).whenComplete((handle, error) -> {
-                inFlight.remove(device.deviceId());
-                if (error != null) {
-                    armKeyValueBackoff(device.deviceId());
-                    subscribedFailed(device.deviceId(), error);
-                    return;
-                }
-                // 成功后才记跟踪（S5：失败不记）；成功即清除退避
-                subscribedSessions.put(device.deviceId(), session);
-                keyValueBackoff.remove(device.deviceId());
-                subscribeSuccess.increment();
-                log.debug("[access] key-value 多地址订阅完成：deviceId={} addresses={}",
-                    device.deviceId(), distinct.size());
-            });
-        } catch (RuntimeException ex) {
-            armKeyValueBackoff(device.deviceId());
-            subscribedFailed(device.deviceId(), ex);
-            return false;
-        }
-        return true;
-    }
-
-    /**
-     * 给 key-value 失败记一次指数退避（起点 30s、翻倍、封顶 2min，与迁移前 {@code SubscriptionBackoff} 同口径）。
-     *
-     * @param deviceId 设备标识
-     */
-    private void armKeyValueBackoff(String deviceId) {
-        KeyValueBackoff previous = keyValueBackoff.get(deviceId);
-        int attempts = previous == null ? 1 : previous.attempts() + 1;
-        Duration delay = ExponentialBackoff.nextDelay(attempts,
-            SubscriptionBackoffPolicy.DEFAULT_INITIAL_DELAY, SubscriptionBackoffPolicy.DEFAULT_MAX_DELAY);
-        keyValueBackoff.put(deviceId, new KeyValueBackoff(attempts, clock.instant().plus(delay)));
     }
 
     /**
@@ -464,11 +358,6 @@ public class AccessSubscriptionPlanner implements SubscriptionPlanner {
     /** 已发起过订阅的设备数（观测/自检用；不参与判定）。 */
     public int trackedSessionCount() {
         return subscribedSessions.size();
-    }
-
-    /** 是否 TCP 协议（{@code payload-format} 分流的前置判据）。 */
-    private static boolean isTcp(DeviceSpec device) {
-        return ProtocolCode.of("tcp").equals(device.protocol());
     }
 
     private static Integer pollIntervalMs(DeviceSpec device) {

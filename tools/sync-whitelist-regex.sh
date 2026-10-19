@@ -126,6 +126,12 @@ ALLOWED+='ypbin-auth/src/main/java/cn/ypbin/admin/auth/service/LoginEventTracker
 ALLOWED+='ypbin-auth/src/test/java/cn/ypbin/admin/auth/log/AuthLogIngestTest\.java|'
 ALLOWED+='ypbin-common/src/test/java/cn/ypbin/admin/common/log/RemoteLogDaoTest\.java|'
 ALLOWED+='ypbin-common/src/test/java/cn/ypbin/admin/common/log/RemoteLogWiringTest\.java|'
+# 第 47 项（2026-10-19 加）：`RemoteLogDaoTest.java` 的**重命名**（R086）——
+# 随 starter #100 把「上报实现」从自建 LogDao 换成 SPI 实现，该测试的被测对象同步改名
+# （`SystemRemoteLogIngestClientTest`），断言口径逐条保留。Git 按重命名记录（R086），
+# 但 Sync Whitelist 门禁比对的是**新路径**，故新名字必须单独登记（旧名字条目保留，
+# 因为上游若删除/改动旧文件仍要命中白名单）。
+ALLOWED+='ypbin-common/src/test/java/cn/ypbin/admin/common/log/SystemRemoteLogIngestClientTest\.java|'
 ALLOWED+=')$'
 
 printf '%s' "$ALLOWED"
