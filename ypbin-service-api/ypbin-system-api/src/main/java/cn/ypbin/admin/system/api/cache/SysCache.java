@@ -34,6 +34,19 @@ import org.jspecify.annotations.Nullable;
  * （{@code SysUserDto}），故「不落敏感字段」由类型结构保证，而非靠回填前手工置空；
  * 密码校验走 {@code ISystemClient.verifyPassword} 直查库比对，改密即时生效。</p>
  *
+ * <p><strong>关于「缓存列表载荷」的类型表达（2026-10-19 已治本）</strong>：
+ * 本类 4 处「缓存载荷是列表」的读取（角色码、权限码、第三方配置列表、绑定列表）此前必须写成
+ * {@code (Class<List<T>>) (Class<?>) List.class} 双强转——根因是 starter 的
+ * {@code CacheService#getOrLoad} 只接受 {@code Class<T>}，而 {@code List<String>} 的运行时类型信息已擦除。
+ * 但该 {@code type} 参数在实现里<b>只做 {@code (T)} 强转、从不参与反序列化</b>（真正的类型还原由
+ * {@code RedisTemplate} 的值序列化器按 JSON 内的类型信息完成）。</p>
+ *
+ * <p>starter 4.2.0 已补「<b>无需 Class 参数</b>」的重载
+ * {@code getOrLoad(String key, Supplier<T> loader, Duration ttl)}，本类改用之后
+ * <b>4 处双重强转与 {@code @SuppressWarnings("unchecked")} 全部移除</b>。
+ * 此前那个「抽成 {@code uncheckedListType()} 收敛到一处」只是治标；现在根因已消除，
+ * 后来人<b>不应</b>再引入双重强转（{@code SysCacheTest} 有源码级护栏钉住）。</p>
+ *
  * @author wenbin
  * @since 2026-09-01
  */
@@ -76,6 +89,15 @@ public final class SysCache {
     }
 
     /**
+     * 「列表载荷」的 {@code Class} 占位（配合 {@code CacheService#getOrLoad} 的 {@code Class<T>} 签名）。
+     *
+     * <p>具体泛型信息在运行时已擦除，{@code CacheService} 也无法用它做元素级反序列化（见类注释）；
+     * 本方法只是把 4 处重复的双强转收敛到一处，其 unchecked 压制范围仅限本方法。</p>
+     *
+     * @param <T> 列表元素类型（编译期占位，运行期无信息）
+     * @return {@code List.class} 的类型化视图
+     */
+    /**
      * 按用户名取用户（登录用），永久缓存。缓存载荷为不含密码的只读视图。
      */
     public static @Nullable SysUserDto getUserByUsername(String username) {
@@ -103,7 +125,8 @@ public final class SysCache {
      * 用户角色码（登录组装身份头用），永久缓存。
      */
     public static List<String> getUserRoleCodes(Long userId) {
-        return CacheUtils.getOrLoad(ROLE_USER_KEY + userId,
+        return CacheUtils.getOrLoad(
+            ROLE_USER_KEY + userId,
             () -> FeignResponses.dataOrThrow(feignClient().listRoleCodes(userId),
                 "系统服务暂不可用，请稍后重试"),
             null);
@@ -113,7 +136,8 @@ public final class SysCache {
      * 用户权限码（鉴权用），永久缓存。
      */
     public static List<String> getUserPermissions(Long userId) {
-        return CacheUtils.getOrLoad(PERM_USER_KEY + userId,
+        return CacheUtils.getOrLoad(
+            PERM_USER_KEY + userId,
             () -> FeignResponses.dataOrThrow(feignClient().listPermissions(userId),
                 "系统服务暂不可用，请稍后重试"),
             null);
@@ -231,7 +255,8 @@ public final class SysCache {
      * 全部启用第三方登录平台授权配置，永久缓存。
      */
     public static List<SocialAuthConfig> listSocialAuthConfigs() {
-        return CacheUtils.getOrLoad(SOCIAL_CONFIGS_KEY,
+        return CacheUtils.getOrLoad(
+            SOCIAL_CONFIGS_KEY,
             () -> FeignResponses.dataOrThrow(feignClient().listSocialAuthConfigs(),
                 "系统服务暂不可用，请稍后重试"),
             null);
@@ -287,7 +312,8 @@ public final class SysCache {
      * 用户已绑定的平台列表，永久缓存。
      */
     public static List<SysUserSocialDto> listSocialBindings(Long userId) {
-        return CacheUtils.getOrLoad(SOCIAL_BINDINGS_USER_KEY + userId,
+        return CacheUtils.getOrLoad(
+            SOCIAL_BINDINGS_USER_KEY + userId,
             () -> FeignResponses.dataOrThrow(feignClient().listSocialBindings(userId),
                 "系统服务暂不可用，请稍后重试"),
             null);

@@ -205,7 +205,7 @@ class SysCacheTest {
     /**
      * 护栏：{@code SysCache} 不得再出现 {@code (Class<List<T>>) (Class<?>)} 双重强转。
      *
-     * <p>starter 4.2.0 给 {@code CacheService#getOrLoad} 补了「无 Class 参数」重载，
+     * <p>starter 4.2.0 给 {@code CacheService#getOrLoad} 补了「无 Class 参数」重载后，
      * 本仓 4 处列表缓存已改用它。这条源码级断言防止后来人「顺手」改回双重强转
      * （会重新引入 unchecked 警告与类型安全假象）。</p>
      */
@@ -214,8 +214,13 @@ class SysCacheTest {
         java.nio.file.Path source = java.nio.file.Path.of(
             "src/main/java/cn/ypbin/admin/system/api/cache/SysCache.java");
         String content = java.nio.file.Files.readString(source);
-        assertThat(content)
-            .as("SysCache 不应再出现 (Class<List<...>>) (Class<?>) 双重强转；应改用 getOrLoad(key, supplier, ttl)")
+        // 必须**剥掉注释**再判：类注释里会描述「此前的双重强转」这段历史，直接 grep 会误伤
+        // （本用例第一版就踩了这个坑——注释里的历史说明让护栏自己失败）
+        String codeOnly = content.replaceAll("(?s)/\\*.*?\\*/", "")
+            .replaceAll("(?m)^\\s*//.*$", "");
+        assertThat(codeOnly)
+            .as("SysCache 代码中不应再出现 (Class<List<...>>) (Class<?>) 双重强转；"
+                + "应改用 getOrLoad(key, supplier, ttl)（注释里的历史说明不算）")
             .doesNotContain("(Class<?>) List.class");
     }
 }
