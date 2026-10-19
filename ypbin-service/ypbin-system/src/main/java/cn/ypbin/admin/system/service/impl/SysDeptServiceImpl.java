@@ -52,9 +52,10 @@ public class SysDeptServiceImpl extends BaseServiceImpl<SysDeptMapper, SysDept> 
         List<DeptResp> roots = TreeUtils.build(tree, DeptResp::getId, DeptResp::getPid,
             DeptResp::setChildren, AdminConstants.ROOT_PARENT_ID);
         // 与迁移前逐条对齐：原递归只在**有子节点**时 setChildren，叶子节点的 children 保持 null。
-        // TreeUtils 一律写回（可能为空的）列表 ⇒ 叶子会多出 "children":[]。DeptResp 带
-        // @JsonInclude(NON_NULL)，空集合仍会被序列化 ⇒ 属对外响应形态变更（实测：
-        // 迁移后 [{"id":2,...,"children":[]}] vs 迁移前 [{"id":2,...}]）。故在此归一为 null。
+        // TreeUtils 一律写回（可能为空的）列表 ⇒ 叶子会多出 "children":[]；而 DeptResp 带
+        // @JsonInclude(NON_NULL)——它只过滤 null、**不过滤空集合** ⇒ 部门接口对外响应形态被改变
+        // （实测：迁移后 [{"id":2,...,"children":[]}] vs 迁移前 [{"id":2,...}]）。
+        // 菜单侧 SysMenuServiceImpl 已做同样归一，部门侧此前漏了（由 iot 仓反向发现）。
         tree.forEach(node -> {
             if (node.getChildren() != null && node.getChildren().isEmpty()) {
                 node.setChildren(null);
