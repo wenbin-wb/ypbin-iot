@@ -43,19 +43,43 @@ class TreeAssemblyConsistencyTest {
     @Test
     @DisplayName("部门树：函数式建树与迁移前的手写递归结果逐节点一致（层级/顺序/叶子 children）")
     void deptTreeShouldMatchLegacyRecursiveBuild() {
-        // ⚠️ 两条路径必须各用**独立的一份**入参：DeptResp 是可变对象，TreeUtils 与递归版都会
-        // setChildren 覆盖原对象。若共用同一批实例，后跑的那条会把前一条的 children 覆盖掉，
-        // 断言就退化成「自己和自己比」而恒绿（本用例初版实测踩过，变异验证发现了它）。
-        List<DeptResp> actual = productionDeptTree(sampleDepts());
-        List<DeptResp> expected = legacyDeptTree(sampleDepts(), AdminConstants.ROOT_PARENT_ID);
+        List<DeptResp> flat = List.of(
+            dept(1L, 0L, "总部"),
+            dept(2L, 1L, "研发部"),
+            dept(3L, 1L, "市场部"),
+            dept(4L, 2L, "后端组"),
+            dept(5L, 4L, "基础平台"),
+            dept(6L, 0L, "分公司"),
+            dept(7L, 6L, "分公司研发"));
+
+        // ⚠️ 两条路径必须各用**独立**的 DeptResp 实例：它们共享同一批可变对象，
+        // 后跑的 setChildren 会覆盖前者 ⇒ 断言退化成恒绿（由 iot 仓复核发现，本仓已修）。
+        List<DeptResp> actualInputs = freshDepts(flat);
+        List<DeptResp> actual = TreeUtils.build(actualInputs, DeptResp::getId, DeptResp::getPid,
+            DeptResp::setChildren, AdminConstants.ROOT_PARENT_ID);
+        // 与生产代码 SysDeptServiceImpl 相同的归一（叶子 children → null）。
+        // 注意必须遍历**入参列表**（全部节点）：只遍历 roots 会漏掉深层叶子。
+        actualInputs.forEach(node -> {
+            if (node.getChildren() != null && node.getChildren().isEmpty()) {
+                node.setChildren(null);
+            }
+        });
+        List<DeptResp> expected = legacyDeptTree(freshDepts(flat), AdminConstants.ROOT_PARENT_ID);
 
         assertThat(describeDeptTree(actual))
             .as("迁移前后层级与顺序必须完全一致（顺序敏感：入参已按 sort,id 升序）")
             .isEqualTo(describeDeptTree(expected));
-        assertThat(childrenShape(actual))
-            .as("叶子 children 必须是 null 而不是空集合（DeptResp 带 @JsonInclude(NON_NULL)，"
-                + "空集合仍会序列化成 \"children\":[]，属对外响应形态变更）")
-            .isEqualTo(childrenShape(expected));
+
+        // 单独钉住「叶子 children 归一」：这是本仓曾漏掉、由 iot 仓反向发现的对外形态变更。
+        // DeptResp 带 @JsonInclude(NON_NULL) 只过滤 null、不过滤空集合 ⇒ 少这一步，
+        // 部门接口会多出 "children":[]（迁移前是 null）。
+        // 判据：归一的**唯一**合法结果是「children == null」；空集合即说明漏了归一。
+        assertThat(flattenDept(actual))
+            .as("children 只能是 null（叶子）或非空列表（有子节点）；空集合说明漏了归一，"
+                + "会让部门接口多出 \"children\":[]，属对外响应形态变更")
+            .allSatisfy(node -> assertThat(node.getChildren()).satisfiesAnyOf(
+                children -> assertThat(children).isNull(),
+                children -> assertThat(children).isNotEmpty()));
     }
 
     @Test
@@ -121,11 +145,12 @@ class TreeAssemblyConsistencyTest {
     @Test
     @DisplayName("根判定：pid 等于 rootParentId 才是根；pid 指向不存在父节点的孤儿节点不出现（与递归版一致）")
     void orphanNodesShouldBeExcludedLikeLegacyRecursion() {
-        List<DeptResp> actual = productionDeptTree(List.of(dept(1L, 0L, "总部"),
-            dept(2L, 999L, "孤儿部门"), dept(3L, 1L, "研发部")));
-        // 独立的一份入参（可变对象，两条路径不能共用实例）
-        List<DeptResp> expected = legacyDeptTree(List.of(dept(1L, 0L, "总部"),
-            dept(2L, 999L, "孤儿部门"), dept(3L, 1L, "研发部")), AdminConstants.ROOT_PARENT_ID);
+        List<DeptResp> flat = List.of(dept(1L, 0L, "总部"), dept(2L, 999L, "孤儿部门"),
+            dept(3L, 1L, "研发部"));
+
+        List<DeptResp> actual = TreeUtils.build(flat, DeptResp::getId, DeptResp::getPid,
+            DeptResp::setChildren, AdminConstants.ROOT_PARENT_ID);
+        List<DeptResp> expected = legacyDeptTree(flat, AdminConstants.ROOT_PARENT_ID);
 
         // 迁移前的递归从 rootParentId 出发向下收集，孤儿节点（父不在树中）不会被访问到 ⇒ 不出现
         assertThat(describeDeptTree(actual)).isEqualTo(describeDeptTree(expected));
@@ -199,59 +224,6 @@ class TreeAssemblyConsistencyTest {
     // ---------------------------------------------------------------- 孪生实现（迁移前的递归版）
 
     /** 迁移前部门树递归实现的逐行复刻（仅用于对照，不进生产） */
-    /** 一份固定的部门样本（每次调用返回**全新实例**，避免两条路径互相覆盖 children）。 */
-    private static List<DeptResp> sampleDepts() {
-        return List.of(
-            dept(1L, 0L, "总部"),
-            dept(2L, 1L, "研发部"),
-            dept(3L, 1L, "市场部"),
-            dept(4L, 2L, "后端组"),
-            dept(5L, 4L, "基础平台"),
-            dept(6L, 0L, "分公司"),
-            dept(7L, 6L, "分公司研发"));
-    }
-
-    /**
-     * 复刻生产 {@code SysDeptServiceImpl#tree}：TreeUtils 建树 + 空 children 归一为 null。
-     *
-     * <p>生产方法依赖 MyBatis 查询，故在此复刻同一处理序列；「与生产一致」由实现行数极少的
-     * 事实 + 断言形态共同保证（若生产的归一行被删掉，{@link #childrenShape} 断言会转红）。</p>
-     */
-    private static List<DeptResp> productionDeptTree(List<DeptResp> flat) {
-        List<DeptResp> roots = TreeUtils.build(flat, DeptResp::getId, DeptResp::getPid,
-            DeptResp::setChildren, AdminConstants.ROOT_PARENT_ID);
-        normalizeDeptEmptyChildren(flat);
-        return roots;
-    }
-
-    /** 与生产 {@code SysDeptServiceImpl#tree} 的归一处理一致（空 children → null）。 */
-    private static void normalizeDeptEmptyChildren(List<DeptResp> nodes) {
-        nodes.forEach(node -> {
-            if (node.getChildren() != null && node.getChildren().isEmpty()) {
-                node.setChildren(null);
-            }
-        });
-    }
-
-    /** 把 children 的三态（null / 空集合 / 非空）描述成可断言文本。 */
-    private static List<String> childrenShape(List<DeptResp> roots) {
-        List<String> shape = new ArrayList<>();
-        collectShape(roots, "", shape);
-        return shape;
-    }
-
-    private static void collectShape(List<DeptResp> nodes, String path, List<String> sink) {
-        if (nodes == null) {
-            return;
-        }
-        for (DeptResp node : nodes) {
-            String here = path + "/" + node.getName();
-            sink.add(here + "=" + (node.getChildren() == null ? "null"
-                : node.getChildren().isEmpty() ? "empty" : "size=" + node.getChildren().size()));
-            collectShape(node.getChildren(), here, sink);
-        }
-    }
-
     private static List<DeptResp> legacyDeptTree(List<DeptResp> depts, Long pid) {
         List<DeptResp> tree = new ArrayList<>();
         for (DeptResp dept : depts) {
@@ -282,6 +254,38 @@ class TreeAssemblyConsistencyTest {
         }
     }
 
+    /**
+     * 用同一份「扁平描述」构造**全新的**实例列表。
+     *
+     * <p>孪生对照必须各用独立实例：{@code DeptResp} 是可变的，两条路径若共享同一批对象，
+     * 后跑的 {@code setChildren} 会覆盖前者 ⇒ 断言恒绿（由 iot 仓复核发现）。</p>
+     *
+     * @param flat 扁平节点（仅用于取 id/pid/name）
+     * @return 全新实例列表
+     */
+    private static List<DeptResp> freshDepts(List<DeptResp> flat) {
+        return flat.stream().map(d -> dept(d.getId(), d.getPid(), d.getName())).toList();
+    }
+
+    /**
+     * 深度优先展平部门树（用于对「叶子 children 归一」做全量断言）。
+     *
+     * @param roots 根节点列表
+     * @return 全部节点
+     */
+    private static List<DeptResp> flattenDept(List<DeptResp> roots) {
+        List<DeptResp> all = new java.util.ArrayList<>();
+        java.util.Deque<DeptResp> stack = new java.util.ArrayDeque<>(roots);
+        while (!stack.isEmpty()) {
+            DeptResp node = stack.pop();
+            all.add(node);
+            if (node.getChildren() != null) {
+                node.getChildren().forEach(stack::push);
+            }
+        }
+        return all;
+    }
+
     private static DeptResp dept(Long id, Long pid, String name) {
         DeptResp resp = new DeptResp();
         resp.setId(id);
@@ -302,5 +306,48 @@ class TreeAssemblyConsistencyTest {
         RouteResp resp = new RouteResp();
         resp.setName(name);
         return resp;
+    }
+
+    /**
+     * <b>驱动真实生产代码</b>：直接调 {@code SysDeptServiceImpl#tree()}。
+     *
+     * <p><b>为什么必须补这条</b>（2026-10-19 变异验证发现）：上一条孪生对照用例是「复刻」生产写法
+     * （自己调 {@code TreeUtils} 再自己做归一），因此<b>把生产代码里的归一删掉，它依然绿</b>——
+     * 属假保护。本用例把 {@code list(...)} 桩成假数据，让真实的 {@code tree()} 跑一遍，
+     * 删归一即转红（已变异验证）。</p>
+     */
+    @Test
+    @DisplayName("生产路径：SysDeptServiceImpl#tree() 的叶子 children 必须是 null（删归一即转红）")
+    void productionDeptTreeMustNormalizeLeafChildren() {
+        SysDeptServiceImpl service = org.mockito.Mockito.spy(new SysDeptServiceImpl(
+            org.mockito.Mockito.mock(cn.ypbin.admin.system.mapper.SysUserMapper.class),
+            org.mockito.Mockito.mock(cn.ypbin.admin.system.mapper.SysRoleDeptMapper.class)));
+        // 桩掉 MyBatis-Plus 的 list(...)：返回「总部 → 研发部 → 后端组」+ 一个无子节点的根
+        List<cn.ypbin.admin.system.entity.SysDept> rows = new ArrayList<>();
+        rows.add(sysDept(1L, 0L, "总部"));
+        rows.add(sysDept(2L, 1L, "研发部"));
+        rows.add(sysDept(4L, 2L, "后端组"));
+        rows.add(sysDept(6L, 0L, "分公司"));
+        org.mockito.Mockito.doReturn(rows).when(service)
+            .list(org.mockito.ArgumentMatchers.any(com.baomidou.mybatisplus.core.conditions.Wrapper.class));
+
+        List<DeptResp> roots = service.tree();
+
+        assertThat(roots).hasSize(2);
+        // 深度优先展平后逐个断言：children 只能是 null 或非空（空集合 = 漏了归一）
+        assertThat(flattenDept(roots))
+            .as("生产路径的叶子 children 必须是 null；空集合会让部门接口多出 \"children\":[]")
+            .allSatisfy(node -> assertThat(node.getChildren()).satisfiesAnyOf(
+                children -> assertThat(children).isNull(),
+                children -> assertThat(children).isNotEmpty()));
+    }
+
+    private static cn.ypbin.admin.system.entity.SysDept sysDept(Long id, Long pid, String name) {
+        cn.ypbin.admin.system.entity.SysDept dept = new cn.ypbin.admin.system.entity.SysDept();
+        dept.setId(id);
+        dept.setPid(pid);
+        dept.setName(name);
+        dept.setSort(0);
+        return dept;
     }
 }
