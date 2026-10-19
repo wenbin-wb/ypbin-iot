@@ -15,13 +15,13 @@ import cn.ypbin.admin.iot.availability.ReadingIngestReq;
 import cn.ypbin.admin.iot.availability.ReadingObservationDto;
 import cn.ypbin.iot.runtime.egress.BoundedBatchEgressQueue;
 import cn.ypbin.starter.core.model.R;
+import cn.ypbin.starter.tools.warn.WarnThrottled;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.annotation.PreDestroy;
 import java.time.Duration;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -68,7 +68,15 @@ public class HttpAccessReadingSink implements AccessReadingSink {
     private final Counter sentCounter;
     private final Counter failedCounter;
     private final Counter invalidCounter;
-    private final AtomicLong lastDropWarnAt = new AtomicLong(Long.MIN_VALUE);
+
+    /**
+     * 队列满告警的节流器（starter 4.1.0 的 {@code WarnThrottled}，issue #106）。
+     *
+     * <p>此前是手写的 {@code lastDropWarnAt + compareAndSet}：与本仓另外两处（租约抖动、时序写入）
+     * 是同一段逻辑的复制品，且不累计「本轮被抑制了多少条」。改用基座后，节流语义只有一份实现，
+     * 且能在下一条放行的 WARN 里报出抑制条数（限流 ≠ 静默）。</p>
+     */
+    private final WarnThrottled dropWarn = new WarnThrottled(DROP_WARN_INTERVAL_MS, log);
 
     /** 有界微批出口队列（starter 0.4.0 基座：非阻塞 offer / 单消费线程 / 停机循环排空）。 */
     private final BoundedBatchEgressQueue<ReadingObservationDto> queue;
@@ -214,14 +222,16 @@ public class HttpAccessReadingSink implements AccessReadingSink {
         }
     }
 
-    /** 队列满的告警按最小间隔打，避免每丢一条打一行。 */
+    /**
+     * 队列满的告警按最小间隔打，避免每丢一条打一行。
+     *
+     * <p>保留原文案与级别；末尾追加「此前同类被抑制 N 条」——限流不等于静默，被压掉的量必须可见，
+     * 否则只看日志会以为「只丢了几条」。</p>
+     */
     private void warnDropIfNeeded() {
-        long now = System.currentTimeMillis();
-        long last = lastDropWarnAt.get();
-        if (now - last < DROP_WARN_INTERVAL_MS || !lastDropWarnAt.compareAndSet(last, now)) {
-            return;
-        }
-        log.warn("[access] 读数上报队列已满，正在丢弃（累计丢弃 {} 条；调大 {} 或排查 iot 侧是否不可达）",
-            (long) droppedCounter.count(), AccessEgressProperties.PREFIX + ".queue-capacity");
+        dropWarn.tryWarn("[access] 读数上报队列已满，正在丢弃（累计丢弃 {} 条；调大 {} 或排查 iot 侧是否不可达；"
+                + "此前同类被抑制 {} 条）",
+            (long) droppedCounter.count(), AccessEgressProperties.PREFIX + ".queue-capacity",
+            dropWarn.suppressedCount());
     }
 }
