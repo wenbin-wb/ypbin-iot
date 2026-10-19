@@ -34,7 +34,7 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 > 只会被当噪音忽略。现在：白名单内冲突 = warning + summary 列出；白名单外冲突 = 判红（那才是
 > 「分歧面失控」的信号）。
 
-> **白名单膨胀要记账**：目前 **47** 个文件（权威清单 = `tools/sync-whitelist-regex.sh`；本表与它必须逐项一致）。
+> **白名单膨胀要记账**：目前 **53** 个文件（权威清单 = `tools/sync-whitelist-regex.sh`；本表与它必须逐项一致）。
 > 2026-10-19：**加第 47 项** —— `RemoteLogDaoTest.java` 的**重命名**（R086 → `SystemRemoteLogIngestClientTest.java`）。
 > 门禁比对新路径，故新名字必须单独登记（旧名字条目保留，上游改动旧文件时仍要命中）。
 
@@ -86,6 +86,7 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 | `ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/mapper/SysMessageMapper.java` | 增「按收件人查站内信」与落库辅助查询 | 站内信必须复用既有 `sys_message` 表与 Mapper（不新造站内信链路），查询方法只能加在既有 Mapper 上 |
 | `ypbin-service/ypbin-system/src/test/.../feign/SystemClientImplConfigMaskTest.java` | **新增**（#87 脱敏口径统一） | **2026-10-19 加（第 37 项）**：admin 新增该测试（#87），本仓同步时因 `SystemClientImpl` 构造器比 admin 多两个依赖（`SysMessageMapper`/`MailService`，本仓独有的站内信/邮件内部端点）⇒ 测试构造参数必须跟随本仓实现，与 upstream 构成 **add/add 冲突**（`Upstream Sync Check` 实测判红）。**为什么不能用新文件**：被测类构造器签名不同，换文件名改变不了这个事实。**代价如实登记**：上游若改该测试断言，同步时采纳上游断言 + 保留本仓构造参数。 |
 | `ypbin-service/ypbin-system/src/test/java/cn/ypbin/admin/system/feign/SystemClientImplUserByIdTest.java`、`SystemClientImplPlatformUserTest.java`、`SystemClientImplLogIngestTest.java` | 构造参数随 `SystemClientImpl` 注入新增，同步补 `mock(SysMessageMapper.class)`/`mock(MailService.class)` | 既有 3 个单测的构造器签名随被测类变化，属**连带更新**（3 个文件共 17 行） |
+| `ypbin-common/.../constant/AdminConstants.java`、`ypbin-service/ypbin-ai/.../core/AiEmbeddingConfigResolverImpl.java`、`ypbin-auth/.../CaptchaController.java`、`SmsLoginController.java`、`AuthService.java`、`PhoneLoginStrategy.java` | **补齐 admin #88 的 5 处漏同步** | **2026-10-19 加（第 48–52 项）**：① `AdminConstants` 删 3 个零引用死常量 + 通配码 `ALL_PERMISSION` 改引用 starter 的 `StpPermissionAdapter.SUPER_ADMIN`（同一契约两个定义点，漂移即静默越权/漏权）；② `AiEmbeddingConfigResolverImpl` 的 `orElse(1L)` 静默回退默认租户改为显式失败（与同模块 Chat resolver 同口径，禁静默降级）；③ 4 个 auth 类的登录开关配置键 `private` 重复定义收敛到新文件 `LoginConfigKeys`（新文件不受白名单限制）。**为什么不能用新文件**：问题就在这些既有类的方法体与常量定义上。 |
 | `docs/microservice-deployment.md` | 「初始口令」一句话更正 | **2026-09-26 加**：该句原写「Nacos 控制台默认 `nacos/nacos`」，而本仓已改为随机口令 + 开 auth（`NACOS-AUTH.md`）。留着一句**已不成立**的口令说明会误导运维，故只能改既有文件（无法用新文件表达「原句作废」） |
 | `README.md` | **整体重写为 IoT 版** | **2026-09-29 加**（M-6）：原 README 是 admin 原版（标题、徽章、截图、功能清单全是基座的），**读起来像另一个项目**。这是「仓库门面」性质的内容，**只能用既有文件表达**——新增 `README-IOT.md` 之类只会让访客仍然先看到错误的那个（GitHub 默认渲染 `README.md`）。同时它是**仓库首屏可信度**问题：README 里承诺的能力与实际不符属对外陈述。**代价如实登记**：README 是上游高频改动文件（徽章/截图/功能表），下一次 `git merge upstream/main` 必然冲突，且**必须整体取本仓版本**（不是逐行合并）——这份代价由「门面必须说真话」换取 |
 | `.github/workflows/ci.yml` | **两处改动（均针对同一段「starter 版本门禁」）**：① 校验那一步的 `curl` 加 `Authorization: Bearer ${{ github.token }}`（+ `Accept` 头）；② 其后「检出 ypbin-starter」由 `ref: master` 改为 **`ref: v<声明版本>`**（用上一步写进 `GITHUB_ENV` 的 tag） | **① 2026-10-13 加**：GitHub REST API 的**未认证**额度是 60 次/小时/IP，托管 runner 出口 IP 共享 ⇒ 实测 `curl: (22) ... 403` 让该步**随机转红**（同日 main 与 PR 各一次）。随机红的门禁会让人习惯性忽略红，比没有门禁更坏；加同仓库只读 token 后额度 5000/小时。**② 2026-10-13 加（同日）**：该步先断言「pom 声明的 starter 版本 == 最新 Release」，却检出 **master** 编译 ⇒ 「声明的」与「实际编译的」是两回事，master 上有而 Release 里没有的 API 会让 CI **假绿**（审计 issue #233）；改为按 `v<声明版本>` 检出后，CI 验证的就是「消费者真正拿到的那份 starter」。**为什么必须改既有文件**：这两处都在 `ci.yml` 里，另立新工作流无法消除「随机红」与「假绿」。**代价如实登记**：`ci.yml` 属 upstream 既有工作流 ⇒ 今后 `git merge upstream/main` 在该文件上可能出现冲突（预期内，冲突属「白名单内」）。后续若 upstream 自行补上这两处，本条可随之删除 
