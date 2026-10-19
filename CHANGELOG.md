@@ -13,6 +13,49 @@
 
 ## [未发布]
 
+### 变更（2026-10-19）· ai 模块消费 starter #103 / #105 第一步 + admin #89
+
+> 依赖已是 `ypbin-starter 4.1.0`（根 pom 钉正式版，无需 `-D` 覆盖）。本批三个 issue 在 admin 侧
+> **已合入 upstream/main**，故本仓直接采纳上游的同名实现（文件与上游逐字节一致，分歧面为零）。
+
+#### starter #103（ai 侧）· `AiKeyCipher` 的 `@Value` → `@ConfigurationProperties`
+- 新增 `ai/config/AiModelConfigProperties`（`PREFIX = "ypbin.ai.model-config"`），`AiKeyCipher` 改构造器注入；
+  ai 模块的 `@Value` **清零**（`grep -rn "@Value(" ypbin-service/ypbin-ai/src/main` = 0）。
+- ai 模块 pom 补 `spring-boot-configuration-processor`（optional）：元数据已实际生成
+  `ypbin.ai.model-config.secret-key`。
+- 🔴 `secret-key` 是**真实凭据**：properties 类**不覆写 `toString()`**、不写日志、异常消息只报
+  「哪个键缺失 / 期望与实际字节数」，绝不带密钥值。
+- **本仓差异（1 处）**：装配点是**新文件** `ai/config/AiModelConfigConfiguration`，而不是像 admin 那样
+  改 `AiServiceApplication`——本仓启动类与 admin 已有实质分歧（`RemoteIngestClientConfiguration` 在本仓不存在），
+  为一个注解改启动类等于把分歧面扩大。语义等价，且不新增白名单条目。
+  **同步期**采纳上游启动类后两处启用并存，已用测试证明仍是单例、不报重复 Bean。
+
+#### starter #105 第一步（ai 侧）· 删 `SseStreamBridge` 重复实现
+- ai 模块引入 `ypbin-starter-messaging`（仅为 `SseStreamBridge`；不启用 SSE 订阅端点/扇出——
+  那需要 `ypbin.sse.enabled=true`，ai 的 Nacos 配置刻意没有该键）。
+- 删 `AiChatSseSupport.errorEmitter` / `rootMessage`，调用点改调 `SseStreamBridge`。
+- **`disposeQuietly` 保留**：starter 用 `Disposable.Swap`，本仓手工 `subscribe()` 持有
+  `AtomicReference<Disposable>`，类型不同；统一需在 starter 补重载（新增 API，属独立评估项）。
+- **行为等价性已证明**（不只是"看代码觉得一样"）：`SseStreamBridgeEquivalenceTest` 把被删的原实现
+  **逐字**留在测试里作参照物，反射读 `ResponseBodyEmitter#earlySendAttempts` 取真实帧字节，
+  断言两者逐字节相同（`event:error\ndata:<文案>\n\n`）、超时同为 `0L`、文案不加前缀
+  （`DEFAULT_ERROR_PREFIX` 只用于 `failStream`）、`rootMessage` 取最深 cause 的语义一致。
+- ⚠️ **第二步未做**：把 `sendMessageStream` 整段改为 `SseStreamBridge.stream` 会改变超时语义
+  （当前 `new SseEmitter(0L)` 永不超时）、上下文传播与错误帧格式，issue 要求单独评估。
+
+#### admin #89 · `testConnection` 补审计
+- `AiModelConfigController#testConnection` 补 `@Log(value = "模型连通性测试", module = "AI 配置")`：
+  该端点会解密 API Key 并发真实 HTTP 请求（消耗外部配额），此前零审计。
+- javadoc 写明「消耗配额故记日志」、`@Log` 默认只采 `REQUEST_PARAM`（这里只有路径变量 `id`），
+  以及**刻意不加 `@Idempotent`** 的理由。
+- 其余 5 个问答/检索端点**维持不加**，各自 javadoc 写明审计由 `ai_query_log` 承担。
+- **复核「`id` 是路径变量 ⇒ `sys_log.request_param` 不含 API Key」**：starter 的
+  `LogCollector#resolveParams` 读 `request.getParameterMap()`（query/form 参数），路径变量不在其中；
+  `Include.defaultIncludes()` 仅 `REQUEST_PARAM + IP + CLIENT`，不含请求/响应体（starter 源码逐条核实）。
+- 新增 `AiModelConfigControllerAuditTest`：用真实 `LogAspect` + `LogCollector` 织到控制器上**实测装配**，
+  断言采集出的 `LogRecord` 有 description/module、`requestParam`/`requestBody`/`responseBody` 全为 null，
+  并反射断言 5 个问答/检索端点确实没有 `@Log`（防双写）。
+
 ### 变更（2026-10-18 批次四）· 消费 starter 4.1.0 / iot-starter 0.4.1（#100/#101/#103 + #37/#38/#39）
 
 > 依赖仍是 `ypbin-starter 4.0.0` / `ypbin-iot 0.4.0`（**未改版本号**）；本批是**代码侧提前消费**，

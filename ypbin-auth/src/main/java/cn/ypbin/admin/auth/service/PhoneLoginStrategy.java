@@ -9,6 +9,8 @@
  */
 package cn.ypbin.admin.auth.service;
 
+import cn.ypbin.admin.auth.support.LoginConfigKeys;
+
 import cn.ypbin.admin.auth.dto.PhoneLoginReq;
 import cn.ypbin.admin.auth.support.AuthConfigReader;
 import cn.ypbin.admin.system.model.dto.SysUserDto;
@@ -30,8 +32,6 @@ import org.springframework.stereotype.Component;
 @RequiredArgsConstructor
 public class PhoneLoginStrategy {
 
-    /** 短信验证码登录开关参数键 */
-    private static final String KEY_LOGIN_SMS_ENABLED = "LOGIN_SMS_ENABLED";
 
     private final SmsCodeService smsCodeService;
     private final AuthConfigReader configReader;
@@ -57,7 +57,7 @@ public class PhoneLoginStrategy {
      */
     public LoginResp login(PhoneLoginReq req, String clientIp, String userAgent) {
         // 开关检查
-        if (!configReader.getBoolean(KEY_LOGIN_SMS_ENABLED, false)) {
+        if (!configReader.getBoolean(LoginConfigKeys.LOGIN_SMS_ENABLED, false)) {
             throw new BusinessException("短信验证码登录未开启");
         }
         String phone = req.getPhone().trim();

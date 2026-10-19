@@ -9,6 +9,8 @@
  */
 package cn.ypbin.admin.auth.controller;
 
+import cn.ypbin.admin.auth.support.LoginConfigKeys;
+
 import cn.ypbin.admin.auth.dto.PhoneLoginReq;
 import cn.ypbin.admin.auth.service.PhoneLoginStrategy;
 import cn.ypbin.admin.auth.service.SmsCodeService;
@@ -37,8 +39,6 @@ import org.springframework.web.bind.annotation.RestController;
 @RequiredArgsConstructor
 public class SmsLoginController {
 
-    /** 短信验证码登录开关参数键 */
-    private static final String KEY_LOGIN_SMS_ENABLED = "LOGIN_SMS_ENABLED";
 
     private final SmsCodeService smsCodeService;
     private final AuthConfigReader configReader;
@@ -50,7 +50,7 @@ public class SmsLoginController {
     @PostMapping("/sms/send")
     @RateLimit(count = 5, window = 60, message = "验证码发送过于频繁，请稍后再试")
     public R<Void> sendCode(@RequestParam String phone) {
-        if (!configReader.getBoolean(KEY_LOGIN_SMS_ENABLED, false)) {
+        if (!configReader.getBoolean(LoginConfigKeys.LOGIN_SMS_ENABLED, false)) {
             throw new BusinessException("短信验证码登录未开启");
         }
         smsCodeService.sendCode(phone);

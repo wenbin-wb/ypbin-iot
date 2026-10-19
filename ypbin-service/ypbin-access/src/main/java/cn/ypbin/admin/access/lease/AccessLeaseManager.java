@@ -22,6 +22,7 @@ import cn.ypbin.admin.iot.lease.LeaseRenewReq;
 import cn.ypbin.admin.iot.lease.LeaseRenewResp;
 import cn.ypbin.starter.core.model.R;
 import cn.ypbin.starter.core.util.LogSanitizer;
+import cn.ypbin.starter.tools.warn.WarnThrottled;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -36,7 +37,6 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -126,7 +126,22 @@ public class AccessLeaseManager {
     /** 当前**连续**暂缓次数（采纳即清零；到 {@link #SKEW_CONFIRM_MAX_DEFERRALS} 强制采纳）。 */
     private final AtomicInteger deferredJumps = new AtomicInteger();
 
-    private final AtomicLong lastSkewWarnAt = new AtomicLong(Long.MIN_VALUE);
+    /**
+     * 跳变/暂缓告警的节流器（starter 4.1.0 的 {@code WarnThrottled}，issue #106）。
+     *
+     * <p>此前是手写的 {@code lastSkewWarnAt + compareAndSet}。改用基座后节流语义只有一份实现，
+     * 且能报出「此前同类被抑制 N 条」——限流不等于静默。</p>
+     *
+     * <p><b>注意与 {@link #lastWarnedSkew} 的区别</b>：那个字段记录的是「上次告警时的偏移<b>值</b>」，
+     * 语义是「值明显变化才再告警」，<b>不是</b>时间节流，不要误改成本类替换。</p>
+     *
+     * <p><b>时钟来源（如实登记的行为变化）</b>：迁移前的节流读注入的 {@link #clock}，可被假时钟
+     * 驱动；{@code WarnThrottled} 只公开「间隔 + 日志器」两个构造器（带 {@link java.time.Clock} 的那个
+     * 是包内可见），因此节流窗口现在<b>以系统时钟为基准</b>。生产装配注入的本就是系统时钟
+     * （见 {@code AccessLeaseConfiguration}），故运行行为不变；单测通过构造器注入自己的节流器
+     * 取得确定性（见 {@code warnSkewRateLimited} 的测试缝）。</p>
+     */
+    private final WarnThrottled skewWarn;
 
     /**
      * 「连续两次一致」的确认容差。
@@ -166,11 +181,34 @@ public class AccessLeaseManager {
     public AccessLeaseManager(ILeaseClient leaseClient, TenantLinkManager linkManager,
             AccessProperties properties, MeterRegistry meterRegistry,
             ConfigEpochReconciler reconciler, Clock clock) {
+        this(leaseClient, linkManager, properties, meterRegistry, reconciler, clock,
+            new WarnThrottled(SKEW_WARN_INTERVAL_MS,
+                LoggerFactory.getLogger(AccessLeaseManager.class)));
+    }
+
+    /**
+     * 单测用的构造器：注入节流器，使「窗口内只打一条 / 跨窗口再打 / 抑制计数」可确定性验证。
+     *
+     * <p>生产恒走上面那个构造器（窗口 = {@link #SKEW_WARN_INTERVAL_MS}）。这里把节流器作为参数而不是
+     * 把间隔作为参数，是因为 {@code WarnThrottled} 的时钟不可从包外注入，只有换成它才能控制时间。</p>
+     *
+     * @param leaseClient   租约客户端
+     * @param linkManager   链路控制端口
+     * @param properties    节点参数
+     * @param meterRegistry 指标注册表
+     * @param reconciler    配置版本对账器
+     * @param clock         本地时间源
+     * @param skewWarn      偏移告警节流器
+     */
+    AccessLeaseManager(ILeaseClient leaseClient, TenantLinkManager linkManager,
+            AccessProperties properties, MeterRegistry meterRegistry,
+            ConfigEpochReconciler reconciler, Clock clock, WarnThrottled skewWarn) {
         this.leaseClient = leaseClient;
         this.linkManager = linkManager;
         this.properties = properties;
         this.reconciler = reconciler;
         this.clock = clock;
+        this.skewWarn = skewWarn;
         this.renewSuccess = Counter.builder(METRIC_PREFIX + "renew.success").register(meterRegistry);
         this.renewFailure = Counter.builder(METRIC_PREFIX + "renew.failure").register(meterRegistry);
         this.revokedCounter = Counter.builder(METRIC_PREFIX + "revoked").register(meterRegistry);
@@ -286,9 +324,11 @@ public class AccessLeaseManager {
                 pendingJump.set(skew);
                 skewDeferredCounter.increment();
                 warnSkewRateLimited("时钟偏移相对已校准值跳变 {} 秒（阈值 {} 秒）⇒ **暂缓采纳**（第 {} 次），"
-                    + "保留原校准 {} 秒；读数一致或暂缓达上限才采纳（请查 NTP/DB/容器时区）：node={}",
+                        + "保留原校准 {} 秒；读数一致或暂缓达上限才采纳（请查 NTP/DB/容器时区）：node={}；"
+                        + "此前同类被抑制 {} 条",
                     skew.minus(current).toSeconds(), jumpThreshold.toSeconds(), deferrals,
-                    current.toSeconds(), LogSanitizer.sanitize(properties.getNodeId()));
+                    current.toSeconds(), LogSanitizer.sanitize(properties.getNodeId()),
+                    skewWarn.suppressedCount());
                 return;
             }
             log.warn("时钟偏移跳变 {} 秒{} ⇒ 采纳新偏移（原 {} 秒，连续暂缓 {} 次）：node={}",
@@ -314,15 +354,27 @@ public class AccessLeaseManager {
         }
     }
 
-    /** 跳变/大偏移告警按最小间隔打（默认 60s），避免每轮一条。 */
-    private void warnSkewRateLimited(String format, Object... args) {
-        // 用注入时钟：既避免「时钟旁路」（外委复核点出），也让限流可被假时钟测试
-        long now = clock.millis();
-        long last = lastSkewWarnAt.get();
-        if (now - last < SKEW_WARN_INTERVAL_MS || !lastSkewWarnAt.compareAndSet(last, now)) {
-            return;
-        }
-        log.warn(format, args);
+    /**
+     * 跳变/大偏移告警按最小间隔打（默认 60s），避免每轮一条。
+     *
+     * <p>文案与参数由调用方原样给出（调用方把 {@code skewWarn.suppressedCount()} 作为末位参数拼进
+     * 「此前同类被抑制 N 条」），本方法只负责「是否真的输出」。</p>
+     *
+     * @param format 日志模板
+     * @param args   模板参数（末位为被抑制条数）
+     * @return 本次是否真的输出了日志（便于测试断言「跨窗口再打」）
+     */
+    private boolean warnSkewRateLimited(String format, Object... args) {
+        return skewWarn.tryWarn(format, args);
+    }
+
+    /**
+     * 被节流抑制的偏移告警累计条数（观测口径：限流不等于静默，被压掉的量必须可查）。
+     *
+     * @return 累计抑制条数
+     */
+    long suppressedSkewWarnCount() {
+        return skewWarn.suppressedCount();
     }
 
     /**

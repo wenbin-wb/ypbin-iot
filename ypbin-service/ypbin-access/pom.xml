@@ -77,6 +77,13 @@
             <groupId>cn.ypbin</groupId>
             <artifactId>ypbin-starter-log</artifactId>
         </dependency>
+        <!-- WARN 节流（starter 4.1.0 的 WarnThrottled，issue #106）：队列满/租约抖这类持续性问题
+             若每来一条就 WARN，会把日志写满、淹没真正的线索。该工具类线程安全、无 Spring 依赖；
+             不改用其它模块的间接传递依赖——显式声明才能保证版本由本模块的 BOM 约束。 -->
+        <dependency>
+            <groupId>cn.ypbin</groupId>
+            <artifactId>ypbin-starter-tools</artifactId>
+        </dependency>
         <!-- MeterRegistry 的提供者：本仓各服务都用指标，缺它启动即失败（实测） -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

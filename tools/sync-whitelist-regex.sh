@@ -132,6 +132,29 @@ ALLOWED+='ypbin-common/src/test/java/cn/ypbin/admin/common/log/RemoteLogWiringTe
 # 但 Sync Whitelist 门禁比对的是**新路径**，故新名字必须单独登记（旧名字条目保留，
 # 因为上游若删除/改动旧文件仍要命中白名单）。
 ALLOWED+='ypbin-common/src/test/java/cn/ypbin/admin/common/log/SystemRemoteLogIngestClientTest\.java|'
+# 第 49–54 项（2026-10-19 加）：补齐 admin #88 的 5 处漏同步（iot 是 admin fork）。
+# 这些是「admin 已修、iot 未跟随」的真实缺口，不是刻意分歧；改动只能落在既有文件上：
+#   - `AdminConstants`：删 3 个零引用死常量 + 通配权限码改引用 starter 的
+#     `StpPermissionAdapter.SUPER_ADMIN`（同一契约两个定义点，漂移即静默越权/漏权）；
+#   - `AiEmbeddingConfigResolverImpl`：`orElse(1L)` 静默回退默认租户改为显式失败
+#     （与同模块 Chat resolver 同口径，属「禁静默降级」红线）；
+#   - 4 个 auth 类：登录开关配置键此前各自 `private` 重复定义（改一处漏一处只会让某入口
+#     静默失效），收敛到新文件 `LoginConfigKeys`（新文件不受白名单限制）。
+# 为什么不能用新文件表达：问题就在这些既有类的方法体/常量定义上。
+ALLOWED+='ypbin-auth/src/main/java/cn/ypbin/admin/auth/controller/CaptchaController\.java|'
+ALLOWED+='ypbin-auth/src/main/java/cn/ypbin/admin/auth/controller/SmsLoginController\.java|'
+ALLOWED+='ypbin-auth/src/main/java/cn/ypbin/admin/auth/service/AuthService\.java|'
+ALLOWED+='ypbin-auth/src/main/java/cn/ypbin/admin/auth/service/PhoneLoginStrategy\.java|'
+ALLOWED+='ypbin-common/src/main/java/cn/ypbin/admin/common/constant/AdminConstants\.java|'
+ALLOWED+='ypbin-service/ypbin-ai/src/main/java/cn/ypbin/admin/ai/core/AiEmbeddingConfigResolverImpl\.java|'
+# 第 48 项（2026-10-19 加，#106 树组装）：`SysDeptServiceImpl#tree` 改用 starter 的 TreeUtils 后，
+# 补回「叶子 children 归一为 null」——admin 的同一迁移**漏了这一步**，实测响应从
+# `[{...,"id":2,...}]` 变成 `[{...,"id":2,...,"children":[]}]`（DeptResp 带 @JsonInclude(NON_NULL)，
+# 但空集合仍会被序列化）⇒ 部门接口的对外响应形态变了。本仓按「行为 100% 一致」的要求补回归一。
+# **为什么不能用新文件表达**：归一行必须落在既有的 tree() 方法里（TreeUtils 在同一方法内建树）。
+# **代价如实登记**：上游若自行修好（补上归一），同步时两块改动等价、可整体取上游；本仓届时删掉本条。
+# ⚠️ 这是本批**唯一**与 upstream 有真实分歧的文件：其余 #106/#107 主源码与上游逐字一致（零分歧）。
+ALLOWED+='ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/service/impl/SysDeptServiceImpl\.java|'
 ALLOWED+=')$'
 
 printf '%s' "$ALLOWED"

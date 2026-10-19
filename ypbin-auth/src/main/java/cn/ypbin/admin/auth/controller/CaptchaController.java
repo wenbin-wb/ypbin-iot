@@ -9,6 +9,8 @@
  */
 package cn.ypbin.admin.auth.controller;
 
+import cn.ypbin.admin.auth.support.LoginConfigKeys;
+
 import cloud.tianai.captcha.common.response.ApiResponse;
 import cloud.tianai.captcha.validator.common.model.dto.ImageCaptchaTrack;
 import cn.ypbin.admin.auth.support.AuthConfigReader;
@@ -34,8 +36,6 @@ import org.springframework.web.bind.annotation.RestController;
 @RequiredArgsConstructor
 public class CaptchaController {
 
-    /** 登录验证码开关参数键 */
-    private static final String KEY_LOGIN_CAPTCHA_ENABLED = "LOGIN_CAPTCHA_ENABLED";
 
     private final CaptchaService captchaService;
     private final AuthConfigReader configReader;
@@ -45,7 +45,7 @@ public class CaptchaController {
      */
     @GetMapping
     public R<?> generate() {
-        if (!configReader.getBoolean(KEY_LOGIN_CAPTCHA_ENABLED, false)) {
+        if (!configReader.getBoolean(LoginConfigKeys.LOGIN_CAPTCHA_ENABLED, false)) {
             return R.ok();
         }
         ApiResponse<?> data = captchaService.generate();
