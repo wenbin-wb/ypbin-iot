@@ -20,9 +20,9 @@ import cn.ypbin.admin.system.model.req.DeptSaveReq;
 import cn.ypbin.admin.system.model.resp.DeptResp;
 import cn.ypbin.admin.system.service.SysDeptService;
 import cn.ypbin.starter.core.exception.BusinessException;
+import cn.ypbin.starter.core.tree.TreeUtils;
 import cn.ypbin.starter.crud.service.BaseServiceImpl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import java.util.ArrayList;
 import java.util.List;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.BeanUtils;
@@ -45,7 +45,22 @@ public class SysDeptServiceImpl extends BaseServiceImpl<SysDeptMapper, SysDept> 
     @Override
     public List<DeptResp> tree() {
         List<SysDept> depts = list(new LambdaQueryWrapper<SysDept>().orderByAsc(SysDept::getSort));
-        return buildTree(depts, AdminConstants.ROOT_PARENT_ID);
+        // 用 starter 的 O(n) 函数式建树（starter #106）：原先手写递归在每层都全量扫描入参列表（O(n²)），
+        // 且 `SysDept` 的字段名是 `pid`、实现不了 starter 的 TreeNode 接口（要求 getParentId()）。
+        // 函数式重载允许宿主保留自己的字段名——本仓因此不必为「适配接口」再加一个方法。
+        List<DeptResp> tree = depts.stream().map(this::toResp).toList();
+        List<DeptResp> roots = TreeUtils.build(tree, DeptResp::getId, DeptResp::getPid,
+            DeptResp::setChildren, AdminConstants.ROOT_PARENT_ID);
+        // 与迁移前逐条对齐：原递归只在**有子节点**时 setChildren，叶子节点的 children 保持 null。
+        // TreeUtils 一律写回（可能为空的）列表 ⇒ 叶子会多出 "children":[]。DeptResp 带
+        // @JsonInclude(NON_NULL)，空集合仍会被序列化 ⇒ 属对外响应形态变更（实测：
+        // 迁移后 [{"id":2,...,"children":[]}] vs 迁移前 [{"id":2,...}]）。故在此归一为 null。
+        tree.forEach(node -> {
+            if (node.getChildren() != null && node.getChildren().isEmpty()) {
+                node.setChildren(null);
+            }
+        });
+        return roots;
     }
 
     @Override
@@ -95,21 +110,6 @@ public class SysDeptServiceImpl extends BaseServiceImpl<SysDeptMapper, SysDept> 
         if (!removeById(id)) {
             throw new BusinessException("删除部门失败");
         }
-    }
-
-    private List<DeptResp> buildTree(List<SysDept> depts, Long pid) {
-        List<DeptResp> tree = new ArrayList<>();
-        for (SysDept dept : depts) {
-            if (pid.equals(dept.getPid())) {
-                DeptResp node = toResp(dept);
-                List<DeptResp> children = buildTree(depts, dept.getId());
-                if (!children.isEmpty()) {
-                    node.setChildren(children);
-                }
-                tree.add(node);
-            }
-        }
-        return tree;
     }
 
     private DeptResp toResp(SysDept dept) {

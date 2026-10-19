@@ -34,7 +34,13 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 > 只会被当噪音忽略。现在：白名单内冲突 = warning + summary 列出；白名单外冲突 = 判红（那才是
 > 「分歧面失控」的信号）。
 
-> **白名单膨胀要记账**：目前 **53** 个文件（权威清单 = `tools/sync-whitelist-regex.sh`；本表与它必须逐项一致）。
+> **白名单膨胀要记账**：目前 **54** 个文件（权威清单 = `tools/sync-whitelist-regex.sh`；本表与它必须逐项一致）。
+> **白名单膨胀要记账**：目前 **54** 个文件（权威清单 = `tools/sync-whitelist-regex.sh`；本表与它必须逐项一致）。
+> 2026-10-19：**加第 48 项** —— `SysDeptServiceImpl.java` 补「叶子 children 归一为 null」（#106 树组装）。
+> **admin 的同一迁移漏了这一步**：`TreeUtils.build` 一律写回空集合，而迁移前只在有子节点时 `setChildren`，
+> 实测响应从 `[{"id":2,...}]` 变成 `[{"id":2,...,"children":[]}]`（`DeptResp` 带 `@JsonInclude(NON_NULL)`，
+> 但**空集合仍会序列化**）⇒ 部门接口对外形态改变。本仓按「行为 100% 一致」补回。
+> 同批其余 #106/#107 主源码**逐字采纳上游、零分歧**（见下方专条），故本批只加这 1 项。
 > 2026-10-19：**加第 47 项** —— `RemoteLogDaoTest.java` 的**重命名**（R086 → `SystemRemoteLogIngestClientTest.java`）。
 > 门禁比对新路径，故新名字必须单独登记（旧名字条目保留，上游改动旧文件时仍要命中）。
 
@@ -86,7 +92,7 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 | `ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/mapper/SysMessageMapper.java` | 增「按收件人查站内信」与落库辅助查询 | 站内信必须复用既有 `sys_message` 表与 Mapper（不新造站内信链路），查询方法只能加在既有 Mapper 上 |
 | `ypbin-service/ypbin-system/src/test/.../feign/SystemClientImplConfigMaskTest.java` | **新增**（#87 脱敏口径统一） | **2026-10-19 加（第 37 项）**：admin 新增该测试（#87），本仓同步时因 `SystemClientImpl` 构造器比 admin 多两个依赖（`SysMessageMapper`/`MailService`，本仓独有的站内信/邮件内部端点）⇒ 测试构造参数必须跟随本仓实现，与 upstream 构成 **add/add 冲突**（`Upstream Sync Check` 实测判红）。**为什么不能用新文件**：被测类构造器签名不同，换文件名改变不了这个事实。**代价如实登记**：上游若改该测试断言，同步时采纳上游断言 + 保留本仓构造参数。 |
 | `ypbin-service/ypbin-system/src/test/java/cn/ypbin/admin/system/feign/SystemClientImplUserByIdTest.java`、`SystemClientImplPlatformUserTest.java`、`SystemClientImplLogIngestTest.java` | 构造参数随 `SystemClientImpl` 注入新增，同步补 `mock(SysMessageMapper.class)`/`mock(MailService.class)` | 既有 3 个单测的构造器签名随被测类变化，属**连带更新**（3 个文件共 17 行） |
-| `ypbin-common/.../constant/AdminConstants.java`、`ypbin-service/ypbin-ai/.../core/AiEmbeddingConfigResolverImpl.java`、`ypbin-auth/.../CaptchaController.java`、`SmsLoginController.java`、`AuthService.java`、`PhoneLoginStrategy.java` | **补齐 admin #88 的 5 处漏同步** | **2026-10-19 加（第 48–52 项）**：① `AdminConstants` 删 3 个零引用死常量 + 通配码 `ALL_PERMISSION` 改引用 starter 的 `StpPermissionAdapter.SUPER_ADMIN`（同一契约两个定义点，漂移即静默越权/漏权）；② `AiEmbeddingConfigResolverImpl` 的 `orElse(1L)` 静默回退默认租户改为显式失败（与同模块 Chat resolver 同口径，禁静默降级）；③ 4 个 auth 类的登录开关配置键 `private` 重复定义收敛到新文件 `LoginConfigKeys`（新文件不受白名单限制）。**为什么不能用新文件**：问题就在这些既有类的方法体与常量定义上。 |
+| `ypbin-common/.../constant/AdminConstants.java`、`ypbin-service/ypbin-ai/.../core/AiEmbeddingConfigResolverImpl.java`、`ypbin-auth/.../CaptchaController.java`、`SmsLoginController.java`、`AuthService.java`、`PhoneLoginStrategy.java` | **补齐 admin #88 的 5 处漏同步** | **2026-10-19 加（第 49–54 项）**：① `AdminConstants` 删 3 个零引用死常量 + 通配码 `ALL_PERMISSION` 改引用 starter 的 `StpPermissionAdapter.SUPER_ADMIN`（同一契约两个定义点，漂移即静默越权/漏权）；② `AiEmbeddingConfigResolverImpl` 的 `orElse(1L)` 静默回退默认租户改为显式失败（与同模块 Chat resolver 同口径，禁静默降级）；③ 4 个 auth 类的登录开关配置键 `private` 重复定义收敛到新文件 `LoginConfigKeys`（新文件不受白名单限制）。**为什么不能用新文件**：问题就在这些既有类的方法体与常量定义上。 |
 | `docs/microservice-deployment.md` | 「初始口令」一句话更正 | **2026-09-26 加**：该句原写「Nacos 控制台默认 `nacos/nacos`」，而本仓已改为随机口令 + 开 auth（`NACOS-AUTH.md`）。留着一句**已不成立**的口令说明会误导运维，故只能改既有文件（无法用新文件表达「原句作废」） |
 | `README.md` | **整体重写为 IoT 版** | **2026-09-29 加**（M-6）：原 README 是 admin 原版（标题、徽章、截图、功能清单全是基座的），**读起来像另一个项目**。这是「仓库门面」性质的内容，**只能用既有文件表达**——新增 `README-IOT.md` 之类只会让访客仍然先看到错误的那个（GitHub 默认渲染 `README.md`）。同时它是**仓库首屏可信度**问题：README 里承诺的能力与实际不符属对外陈述。**代价如实登记**：README 是上游高频改动文件（徽章/截图/功能表），下一次 `git merge upstream/main` 必然冲突，且**必须整体取本仓版本**（不是逐行合并）——这份代价由「门面必须说真话」换取 |
 | `.github/workflows/ci.yml` | **两处改动（均针对同一段「starter 版本门禁」）**：① 校验那一步的 `curl` 加 `Authorization: Bearer ${{ github.token }}`（+ `Accept` 头）；② 其后「检出 ypbin-starter」由 `ref: master` 改为 **`ref: v<声明版本>`**（用上一步写进 `GITHUB_ENV` 的 tag） | **① 2026-10-13 加**：GitHub REST API 的**未认证**额度是 60 次/小时/IP，托管 runner 出口 IP 共享 ⇒ 实测 `curl: (22) ... 403` 让该步**随机转红**（同日 main 与 PR 各一次）。随机红的门禁会让人习惯性忽略红，比没有门禁更坏；加同仓库只读 token 后额度 5000/小时。**② 2026-10-13 加（同日）**：该步先断言「pom 声明的 starter 版本 == 最新 Release」，却检出 **master** 编译 ⇒ 「声明的」与「实际编译的」是两回事，master 上有而 Release 里没有的 API 会让 CI **假绿**（审计 issue #233）；改为按 `v<声明版本>` 检出后，CI 验证的就是「消费者真正拿到的那份 starter」。**为什么必须改既有文件**：这两处都在 `ci.yml` 里，另立新工作流无法消除「随机红」与「假绿」。**代价如实登记**：`ci.yml` 属 upstream 既有工作流 ⇒ 今后 `git merge upstream/main` 在该文件上可能出现冲突（预期内，冲突属「白名单内」）。后续若 upstream 自行补上这两处，本条可随之删除 
@@ -94,12 +100,28 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 | `ypbin-gateway/src/main/resources/application.yml` | 路由/清洗/免登录段并入本地配置 | **2026-10-01 加**（#11 第 1 批网关侧）：nacos 3.x 服务端脚本化读写 API 已移除（一手实测 GET/POST 全 404）⇒ 网关配置只能随 jar 发布，routes/exclude 必须落在网关既有 application.yml。可审计：若未来 nacos 支持 API，可回退到 nacos 配置（SYNC 分歧面 +1）。长期应反哺 admin 仓（网关工程属 upstream）。<br>**⚠️ 2026-10-08 更正**：本条当时的理由"nacos 3.x 服务端脚本化读写 API 已移除（全 404）"**不成立**——v1 确实全 404，但 **v3 admin API 读写均可用**（`/nacos/v3/auth/user/login` + `/nacos/v3/admin/cs/config` GET/POST，2026-10-08 实测；工具 `tools/set-nacos-flag.py`）⇒ 触发条件"若未来 nacos 支持 API"**已满足**，"网关配置回退到 Nacos"从"不可行"变成"**可行性已成立、决策未做**"。本白名单条目**暂不变**（未回退前仍需改该 application.yml），待另立评估 | 
 | `CHANGELOG.md` | 在 `## [未发布]` 段追加本批 deploy/IoT 修复条目 | **2026-10-12 加**：发布台账/对外门面，GitHub 与发布流程只认根 `CHANGELOG.md`，另写一份不会被看到（同 README.md 的理由）。**代价如实登记**：与 upstream 该文件冲突时**整体取本仓版本**（不是逐行合并）。改的是「允许改这个既有文件」，不改变任何门禁判据。 |
 | `deploy/nginx-microservice.conf` | 在 `/api/` location 加 `proxy_http_version 1.1` / `Connection ''` / `proxy_buffering off` / `proxy_cache off` | **2026-10-15 加**：SSE 实时流必须关闭代理缓冲，否则事件被攒在 proxy buffer 里、用户看到「实时流不动」。问题就在既有的 `/api/` location 上（无缓冲只能改这个文件），无法用新文件表达。**代价如实登记**：与 upstream 该文件冲突时按语义合并（保留 SSE 三行 + 采纳上游其它改动）。 |
+| `ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/service/impl/SysDeptServiceImpl.java` | `tree()` 用 `TreeUtils.build` 建树后，补「叶子 children 归一为 null」 | **第 48 项，2026-10-19 加（#106 树组装）**：admin 的同一迁移**漏了归一**——`TreeUtils` 一律写回空集合，而迁移前只在有子节点时 `setChildren`，实测响应由 `[{"id":2,...}]` 变为 `[{"id":2,...,"children":[]}]`（`@JsonInclude(NON_NULL)` 对空集合无效）⇒ 对外响应形态变更。归一行只能写进既有 `tree()`（建树就在该方法内），无法用新文件表达。**代价如实登记**：上游若自行补上归一，同步时取上游即可并删除本条；在此之前该文件是本批**唯一**与 upstream 有真实分歧的文件。 |
 | `ypbin-common/src/test/java/cn/ypbin/admin/common/log/SystemRemoteLogIngestClientTest.java` | **重命名**（原 `RemoteLogDaoTest.java`，R086）+ 断言口径随被测对象改名（自建 LogDao → SPI 实现） | **2026-10-19 加（第 47 项）**：随 starter #100 的上收，该测试的被测对象从 `RemoteLogDao` 换成 `SystemRemoteLogIngestClient`；Git 记为重命名但白名单门禁比对**新路径**，故需单独登记。**代价**：与旧条目同理（上游改该文件会冲突）。 |
 | `deploy/sql/006-iot-schema.sql`、`007-iot-data.sql` | **新文件** | 全新安装用 |
 | `deploy/sql/migration/*-iot-*.sql` | **新文件**（命名必须含 `-iot-`） | 已上线库用；按文件名排序拼接后与 `006+007` **语句等价**（有 CI 校验）。顺序即结构演进顺序：`device-schema` → `lease-schema` → `menu-data` |
 | `ypbin-common/.../log/RemoteLogAutoConfiguration.java`、`.../log/RemoteLogDao.java`、`.../tracking/RemoteTrackAutoConfiguration.java`、`.../tracking/RemoteTrackEventSink.java` | **删除**（4 个自建的跨服务上报自动配置与落库实现） | **2026-10-18 加（第 38–41 项）**：消费 `ypbin-starter` 4.1.0 的 starter #100 —— 基座已提供 `RemoteLogAutoConfiguration`/`RemoteTrackAutoConfiguration`（各自以 `@ConditionalOnBean(..IngestClient)` 为条件、`@Bean` 带 `@ConditionalOnMissingBean`）与 `RemoteLogDao`/`RemoteTrackEventSink`。本仓只保留 2 个 **SPI 实现**（`SystemRemoteLogIngestClient`/`SystemRemoteTrackIngestClient`）+ 1 个注册它们的自动配置（新文件）。**为什么不能用新文件表达**：要表达的是「删除既有实现」，留着就与基座重复（本仓反对的漂移面）。**代价如实登记**：上游再改这 4 个文件时，同步会以 modify/delete 暴露；正确解是上游也删（理由对上游同样成立）。 |
 | `ypbin-common/.../log/IdentityHeaderLogUserProvider.java`、`ypbin-auth/.../service/LoginEventTracker.java`、`ypbin-auth/src/test/.../log/AuthLogIngestTest.java`、`ypbin-common/src/test/.../log/RemoteLogDaoTest.java`、`ypbin-common/src/test/.../log/RemoteLogWiringTest.java` | **连带更新**（注释改指新装配；两个既有单测随实现迁移到 SPI 形态） | **2026-10-18 加（第 42–46 项）**：随上面 4 个类删除而必须同步的连带改动。两个测试的**断言口径逐条保留**（上报即采集模型本身、失败必须上抛而非静默、失败带完整堆栈、异常被监听器吸收），只把被测对象从 `RemoteLogDao` 换成 `SystemRemoteLogIngestClient`。 |
 | `admin-ui`（后续） | 路由/菜单注册 | 前端增量时再补清单 |
+
+> **2026-10-19 专条（#106 树组装 / #107 数据范围）：优先「逐字采纳上游」，而不是各写一份**
+>
+> admin 的 `main`（`fd4dc07`）已完成 starter #106/#107 的宿主侧迁移。本仓这一批的处置原则是
+> **能采纳就采纳**，把分歧面压到最小：
+>
+> | 文件 | 处置 |
+> |---|---|
+> | `SysMenuServiceImpl.java`、`DataScopeEnum.java`、`AbstractDataScopeResolver.java`、`DataScopeDataSources.java`、`DataScopeDiagnostics.java`、`docs/data-permission.md` | **逐字采纳上游**（`diff` 为零）⇒ **零分歧、不进白名单** |
+> | 说明文档 | 放**新文件** `docs/IOT-STARTER-106-107.md`（不改上游 `docs/data-permission.md`，否则多一个冲突点） |
+> | `SysDeptServiceImpl.java` | 采纳上游 + **补回叶子 children 归一**（上游漏了，见第 48 项）⇒ 唯一分歧 |
+> | `DataScopeMigrationBoundaryTest.java`、`TreeAssemblyConsistencyTest.java` | 采纳上游，仅在**新文件** `DataScopeSupplementaryBoundaryTest.java` 里补 iot 关心的边界（不改上游测试） |
+>
+> 为什么这条值得单列：**采纳比自研便宜**——自研一份等价实现要付出「永久多一个同步冲突点」的代价，
+> 而采纳为零。只有「上游实现确有行为缺陷」时才改（本批仅 1 处，且已实测取证）。
 
 > **为什么必须改这个上游测试文件（唯一豁免来源，不可回避）**：该类的 `LOOP_DB_EXEMPTIONS` 是
 > 「循环内 DB/RPC」**误报的唯一出口**——规则按「接收者名以 `Mapper`/`Dao`/`Client`… 结尾」判定，
