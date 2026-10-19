@@ -147,14 +147,6 @@ ALLOWED+='ypbin-auth/src/main/java/cn/ypbin/admin/auth/service/AuthService\.java
 ALLOWED+='ypbin-auth/src/main/java/cn/ypbin/admin/auth/service/PhoneLoginStrategy\.java|'
 ALLOWED+='ypbin-common/src/main/java/cn/ypbin/admin/common/constant/AdminConstants\.java|'
 ALLOWED+='ypbin-service/ypbin-ai/src/main/java/cn/ypbin/admin/ai/core/AiEmbeddingConfigResolverImpl\.java|'
-# 第 48 项（2026-10-19 加，#106 树组装）：`SysDeptServiceImpl#tree` 改用 starter 的 TreeUtils 后，
-# 补回「叶子 children 归一为 null」——admin 的同一迁移**漏了这一步**，实测响应从
-# `[{...,"id":2,...}]` 变成 `[{...,"id":2,...,"children":[]}]`（DeptResp 带 @JsonInclude(NON_NULL)，
-# 但空集合仍会被序列化）⇒ 部门接口的对外响应形态变了。本仓按「行为 100% 一致」的要求补回归一。
-# **为什么不能用新文件表达**：归一行必须落在既有的 tree() 方法里（TreeUtils 在同一方法内建树）。
-# **代价如实登记**：上游若自行修好（补上归一），同步时两块改动等价、可整体取上游；本仓届时删掉本条。
-# ⚠️ 这是本批**唯一**与 upstream 有真实分歧的文件：其余 #106/#107 主源码与上游逐字一致（零分歧）。
-ALLOWED+='ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/service/impl/SysDeptServiceImpl\.java|'
 ALLOWED+=')$'
 
 printf '%s' "$ALLOWED"

@@ -34,8 +34,13 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 > 只会被当噪音忽略。现在：白名单内冲突 = warning + summary 列出；白名单外冲突 = 判红（那才是
 > 「分歧面失控」的信号）。
 
-> **白名单膨胀要记账**：目前 **54** 个文件（权威清单 = `tools/sync-whitelist-regex.sh`；本表与它必须逐项一致）。
-> **白名单膨胀要记账**：目前 **54** 个文件（权威清单 = `tools/sync-whitelist-regex.sh`；本表与它必须逐项一致）。
+> **2026-10-19 反哺闭环（#106 树组装）**：本轮曾因「`SysDeptServiceImpl` 补回叶子 children 归一」
+> 新增第 48 项白名单条目；该缺陷已**反哺 admin 仓**（admin `1f390dc`，同时修掉其孪生测试的两处
+> 假保护），本仓已改为与上游逐字节一致 ⇒ **该条目已删除，分歧面归零**。
+> 教训：fork 里发现的上游缺陷应优先反哺，而不是长期持有分歧（全局规范 1.6）。
+
+> **白名单膨胀要记账**：目前 **53** 个文件（权威清单 = `tools/sync-whitelist-regex.sh`；本表与它必须逐项一致）。
+> **白名单膨胀要记账**：目前 **53** 个文件（权威清单 = `tools/sync-whitelist-regex.sh`；本表与它必须逐项一致）。
 > 2026-10-19：**加第 48 项** —— `SysDeptServiceImpl.java` 补「叶子 children 归一为 null」（#106 树组装）。
 > **admin 的同一迁移漏了这一步**：`TreeUtils.build` 一律写回空集合，而迁移前只在有子节点时 `setChildren`，
 > 实测响应从 `[{"id":2,...}]` 变成 `[{"id":2,...,"children":[]}]`（`DeptResp` 带 `@JsonInclude(NON_NULL)`，
@@ -100,7 +105,6 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 | `ypbin-gateway/src/main/resources/application.yml` | 路由/清洗/免登录段并入本地配置 | **2026-10-01 加**（#11 第 1 批网关侧）：nacos 3.x 服务端脚本化读写 API 已移除（一手实测 GET/POST 全 404）⇒ 网关配置只能随 jar 发布，routes/exclude 必须落在网关既有 application.yml。可审计：若未来 nacos 支持 API，可回退到 nacos 配置（SYNC 分歧面 +1）。长期应反哺 admin 仓（网关工程属 upstream）。<br>**⚠️ 2026-10-08 更正**：本条当时的理由"nacos 3.x 服务端脚本化读写 API 已移除（全 404）"**不成立**——v1 确实全 404，但 **v3 admin API 读写均可用**（`/nacos/v3/auth/user/login` + `/nacos/v3/admin/cs/config` GET/POST，2026-10-08 实测；工具 `tools/set-nacos-flag.py`）⇒ 触发条件"若未来 nacos 支持 API"**已满足**，"网关配置回退到 Nacos"从"不可行"变成"**可行性已成立、决策未做**"。本白名单条目**暂不变**（未回退前仍需改该 application.yml），待另立评估 | 
 | `CHANGELOG.md` | 在 `## [未发布]` 段追加本批 deploy/IoT 修复条目 | **2026-10-12 加**：发布台账/对外门面，GitHub 与发布流程只认根 `CHANGELOG.md`，另写一份不会被看到（同 README.md 的理由）。**代价如实登记**：与 upstream 该文件冲突时**整体取本仓版本**（不是逐行合并）。改的是「允许改这个既有文件」，不改变任何门禁判据。 |
 | `deploy/nginx-microservice.conf` | 在 `/api/` location 加 `proxy_http_version 1.1` / `Connection ''` / `proxy_buffering off` / `proxy_cache off` | **2026-10-15 加**：SSE 实时流必须关闭代理缓冲，否则事件被攒在 proxy buffer 里、用户看到「实时流不动」。问题就在既有的 `/api/` location 上（无缓冲只能改这个文件），无法用新文件表达。**代价如实登记**：与 upstream 该文件冲突时按语义合并（保留 SSE 三行 + 采纳上游其它改动）。 |
-| `ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/service/impl/SysDeptServiceImpl.java` | `tree()` 用 `TreeUtils.build` 建树后，补「叶子 children 归一为 null」 | **第 48 项，2026-10-19 加（#106 树组装）**：admin 的同一迁移**漏了归一**——`TreeUtils` 一律写回空集合，而迁移前只在有子节点时 `setChildren`，实测响应由 `[{"id":2,...}]` 变为 `[{"id":2,...,"children":[]}]`（`@JsonInclude(NON_NULL)` 对空集合无效）⇒ 对外响应形态变更。归一行只能写进既有 `tree()`（建树就在该方法内），无法用新文件表达。**代价如实登记**：上游若自行补上归一，同步时取上游即可并删除本条；在此之前该文件是本批**唯一**与 upstream 有真实分歧的文件。 |
 | `ypbin-common/src/test/java/cn/ypbin/admin/common/log/SystemRemoteLogIngestClientTest.java` | **重命名**（原 `RemoteLogDaoTest.java`，R086）+ 断言口径随被测对象改名（自建 LogDao → SPI 实现） | **2026-10-19 加（第 47 项）**：随 starter #100 的上收，该测试的被测对象从 `RemoteLogDao` 换成 `SystemRemoteLogIngestClient`；Git 记为重命名但白名单门禁比对**新路径**，故需单独登记。**代价**：与旧条目同理（上游改该文件会冲突）。 |
 | `deploy/sql/006-iot-schema.sql`、`007-iot-data.sql` | **新文件** | 全新安装用 |
 | `deploy/sql/migration/*-iot-*.sql` | **新文件**（命名必须含 `-iot-`） | 已上线库用；按文件名排序拼接后与 `006+007` **语句等价**（有 CI 校验）。顺序即结构演进顺序：`device-schema` → `lease-schema` → `menu-data` |
