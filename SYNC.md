@@ -34,7 +34,7 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 > 只会被当噪音忽略。现在：白名单内冲突 = warning + summary 列出；白名单外冲突 = 判红（那才是
 > 「分歧面失控」的信号）。
 
-> **白名单膨胀要记账**：目前 **46** 个文件（权威清单 = `tools/sync-whitelist-regex.sh`；本表与它必须逐项一致）。
+> **白名单膨胀要记账**：目前 **47** 个文件（权威清单 = `tools/sync-whitelist-regex.sh`；本表与它必须逐项一致）。
 > 2026-10-19：**加第 47 项** —— `RemoteLogDaoTest.java` 的**重命名**（R086 → `SystemRemoteLogIngestClientTest.java`）。
 > 门禁比对新路径，故新名字必须单独登记（旧名字条目保留，上游改动旧文件时仍要命中）。
 
