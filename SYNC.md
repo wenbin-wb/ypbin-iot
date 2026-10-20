@@ -39,8 +39,13 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 > 假保护），本仓已改为与上游逐字节一致 ⇒ **该条目已删除，分歧面归零**。
 > 教训：fork 里发现的上游缺陷应优先反哺，而不是长期持有分歧（全局规范 1.6）。
 
-> **白名单膨胀要记账**：目前 **53** 个文件（权威清单 = `tools/sync-whitelist-regex.sh`；本表与它必须逐项一致）。
-> **白名单膨胀要记账**：目前 **53** 个文件（权威清单 = `tools/sync-whitelist-regex.sh`；本表与它必须逐项一致）。
+> **2026-10-20（#303 登录 401）**：新增第 54 项 `deploy/nacos/ypbin-auth.yaml`（identity 修复必须落在
+> 该既有模板）；同时**修掉一条重复条目**（`ISystemClient.java` 出现两次，导致脚本计数 54 而文档 53 的
+> 长期不一致）。注：本仓 auth 模板显式开启 `ypbin.sse.enabled`，与上游「刻意不配」相反——属真实语义
+> 差异，本次只登记不改行为（改了会变更运行时装配，需单独评估）。
+
+> **白名单膨胀要记账**：目前 **54** 个文件（权威清单 = `tools/sync-whitelist-regex.sh`；本表与它必须逐项一致）。
+> **白名单膨胀要记账**：目前 **54** 个文件（权威清单 = `tools/sync-whitelist-regex.sh`；本表与它必须逐项一致）。
 > 2026-10-19：**加第 48 项** —— `SysDeptServiceImpl.java` 补「叶子 children 归一为 null」（#106 树组装）。
 > **admin 的同一迁移漏了这一步**：`TreeUtils.build` 一律写回空集合，而迁移前只在有子节点时 `setChildren`，
 > 实测响应从 `[{"id":2,...}]` 变成 `[{"id":2,...,"children":[]}]`（`DeptResp` 带 `@JsonInclude(NON_NULL)`，

@@ -103,7 +103,6 @@ ALLOWED+='ypbin-common/src/main/resources/META-INF/spring/org\.springframework\.
 ALLOWED+='ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/service/impl/SysConfigServiceImpl\.java|'
 ALLOWED+='ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/SystemServiceApplication\.java|'
 ALLOWED+='ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/provider/DbLogProviders\.java|'
-ALLOWED+='ypbin-service-api/ypbin-system-api/src/main/java/cn/ypbin/admin/system/api/feign/ISystemClient\.java|'
 # ---------------------------------------------------------------------------
 # 第 38–46 项（2026-10-18 加）：消费 starter 4.1.0 的 **starter #100**
 # （日志/埋点跨服务上报的自动配置与落库实现上收到基座）。
@@ -146,6 +145,14 @@ ALLOWED+='ypbin-auth/src/main/java/cn/ypbin/admin/auth/controller/SmsLoginContro
 ALLOWED+='ypbin-auth/src/main/java/cn/ypbin/admin/auth/service/AuthService\.java|'
 ALLOWED+='ypbin-auth/src/main/java/cn/ypbin/admin/auth/service/PhoneLoginStrategy\.java|'
 ALLOWED+='ypbin-common/src/main/java/cn/ypbin/admin/common/constant/AdminConstants\.java|'
+# ---------------------------------------------------------------------------
+# 第 54 项（2026-10-20 加，#303 登录 401 修复）：auth 的 Nacos 模板
+#   · 本仓显式开启 ypbin.sse.enabled（上游 admin 刻意不配 = 保持默认 false），属**真实语义差异**，
+#     保留本仓行为不动（改动会改变运行时装配，需单独评估）；
+#   · 上游把 ypbin.cloud.feign.trusted-source-token 在本文件重复声明一次，本仓靠 ypbin-common.yaml
+#     继承同串值，故未重复声明。
+# 为什么不能用新文件表达：issue #303 的修复（identity.enabled=false）必须落在该既有模板文件里。
+ALLOWED+='deploy/nacos/ypbin-auth\.yaml|'
 ALLOWED+='ypbin-service/ypbin-ai/src/main/java/cn/ypbin/admin/ai/core/AiEmbeddingConfigResolverImpl\.java|'
 ALLOWED+=')$'
 
