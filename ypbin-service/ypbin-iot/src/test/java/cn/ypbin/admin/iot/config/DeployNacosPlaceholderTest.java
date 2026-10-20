@@ -49,8 +49,19 @@ import org.junit.jupiter.api.Test;
  */
 class DeployNacosPlaceholderTest {
 
-    /** 仓库根（surefire 的工作目录是模块目录，故向上两级定位）。 */
-    private static final Path REPO_ROOT = Path.of("..", "..").toAbsolutePath().normalize();
+    /** 仓库根：从当前工作目录向上找含 {@code deploy/nacos} 的目录（不写死层级，换测试模块也不会失效）。 */
+    private static final Path REPO_ROOT = locateRepoRoot();
+
+    private static Path locateRepoRoot() {
+        Path current = Path.of("").toAbsolutePath();
+        while (current != null) {
+            if (Files.isDirectory(current.resolve("deploy/nacos"))) {
+                return current;
+            }
+            current = current.getParent();
+        }
+        throw new IllegalStateException("未找到仓库根（向上查找 deploy/nacos 失败）");
+    }
 
     /**
      * 非注释行里的<b>环境变量式</b>占位符：{@code ${NAME}} 或 {@code ${NAME:...}}。

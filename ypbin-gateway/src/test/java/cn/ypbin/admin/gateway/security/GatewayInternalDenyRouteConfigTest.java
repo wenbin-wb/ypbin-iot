@@ -64,8 +64,12 @@ class GatewayInternalDenyRouteConfigTest {
 
         assertThat(predicates(deny)).as("%s 的 deny 路由必须精确匹配 /iot/internal/**", file)
             .contains("Path=/iot/internal/**");
+        // ⚠️ 必须 3xx：SCG 的 RedirectTo 只接受 3xx，写 404 会让 gateway **启动直接失败**
+        // （`status must be a 3xx code, but was 404`，2026-10-20 dev 实测）。
+        // 本断言第一版写的是 startsWith("RedirectTo=404") —— 那等于把 bug 钉成了契约，
+        // 所以修复时它反而拦住了正确改动。判据改为「3xx + 有跳转目标」。
         assertThat(filters(deny)).as("%s 的 deny 路由必须用 RedirectTo 短路（不转发上游）", file)
-            .anyMatch(filter -> filter.startsWith("RedirectTo=404"));
+            .anyMatch(GatewayInternalDenyRouteConfigTest::isShortCircuitRedirect);
         assertThat(predicates(iot)).as("%s 的 iot 通配路由必须仍在", file).contains("Path=/iot/**");
 
         int denyOrder = order(deny);
@@ -73,6 +77,33 @@ class GatewayInternalDenyRouteConfigTest {
         assertThat(denyOrder).as("%s：deny 路由必须排在 iot 通配路由之前（deny=%s iot=%s）",
                 file, denyOrder, iotOrder)
             .isLessThan(iotOrder);
+    }
+
+    /**
+     * 判定 {@code RedirectTo} filter 是否合法：状态码必须是 3xx 且带跳转目标。
+     *
+     * <p>SCG 的 {@code RedirectTo} 只接受 3xx —— 非 3xx 会在**启动期**抛
+     * {@code status must be a 3xx code}，gateway 起不来。安全语义不靠状态码表达：
+     * 跳转目标本身没有路由，客户端跟随后拿到 404；真正的 404 信封由 starter 的
+     * {@code InternalPathBlockGlobalFilter} 在路由匹配前返回。</p>
+     *
+     * @param filter 一条 filter 文本（形如 {@code RedirectTo=302,/path}）
+     * @return 是否合法
+     */
+    private static boolean isShortCircuitRedirect(String filter) {
+        if (!filter.startsWith("RedirectTo=")) {
+            return false;
+        }
+        String[] parts = filter.substring("RedirectTo=".length()).split(",", 2);
+        if (parts.length != 2 || parts[1].isBlank()) {
+            return false;
+        }
+        try {
+            int status = Integer.parseInt(parts[0].trim());
+            return status >= 300 && status <= 399;
+        } catch (NumberFormatException ex) {
+            return false;
+        }
     }
 
     @SuppressWarnings("unchecked")

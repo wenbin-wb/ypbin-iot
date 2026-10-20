@@ -13,6 +13,7 @@ import cn.ypbin.starter.crud.model.PageQuery;
 import java.time.LocalDateTime;
 import lombok.Getter;
 import lombok.Setter;
+import org.springframework.format.annotation.DateTimeFormat;
 
 /**
  * 消息跟踪的查询条件（设计 `docs/MESSAGE-TRACE-DESIGN.md` §5）。
@@ -28,10 +29,20 @@ import lombok.Setter;
 @Setter
 public class DeviceTraceQuery extends PageQuery {
 
-    /** 时间窗起点（可空 ⇒ 由服务层回落为"当前时刻往前 defaultWindowMinutes"）。 */
+    /**
+     * 时间窗起点（可空 ⇒ 由服务层回落为"当前时刻往前 defaultWindowMinutes"）。
+     *
+     * <p><b>必须显式声明 {@code @DateTimeFormat}</b>：本 DTO 由 {@code @ModelAttribute} 从 query
+     * 参数绑定，Spring 默认转换器只认 ISO_LOCAL_DATE_TIME（带 {@code Z} 的
+     * {@code Date.toISOString()} 会解析失败 ⇒ 400）。显式 pattern 与前端
+     * {@code trace.vue} 的 {@code YYYY-MM-DD HH:mm:ss} 及同仓
+     * {@code MaintenanceWindowReq}/{@code AvailabilityResp}/{@code EventLogQuery} 同口径。</p>
+     */
+    @DateTimeFormat(pattern = "yyyy-MM-dd HH:mm:ss")
     private LocalDateTime from;
 
-    /** 时间窗终点（可空 ⇒ 当前时刻）。 */
+    /** 时间窗终点（可空 ⇒ 当前时刻）。格式口径同 {@link #from}。 */
+    @DateTimeFormat(pattern = "yyyy-MM-dd HH:mm:ss")
     private LocalDateTime to;
 
     /** 阶段过滤（可空=全部；未知阶段由服务层显式报错，不静默当"全部"）。 */
