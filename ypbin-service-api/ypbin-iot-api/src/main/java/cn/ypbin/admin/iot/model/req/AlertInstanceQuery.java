@@ -12,6 +12,7 @@ package cn.ypbin.admin.iot.model.req;
 import java.time.LocalDateTime;
 import lombok.Getter;
 import lombok.Setter;
+import org.springframework.format.annotation.DateTimeFormat;
 
 /**
  * 告警实例分页查询条件（全局列表与设备详情「告警」页签共用）。
@@ -50,9 +51,21 @@ public class AlertInstanceQuery {
     /** 规则 ID 筛选（可空）。 */
     private Long ruleId;
 
-    /** 首次越界时刻起（含，可空）。 */
+    /**
+     * 首次越界时刻起（含，可空）。
+     *
+     * <p>格式固定 {@code yyyy-MM-dd HH:mm:ss}（与 availability / maintenance 同口径）：不加
+     * {@code @DateTimeFormat} 时 Spring 按 {@code ISO_LOCAL_DATE_TIME} 解析，前端传带 {@code T}/{@code Z}
+     * 或带空格的串都会 400（2026-10-20 审查在消息跟踪端点上踩过同类事故）。</p>
+     */
+    @DateTimeFormat(pattern = "yyyy-MM-dd HH:mm:ss")
     private LocalDateTime from;
 
-    /** 首次越界时刻止（含，可空）。 */
+    /**
+     * 首次越界时刻止（含，可空）。
+     *
+     * <p>格式约定同 {@link #from}。</p>
+     */
+    @DateTimeFormat(pattern = "yyyy-MM-dd HH:mm:ss")
     private LocalDateTime to;
 }
