@@ -88,6 +88,11 @@ jobs:
           python3 -m pip install --quiet 'pyyaml>=6,<7'
           bash tools/check-identity-config.sh
 
+      - name: Nacos 导入前「live-only 键」检查工具自测（#304：防「整份覆盖静默丢键」）
+        # 工具本身是纯标准库实现（不依赖 PyYAML：部署机不保证有，且这一步要能在裸机跑）。
+        # 自测覆盖：嵌套键/注释/序列项/值内冒号/白名单/控制台 JSON 解包/本仓模板无块标量。
+        run: python3 tools/nacos-live-only-diff.py --self-test
+
       - name: 配置里不得出现已登记的废弃键（#297：防「写了但不生效」）
         # 为什么放在本工作流而不是 ci.yml：ci.yml 是 **admin 拥有的既有文件**（SYNC.md 第二节
         # 明确「不改 admin 既有工作流的语义」，改它要进白名单并登记代价）。本工作流是 fork 自有的

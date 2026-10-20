@@ -552,6 +552,8 @@ root-only；`deploy/.env` 是**刻意的凭据源**，已由 `! -name ".env"` �
    - `ypbin-common.yaml` 的 `ypbin.cloud.feign.trusted-source-token` 块与
      `ypbin-auth.yaml` 的 `ypbin.security.identity.enabled: false` **只在 live 有**，
      模板里没有（已与 `origin/main` 的 `deploy/nacos/` 逐份核对）——整份覆盖会**抹掉它们**。
+     - 2026-10-20 更新：**这两个键已补进模板**（identity 那次是真实事故：抹掉后平台无法登录），
+       且导入前差异检查已机械化（见 §5.6.8）。
    - 反向的 drift 见 §5.6.6。
 2. 仓库 `deploy/nacos/*.yaml` 一律用 `${...}` 占位符 ⇒ **不用改仓库模板**。但**别指望
    「重跑 `install.sh` 就自动生效」**：`install.sh:1280` 写的是
@@ -741,6 +743,44 @@ bash /opt/ypbin/token-rotation-<TS>/rollback-<TS>.sh
 脚本做四件事：① 还原 `deploy/.env`（轮换后版本留档）；② 还原两处**非运行 admin 旧栈**的 `.env`；
 ③ 把 7 份「轮换前」的 live 快照原样重发到 Nacos；④ 按 `nacos → gateway → auth → system → iot`
 逐个重启并等就绪。**前提是 `$W/before/` 未被删除**——它就是回滚原料。
+
+#### 5.6.8 live-only 键的机械化检查（issue #304，2026-10-20）
+
+**问题**：`install.sh` 导入 Nacos 是**整份覆盖**。任何「线上有、模板无」的键都会被静默删除，
+而历史上 CI 不红、启动无告警，直到用户操作才暴露（`identity.enabled` 那次 → 平台无法登录）。
+
+**现在的机制**（`install.sh` 在每次 POST 之前）：
+
+```
+GET  线上当前 Data ID 内容（/v3/console/cs/config）
+  ↓    --unwrap 解出 content（兼容控制台 JSON 与纯文本两种响应）
+逐叶子键比对「线上 − 渲染后模板 − 白名单」
+  ↓
+默认：逐条 ::warning:: 告警并继续
+NACOS_IMPORT_STRICT=1：::error:: 并**中止导入**
+```
+
+- 工具：`tools/nacos-live-only-diff.py`（**纯标准库**，不依赖 PyYAML——部署机不保证有；
+  自测由 CI 的 `Sync Whitelist` 工作流运行：`python3 tools/nacos-live-only-diff.py --self-test`）。
+- 白名单：`deploy/nacos-live-only-allowlist.txt`（每行一个叶子键路径 + **必须写理由**）。
+  优先做法永远是「把键补进模板」，只有确实无法进模板时才登记。
+- 只比键路径、不比值（值差异是模板职责，不属「丢键」风险）。
+- 已知局限：不解析块标量（`|`/`>`）内容；自测里有一条用例会在本仓模板引入块标量时提醒升级工具。
+
+**现场用法**：
+
+```bash
+# 常规部署（默认告警不阻断）
+bash deploy/install.sh
+
+# 重要环境：发现白名单外 live-only 键就中止
+NACOS_IMPORT_STRICT=1 bash deploy/install.sh
+```
+
+**判据**：部署日志里应出现 `[ok] 无 live-only 键` 或明确的 `::warning::` 行；
+若出现 `跳过 live-only 检查`，说明 python3 缺失或线上内容取不到——**这是降级，需要人工核对**。
+
+---
 
 ## 6. 保留策略运维：开关 + 手工触发一轮清理（issue #227）
 
