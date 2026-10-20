@@ -353,3 +353,43 @@ deploy/nacos/ypbin-system.yaml:8:  tenant:      → enabled: true
 | 启动 access 实测「无 TenantContext 异常」 | **未做**：本机未起完整 compose 栈；结论仅到配置级（见 §9.4）。若要闭环，需在部署机执行 `docker compose logs ypbin-access \| grep -i tenant` 且结果为空 |
 | 未登录访问 `/auth/user/info` 返回 401 的回归 | **未做**（同上，需运行栈）。行为**理论上未变**：`interceptor` 默认本就是 `true`，本次只是把默认值写成显式 |
 | 管理端仓（admin）同类配置 | admin 的 `ai`/`system` 走的是 opt-in 机制（`ypbin.downstream.security-interceptor-disabled: true`，已在 yaml 注释说明），`auth` 已同步显式 `interceptor: true`；admin 无 access/iot 服务 |
+
+## 10. auth 必须显式关闭身份头账号体系（`identity.enabled: false`，2026-10-20）
+
+### 10.1 结论
+
+`deploy/nacos/ypbin-auth.yaml` 里 `ypbin.security.identity.enabled` **必须显式为 `false`**，
+不能靠继承 `ypbin-common.yaml` 的 `true`。其余服务（system/ai/iot）保持继承 `true`。
+
+### 10.2 为什么（dev 实测事故）
+
+auth 是「校验口令 → 发 token → 建会话」的一方：口令通过后 `LoginSupport` 走
+`LoginHelper.login` + `StpUtil.getSession().set(...)`。
+
+而 `ypbin.security.identity.enabled=true` 时 starter 会把 **`IdentityStpLogic` 注册为 StpUtil 的
+账号体系**——它的 token 值来自**网关签发的身份头**。`/auth/login` 请求本身没有身份头 ⇒
+建会话阶段抛 `NotLoginException` ⇒ **正确口令登录返回 401「登录状态无效，请重新登录」**
+（前台表现为登录失败，极易被误判成口令错）。
+
+该键 2026-09-25 起只存在于线上 live 配置、**未入仓内模板**；2026-10-20 首轮部署按模板整份覆盖后
+丢失，导致平台无法登录。现已显式写进模板，避免再次被覆盖。
+
+### 10.3 判据（可复用）
+
+> `identity` 只给「**位于可信网关之后、不自己签发会话**」的下游服务（system/ai/iot）。
+> 自己签发会话的那一个（auth）必须关掉，否则它的 `login` 端点没有身份头可用。
+
+### 10.4 验收
+
+```bash
+# auth 必须显式 false；其余服务不应出现该键（继承 common 的 true）
+grep -n -A1 "identity:" deploy/nacos/ypbin-auth.yaml        # 期望：enabled: false
+grep -c "identity:" deploy/nacos/ypbin-system.yaml         # 期望：0
+# 登录链路（有可用口令时）：POST /auth/login 应返回 200 + token，而不是 401/409
+```
+
+### 10.5 与 `security.interceptor` 的关系
+
+两者**独立**：`interceptor` 决定「是否做全局登录校验」（auth 必须 `true`，见 §9），
+`identity.enabled` 决定「StpUtil 用哪套账号体系」（auth 必须 `false`）。两者同名易混，
+此处并列登记以免下次只改一个。
