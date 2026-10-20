@@ -1807,7 +1807,7 @@ if [ -n "$NACOS_TOKEN" ]; then
   # XXL_JOB_ACCESS_TOKEN：xxl-job 3.5.0 起执行器 AccessToken 必填且须与 admin 一致，无法自动生成
   # （生成了 admin 也不认），故只做「模板用了就必须由运维提供」的前置校验（fail-fast，不让 system
   # 在启动期才报绑定失败）。详见 deploy/.env.example 该键的说明。
-  if grep -q '\${XXL_JOB_ACCESS_TOKEN}' "$NACOS_DIR"/*.yaml 2>/dev/null; then
+  if grep -qE '\$\{XXL_JOB_ACCESS_TOKEN(:[^}]*)?}' "$NACOS_DIR"/*.yaml 2>/dev/null; then
     [ -n "${XXL_JOB_ACCESS_TOKEN:-}" ] || die "Nacos 模板里有 \${XXL_JOB_ACCESS_TOKEN} 占位符但 deploy/.env 未设置：请填成 xxl-job-admin 里「ypbin-system」执行器的 AccessToken（生成：openssl rand -hex 16，再同步填进 admin），或将模板里 ypbin.xxl-job.enabled 改为 false"
   fi
   if grep -q '\${IOTDB_PASSWORD}' "$NACOS_DIR"/*.yaml 2>/dev/null; then
@@ -1832,7 +1832,7 @@ if [ -n "$NACOS_TOKEN" ]; then
           -e "/^[[:space:]]*#/! s/\${INTERNAL_TOKEN}/${INTERNAL_TOKEN}/g" \
           -e "/^[[:space:]]*#/! s/\${GATEWAY_SIGN_TOKEN}/${GATEWAY_SIGN_TOKEN}/g" \
           -e "/^[[:space:]]*#/! s/\${IOTDB_PASSWORD}/${IOTDB_PASSWORD:-}/g" \
-          -e "/^[[:space:]]*#/! s/\${XXL_JOB_ACCESS_TOKEN}/${XXL_JOB_ACCESS_TOKEN:-}/g" \
+          -e "/^[[:space:]]*#/! s/\${XXL_JOB_ACCESS_TOKEN\(:[^}]*\)\?}/${XXL_JOB_ACCESS_TOKEN:-}/g" \
           "$cfg_file" > "$TMP_CFG"
     else
       # REDIS_PASSWORD 为空（NO_DOCKER 外部 Redis 不认证）→ 删除非注释的 password 行，等价不配置密码；
@@ -1842,7 +1842,7 @@ if [ -n "$NACOS_TOKEN" ]; then
           -e "/^[[:space:]]*#/! s/\${INTERNAL_TOKEN}/${INTERNAL_TOKEN}/g" \
           -e "/^[[:space:]]*#/! s/\${GATEWAY_SIGN_TOKEN}/${GATEWAY_SIGN_TOKEN}/g" \
           -e "/^[[:space:]]*#/! s/\${IOTDB_PASSWORD}/${IOTDB_PASSWORD:-}/g" \
-          -e "/^[[:space:]]*#/! s/\${XXL_JOB_ACCESS_TOKEN}/${XXL_JOB_ACCESS_TOKEN:-}/g" \
+          -e "/^[[:space:]]*#/! s/\${XXL_JOB_ACCESS_TOKEN\(:[^}]*\)\?}/${XXL_JOB_ACCESS_TOKEN:-}/g" \
           -e "/^[[:space:]]*#/! /password: \${REDIS_PASSWORD}/d" \
           "$cfg_file" > "$TMP_CFG"
     fi

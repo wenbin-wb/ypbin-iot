@@ -56,50 +56,81 @@ import org.springframework.context.annotation.Configuration;
 public class RemoteIngestClientAutoConfiguration {
 
     /**
-     * 日志上报实现：把 {@code LogRecord} 上报给 system（跨服务，不直连库）。
+     * 日志侧装配（<b>独立嵌套类</b>，类级 {@code @ConditionalOnClass}）。
      *
-     * @param systemClient system 服务 Feign 客户端
-     * @return 日志上报 SPI 实现
+     * <p><b>为什么 log 的 {@code @Bean} 也必须收进带类级条件的嵌套类</b>（2026-10-20 第二轮
+     * dev 部署实测）：上一轮只把 track 收进嵌套类，log 的
+     * {@code remoteLogIngestClient(ISystemClient)} 仍留在父类 ⇒ 宿主 {@code ypbin-access}
+     * 没有依赖 {@code ypbin-system-api}（因此没有 {@code ISystemClient}）时，Spring 在<b>条件求值
+     * 阶段内省父类全部 {@code @Bean} 方法签名</b>就撞 {@code NoClassDefFoundError}：
+     * {@code Error processing condition on RemoteIngestClientAutoConfiguration.sessionLogClientProvider
+     * → NoClassDefFoundError: cn/ypbin/admin/system/api/feign/ISystemClient}。方法级
+     * {@code @ConditionalOnClass} 不能阻止这次内省，类级条件才可以（先求值、整类跳过）。</p>
+     *
+     * <p>教训：**只要 {@code @Bean} 方法签名里出现可选依赖的类型，就必须和它的类级条件待在同一个
+     * 嵌套配置类里**；把不同可选依赖的 {@code @Bean} 混在同一个类里，等于把它们的条件绑在一起。</p>
      */
-    @Bean
+    @Configuration(proxyBeanMethods = false)
     @ConditionalOnClass({RemoteLogIngestClient.class, ISystemClient.class})
-    @ConditionalOnMissingBean(RemoteLogIngestClient.class)
-    public RemoteLogIngestClient remoteLogIngestClient(ISystemClient systemClient) {
-        return new SystemRemoteLogIngestClient(systemClient);
+    static class LogIngestConfiguration {
+
+        /**
+         * 日志上报实现：把 {@code LogRecord} 上报给 system（跨服务，不直连库）。
+         *
+         * @param systemClient system 服务 Feign 客户端
+         * @return 日志上报 SPI 实现
+         */
+        @Bean
+        @ConditionalOnMissingBean(RemoteLogIngestClient.class)
+        RemoteLogIngestClient remoteLogIngestClient(ISystemClient systemClient) {
+            return new SystemRemoteLogIngestClient(systemClient);
+        }
     }
 
     /**
-     * 操作人数据源（网关身份头实现）：从 {@code IdentityContext} 取当前用户。
+     * 日志「数据源」侧装配（操作人 / 客户端信息）：只依赖 starter-log 与 starter-security 的
+     * {@code LogUserProvider} / {@code LogClientProvider}，<b>不依赖 {@code ISystemClient}</b>。
      *
-     * <p>starter 的 {@code LogAutoConfiguration.logUserProvider()} 默认实现恒返回空 ⇒ {@code sys_log}
-     * 的 {@code create_user} 恒为 null。本实现替代它（含与 system 侧 {@code DbLogProviders} 的互斥，
-     * 由两边的 {@code @ConditionalOnMissingBean} 保证同容器只有一个）。</p>
-     *
-     * @return 操作人数据源
+     * <p>与上报装配分开成类，是为了让缺口 {@code ISystemClient} 的宿主编译/启动时仍能拿到这两个
+     * provider（上报装配被整类跳过），而不是「一个可选依赖缺失就整块日志能力消失」。</p>
      */
-    @Bean
-    @ConditionalOnMissingBean(LogUserProvider.class)
-    public LogUserProvider identityHeaderLogUserProvider() {
-        return new IdentityHeaderLogUserProvider();
-    }
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnClass({LogUserProvider.class, LogClientProvider.class, SessionLogClientProvider.class})
+    static class LogProviderConfiguration {
 
-    /**
-     * 客户端信息数据源：<b>直接用 starter 4.1.0 的实现</b>（`cn.ypbin.starter.security.log`）。
-     *
-     * <p>本仓此前自建过同名实现，starter 4.1.0（issue #100）已把「身份头模式按 loginId 读账号会话、
-     * 单体模式读当前 token 会话」两种分支做进去，且单体模式只读 <b>1 次</b>会话（本地副本是 2 次）。
-     * 保留本地副本会让「栈帧/IDE 跳转/同包测试解析」指向错误实现，故删除并改用官方版
-     * （架构门禁 {@code DuplicateClassNameGateTest} 会拦住这类遗留副本）。</p>
-     *
-     * <p>仍保留本 Bean：宿主必须<b>显式</b>注册 SPI 适配（starter 的默认实现返回空，见
-     * {@code LogAutoConfiguration}），这里把它接到 starter 的会话实现上。</p>
-     *
-     * @return 客户端信息数据源
-     */
-    @Bean
-    @ConditionalOnMissingBean(LogClientProvider.class)
-    public LogClientProvider sessionLogClientProvider() {
-        return new SessionLogClientProvider();
+        /**
+         * 操作人数据源（网关身份头实现）：从 {@code IdentityContext} 取当前用户。
+         *
+         * <p>starter 的 {@code LogAutoConfiguration.logUserProvider()} 默认实现恒返回空 ⇒ {@code sys_log}
+         * 的 {@code create_user} 恒为 null。本实现替代它（含与 system 侧 {@code DbLogProviders} 的互斥，
+         * 由两边的 {@code @ConditionalOnMissingBean} 保证同容器只有一个）。</p>
+         *
+         * @return 操作人数据源
+         */
+        @Bean
+        @ConditionalOnMissingBean(LogUserProvider.class)
+        LogUserProvider identityHeaderLogUserProvider() {
+            return new IdentityHeaderLogUserProvider();
+        }
+
+        /**
+         * 客户端信息数据源：<b>直接用 starter 4.1.0 的实现</b>（`cn.ypbin.starter.security.log`）。
+         *
+         * <p>本仓此前自建过同名实现，starter 4.1.0（issue #100）已把「身份头模式按 loginId 读账号会话、
+         * 单体模式读当前 token 会话」两种分支做进去，且单体模式只读 <b>1 次</b>会话（本地副本是 2 次）。
+         * 保留本地副本会让「栈帧/IDE 跳转/同包测试解析」指向错误实现，故删除并改用官方版
+         * （架构门禁 {@code DuplicateClassNameGateTest} 会拦住这类遗留副本）。</p>
+         *
+         * <p>仍保留本 Bean：宿主必须<b>显式</b>注册 SPI 适配（starter 的默认实现返回空，见
+         * {@code LogAutoConfiguration}），这里把它接到 starter 的会话实现上。</p>
+         *
+         * @return 客户端信息数据源
+         */
+        @Bean
+        @ConditionalOnMissingBean(LogClientProvider.class)
+        LogClientProvider sessionLogClientProvider() {
+            return new SessionLogClientProvider();
+        }
     }
 
     /**

@@ -56,6 +56,32 @@ class RemoteIngestClientAutoConfigurationTest {
             });
     }
 
+    /**
+     * <b>第二轮 dev 部署的真实事故</b>（2026-10-20）：宿主 {@code ypbin-access} 没有
+     * {@code ypbin-system-api}，因此类路径上没有 {@link ISystemClient}。上一轮只把 track 的
+     * {@code @Bean} 收进带类级条件的嵌套类，log 的 {@code remoteLogIngestClient(ISystemClient)}
+     * 还留在父类 ⇒ 条件求值期内省父类方法签名时直接
+     * {@code NoClassDefFoundError: cn/ypbin/admin/system/api/feign/ISystemClient}}，access 起不来。
+     *
+     * <p>本用例把 {@code ISystemClient} 从类路径遮掉，断言：① 上下文仍能启动；
+     * ② 两个「上报」Bean 都不装配（确实没有依赖可用）；③ <b>日志数据源 Bean 仍然装配</b>
+     * （它们不依赖 {@code ISystemClient}，不该被连坐）。</p>
+     */
+    @Test
+    @DisplayName("★ 类路径缺 ISystemClient（access 场景）：上下文仍能启动，日志数据源 Bean 不被连坐")
+    void shouldStartWithoutSystemClientOnClasspath() {
+        runner.withClassLoader(new FilteredClassLoader(ISystemClient.class))
+            .run(context -> {
+                assertThat(context).as("缺 ISystemClient 时不得因内省 @Bean 方法签名而启动失败")
+                    .hasNotFailed();
+                assertThat(context).doesNotHaveBean(RemoteLogIngestClient.class);
+                assertThat(context).doesNotHaveBean(RemoteTrackIngestClient.class);
+                assertThat(context).as("日志数据源不依赖 ISystemClient，必须仍然可用")
+                    .hasSingleBean(cn.ypbin.starter.log.core.LogUserProvider.class);
+                assertThat(context).hasSingleBean(cn.ypbin.starter.log.core.LogClientProvider.class);
+            });
+    }
+
     @Test
     @DisplayName("类路径齐备：两个上报 Bean 都装配")
     void shouldRegisterBothWhenAllSpiPresent() {

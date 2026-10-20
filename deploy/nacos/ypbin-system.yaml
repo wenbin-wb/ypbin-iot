@@ -107,6 +107,10 @@ ypbin:
   xxl-job:
     enabled: true
     admin-addresses: http://xxl-job-admin:8080
-    access-token: "${XXL_JOB_ACCESS_TOKEN:?3.5.0 起执行器维度 AccessToken 必填，且须与 admin 中同名 AppName 一致}"
+    # 写法必须是**裸占位符**（不带 `:默认值` 后缀）：install.sh 的 grep/sed 是精确匹配
+    # `${XXL_JOB_ACCESS_TOKEN}`，带后缀会「既不替换也不触发前置校验」，Nacos 里留下字面占位符
+    # ⇒ system 启动期绑定失败（2026-10-20 第二轮 dev 部署实测踩到）。
+    # 缺值时的 fail-fast 由两处保证：install.sh 的前置校验（部署期）、Spring 的不可解析占位符（启动期）。
+    access-token: "${XXL_JOB_ACCESS_TOKEN}"
     appname: ypbin-system
     port: 9999
