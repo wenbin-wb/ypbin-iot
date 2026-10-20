@@ -107,8 +107,9 @@ class TwinBindingResolverTest {
         when(serviceMapper.selectBatchIds(anyCollection())).thenReturn(
             List.of(service(SERVICE_ID, "Environment")));
 
+        // 回写是写副作用 ⇒ 只有显式传 healCache=true 才执行（读路径必须 false）
         Map<Long, TwinBindingResolver.ResolvedBinding> result =
-            resolver.resolve(List.of(binding(1L, 9_999L, "Environment", "temperature")));
+            resolver.resolve(List.of(binding(1L, 9_999L, "Environment", "temperature")), true);
 
         assertThat(result.get(1L).getStale()).isFalse();
         assertThat(result.get(1L).getPropertyId()).isEqualTo(PROPERTY_ID);
@@ -154,7 +155,7 @@ class TwinBindingResolverTest {
             .thenThrow(new IllegalStateException("db down"));
 
         Map<Long, TwinBindingResolver.ResolvedBinding> result =
-            resolver.resolve(List.of(binding(1L, 9_999L, "Environment", "temperature")));
+            resolver.resolve(List.of(binding(1L, 9_999L, "Environment", "temperature")), true);
 
         assertThat(result.get(1L).getStale()).isFalse();
         assertThat(result.get(1L).getPropertyId()).isEqualTo(PROPERTY_ID);
@@ -293,5 +294,26 @@ class TwinBindingResolverTest {
         binding.setServiceIdentifier(serviceIdentifier);
         binding.setPropertyIdentifier(propertyIdentifier);
         return binding;
+    }
+
+    @Test
+    @DisplayName("★ 读路径（默认 resolve）**绝不**写库：GET 端点不得有写副作用")
+    void readPathMustNotWrite() {
+        when(propertyMapper.selectBatchIds(anyCollection())).thenReturn(
+            List.of(property(PROPERTY_ID, SERVICE_ID, "temperature", "温度")));
+        when(serviceMapper.selectBatchIds(anyCollection())).thenReturn(
+            List.of(service(SERVICE_ID, "Environment")));
+
+        // 主键缓存悬空、但业务标识可解析 ⇒ 会命中「可自愈」条件
+        Map<Long, TwinBindingResolver.ResolvedBinding> result =
+            resolver.resolve(List.of(binding(1L, 9_999L, "Environment", "temperature")));
+
+        // 解析结果仍给出正确的 propertyId 与 stale=false（页面照常渲染）
+        assertThat(result.get(1L).getPropertyId()).isEqualTo(PROPERTY_ID);
+        assertThat(result.get(1L).getStale()).isFalse();
+        // 但**一次写都不能发生**：GET 带写副作用会被安全扫描判为 CSRF 面，
+        // 且浏览器预取/代理重放都会顺带改库
+        verify(bindingMapper, times(0)).batchHealPropertyId(anyList());
+        verify(bindingMapper, times(0)).update(any(), any());
     }
 }
