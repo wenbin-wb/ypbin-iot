@@ -22,6 +22,7 @@ import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
 
 /**
  * 跨服务上报 SPI 的装配：把本仓的日志/埋点上报实现注册成 Bean，供 starter 的
@@ -102,15 +103,33 @@ public class RemoteIngestClientAutoConfiguration {
     }
 
     /**
-     * 埋点上报实现：把 {@code TrackEvent} 上报给 system。
+     * 埋点上报装配（<b>独立嵌套类</b>，类级 {@code @ConditionalOnClass}）。
      *
-     * @param systemClient system 服务 Feign 客户端
-     * @return 埋点上报 SPI 实现
+     * <p><b>为什么必须做成分离的嵌套配置类</b>（2026-10-20 dev 真实启动失败）：
+     * 方法级 {@code @ConditionalOnClass} 不足以保证安全——Spring 处理自动配置类时仍会
+     * <b>内省该类的全部 {@code @Bean} 方法签名</b>，而本方法的返回类型
+     * {@link RemoteTrackIngestClient} 位于 {@code ypbin-starter-tracking}。宿主
+     * {@code ypbin-access} 没有引入该模块 ⇒ 内省阶段直接 {@code NoClassDefFoundError}，
+     * 整个应用起不来（失败信息还指向本类，与「缺少一个可选依赖」的因果很远）。</p>
+     *
+     * <p>把这类 {@code @Bean} 收进<b>带类级条件</b>的嵌套 {@code @Configuration}：Spring 先求值
+     * 嵌套类的类级条件（ASM 读取，不加载类），条件不满足就<b>整类跳过</b>，不再内省其方法签名。
+     * 这是「可选依赖 + 自动配置」的标准写法。</p>
      */
-    @Bean
+    @Configuration(proxyBeanMethods = false)
     @ConditionalOnClass({RemoteTrackIngestClient.class, ISystemClient.class})
-    @ConditionalOnMissingBean(RemoteTrackIngestClient.class)
-    public RemoteTrackIngestClient remoteTrackIngestClient(ISystemClient systemClient) {
-        return new SystemRemoteTrackIngestClient(systemClient);
+    static class TrackIngestConfiguration {
+
+        /**
+         * 埋点上报实现：把 {@code TrackEvent} 上报给 system。
+         *
+         * @param systemClient system 服务 Feign 客户端
+         * @return 埋点上报 SPI 实现
+         */
+        @Bean
+        @ConditionalOnMissingBean(RemoteTrackIngestClient.class)
+        RemoteTrackIngestClient remoteTrackIngestClient(ISystemClient systemClient) {
+            return new SystemRemoteTrackIngestClient(systemClient);
+        }
     }
 }

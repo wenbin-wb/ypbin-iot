@@ -52,13 +52,20 @@ spring:
             # 路由匹配，大小写/编码分隔符（%2F/%5C）变体一并拦截，返回统一 404 信封）；
             # 本路由为配置层纵深防御与可见性，两处 YAML 必须保持同构。
             # ⚠️ 4.0.0 起本仓不再保留自建 InternalEndpointBlockFilter（已删除）。
+            #
+            # ⚠️ 这里**必须是 3xx**：SCG 的 RedirectTo 只接受 3xx 状态码，写 404 会让 gateway
+            # **启动直接失败**（`status must be a 3xx code, but was 404`，2026-10-20 dev 实测）。
+            # 别被「返回 404 才像拦住了」的直觉误导：本 filter 的价值是**短路不转发**，不是响应码本身；
+            # 跳转目标 `/iot/internal-denied` 没有任何路由 ⇒ 客户端跟随跳转后拿到的仍是 404，
+            # 而不跟随的客户端看到 302 也知道被拒（真正的 404 信封响应由上面的
+            # InternalPathBlockGlobalFilter 负责，它在路由匹配之前就返回了）。
             - id: iot-internal-deny
               uri: lb://ypbin-iot
               order: -1
               predicates:
                 - Path=/iot/internal/**
               filters:
-                - RedirectTo=404,/iot/internal-denied
+                - RedirectTo=302,/iot/internal-denied
             - id: iot-openapi
               uri: lb://ypbin-iot
               # 开放 API（门面）：只剥服务短名、保留 /open-api/v1 前缀落到 iot 门面
