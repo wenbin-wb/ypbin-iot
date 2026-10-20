@@ -275,3 +275,81 @@ Nacos 服务数 totalCount=5
 | 服务仍用**超管账号**（`nacos`）连 Nacos | 未改；建议后续建最小权限 client 用户 |
 | 开 auth 后 `install.sh` / 其它脚本是否还有别的匿名 Nacos 调用点 | 本轮只修了三个 rotate 工具（原因是它们在生产实际被调用过）；未做全仓扫描 |
 | 服务器 `/tmp` 与 `/opt/ypbin` 的旧备份残留 | 本轮清掉了 `/opt/ypbin/{secret-rotation,token-rotation}-*`（**含早前轮次的回滚物，属副作用，已登记**）；`/tmp` 大文件未动 |
+
+## 9. `ypbin.security.interceptor` 必须每服务显式声明（2026-10-20，issue #302）
+
+### 9.1 结论
+
+**五个服务的 `ypbin.security.interceptor` 一律显式写出，不依赖 starter 默认值**：
+只有 `auth` 为 `true`，其余四个微服务为 `false`。
+
+| 服务 | 声明 | 位置 |
+|---|---|---|
+| `ypbin-auth` | `interceptor: true` | `deploy/nacos/ypbin-auth.yaml` |
+| `ypbin-access` | `interceptor: false` | `deploy/nacos/ypbin-access.yaml` |
+| `ypbin-ai` | `interceptor: false` | `deploy/nacos/ypbin-ai.yaml` |
+| `ypbin-iot` | `interceptor: false` | `deploy/nacos/ypbin-iot.yaml` |
+| `ypbin-system` | `interceptor: false` | `deploy/nacos/ypbin-system.yaml` |
+
+### 9.2 为什么不能依赖默认值
+
+starter 的这个默认值**方向已经变过一次**：4.1.0 的 `DownstreamDefaultsEnvironmentPostProcessor`
+原本会对下游宿主默认注入 `ypbin.security.interceptor=false`，发布前做了方向修正——
+现只默认注入**方向更严格**的 `ypbin.tenant.fail-on-missing-tenant=true`，
+`security-interceptor-disabled` 改为显式 opt-in（`ypbin.downstream.security-interceptor-disabled=true`）。
+
+修正原因正是 auth：`ypbin-auth` 也依赖 `cloud-core`，但**有真实用户会话**，且
+`/user/info`、`/codes`、`/menu/all`、`/check`、`/social/*` 等端点**没有**逐个标 `@SaCheckLogin`,
+全靠这个全局拦截器兜底。默认注入 `false` = 这些端点**静默失去登录校验**。
+
+⇒ 只要安全边界的开关还是「默认值」，starter 下一次改默认值就会**静默改变 auth 的安全边界**。
+故本条纪律：**安全边界的开关一律显式，不用默认值**（判据同 starter CHANGELOG 的「默认注入项只允许是更严格方向」）。
+
+### 9.3 验收命令（可机械核对）
+
+```bash
+cd <repo-root>
+for f in access auth ai iot system; do
+  printf "%-8s " "$f"
+  grep -q "interceptor:" deploy/nacos/ypbin-$f.yaml \
+    && echo "OK ($(grep -oP 'interceptor:\s*\K\w+' deploy/nacos/ypbin-$f.yaml))" \
+    || echo MISSING
+done
+# 期望：五行业务服务全 OK，且只有 auth 为 true
+```
+
+2026-10-20 实测输出（本仓）：
+
+```
+access   OK (false)
+auth     OK (true)
+ai       OK (false)
+iot      OK (false)
+system   OK (false)
+```
+
+### 9.4 连带核验：`fail-on-missing-tenant` 默认注入对 access / auth 无影响
+
+starter 4.1.0 起会默认注入 `ypbin.tenant.fail-on-missing-tenant=true`。该属性**只在租户拦截器生效时**
+才被 `DefaultTenantLineHandler` 读取，而租户自动配置的开关是 `ypbin.tenant.enabled`（**默认 false**，
+需显式开启）：
+
+```
+$ grep -rn "^\s*tenant:" deploy/nacos/*.yaml
+deploy/nacos/ypbin-ai.yaml:7:  tenant:        → enabled: true
+deploy/nacos/ypbin-iot.yaml:7:  tenant:       → enabled: true
+deploy/nacos/ypbin-system.yaml:8:  tenant:      → enabled: true
+# access / auth 无 tenant 段 ⇒ 未启用租户隔离 ⇒ 注入项无效果
+```
+
+⇒ **access 与 auth 不受该默认注入影响**（结论强度：**配置级核验**——三份 yaml 显式开启、
+另两份与 `ypbin-common.yaml` 均无 `tenant.enabled`，且无代码 `setEnabled(true)`；
+**未做**启动期 Bean 装配实测，见 §9.5）。
+
+### 9.5 仍未验证（如实登记）
+
+| 项 | 状态 |
+|---|---|
+| 启动 access 实测「无 TenantContext 异常」 | **未做**：本机未起完整 compose 栈；结论仅到配置级（见 §9.4）。若要闭环，需在部署机执行 `docker compose logs ypbin-access \| grep -i tenant` 且结果为空 |
+| 未登录访问 `/auth/user/info` 返回 401 的回归 | **未做**（同上，需运行栈）。行为**理论上未变**：`interceptor` 默认本就是 `true`，本次只是把默认值写成显式 |
+| 管理端仓（admin）同类配置 | admin 的 `ai`/`system` 走的是 opt-in 机制（`ypbin.downstream.security-interceptor-disabled: true`，已在 yaml 注释说明），`auth` 已同步显式 `interceptor: true`；admin 无 access/iot 服务 |
