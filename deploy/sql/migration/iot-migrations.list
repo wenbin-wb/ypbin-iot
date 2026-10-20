@@ -38,3 +38,5 @@
 2026-10-15-iot-alert-condition-group.sql
 2026-10-15-iot-board-config.sql
 2026-10-15-iot-dashboard-snapshot.sql
+2026-10-21-iot-twin-schema.sql
+2026-10-21-iot-twin-menu.sql

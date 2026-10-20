@@ -17,13 +17,17 @@ import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.core.util.LogSanitizer;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import tools.jackson.core.type.TypeReference;
@@ -103,6 +107,174 @@ public class LatestValueQueryService {
     }
 
     /**
+     * 批量查询多台设备的最新值（**一次 Redis pipeline**，不按设备循环 HGETALL）。
+     *
+     * <p><b>为什么必须批量</b>：孪生场景一次可能展示 500 个点位（对应最多 500 台设备）。
+     * 逐台调用 {@link #listLatest(Long)} 会发出 500 次 Redis 往返 + 500 次设备查库 +
+     * 500 次坐标索引查询——那是一次页面打开就要几十秒、且把 Redis 连接池打满的形态。
+     * 本方法把这三类操作各压成一次。</p>
+     *
+     * <p><b>与单设备版的结果完全一致</b>：每台设备内部沿用同一套「历史坐标形态归一 + ts 取新 +
+     * ts 并列时规范标识胜」的裁决（抽取为 {@code mergeDeviceEntries}，供两个方法共用），
+     * 因此同一份 Redis 数据无论走哪条路径，返回值逐字段相同。</p>
+     *
+     * <p><b>失败语义（与单设备版一致）</b>：Redis 未装配或读取异常时，每台设备都返回空列表——
+     * 「没有最新值」不是故障；但异常必须 {@code log.error} 带堆栈并累加
+     * {@value #METRIC_READ_FAILED}，让「Redis 抖动」在指标上可见。</p>
+     *
+     * @param deviceIds 设备主键集合（为空时返回空 Map，不发任何查询）
+     * @return 设备主键 → 最新值列表（每台设备的列表按属性标识升序；Redis 不可用时值为空列表）。
+     *         返回的 Map 对入参中**每一台存在的设备**都有条目（可能对应空列表）。
+     */
+    public Map<Long, List<LatestValueResp>> listLatestBatch(List<Long> deviceIds) {
+        if (deviceIds == null || deviceIds.isEmpty()) {
+            // 空集合短路：既省三次查询，也避免空 IN 生成非法 SQL
+            return Map.of();
+        }
+        List<Long> idList = deviceIds.stream().filter(Objects::nonNull).distinct().toList();
+        if (idList.isEmpty()) {
+            return Map.of();
+        }
+        // ① 一次查设备（同时完成租户过滤：跨租户设备查不到 ⇒ 不出现在结果里）
+        Map<Long, IotDevice> deviceById = new LinkedHashMap<>();
+        for (IotDevice device : deviceMapper.selectByIds(idList)) {
+            deviceById.put(device.getId(), device);
+        }
+        if (deviceById.isEmpty()) {
+            return Map.of();
+        }
+        // ② 一次取坐标索引（与单设备版同一数据源，保证归一裁决口径相同）
+        Map<Long, PointMappingIndex.DeviceCoordinates> coordinatesByDevice =
+            pointMappingIndex.loadCoordinates(deviceById.keySet());
+        StringRedisTemplate redisTemplate = redisTemplateProvider.getIfAvailable();
+        if (redisTemplate == null) {
+            log.warn("[iot] 未发现 StringRedisTemplate：批量最新值查询返回空结果（设备数={}）",
+                deviceById.size());
+            return emptyResult(deviceById.keySet());
+        }
+        // ③ 一次 pipeline（不是 N 次 HGETALL）。入队顺序必须与 orderedIds 完全一致：
+        //    pipeline 的结果按命令入队顺序返回，顺序错位会让 A 设备的值贴到 B 设备上。
+        List<Long> orderedIds = new ArrayList<>(deviceById.keySet());
+        List<Object> pipelined;
+        try {
+            pipelined = redisTemplate.executePipelined((RedisCallback<Object>) connection -> {
+                for (Long deviceId : orderedIds) {
+                    IotDevice device = deviceById.get(deviceId);
+                    byte[] key = RedisLatestValueWriter.key(device.getTenantId(), deviceId)
+                        .getBytes(StandardCharsets.UTF_8);
+                    connection.hashCommands().hGetAll(key);
+                }
+                // pipeline 内的回调返回值被框架忽略（结果由 executePipelined 收集）
+                return null;
+            });
+        } catch (RuntimeException ex) {
+            readFailedCounter.increment();
+            log.error("[iot] 批量最新值读取失败（按空列表返回，不伪造数据）：设备数={}",
+                deviceById.size(), ex);
+            return emptyResult(deviceById.keySet());
+        }
+        Map<Long, List<LatestValueResp>> result = new LinkedHashMap<>();
+        for (int index = 0; index < orderedIds.size(); index++) {
+            Long deviceId = orderedIds.get(index);
+            Object raw = index < pipelined.size() ? pipelined.get(index) : null;
+            Map<Object, Object> entries = toEntriesMap(raw, deviceId);
+            result.put(deviceId,
+                mergeDeviceEntries(deviceId, entries, coordinatesByDevice.get(deviceId)));
+        }
+        return result;
+    }
+
+    /**
+     * 把 pipeline 的单个结果转成 entries（Redis 返回 {@code Map<Object,Object>}；
+     * 空哈希返回空 Map）。
+     *
+     * @param raw      pipeline 单条结果
+     * @param deviceId 设备主键（仅用于告警定位）
+     * @return 哈希条目
+     */
+    @SuppressWarnings("unchecked")
+    private Map<Object, Object> toEntriesMap(Object raw, Long deviceId) {
+        if (raw instanceof Map<?, ?> map) {
+            return (Map<Object, Object>) map;
+        }
+        if (raw != null) {
+            log.warn("[iot] 批量最新值的 pipeline 结果类型非预期，按空处理：deviceId={} type={}",
+                deviceId, raw.getClass().getName());
+        }
+        return Map.of();
+    }
+
+    /**
+     * 合并单台设备的哈希条目为结果列表（**单设备版与批量版共用的唯一裁决实现**）。
+     *
+     * <p>把这段抽出来而不是在两个方法里各写一份：裁决规则（ts 取新、ts 并列时规范标识胜、
+     * 都不是规范标识时按形态字典序）一旦有两份实现就会漂移，而漂移的表现是「同一份数据
+     * 单查与批量查给出不同的值」——排障时几乎不可能想到是这个原因。</p>
+     *
+     * @param deviceId    设备主键
+     * @param entries     Redis 哈希条目（可能为空）
+     * @param coordinates 该设备的坐标索引（可空，空时按原样使用 field）
+     * @return 最新值列表（按属性标识升序；空 entries ⇒ 空列表）
+     */
+    private List<LatestValueResp> mergeDeviceEntries(Long deviceId, Map<Object, Object> entries,
+                                                     PointMappingIndex.DeviceCoordinates coordinates) {
+        if (entries == null || entries.isEmpty()) {
+            return List.of();
+        }
+        Map<String, String> canonicalByForm = coordinates == null
+            ? Map.of() : coordinates.canonicalByForm();
+        Map<String, LatestValueResp> winners = new LinkedHashMap<>();
+        Map<String, String> winnerForm = new LinkedHashMap<>();
+        int legacyFields = 0;
+        for (Map.Entry<Object, Object> entry : entries.entrySet()) {
+            if (entry.getKey() == null) {
+                continue;
+            }
+            String form = String.valueOf(entry.getKey());
+            LatestValueResp value = parse(form, entry.getValue() == null
+                ? null : String.valueOf(entry.getValue()), deviceId);
+            if (value == null) {
+                continue;
+            }
+            String canonical = canonicalByForm.getOrDefault(form, form);
+            if (!canonical.equals(form)) {
+                legacyFields++;
+            }
+            value.setPropertyId(canonical);
+            LatestValueResp known = winners.get(canonical);
+            if (known == null
+                || isBetterCandidate(value, form, canonical, known, winnerForm.get(canonical))) {
+                winners.put(canonical, value);
+                winnerForm.put(canonical, form);
+            }
+        }
+        if (legacyFields > 0) {
+            legacyFieldCounter.increment(legacyFields);
+            log.info("[iot] 最新值读到**历史坐标形态**（属性主键字符串）并已归一到属性标识："
+                    + "deviceId={} 条数={}（过渡期兼容；backfill 完成后该日志与 "
+                    + "iot.latest.coordinate.legacy 应归零）",
+                LogSanitizer.sanitize(deviceId), legacyFields);
+        }
+        List<LatestValueResp> result = new ArrayList<>(winners.size());
+        winners.keySet().stream().sorted().forEach(canonical -> result.add(winners.get(canonical)));
+        return result;
+    }
+
+    /**
+     * 构造「每台设备空列表」的结果（Redis 不可用/读取失败时使用，保证 Map 覆盖全部入参设备）。
+     *
+     * @param deviceIds 设备主键
+     * @return 设备主键 → 空列表
+     */
+    private Map<Long, List<LatestValueResp>> emptyResult(Collection<Long> deviceIds) {
+        Map<Long, List<LatestValueResp>> result = new LinkedHashMap<>();
+        for (Long deviceId : deviceIds) {
+            result.put(deviceId, List.of());
+        }
+        return result;
+    }
+
+    /**
      * 查询某设备全部点位的最新值。
      *
      * @param deviceId 设备 ID
@@ -138,47 +310,13 @@ public class LatestValueQueryService {
             // key 不存在 = 这台设备还没上报过：正常状态，不是错误
             return List.of();
         }
-        Map<String, String> canonicalByForm =
-            pointMappingIndex.loadCoordinates(List.of(deviceId))
-                .getOrDefault(deviceId, PointMappingIndex.DeviceCoordinates.empty())
-                .canonicalByForm();
-        // 按规范标识收敛：同一标识的两种形态（历史主键字符串 / 属性标识）只保留读数时刻最新的一条
-        Map<String, LatestValueResp> winners = new LinkedHashMap<>();
-        // 胜出者来自哪种形态：**ts 并列时的裁决必须与遍历顺序无关**——Redis HGETALL 不保证顺序，
-        // 若按「先到者胜」，同一个 key 的两次查询可能返回不同的值与质量码（排障时表现为「值偶发变化」）
-        Map<String, String> winnerForm = new LinkedHashMap<>();
-        int legacyFields = 0;
-        for (Map.Entry<Object, Object> entry : entries.entrySet()) {
-            if (entry.getKey() == null) {
-                continue;
-            }
-            String form = String.valueOf(entry.getKey());
-            LatestValueResp value = parse(form, entry.getValue() == null ? null
-                : String.valueOf(entry.getValue()), deviceId);
-            if (value == null) {
-                continue;
-            }
-            String canonical = canonicalByForm.getOrDefault(form, form);
-            if (!canonical.equals(form)) {
-                legacyFields++;
-            }
-            value.setPropertyId(canonical);
-            LatestValueResp known = winners.get(canonical);
-            if (known == null || isBetterCandidate(value, form, canonical, known, winnerForm.get(canonical))) {
-                winners.put(canonical, value);
-                winnerForm.put(canonical, form);
-            }
-        }
-        if (legacyFields > 0) {
-            legacyFieldCounter.increment(legacyFields);
-            log.info("[iot] 最新值读到**历史坐标形态**（属性主键字符串）并已归一到属性标识："
-                    + "deviceId={} 条数={}（过渡期兼容；backfill 完成后该日志与 iot.latest.coordinate.legacy 应归零）",
-                LogSanitizer.sanitize(deviceId), legacyFields);
-        }
-        // 按点位标识排序：Redis 哈希无序，输出顺序不固定会让同一份数据每次展示都不一样
-        List<LatestValueResp> result = new ArrayList<>(winners.size());
-        winners.keySet().stream().sorted().forEach(canonical -> result.add(winners.get(canonical)));
-        return result;
+        // 归并与裁决统一走 mergeDeviceEntries（与批量版共用同一实现，避免两份规则漂移）：
+        // 同一标识的两种形态（历史主键字符串 / 属性标识）只保留读数时刻最新的一条，
+        // 且 ts 并列时的裁决与遍历顺序无关（Redis HGETALL 不保证顺序）。
+        PointMappingIndex.DeviceCoordinates coordinates = pointMappingIndex
+            .loadCoordinates(List.of(deviceId))
+            .getOrDefault(deviceId, PointMappingIndex.DeviceCoordinates.empty());
+        return mergeDeviceEntries(deviceId, entries, coordinates);
     }
 
     /**

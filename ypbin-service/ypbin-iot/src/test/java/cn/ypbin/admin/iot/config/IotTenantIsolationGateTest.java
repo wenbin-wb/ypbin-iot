@@ -81,7 +81,13 @@ class IotTenantIsolationGateTest {
         // 组态看板配置（2026-10-15 追加，与快照同批）：实体 extends TenantBaseEntity，
         // 存的是本租户的看板组件配置；漏登记 ⇒ 本清单式门禁的「逐表 ignoreTable=false」
         // 对它失效（独立验收任务 verify-backend/task-8 发现的覆盖缺口，已补）。
-        "iot_dashboard_board_config");
+        "iot_dashboard_board_config",
+
+        // 数字孪生（2026-10-21 追加）：四张表都 extends TenantBaseEntity，都是租户表。
+        // 漏登记的后果：场景树/点位坐标/属性绑定全部跨租户可见 —— 其中
+        // iot_twin_point 直接暴露「别人厂里哪些设备、装在哪」，是物理布局信息。
+        "iot_twin_model_asset", "iot_twin_scene", "iot_twin_point", "iot_twin_point_binding"
+    );
 
     /** 平台表（不继承租户基类，必须被忽略——作为「ignoreTable 能返回 true」的自检锚点）。 */
     /**
