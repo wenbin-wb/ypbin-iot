@@ -31,6 +31,7 @@ NACOS_DIR="$ROOT/deploy/nacos"
 # 具名常量（杜绝魔法值）
 COMMON_CFG="ypbin-common.yaml"
 GATEWAY_CFG="ypbin-gateway.yaml"
+AUTH_CFG="ypbin-auth.yaml"
 # 与 install.sh 的 sed 替换键名一致
 PLACEHOLDER_SIGN='${GATEWAY_SIGN_TOKEN}'
 PLACEHOLDER_INTERNAL='${INTERNAL_TOKEN}'
@@ -42,7 +43,7 @@ fail=0
 err() { echo "::error::$*" >&2; fail=1; }
 info() { echo "  $*"; }
 
-for f in "$COMMON_CFG" "$GATEWAY_CFG"; do
+for f in "$COMMON_CFG" "$GATEWAY_CFG" "$AUTH_CFG"; do
   [ -f "$NACOS_DIR/$f" ] || { err "缺少配置模板 deploy/nacos/$f"; }
 done
 [ "$fail" -eq 0 ] || exit 1
@@ -61,15 +62,16 @@ TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 render "$NACOS_DIR/$COMMON_CFG" > "$TMP_DIR/$COMMON_CFG"
 render "$NACOS_DIR/$GATEWAY_CFG" > "$TMP_DIR/$GATEWAY_CFG"
+render "$NACOS_DIR/$AUTH_CFG" > "$TMP_DIR/$AUTH_CFG"
 
 # 用 Python 解析 YAML 取**真实结构**（不靠 grep 文本匹配：缩进写错、键写进注释、
 # 键名拼错（如 trusted_source_token / trustedSourceToken）都会被 grep 放过，被解析器抓住）。
-python3 - "$TMP_DIR" "$COMMON_CFG" "$GATEWAY_CFG" "$FAKE_SIGN" <<'PY'
+python3 - "$TMP_DIR" "$COMMON_CFG" "$GATEWAY_CFG" "$FAKE_SIGN" "$AUTH_CFG" <<'PY'
 import json
 import re
 import sys
 
-tmp_dir, common_name, gateway_name, fake_sign = sys.argv[1:5]
+tmp_dir, common_name, gateway_name, fake_sign, auth_name = sys.argv[1:6]
 
 try:
     import yaml
@@ -154,6 +156,30 @@ if enabled is True:
         fail = 1
     else:
         print("[ok] ypbin-common.yaml: ypbin.security.identity.{enabled=true, trusted-source-token=${GATEWAY_SIGN_TOKEN}}")
+
+# ---- 断言 1b：auth 必须显式关闭身份头账号体系 ----
+# auth 是「自己签发会话」的一方：identity 模式下 IdentityStpLogic 的 token 取自网关身份头，
+# 而 /auth/login 没有身份头 ⇒ 建会话抛 NotLoginException ⇒ **正确口令登录也返回 401**。
+# 该键 2026-09-25 起曾只存在于 live 配置、模板整份重导后丢失（2026-10-20 DEV 实测登录故障）。
+auth = load(f"{tmp_dir}/{auth_name}")
+auth_enabled, auth_has = dig(auth, "ypbin", "security", "identity", "enabled")
+if not auth_has:
+    print(
+        f"::error file=deploy/nacos/{auth_name}::"
+        "缺少 ypbin.security.identity.enabled 的**显式**声明 —— 会继承 ypbin-common.yaml 的 true，"
+        "导致 auth 用「网关身份头」当 token：/auth/login 无身份头 ⇒ 建会话抛 NotLoginException ⇒ "
+        "正确口令登录返回 401。请显式写 enabled: false。"
+    )
+    fail = 1
+elif auth_enabled is not False:
+    print(
+        f"::error file=deploy/nacos/{auth_name}::"
+        f"ypbin.security.identity.enabled 必须为 false（当前 {auth_enabled!r}）——"
+        "auth 自己签发会话，不能用身份头账号体系。"
+    )
+    fail = 1
+else:
+    print(f"[ok] {auth_name}: ypbin.security.identity.enabled=false（auth 不继承身份头账号体系）")
 
 # ---- 断言 2：网关签发侧密钥必须存在且是同一占位符（=同串来源）----
 gw_token, has_gw = dig(gateway, "ypbin", "gateway", "auth", "trusted-source-token")
