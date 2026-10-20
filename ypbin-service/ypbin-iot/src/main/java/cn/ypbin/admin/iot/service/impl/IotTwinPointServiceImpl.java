@@ -49,6 +49,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -70,6 +72,9 @@ import org.springframework.util.StringUtils;
 @Service
 public class IotTwinPointServiceImpl extends BaseServiceImpl<IotTwinPointMapper, IotTwinPoint>
     implements IotTwinPointService {
+
+    private static final Logger log =
+        LoggerFactory.getLogger(IotTwinPointServiceImpl.class);
 
     private final IotTwinSceneMapper twinSceneMapper;
 
@@ -149,6 +154,9 @@ public class IotTwinPointServiceImpl extends BaseServiceImpl<IotTwinPointMapper,
         apply(point, req);
         save(point);
         insertBindings(point.getId(), bindings, propertyIdByKey);
+        // 写路径顺带自愈：把其它点位里「主键悬空但业务标识可解析」的绑定缓存修正掉。
+        // 这是**写请求**内的写库，符合 HTTP 语义（不放读路径，见 TwinBindingResolver 注释）。
+        healStaleBindingsOfScene(sceneId);
         return point.getId();
     }
 
@@ -170,6 +178,7 @@ public class IotTwinPointServiceImpl extends BaseServiceImpl<IotTwinPointMapper,
         // 整体替换：先物理删除旧绑定，再插入新绑定（见类注释）
         twinPointBindingMapper.physicalDeleteByPointIds(List.of(pointId));
         insertBindings(pointId, bindings, propertyIdByKey);
+        healStaleBindingsOfScene(sceneId);
     }
 
     @Override
@@ -435,6 +444,43 @@ public class IotTwinPointServiceImpl extends BaseServiceImpl<IotTwinPointMapper,
             .orElseThrow(() -> new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
                 "当前登录身份没有租户上下文，无法保存点位绑定："
                     + "平台管理员需要先选择/切换到目标租户"));
+    }
+
+
+    /**
+     * 自愈本场景内「主键缓存悬空但业务标识可解析」的绑定（**只在写路径调用**）。
+     *
+     * <p>为什么放在写路径而不是读路径：回写是一次 UPDATE，而点位列表与运行态快照都是
+     * **GET** 端点。GET 带写副作用会被安全扫描判为 CSRF 面，且浏览器预取/代理重放会顺带改库
+     * （详见 {@code TwinBindingResolver#resolve(Collection, boolean)} 的注释）。
+     * 用户在页面上保存一次点位，顺手把该场景的失效缓存修正掉，是成本最低且语义正确的时机。</p>
+     *
+     * <p>失败不阻塞本次保存：自愈是「锦上添花」，其失败不应让用户的编辑操作报错
+     * （记 WARN + 完整堆栈，下次保存会重试）。</p>
+     *
+     * @param sceneId 场景主键
+     */
+    private void healStaleBindingsOfScene(Long sceneId) {
+        try {
+            List<Long> pointIds = baseMapper.selectList(new LambdaQueryWrapper<IotTwinPoint>()
+                    .eq(IotTwinPoint::getSceneId, sceneId)
+                    .select(IotTwinPoint::getId))
+                .stream().map(IotTwinPoint::getId).toList();
+            if (pointIds.isEmpty()) {
+                return;
+            }
+            List<IotTwinPointBinding> bindings = twinPointBindingMapper.selectList(
+                new LambdaQueryWrapper<IotTwinPointBinding>()
+                    .in(IotTwinPointBinding::getPointId, pointIds));
+            if (bindings.isEmpty()) {
+                return;
+            }
+            // healCache=true：显式开启回写（读路径永远传 false）
+            bindingResolver.resolve(bindings, true);
+        } catch (RuntimeException ex) {
+            log.warn("[iot] 孪生绑定缓存自愈失败（不影响本次保存，下次保存会重试）：sceneId={}",
+                sceneId, ex);
+        }
     }
 
     // ---------- 响应转换 ----------

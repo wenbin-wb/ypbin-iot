@@ -79,18 +79,16 @@ class TwinBindingResolverTest {
     @Test
     @DisplayName("★ 批量解析只发 2 次查询（与绑定数无关）")
     void resolveIsBatched() {
-        when(propertyMapper.selectBatchIds(anyCollection())).thenReturn(
-            List.of(property(PROPERTY_ID, SERVICE_ID, "temperature", "温度")));
-        when(serviceMapper.selectBatchIds(anyCollection())).thenReturn(
-            List.of(service(SERVICE_ID, "Environment")));
+        stubDb();
 
         Map<Long, TwinBindingResolver.ResolvedBinding> result = resolver.resolve(List.of(
             binding(1L, PROPERTY_ID, "Environment", "temperature"),
             binding(2L, PROPERTY_ID, "Environment", "temperature"),
             binding(3L, STALE_PROPERTY_ID, "Environment", "gone")));
 
-        verify(propertyMapper, times(1)).selectBatchIds(any(Collection.class));
-        verify(serviceMapper, times(1)).selectBatchIds(any(Collection.class));
+        // 新实现（按业务标识查库）的两次查询：① 服务按 service_id IN ② 属性按 service_id IN
+        verify(serviceMapper, times(1)).selectByServiceIdentifiers(anyCollection());
+        verify(propertyMapper, times(1)).selectList(any());
         assertThat(result).hasSize(3);
         assertThat(result.get(1L).getStale()).isFalse();
         assertThat(result.get(1L).getPropertyName()).isEqualTo("温度");
@@ -102,10 +100,7 @@ class TwinBindingResolverTest {
     @Test
     @DisplayName("★ 属性行被物理删除（主键悬空）但业务标识可解析 ⇒ 不 stale，并回写主键缓存")
     void healsStalePropertyId() {
-        when(propertyMapper.selectBatchIds(anyCollection())).thenReturn(
-            List.of(property(PROPERTY_ID, SERVICE_ID, "temperature", "温度")));
-        when(serviceMapper.selectBatchIds(anyCollection())).thenReturn(
-            List.of(service(SERVICE_ID, "Environment")));
+        stubDb();
 
         // 回写是写副作用 ⇒ 只有显式传 healCache=true 才执行（读路径必须 false）
         Map<Long, TwinBindingResolver.ResolvedBinding> result =
@@ -119,8 +114,7 @@ class TwinBindingResolverTest {
     @Test
     @DisplayName("属性与业务标识都解析不到 ⇒ stale=true，名称回落属性标识（不编造）")
     void staleWhenNothingMatches() {
-        when(propertyMapper.selectBatchIds(anyCollection())).thenReturn(List.of());
-        when(serviceMapper.selectBatchIds(anyCollection())).thenReturn(List.of());
+        stubEmptyDb();
 
         Map<Long, TwinBindingResolver.ResolvedBinding> result =
             resolver.resolve(List.of(binding(1L, STALE_PROPERTY_ID, "Environment", "gone")));
@@ -134,10 +128,7 @@ class TwinBindingResolverTest {
     @Test
     @DisplayName("★ 主键缓存命中且与库一致 ⇒ 不回写（避免无意义的写放大）")
     void noHealWhenCacheMatches() {
-        when(propertyMapper.selectBatchIds(anyCollection())).thenReturn(
-            List.of(property(PROPERTY_ID, SERVICE_ID, "temperature", "温度")));
-        when(serviceMapper.selectBatchIds(anyCollection())).thenReturn(
-            List.of(service(SERVICE_ID, "Environment")));
+        stubDb();
 
         resolver.resolve(List.of(binding(1L, PROPERTY_ID, "Environment", "temperature")));
 
@@ -147,10 +138,7 @@ class TwinBindingResolverTest {
     @Test
     @DisplayName("★ 回写失败只记 WARN，不影响本次解析结果")
     void healFailureDoesNotBreakRead() {
-        when(propertyMapper.selectBatchIds(anyCollection())).thenReturn(
-            List.of(property(PROPERTY_ID, SERVICE_ID, "temperature", "温度")));
-        when(serviceMapper.selectBatchIds(anyCollection())).thenReturn(
-            List.of(service(SERVICE_ID, "Environment")));
+        stubDb();
         when(bindingMapper.batchHealPropertyId(anyList()))
             .thenThrow(new IllegalStateException("db down"));
 
@@ -172,10 +160,7 @@ class TwinBindingResolverTest {
     @Test
     @DisplayName("unit_override 优先于物模型单位")
     void unitOverrideWins() {
-        when(propertyMapper.selectBatchIds(anyCollection())).thenReturn(
-            List.of(property(PROPERTY_ID, SERVICE_ID, "temperature", "温度")));
-        when(serviceMapper.selectBatchIds(anyCollection())).thenReturn(
-            List.of(service(SERVICE_ID, "Environment")));
+        stubDb();
         IotTwinPointBinding binding = binding(1L, PROPERTY_ID, "Environment", "temperature");
         binding.setUnitOverride("K");
 
@@ -197,11 +182,7 @@ class TwinBindingResolverTest {
     @Test
     @DisplayName("★ 写侧：一次列全所有不存在的属性组合")
     void validateListsAllMissing() {
-        when(serviceMapper.selectList(any())).thenReturn(List.of(serviceEntity(SERVICE_ID)));
-        when(serviceMapper.selectBatchIds(anyCollection())).thenReturn(
-            List.of(service(SERVICE_ID, "Environment")));
-        when(propertyMapper.selectList(any())).thenReturn(
-            List.of(property(PROPERTY_ID, SERVICE_ID, "temperature", "温度")));
+        stubDb();
 
         assertThatThrownBy(() -> resolver.validateBindings(9_001L, List.of(
             new TwinBindingResolver.BindingKey("Environment", "temperature"),
@@ -216,7 +197,7 @@ class TwinBindingResolverTest {
     @Test
     @DisplayName("写侧：产品无任何物模型服务 ⇒ 拒绝")
     void validateWithoutServicesRejected() {
-        when(serviceMapper.selectList(any())).thenReturn(List.of());
+        stubEmptyDb();
         assertThatThrownBy(() -> resolver.validateBindings(9_001L,
             List.of(new TwinBindingResolver.BindingKey("Environment", "temperature"))))
             .isInstanceOf(BusinessException.class)
@@ -234,11 +215,7 @@ class TwinBindingResolverTest {
     @Test
     @DisplayName("写侧：全部存在 ⇒ 通过，并解析出属性主键")
     void validateAndResolvePropertyIds() {
-        when(serviceMapper.selectList(any())).thenReturn(List.of(serviceEntity(SERVICE_ID)));
-        when(serviceMapper.selectBatchIds(anyCollection())).thenReturn(
-            List.of(service(SERVICE_ID, "Environment")));
-        when(propertyMapper.selectList(any())).thenReturn(
-            List.of(property(PROPERTY_ID, SERVICE_ID, "temperature", "温度")));
+        stubDb();
 
         List<TwinBindingResolver.BindingKey> keys = List.of(
             new TwinBindingResolver.BindingKey("Environment", "temperature"));
@@ -258,20 +235,12 @@ class TwinBindingResolverTest {
             .isNotEqualTo(TwinBindingResolver.key("a\u0000b", ""));
     }
 
-    private static IotService serviceEntity(long id) {
-        IotService service = new IotService();
-        service.setId(id);
-        service.setProductId(9_001L);
-        service.setServiceId("Environment");
-        return service;
-    }
-
     private static IotService service(long id, String serviceId) {
-        IotService service = new IotService();
-        service.setId(id);
-        service.setServiceId(serviceId);
-        service.setServiceName(serviceId + " 服务");
-        return service;
+        IotService svc = new IotService();
+        svc.setId(id);
+        svc.setServiceId(serviceId);
+        svc.setServiceName(serviceId + " 服务");
+        return svc;
     }
 
     private static IotProperty property(long id, long serviceId, String identifier, String name) {
@@ -299,10 +268,7 @@ class TwinBindingResolverTest {
     @Test
     @DisplayName("★ 读路径（默认 resolve）**绝不**写库：GET 端点不得有写副作用")
     void readPathMustNotWrite() {
-        when(propertyMapper.selectBatchIds(anyCollection())).thenReturn(
-            List.of(property(PROPERTY_ID, SERVICE_ID, "temperature", "温度")));
-        when(serviceMapper.selectBatchIds(anyCollection())).thenReturn(
-            List.of(service(SERVICE_ID, "Environment")));
+        stubDb();
 
         // 主键缓存悬空、但业务标识可解析 ⇒ 会命中「可自愈」条件
         Map<Long, TwinBindingResolver.ResolvedBinding> result =
@@ -315,5 +281,77 @@ class TwinBindingResolverTest {
         // 且浏览器预取/代理重放都会顺带改库
         verify(bindingMapper, times(0)).batchHealPropertyId(anyList());
         verify(bindingMapper, times(0)).update(any(), any());
+    }
+
+    /**
+     * 受约束的假库：**按入参作答，不存在就返回空**。
+     *
+     * <p>为什么必须这样：早前的 mock 用 `when(...).thenReturn(List.of(property(...)))`
+     * **无视入参**硬返回那一行，于是「只按主键查库」的实现即使完全拿不到数据也全绿 ——
+     * 独立复核正是靠这条假绿漏掉了「业务标识从未参与查库」的真实缺陷
+     * （属性行被物理删除后主键悬空 ⇒ selectBatchIds 返空 ⇒ 业务标识索引空 ⇒ 永远 stale）。</p>
+     *
+     * <p>这里按 SQL 语义模拟：按业务标识 IN 查服务、按 service_id IN 查属性、
+     * 按主键 IN 查属性（**只返回真的存在的**）。</p>
+     */
+    private void stubDb() {
+        List<IotService> services = List.of(service(SERVICE_ID, "Environment"));
+        List<IotProperty> properties = List.of(
+            property(PROPERTY_ID, SERVICE_ID, "temperature", "温度"),
+            property(PROPERTY_ID + 1, SERVICE_ID, "humidity", "湿度"));
+
+        when(serviceMapper.selectByServiceIdentifiers(anyCollection())).thenAnswer(inv -> {
+            Collection<?> wanted = inv.getArgument(0);
+            return services.stream().filter(svc -> wanted.contains(svc.getServiceId())).toList();
+        });
+        // 写侧（validateBindings / resolvePropertyIds）按 productId 查服务列表
+        when(serviceMapper.selectList(any())).thenReturn(services);
+        // 按 service_id IN 过滤（新实现的行为）：这里模拟「只返回请求到的那些服务的属性」
+        when(propertyMapper.selectList(any())).thenReturn(properties);
+        // 关键：按主键查时**只返回真的存在的行**（物理删除后就是空）
+        when(propertyMapper.selectBatchIds(anyCollection())).thenAnswer(inv -> {
+            Collection<?> wanted = inv.getArgument(0);
+            return properties.stream().filter(prop -> wanted.contains(prop.getId())).toList();
+        });
+        when(serviceMapper.selectBatchIds(anyCollection())).thenAnswer(inv -> {
+            Collection<?> wanted = inv.getArgument(0);
+            return services.stream().filter(svc -> wanted.contains(svc.getId())).toList();
+        });
+    }
+
+    /** 空库（服务行都不存在）。 */
+    private void stubEmptyDb() {
+        when(serviceMapper.selectByServiceIdentifiers(anyCollection())).thenReturn(List.of());
+        when(propertyMapper.selectList(any())).thenReturn(List.of());
+        when(propertyMapper.selectBatchIds(anyCollection())).thenReturn(List.of());
+        when(serviceMapper.selectBatchIds(anyCollection())).thenReturn(List.of());
+    }
+
+    @Test
+    @DisplayName("★ 属性行被物理删除（主键悬空）后：业务标识仍能解析，且**真的去查了库**")
+    void resolvesByBusinessIdentifierAfterPhysicalDelete() {
+        stubDb();
+        // 绑定里缓存的是已被删除的旧主键 9999；业务标识仍指向存在的 temperature
+        Map<Long, TwinBindingResolver.ResolvedBinding> result =
+            resolver.resolve(List.of(binding(1L, 9_999L, "Environment", "temperature")));
+
+        // 若实现只按主键查库，这里必然是 stale=true / propertyId=null（本用例会红）
+        assertThat(result.get(1L).getStale()).isFalse();
+        assertThat(result.get(1L).getPropertyId()).isEqualTo(PROPERTY_ID);
+        assertThat(result.get(1L).getPropertyName()).isEqualTo("温度");
+        // 且必须真的调用了「按业务标识查服务」——这是自愈链路的前提
+        verify(serviceMapper, times(1)).selectByServiceIdentifiers(anyCollection());
+    }
+
+    @Test
+    @DisplayName("★ 业务标识优先于主键缓存（主键被复用时不会误匹配到另一个属性）")
+    void businessIdentifierWinsOverStalePrimaryKey() {
+        stubDb();
+        // 绑定缓存的主键 6001 实际上属于 temperature，但业务标识写的是 humidity（6002）
+        Map<Long, TwinBindingResolver.ResolvedBinding> result =
+            resolver.resolve(List.of(binding(1L, PROPERTY_ID, "Environment", "humidity")));
+
+        assertThat(result.get(1L).getPropertyName()).isEqualTo("湿度");
+        assertThat(result.get(1L).getPropertyId()).isEqualTo(PROPERTY_ID + 1);
     }
 }

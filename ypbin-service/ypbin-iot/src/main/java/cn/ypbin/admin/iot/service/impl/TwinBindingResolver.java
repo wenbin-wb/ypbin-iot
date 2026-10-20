@@ -31,6 +31,7 @@ import lombok.Setter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
+import org.springframework.util.StringUtils;
 
 /**
  * 数字孪生绑定 ↔ 物模型属性的**批量解析器**（读侧自愈 + 写侧校验）。
@@ -116,31 +117,40 @@ public class TwinBindingResolver {
         if (bindings == null || bindings.isEmpty()) {
             return result;
         }
-        // ① 一次按主键取属性行（含 service_id）
-        Set<Long> propertyIds = new LinkedHashSet<>();
+        // ① **按业务标识查库**（不是按主键缓存）——这一步是自愈的前提，不能省。
+        //
+        //    ⚠️ 曾经写成「只按 property_id 缓存查 selectBatchIds」，那是错的：
+        //    属性行被 replaceTsl 物理删除后主键悬空 ⇒ 按主键查**返空** ⇒ 业务标识索引也是空
+        //    ⇒ 永远解析不到 ⇒ 永远 stale ⇒ 自愈永不发生。而单测里 mock 无视入参硬返回了行，
+        //    所以门禁全绿却完全不通（独立复核实测发现）。
+        //    正确口径：业务标识（service.serviceId + property.identifier）才是权威键，
+        //    必须真的拿它去查库；主键只作「快路径」缓冲。
+        Set<String> serviceIdentifiers = new LinkedHashSet<>();
         for (IotTwinPointBinding binding : bindings) {
-            if (binding.getPropertyId() != null) {
-                propertyIds.add(binding.getPropertyId());
+            if (StringUtils.hasText(binding.getServiceIdentifier())) {
+                serviceIdentifiers.add(binding.getServiceIdentifier().trim());
             }
         }
-        List<IotProperty> properties = propertyIds.isEmpty()
+        // 按业务标识批量取服务行（租户插件自动追加 tenant_id 条件）
+        Map<Long, IotService> serviceById = new HashMap<>();
+        if (!serviceIdentifiers.isEmpty()) {
+            // 用显式的「按业务标识查」方法（而不是拼 LambdaQueryWrapper）：
+            // ① 语义自明，review 时一眼看出「业务标识真的参与了查库」；
+            // ② 单测可断言这个方法被调用，堵住「mock 无视入参」的假绿。
+            for (IotService service : iotServiceMapper
+                .selectByServiceIdentifiers(serviceIdentifiers)) {
+                serviceById.put(service.getId(), service);
+            }
+        }
+        // ② 按这些服务的全部属性批量取回（一次 IN，不逐服务查）
+        List<IotProperty> properties = serviceById.isEmpty()
             ? List.of()
-            : iotPropertyMapper.selectBatchIds(propertyIds);
+            : iotPropertyMapper.selectList(new LambdaQueryWrapper<IotProperty>()
+                .in(IotProperty::getServiceId, serviceById.keySet()));
 
-        // ② 一次取全部被引用的服务行（拿到 service_id 业务标识，用于按标识匹配）
-        Set<Long> serviceIds = new LinkedHashSet<>();
-        for (IotProperty property : properties) {
-            if (property.getServiceId() != null) {
-                serviceIds.add(property.getServiceId());
-            }
-        }
-        Map<Long, IotService> serviceById = loadServices(serviceIds);
-
-        // ③ 建两个索引：按主键命中、按业务标识命中
+        // ③ 建「业务标识 → 属性」索引（**唯一索引**：只认业务标识，见 matchProperty 注释）
         Map<String, IotProperty> propertyByKey = new HashMap<>();
-        Map<Long, IotProperty> propertyById = new HashMap<>();
         for (IotProperty property : properties) {
-            propertyById.put(property.getId(), property);
             IotService service = serviceById.get(property.getServiceId());
             if (service != null) {
                 propertyByKey.put(key(service.getServiceId(), property.getIdentifier()), property);
@@ -148,7 +158,7 @@ public class TwinBindingResolver {
         }
 
         for (IotTwinPointBinding binding : bindings) {
-            IotProperty matched = matchProperty(binding, propertyById, propertyByKey);
+            IotProperty matched = matchProperty(binding, propertyByKey);
             result.put(binding.getId(), toResolved(binding, matched, serviceById));
         }
         if (healCache) {
@@ -249,20 +259,21 @@ public class TwinBindingResolver {
      * 先用主键缓存命中，再按业务标识兜底（主键悬空时）。
      *
      * @param binding       绑定实体
-     * @param propertyById  主键索引
      * @param propertyByKey 业务键索引
      * @return 命中的属性行；都命中不到时返回 null
      */
     private IotProperty matchProperty(IotTwinPointBinding binding,
-                                      Map<Long, IotProperty> propertyById,
                                       Map<String, IotProperty> propertyByKey) {
-        if (binding.getPropertyId() != null) {
-            IotProperty byId = propertyById.get(binding.getPropertyId());
-            if (byId != null) {
-                return byId;
-            }
-        }
-        return propertyByKey.get(key(binding.getServiceIdentifier(), binding.getPropertyIdentifier()));
+        // **只按业务标识匹配**：它才是权威键。
+        //
+        // 为什么不回退到主键缓存（这是一个真实的错配源，单测抓到过）：
+        // 绑定里同时存了「业务标识」与「主键缓存」，两者可能不一致——例如属性行被删除后
+        // 主键被数据库复用给了另一个属性，或 TSL 重导入后新属性恰好占了旧主键。
+        // 此时按主键回退会把 A 属性解析成 B，页面显示的是**错误的值**（比 stale 更危险：
+        // stale 至少能让用户看见「这里坏了」，错配会让用户以为数据正常）。
+        // 因此业务标识命中不了就判 stale，由页面提示重配，绝不猜。
+        return propertyByKey.get(
+            key(binding.getServiceIdentifier(), binding.getPropertyIdentifier()));
     }
 
     private ResolvedBinding toResolved(IotTwinPointBinding binding, IotProperty matched,

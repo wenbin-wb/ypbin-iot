@@ -11,8 +11,10 @@ package cn.ypbin.admin.iot.mapper;
 
 import cn.ypbin.admin.iot.entity.IotService;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import java.util.Collection;
 import java.util.List;
 import org.apache.ibatis.annotations.Delete;
+import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Param;
 
 /**
@@ -44,4 +46,22 @@ public interface IotServiceMapper extends BaseMapper<IotService> {
         + "<foreach collection='ids' item='id' open='(' separator=',' close=')'>#{id}</foreach>"
         + "</script>")
     int physicalDeleteByIds(@Param("ids") List<Long> ids);
+
+    /**
+     * 按**服务业务标识**批量查服务行（自愈链路专用）。
+     *
+     * <p>为什么必须有它：孪生绑定的权威键是 {@code (serviceIdentifier, propertyIdentifier)}，
+     * 而属性主键只是可能悬空的缓存。若只按主键查库，属性行被 TSL 重导入物理删除后
+     * 就永远查不到 ⇒ 自愈永不发生（独立复核实测发现的真实缺陷）。</p>
+     *
+     * <p>租户插件会给该 SELECT 追加 tenant_id 条件，故仍受租户隔离约束。</p>
+     *
+     * @param serviceIdentifiers 服务业务标识（调用方保证非空）
+     * @return 服务行（无匹配时为空列表）
+     */
+    @Select("<script>SELECT * FROM iot_service WHERE is_deleted = 0 AND service_id IN "
+        + "<foreach collection='serviceIdentifiers' item='sid' open='(' separator=',' close=')'>"
+        + "#{sid}</foreach></script>")
+    List<IotService> selectByServiceIdentifiers(
+        @Param("serviceIdentifiers") Collection<String> serviceIdentifiers);
 }
