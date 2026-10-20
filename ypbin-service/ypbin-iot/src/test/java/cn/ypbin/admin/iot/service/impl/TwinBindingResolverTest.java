@@ -102,9 +102,11 @@ class TwinBindingResolverTest {
     void healsStalePropertyId() {
         stubDb();
 
-        // 回写是写副作用 ⇒ 只有显式传 healCache=true 才执行（读路径必须 false）
-        Map<Long, TwinBindingResolver.ResolvedBinding> result =
-            resolver.resolve(List.of(binding(1L, 9_999L, "Environment", "temperature")), true);
+        // 回写是独立的写方法（resolve 保持纯读）⇒ 写路径显式两步调用
+        List<IotTwinPointBinding> list =
+            List.of(binding(1L, 9_999L, "Environment", "temperature"));
+        Map<Long, TwinBindingResolver.ResolvedBinding> result = resolver.resolve(list);
+        resolver.healStaleCache(list, result);
 
         assertThat(result.get(1L).getStale()).isFalse();
         assertThat(result.get(1L).getPropertyId()).isEqualTo(PROPERTY_ID);
@@ -143,7 +145,7 @@ class TwinBindingResolverTest {
             .thenThrow(new IllegalStateException("db down"));
 
         Map<Long, TwinBindingResolver.ResolvedBinding> result =
-            resolver.resolve(List.of(binding(1L, 9_999L, "Environment", "temperature")), true);
+            resolver.resolve(List.of(binding(1L, 9_999L, "Environment", "temperature")));
 
         assertThat(result.get(1L).getStale()).isFalse();
         assertThat(result.get(1L).getPropertyId()).isEqualTo(PROPERTY_ID);

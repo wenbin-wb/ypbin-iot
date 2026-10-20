@@ -87,32 +87,23 @@ public class TwinBindingResolver {
     }
 
     /**
-     * 解析一组绑定的展示信息（读侧）。
+     * 解析一组绑定（**纯读**）。
+     *
+     * <p><b>本方法必须保持「无任何写操作」——包括不能经由调用图到达写操作。</b>
+     * 它被两个 **GET** 端点调用（点位列表、运行态快照）。此前虽然用
+     * {@code if (healCache)} 把 UPDATE 挡住，但 CodeQL 的 CSRF 规则做的是**静态调用图可达性分析**
+     * （判据：`GET 端点 → … → DatabaseUpdateMethod`，见 CodeQL
+     * `CsrfUnprotectedRequestTypeQuery.qll`），**不追踪布尔参数** ⇒ 只要方法体里出现
+     * 对 `@Update` Mapper 方法的调用，GET 端点就会被判为「疑似状态变更」并报 CSRF。
+     * 所以回写必须物理隔离到 {@link #healStaleCache}（由写路径显式调用），
+     * 而不是靠运行时分支规避。</p>
+     *
+     * <p>解析不到属性的绑定返回 {@code stale=true}，由页面提示用户重配——**不猜、不静默丢弃**。</p>
      *
      * @param bindings 绑定实体（可为空列表）
-     * @return 绑定主键 → 解析结果（键集合与入参一一对应）
-     */
-    public Map<Long, ResolvedBinding> resolve(Collection<IotTwinPointBinding> bindings) {
-        return resolve(bindings, false);
-    }
-
-    /**
-     * 解析一组绑定，并**可选地**回写失效的主键缓存。
-     *
-     * <p><b>为什么读路径必须传 {@code healCache=false}</b>：回写是一次 UPDATE，而
-     * {@code resolve} 被两个 **GET** 端点调用（点位列表、运行态快照）。GET 带写副作用有两层问题：
-     * ① 语义上违反 HTTP 安全方法约定；② 安全扫描（CodeQL `java/csrf`）会把它判为
-     * 「非受 CSRF 保护的写操作」，在 PR 门禁上转红——而这不是误报，是**真实的接口语义缺陷**
-     * （浏览器预取、爬虫、代理重放都会顺带改库）。
-     * 因此读路径只解析、不回写（{@code stale} 标记照旧返回，页面据此提示重配）；
-     * 回写只发生在**写路径**（创建/编辑点位时顺手修正缓存）或后续显式维护动作里。</p>
-     *
-     * @param bindings  绑定实体（可为空列表）
-     * @param healCache 是否回写失效的主键缓存（**读路径必须传 false**）
      * @return 绑定主键 → 解析结果
      */
-    public Map<Long, ResolvedBinding> resolve(Collection<IotTwinPointBinding> bindings,
-                                              boolean healCache) {
+    public Map<Long, ResolvedBinding> resolve(Collection<IotTwinPointBinding> bindings) {
         Map<Long, ResolvedBinding> result = new LinkedHashMap<>();
         if (bindings == null || bindings.isEmpty()) {
             return result;
@@ -160,9 +151,6 @@ public class TwinBindingResolver {
         for (IotTwinPointBinding binding : bindings) {
             IotProperty matched = matchProperty(binding, propertyByKey);
             result.put(binding.getId(), toResolved(binding, matched, serviceById));
-        }
-        if (healCache) {
-            healStaleCache(bindings, result);
         }
         return result;
     }
@@ -306,7 +294,17 @@ public class TwinBindingResolver {
      * <p>只在「解析成功且主键与缓存不一致」时回写。回写失败只记 WARN 不影响本次响应
      * （读路径不该因为写失败而报错）。</p>
      */
-    private void healStaleCache(Collection<IotTwinPointBinding> bindings,
+    /**
+     * 回写失效的主键缓存（**写操作，只允许写路径调用**）。
+     *
+     * <p>独立成公开方法而不是塞进 {@link #resolve} 的可选分支，原因见 `resolve` 注释：
+     * CodeQL 的 CSRF 判据是静态调用图可达性，运行时布尔开关挡不住它。
+     * 本方法要求调用方**自己先 {@link #resolve} 一次**并把结果传进来，避免重复解析。</p>
+     *
+     * @param bindings 绑定实体
+     * @param resolved 已解析结果（key 为绑定主键）
+     */
+    public void healStaleCache(Collection<IotTwinPointBinding> bindings,
                                 Map<Long, ResolvedBinding> resolved) {
         List<IotTwinPointBinding> healing = new ArrayList<>();
         for (IotTwinPointBinding binding : bindings) {

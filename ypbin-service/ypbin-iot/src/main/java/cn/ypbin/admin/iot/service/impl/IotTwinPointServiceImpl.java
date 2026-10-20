@@ -475,8 +475,12 @@ public class IotTwinPointServiceImpl extends BaseServiceImpl<IotTwinPointMapper,
             if (bindings.isEmpty()) {
                 return;
             }
-            // healCache=true：显式开启回写（读路径永远传 false）
-            bindingResolver.resolve(bindings, true);
+            // 显式两步：先纯读解析，再由本方法（写路径）主动触发回写。
+            // 不把回写塞进 resolve 的可选分支——CodeQL 的 CSRF 判据是静态调用图可达性，
+            // 只要 resolve 能到达 @Update 方法，GET 端点就会被判为疑似状态变更。
+            Map<Long, TwinBindingResolver.ResolvedBinding> resolved =
+                bindingResolver.resolve(bindings);
+            bindingResolver.healStaleCache(bindings, resolved);
         } catch (RuntimeException ex) {
             log.warn("[iot] 孪生绑定缓存自愈失败（不影响本次保存，下次保存会重试）：sceneId={}",
                 sceneId, ex);
