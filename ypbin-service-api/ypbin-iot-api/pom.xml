@@ -37,6 +37,14 @@
         <!-- 开放 API 签名：复用 starter 的签名算法与规范化（OpenApiSignVerifier）。
              直接复用而非自写，避免两侧规范化差异导致"时对时错"。 -->
         <dependency>
+            <!-- issue #301②：设备导入的 CSV 切分改用 starter 的 CsvReader（RFC 4180 扫描器），
+                 替代本模块自建的 CsvLineSplitter（139 行重复实现）。
+                 取 starter-tools 会带入 redis/web/micrometer 等传递依赖——这些在消费本模块的
+                 各 Spring Boot 服务里本就存在；代价换来「CSV 语义只有一份实现」。 -->
+            <groupId>cn.ypbin</groupId>
+            <artifactId>ypbin-starter-tools</artifactId>
+        </dependency>
+        <dependency>
             <groupId>cn.ypbin</groupId>
             <artifactId>ypbin-starter-sign</artifactId>
         </dependency>

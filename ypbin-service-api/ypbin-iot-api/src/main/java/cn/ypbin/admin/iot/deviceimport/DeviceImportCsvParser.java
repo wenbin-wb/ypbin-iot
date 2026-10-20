@@ -9,8 +9,9 @@
  */
 package cn.ypbin.admin.iot.deviceimport;
 
-import cn.ypbin.admin.iot.deviceimport.CsvLineSplitter.CsvFormatException;
 import cn.ypbin.admin.iot.enums.DeviceImportErrorCode;
+import cn.ypbin.starter.tools.csv.CsvDocument;
+import cn.ypbin.starter.tools.csv.CsvReader;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CharsetDecoder;
@@ -216,8 +217,8 @@ public final class DeviceImportCsvParser {
     private HeaderResolution resolveHeader(String headerLine) {
         List<String> rawHeaders;
         try {
-            rawHeaders = CsvLineSplitter.split(headerLine);
-        } catch (CsvFormatException ex) {
+            rawHeaders = splitCells(headerLine);
+        } catch (CsvSyntaxException ex) {
             return new HeaderResolution(List.of(), DeviceImportErrorCode.HEADER_MISSING_COLUMN,
                 "表头行本身无法解析（" + ex.getMessage() + "）");
         }
@@ -279,8 +280,8 @@ public final class DeviceImportCsvParser {
         }
         List<String> fields;
         try {
-            fields = CsvLineSplitter.split(rawLine);
-        } catch (CsvFormatException ex) {
+            fields = splitCells(rawLine);
+        } catch (CsvSyntaxException ex) {
             return DeviceImportParseResult.ParsedRow.invalid(rowNo, rawLine, DeviceImportErrorCode.LINE_SYNTAX_INVALID,
                 ex.getMessage());
         }
@@ -313,6 +314,47 @@ public final class DeviceImportCsvParser {
             .onMalformedInput(CodingErrorAction.REPORT)
             .onUnmappableCharacter(CodingErrorAction.REPORT);
         return decoder.decode(ByteBuffer.wrap(content)).toString();
+    }
+
+    /**
+     * 切分一条 CSV 记录的字段。
+     *
+     * <p><b>为什么用 starter 的 {@code CsvReader} 而不是自建切分器</b>（issue #301②）：
+     * 「引号包裹 + 双引号转义 + 字段内逗号」的切分逻辑本仓曾自建 139 行的
+     * {@code CsvLineSplitter}，而 starter 4.1.0 的 {@code ypbin-starter-tools} 已提供同语义的
+     * {@code CsvReader}（RFC 4180 扫描器，含引号/转义/换行与明确错误码）。自建实现属重复，
+     * 故改为一律走框架实现——切换后的语义逐条对齐（见下方说明）。</p>
+     *
+     * <p><b>为什么逐行调用而不是整文件 {@code parseText}</b>：本解析器的对外契约之一是
+     * 「失败行**原样回吐**」（{@code FailedRow.rawLine} 用于生成可重传的失败行 CSV），
+     * 而 {@code CsvRow} 只带行号与单元格、不带原始文本；此外行级上限 {@code MAX_LINE_CHARS}
+     * 与逐行行号都依赖物理行。故保留逐行结构，只把「单行切分」这一层换成框架实现。</p>
+     *
+     * @param line 单条记录文本（不含行尾换行）
+     * @return 字段列表（空行返回只含一个空串的列表，与旧实现一致）
+     * @throws CsvSyntaxException 引号未闭合、引号位置非法等语法错误
+     */
+    private static List<String> splitCells(String line) {
+        if (line == null || line.isEmpty()) {
+            return List.of("");
+        }
+        CsvDocument document = CsvReader.parseText(line);
+        if (document.hasErrors()) {
+            throw new CsvSyntaxException(document.errors().get(0).message());
+        }
+        if (document.rows().isEmpty()) {
+            // 全空白行：框架按「空记录」跳过，这里对齐旧实现的「一个空字段」
+            return List.of("");
+        }
+        return document.rows().get(0).cells();
+    }
+
+    /** 单行 CSV 语法错误（仅在本类内部用于把框架错误转成业务错误码）。 */
+    private static final class CsvSyntaxException extends RuntimeException {
+
+        private CsvSyntaxException(String message) {
+            super(message);
+        }
     }
 
     /**
