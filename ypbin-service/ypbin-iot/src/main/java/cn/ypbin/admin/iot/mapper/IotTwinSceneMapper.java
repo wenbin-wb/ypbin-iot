@@ -10,6 +10,7 @@
 package cn.ypbin.admin.iot.mapper;
 
 import cn.ypbin.admin.iot.entity.IotTwinScene;
+import cn.ypbin.admin.iot.twin.TwinLimits;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import java.util.List;
 import java.util.Map;
@@ -45,6 +46,14 @@ public interface IotTwinSceneMapper extends BaseMapper<IotTwinScene> {
     List<Map<String, Object>> countPointsAndChildren(@Param("sceneIds") List<Long> sceneIds);
 
     /**
+     * 递归 CTE 的深度余量（在 {@link TwinLimits#MAX_SCENE_DEPTH} 之上多留的层数）。
+     *
+     * <p>留余量是为了让「层级过深」与「父子成环」都能在业务侧被识别并给出明确错误，
+     * 而不是在 CTE 层撞 MySQL 的递归上限（默认 1000）后抛出无业务含义的异常。</p>
+     */
+    int CTE_DEPTH_MARGIN = 2;
+
+    /**
      * 用**递归 CTE 一次取回**指定场景的完整父链（含自身），按「自身 → 根」倒序。
      *
      * <p><b>为什么必须是单条语句</b>：树深校验要沿 parentId 逐层上溯。若在 Java 里
@@ -69,7 +78,12 @@ public interface IotTwinSceneMapper extends BaseMapper<IotTwinScene> {
         + "UNION ALL "
         + "SELECT p.id, p.parent_id AS parentId, c.depth + 1 FROM iot_twin_scene p "
         + "INNER JOIN scene_chain c ON p.id = c.parentId "
-        + "WHERE p.is_deleted = 0 AND c.depth < 8"
+        + "WHERE p.is_deleted = 0 AND c.depth < "
+        // 深度硬上限 = MAX_SCENE_DEPTH + 2：用编译期常量拼接而不是写死 8。
+        // 为什么要 +2 余量：留出空间让「超深」与「成环」都能被业务侧判定并给出明确错误，
+        // 而不是在 CTE 层直接撞 MySQL 的 cte_max_recursion_depth（默认 1000）后报错。
+        // 写成字面量的话，将来调 MAX_SCENE_DEPTH 时此处不会同步（本仓「杜绝魔法值」红线）。
+        + (TwinLimits.MAX_SCENE_DEPTH + CTE_DEPTH_MARGIN)
         + ") SELECT id, parentId FROM scene_chain ORDER BY depth")
     List<Map<String, Object>> selectParentChain(@Param("sceneId") Long sceneId);
 }
