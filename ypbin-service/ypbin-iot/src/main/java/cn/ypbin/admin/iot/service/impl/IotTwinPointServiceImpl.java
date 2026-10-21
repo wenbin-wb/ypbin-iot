@@ -38,6 +38,7 @@ import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.core.exception.GlobalErrorCode;
 import cn.ypbin.starter.crud.service.BaseServiceImpl;
 import cn.ypbin.starter.tenant.core.TenantContext;
+import cn.ypbin.starter.tenant.core.TenantProvider;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.IdWorker;
 import java.math.BigDecimal;
@@ -83,6 +84,12 @@ public class IotTwinPointServiceImpl extends BaseServiceImpl<IotTwinPointMapper,
 
     private final IotDeviceMapper deviceMapper;
 
+    /**
+     * 租户来源：与 MyBatis-Plus 租户插件同源（ThreadLocal 优先，其次按请求身份）。
+     * 见 {@link #resolveTenantId()} 的说明。
+     */
+    private final TenantProvider tenantProvider;
+
     private final IotProductMapper productMapper;
 
     private final IotServiceMapper serviceMapper;
@@ -100,7 +107,8 @@ public class IotTwinPointServiceImpl extends BaseServiceImpl<IotTwinPointMapper,
                                    IotServiceMapper serviceMapper,
                                    IotPropertyMapper propertyMapper,
                                    IotPointMappingMapper pointMappingMapper,
-                                   TwinBindingResolver bindingResolver) {
+                                   TwinBindingResolver bindingResolver,
+                                   TenantProvider tenantProvider) {
         this.twinSceneMapper = twinSceneMapper;
         this.twinPointBindingMapper = twinPointBindingMapper;
         this.deviceMapper = deviceMapper;
@@ -109,6 +117,7 @@ public class IotTwinPointServiceImpl extends BaseServiceImpl<IotTwinPointMapper,
         this.propertyMapper = propertyMapper;
         this.pointMappingMapper = pointMappingMapper;
         this.bindingResolver = bindingResolver;
+        this.tenantProvider = tenantProvider;
     }
 
     @Override
@@ -469,11 +478,33 @@ public class IotTwinPointServiceImpl extends BaseServiceImpl<IotTwinPointMapper,
      *
      * @return 当前租户主键
      */
+    /**
+     * 解析本次写点位绑定应归属的租户（与 MyBatis-Plus 租户插件**完全同源**）。
+     *
+     * <p><b>解析链必须与插件一致</b>：{@code TenantContext}（ThreadLocal）优先，
+     * 其次回落到 {@link TenantProvider}（从 IdentityContext/请求身份取）。
+     * 这是本仓既有约定——{@code AvailabilityServiceImpl:1188}、
+     * {@code MaintenanceWindowServiceImpl:57}、{@code DeviceImportServiceImpl:759}
+     * 三处都写成 {@code TenantContext.getTenantId().or(tenantProvider::getCurrentTenantId)}。</p>
+     *
+     * <p><b>为什么不能只用 TenantContext（线上实测缺陷）</b>：平台管理员
+     * （{@code user_type=PLATFORM}）没有 ThreadLocal 租户上下文，但仓内**没有**租户切换
+     * 机制 ⇒ 只读 ThreadLocal 会让「默认账号 admin 永远无法配置点位」，
+     * 整个孪生配置能力对唯一可用的账号不可用。插件本身是靠 {@code TenantProvider}
+     * 兜底才给平台管理员写入正确 tenant_id 的，这里必须同源，否则还会出现
+     * 「插件按 A 租户写入、校验按 B 租户判断」的错位。</p>
+     *
+     * <p>两个来源都拿不到时才拒绝（fail-closed）：那时的正确动作是让用户补租户，
+     * 而不是猜一个租户把数据写错。</p>
+     *
+     * @return 租户主键
+     */
     private Long resolveTenantId() {
         return TenantContext.getTenantId()
+            .or(tenantProvider::getCurrentTenantId)
             .orElseThrow(() -> new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
-                "当前登录身份没有租户上下文，无法保存点位绑定："
-                    + "平台管理员需要先选择/切换到目标租户"));
+                "无法确定点位绑定归属的租户：请以租户账号登录，"
+                    + "或确认当前身份已关联租户"));
     }
 
 

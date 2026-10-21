@@ -38,12 +38,14 @@ import cn.ypbin.admin.iot.model.req.TwinBindingReq;
 import cn.ypbin.admin.iot.twin.TwinLimits;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.tenant.core.TenantContext;
+import cn.ypbin.starter.tenant.core.TenantProvider;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -85,6 +87,9 @@ class IotTwinPointServiceImplTest {
 
     private final TwinBindingResolver bindingResolver = mock(TwinBindingResolver.class);
 
+    /** 租户来源（与 MP 租户插件同源）。 */
+    private final TenantProvider tenantProvider = mock(TenantProvider.class);
+
     private final IotTwinPointMapper pointMapper = mock(IotTwinPointMapper.class);
 
     private IotTwinPointServiceImpl service;
@@ -99,7 +104,10 @@ class IotTwinPointServiceImplTest {
     @BeforeEach
     void setUp() {
         service = new IotTwinPointServiceImpl(sceneMapper, bindingMapper, deviceMapper,
-            productMapper, serviceMapper, propertyMapper, pointMappingMapper, bindingResolver);
+            productMapper, serviceMapper, propertyMapper, pointMappingMapper, bindingResolver,
+            tenantProvider);
+        // 默认让租户上下文可解析（平台管理员走 TenantProvider 回落，见 resolveTenantId）
+        when(tenantProvider.getCurrentTenantId()).thenReturn(Optional.of(TENANT_ID));
         ReflectionTestUtils.setField(service, "baseMapper", pointMapper);
         IotTwinScene scene = new IotTwinScene();
         scene.setId(SCENE_ID);
@@ -446,5 +454,42 @@ class IotTwinPointServiceImplTest {
         assertThatThrownBy(() -> service.create(SCENE_ID, req))
             .isInstanceOf(BusinessException.class)
             .hasMessageContaining("单位长度不能超过 " + TwinLimits.MAX_UNIT_LENGTH);
+    }
+
+    @Test
+    @DisplayName("★ 平台管理员（无 ThreadLocal 租户）也能建点位：回落 TenantProvider（线上缺陷回归）")
+    void platformAdminFallsBackToTenantProvider() {
+        // 线上实测：admin(user_type=PLATFORM) 没有 ThreadLocal 租户上下文 ⇒
+        // 旧实现只读 TenantContext 直接 409「没有租户上下文」，
+        // 而仓内**没有**租户切换机制 ⇒ 唯一可用账号永远无法配置点位。
+        // 修复：按仓内既有约定回落到 TenantProvider（与 MP 租户插件同源）。
+        TwinBindingReq b = binding("Environment", "temperature");
+        IotTwinPointReq req = req();
+        req.setBindings(List.of(b));
+        when(bindingResolver.resolvePropertyIds(anyLong(), any())).thenReturn(Map.of());
+        when(tenantProvider.getCurrentTenantId()).thenReturn(Optional.of(TENANT_ID));
+
+        // 不进入 TenantContext，仅靠 TenantProvider
+        TenantContext.clear();
+        assertThat(TenantContext.getTenantId()).isEmpty();
+
+        service.create(SCENE_ID, req);
+
+        verify(bindingMapper).insertBatch(anyList());
+    }
+
+    @Test
+    @DisplayName("两个租户来源都拿不到时才 fail-closed（不猜租户）")
+    void rejectsWhenNoTenantAtAll() {
+        TwinBindingReq b = binding("Environment", "temperature");
+        IotTwinPointReq req = req();
+        req.setBindings(List.of(b));
+        when(bindingResolver.resolvePropertyIds(anyLong(), any())).thenReturn(Map.of());
+        when(tenantProvider.getCurrentTenantId()).thenReturn(Optional.empty());
+
+        TenantContext.clear();
+        assertThatThrownBy(() -> service.create(SCENE_ID, req))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("无法确定点位绑定归属的租户");
     }
 }

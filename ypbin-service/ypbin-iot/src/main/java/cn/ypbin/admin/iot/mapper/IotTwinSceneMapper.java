@@ -73,10 +73,18 @@ public interface IotTwinSceneMapper extends BaseMapper<IotTwinScene> {
      * @return 每行 {@code id} / {@code parentId}，按 {@code depth} 升序（自身在前）
      */
     @Select("WITH RECURSIVE scene_chain AS ("
-        + "SELECT s.id, s.parent_id AS parentId, 0 AS depth FROM iot_twin_scene s "
+        // ⚠️ CTE 必须**输出 tenant_id 列**（本行 + 下方 UNION ALL 的对应列）。
+        // 原因（线上实测踩坑）：本仓 MyBatis-Plus 的租户插件用 JSqlParser 解析 SQL 后，
+        // 会把 CTE 名 `scene_chain` **当成一张真实表**，于是自动追加
+        //   `INNER JOIN scene_chain c ON ... AND c.tenant_id = ?`
+        //   `SELECT ... FROM scene_chain WHERE tenant_id = ?`
+        // 若 CTE 不输出该列，MySQL 直接报
+        //   `Unknown column 'c.tenant_id' in 'on clause'` ⇒ 创建任何**子场景**都 500。
+        // 单测里插件被 mock 掉，抓不到这个问题，只能靠真实库发现。
+        + "SELECT s.id, s.parent_id AS parentId, s.tenant_id, 0 AS depth FROM iot_twin_scene s "
         + "WHERE s.id = #{sceneId} AND s.is_deleted = 0 "
         + "UNION ALL "
-        + "SELECT p.id, p.parent_id AS parentId, c.depth + 1 FROM iot_twin_scene p "
+        + "SELECT p.id, p.parent_id AS parentId, p.tenant_id, c.depth + 1 FROM iot_twin_scene p "
         + "INNER JOIN scene_chain c ON p.id = c.parentId "
         + "WHERE p.is_deleted = 0 AND c.depth < "
         // 深度硬上限 = MAX_SCENE_DEPTH + 2：用编译期常量拼接而不是写死 8。
