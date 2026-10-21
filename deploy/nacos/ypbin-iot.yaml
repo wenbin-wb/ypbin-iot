@@ -310,6 +310,15 @@ ypbin:
   #    无任何策略，route(null) 抛「未指定存储平台且未配置默认平台」。
   #    （注：starter 的 StorageProperties javadoc 写「默认零配置时自动启用一个本地源」，
   #     但实际代码没有该分支——javadoc 与实现不符，已按实测代码为准，待反哺 starter。）
+  #
+  #     ⚠️ 该 javadoc 缺陷的**影响范围**（2026-10-21 核实，结论：不影响本部署，故暂不修）：
+  #       - 本文件**已显式配置** storage（default-platform + local[0]）⇒ 完全不依赖「零配置自动启用」；
+  #       - IotTwinModelAssetServiceImpl 调用时传的是 STORAGE_PLATFORM="twin"（非 null），
+  #         StorageRouter#route 不会走到「未指定存储平台」的异常分支；
+  #       - 生产代码**没有**任何逻辑依赖「零配置」行为，唯一提及它的是本服务的一处注释。
+  #       ⇒ 纯文档缺陷：只影响「引入 storage 模块但什么都没配」的新宿主（首个上传才报错，
+  #         且错误信息不指向 javadoc 误导这个根因）。
+  #       跟踪：ypbin-starter#113，攒到下个 starter 版本一起发，不在本仓做临时绕过。
   #    孪生模型上传是该缺口的第一个消费者，故在此显式配置一个本地源。
   #
   # ⚠️ domain 刻意留空：模型**一律经 API 流式下载**（/iot/twin/model-assets/{id}/content），
