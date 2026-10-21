@@ -14,7 +14,6 @@ import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.core.exception.GlobalErrorCode;
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Locale;
 import org.slf4j.Logger;
@@ -48,9 +47,6 @@ public class TwinModelFileGuard {
 
     /** glTF 2.x 的版本前缀（规范写法：{@code "2.0"}）。 */
     private static final String GLTF_VERSION_PREFIX = "2.";
-
-    /** {@code .gltf} 探测时最多读取的字节数（JSON 头部足够判定，不整文件读入内存）。 */
-    private static final int GLTF_PROBE_BYTES = 64 * 1024;
 
     private final ObjectMapper objectMapper;
 
@@ -116,20 +112,36 @@ public class TwinModelFileGuard {
         return new ProbeResult(declaredLength);
     }
 
+    /**
+     * 探测 {@code .gltf}（JSON 文本）。
+     *
+     * <p><b>必须流式解析整个文档，不能「只读前 N 字节再当完整 JSON 解析」</b>——
+     * 这是曾经的真实缺陷（独立复核实测发现）：旧实现只读前 64KB 就当完整 JSON 解析，
+     * 于是一个合法但较大的 {@code .gltf}（{@code asset} 出现在 64KB 之后）会被判为
+     * 「不是有效的 glTF JSON」而**无法上传**。而且截断还会把二进制文件解析成
+     * 一堆 U+FFFD 替换字符，错误信息同样误导。</p>
+     *
+     * <p>改为 {@code objectMapper.readTree(InputStream)}：Jackson 流式消费，<b>不把整个
+     * 文件读进内存</b>（64MB 上限的文本模型不会撑爆堆），同时能读到文档任意位置的
+     * {@code asset.version}。读完后只取需要的字段，其余内容随流丢弃。</p>
+     *
+     * @param content 文件内容流
+     * @return 探测结果
+     * @throws IOException 读取失败
+     */
     private ProbeResult probeGltf(InputStream content) throws IOException {
-        byte[] head = content.readNBytes(GLTF_PROBE_BYTES);
-        if (head.length == 0) {
-            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "文件内容为空");
-        }
-        String text = new String(head, StandardCharsets.UTF_8);
         JsonNode root;
         try {
-            root = objectMapper.readTree(text);
+            // 流式解析：Jackson 边读边解析，不会把 64MB 文本整体载入堆内存
+            root = objectMapper.readTree(content);
         } catch (JacksonException ex) {
-            log.warn("[iot] .gltf 文件头部不是合法 JSON，已拒绝", ex);
+            log.warn("[iot] .gltf 文件不是合法 JSON，已拒绝", ex);
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
                 "文件不是有效的 glTF JSON：" + ex.getOriginalMessage()
                     + "。若这是二进制 GLB 文件，请把扩展名改为 .glb 后重新上传");
+        }
+        if (root == null || root.isNull() || root.isMissingNode()) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "文件内容为空");
         }
         JsonNode asset = root.get("asset");
         if (asset == null || !asset.isObject()) {

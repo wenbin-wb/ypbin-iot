@@ -196,4 +196,40 @@ class TwinModelFileGuardTest {
         buf[offset + 2] = (byte) ((value >> 16) & 0xFF);
         buf[offset + 3] = (byte) ((value >> 24) & 0xFF);
     }
+
+    @Test
+    @DisplayName("★ 合法的大 .gltf（asset 在 64KB 之后）必须被接受")
+    void acceptsLargeGltfWithAssetBeyondOldProbeWindow() throws IOException {
+        // 这是真实缺陷的回归用例（独立复核实测发现）：
+        // 旧实现只读前 64KB 就当完整 JSON 解析 ⇒ asset 位于 64KB 之后的合法文件被拒。
+        // 构造一份合法 glTF：先用一个超长字符串字段把 asset 挤到 64KB 之后。
+        StringBuilder json = new StringBuilder("{\"scenes\":[],\"assetPadding\":\"");
+        // 70KB 填充（保证 asset 起始偏移 > 64KB）
+        json.append("x".repeat(70 * 1024));
+        json.append("\",\"asset\":{\"version\":\"2.0\"}}");
+        byte[] content = json.toString().getBytes(StandardCharsets.UTF_8);
+
+        // 前置断言：确认这份文件的 asset 确实在 64KB 之后（否则用例失去意义）
+        assertThat(content.length).isGreaterThan(64 * 1024);
+        assertThat(new String(content, StandardCharsets.UTF_8).indexOf("\"asset\""))
+            .isGreaterThan(64 * 1024);
+
+        TwinModelFileGuard.ProbeResult result = guard.probe("gltf",
+            new ByteArrayInputStream(content));
+
+        assertThat(result).isNotNull();
+    }
+
+    @Test
+    @DisplayName("纯二进制内容被当作 .gltf 上传时给出可理解的拒绝")
+    void rejectsBinaryDisguisedAsGltf() throws IOException {
+        // 随机二进制：流式 JSON 解析会失败，但错误信息要指向「扩展名可能写错」
+        byte[] binary = new byte[256];
+        for (int index = 0; index < binary.length; index++) {
+            binary[index] = (byte) (index % 256);
+        }
+        assertThatThrownBy(() -> guard.probe("gltf", new ByteArrayInputStream(binary)))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("不是有效的 glTF");
+    }
 }
