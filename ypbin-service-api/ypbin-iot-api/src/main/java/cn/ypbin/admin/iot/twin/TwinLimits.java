@@ -58,6 +58,16 @@ public final class TwinLimits {
     /** 点位备注长度上限。 */
     public static final int MAX_POINT_REMARK_LENGTH = 500;
 
+    /**
+     * 服务标识 / 属性标识的长度上限。
+     *
+     * <p>与 DDL 的 {@code iot_twin_point_binding.service_identifier VARCHAR(64)}、
+     * {@code property_identifier VARCHAR(64)} 以及物模型 {@code iot_service.service_id} /
+     * {@code iot_property.identifier} 的列宽一致。此前 DTO 里写的是裸 {@code 64}
+     * （工单 #309 遗留），改 DDL 时不会同步 ⇒ 收口到这里。</p>
+     */
+    public static final int MAX_IDENTIFIER_LENGTH = 64;
+
     /** 单位覆盖长度上限。 */
     public static final int MAX_UNIT_LENGTH = 32;
 

@@ -31,14 +31,23 @@ import lombok.Setter;
 @Setter
 public class TwinBindingReq {
 
-    /** 物模型服务标识。 */
+    /**
+     * 物模型服务标识。
+     *
+     * <p>长度上限引用 {@link TwinLimits#MAX_IDENTIFIER_LENGTH}（与 DDL 列宽同源）。
+     * 注意：注解的 {@code message} 必须是**编译期常量**，无法拼接该 {@code int} 常量，
+     * 故文案里的数字需在上限调整时同步手改 —— 这一处偏差由
+     * {@code TwinLimitsTest} 的「常量与 DDL 列宽一致」用例兜底（改 DDL 时会红）。</p>
+     */
     @NotBlank(message = "服务标识不能为空")
-    @Size(max = 64, message = "服务标识长度不能超过 64")
+    @Size(max = TwinLimits.MAX_IDENTIFIER_LENGTH,
+        message = "服务标识长度不能超过 64")
     private String serviceIdentifier;
 
-    /** 物模型属性标识。 */
+    /** 物模型属性标识（上限同上）。 */
     @NotBlank(message = "属性标识不能为空")
-    @Size(max = 64, message = "属性标识长度不能超过 64")
+    @Size(max = TwinLimits.MAX_IDENTIFIER_LENGTH,
+        message = "属性标识长度不能超过 64")
     private String propertyIdentifier;
 
     /** 展示形态：value | gauge | switch | color | sparkline（service 侧用枚举白名单校验）。 */
