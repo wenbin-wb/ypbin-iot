@@ -488,4 +488,45 @@ class TwinBindingResolverTest {
         assertThat(result.get(1L).getStale()).isTrue();
         assertThat(result.get(1L).getPropertyId()).isNull();
     }
+
+    @Test
+    @DisplayName("★ 自愈回写必须带「读到的旧值」作为乐观并发条件（#307）")
+    void healPassesOldValueForConcurrencyGuard() {
+        stubDb();
+        List<IotTwinPointBinding> list =
+            List.of(binding(1L, 9_999L, "Environment", "temperature"));
+        Map<Long, TwinBindingResolver.ResolvedBinding> result =
+            resolver.resolve(list, PRODUCT_MAP);
+        when(bindingMapper.batchHealPropertyId(anyList())).thenReturn(1);
+
+        resolver.healStaleCache(list, result);
+
+        // 断言 SQL 入参里带上了 oldPropertyId（= 读到的 9999），
+        // 若丢掉它，SQL 的 `property_id = old` 条件就无从生效，并发下会把新值改回旧值。
+        verify(bindingMapper).batchHealPropertyId(argThat(rows -> {
+            assertThat(rows).hasSize(1);
+            Object oldValue = rows.getFirst().get("oldPropertyId");
+            Object newValue = rows.getFirst().get("propertyId");
+            return Long.valueOf(9_999L).equals(oldValue)
+                && Long.valueOf(PROPERTY_ID).equals(newValue);
+        }));
+    }
+
+    @Test
+    @DisplayName("★ 影响行数少于待回写条数时不抛异常（并发保护生效，属预期）")
+    void healToleratesPartialUpdate() {
+        stubDb();
+        List<IotTwinPointBinding> list = List.of(
+            binding(1L, 9_999L, "Environment", "temperature"),
+            binding(2L, 9_999L, "Environment", "temperature"));
+        Map<Long, TwinBindingResolver.ResolvedBinding> result =
+            resolver.resolve(list, PRODUCT_MAP);
+        // 模拟「其中一条被并发改过」⇒ SQL 只更新了 1 条
+        when(bindingMapper.batchHealPropertyId(anyList())).thenReturn(1);
+
+        // 不抛异常：读路径不应因并发改写而失败
+        resolver.healStaleCache(list, result);
+
+        verify(bindingMapper, times(1)).batchHealPropertyId(anyList());
+    }
 }

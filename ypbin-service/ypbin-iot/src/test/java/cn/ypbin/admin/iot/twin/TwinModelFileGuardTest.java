@@ -232,4 +232,114 @@ class TwinModelFileGuardTest {
             .isInstanceOf(BusinessException.class)
             .hasMessageContaining("不是有效的 glTF");
     }
+
+    @Test
+    @DisplayName("★ 大 .gltf 探测内存不随文件大小膨胀（#308 回归）")
+    void largeGltfProbeUsesBoundedMemory() throws IOException {
+        // 独立复核实测：旧实现用 objectMapper.readTree 返回完整 JsonNode 树，
+        // 18.8MB 的合法 glTF 消耗约 242MB 堆（单节点开销约原始文本的 10~15 倍）；
+        // 按 64MB 上限推算需 800MB~1GB ⇒ 一次上传就可能打爆 iot 服务。
+        //
+        // 本用例在**独立线程 + 显式 GC + 受限堆**下测量探测引起的内存增量，
+        // 断言「增量远小于整树量级」：
+        //   - token 流式（读到 asset.version 即返回）⇒ 增量接近 0；
+        //   - readTree 整树 ⇒ 增量约为文件大小的 10 倍以上。
+        // 阈值取「文件大小的 2 倍」，两种实现差异极大（实测整树远超此值），不会被 GC 抖动掩盖。
+        StringBuilder json = new StringBuilder("{\"asset\":{\"version\":\"2.0\"},\"nodes\":[");
+        // 约 8MB 数组内容
+        for (int index = 0; index < 300_000; index++) {
+            if (index > 0) {
+                json.append(',');
+            }
+            json.append("{\"name\":\"node-").append(index).append('"').append('}');
+        }
+        json.append("]}");
+        final byte[] content = json.toString().getBytes(StandardCharsets.UTF_8);
+        final long fileMb = content.length / (1024 * 1024);
+        assertThat(fileMb).isGreaterThanOrEqualTo(6);
+
+        // 在独立线程里测，避免 JUnit 框架自身的分配干扰计数；
+        // 先跑一次预热（类加载、Jackson 初始化都在这一步完成）。
+        guard.probe("gltf", new ByteArrayInputStream(content));
+
+        long deltaBytes = measureHeapDelta(() -> {
+            try {
+                guard.probe("gltf", new ByteArrayInputStream(content));
+            } catch (IOException ex) {
+                throw new IllegalStateException(ex);
+            }
+        });
+        long deltaMb = deltaBytes / (1024 * 1024);
+
+        assertThat(deltaMb)
+            .as("探测 %d MB 的 gltf 后堆增量 %d MB。整树实现约为文件大小的 10 倍以上，"
+                + "流式实现应接近 0", fileMb, deltaMb)
+            .isLessThan(fileMb * 2);
+    }
+
+    /**
+     * 测量一段逻辑引起的堆占用增量（显式 GC 后取 used 差值）。
+     *
+     * @param action 被测逻辑
+     * @return 增量字节数（可能为负，表示期间被回收）
+     */
+    private static long measureHeapDelta(Runnable action) {
+        Runtime runtime = Runtime.getRuntime();
+        System.gc();
+        sleepBriefly();
+        long before = runtime.totalMemory() - runtime.freeMemory();
+        action.run();
+        long after = runtime.totalMemory() - runtime.freeMemory();
+        return after - before;
+    }
+
+    /** 让 GC 有时间真正完成（System.gc() 只是建议）。 */
+    private static void sleepBriefly() {
+        try {
+            Thread.sleep(120);
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    @Test
+    @DisplayName("★ asset 在文档末尾也要能读到（保留 02bdad8b 修的能力）")
+    void readsAssetVersionAnywhereInDocument() throws IOException {
+        // 历史缺陷：只读前 64KB 就当完整 JSON ⇒ asset 在后部时合法文件被拒。
+        // 改为 token 流式后必须仍能读到**任意位置**的 asset.version。
+        StringBuilder json = new StringBuilder("{\"nodes\":[");
+        for (int index = 0; index < 100_000; index++) {
+            if (index > 0) {
+                json.append(',');
+            }
+            json.append("{\"name\":\"n").append(index).append('"').append('}');
+        }
+        json.append("],\"asset\":{\"version\":\"2.0\"}}");
+        byte[] content = json.toString().getBytes(StandardCharsets.UTF_8);
+        // 前置断言：asset 起始位置确实超过旧的 64KB 窗口
+        assertThat(new String(content, StandardCharsets.UTF_8).indexOf("\"asset\""))
+            .isGreaterThan(64 * 1024);
+
+        assertThat(guard.probe("gltf", new ByteArrayInputStream(content))).isNotNull();
+    }
+
+    @Test
+    @DisplayName("★ 超长令牌数被拒绝（防 CPU 拖死）")
+    void rejectsExcessivelyComplexJson() throws IOException {
+        // asset 放在**最后**：这样必须先扫完超长数组才会读到 asset.version，
+        // 才能真正触发令牌上限（放前面会读到即返回，测不到上限）。
+        StringBuilder json = new StringBuilder("{\"nodes\":[");
+        for (int index = 0; index < 400_000; index++) {
+            if (index > 0) {
+                json.append(',');
+            }
+            json.append("{\"a\":1}");
+        }
+        json.append("],\"asset\":{\"version\":\"2.0\"}}");
+        byte[] content = json.toString().getBytes(StandardCharsets.UTF_8);
+
+        assertThatThrownBy(() -> guard.probe("gltf", new ByteArrayInputStream(content)))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("结构过于复杂");
+    }
 }

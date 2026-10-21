@@ -22,6 +22,8 @@ import java.io.InputStream;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Set;
+import java.util.Locale;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -64,6 +66,15 @@ public class IotTwinModelController {
     private static final Logger log = LoggerFactory.getLogger(IotTwinModelController.class);
 
     /** 下载时的缓存时长（秒）：同一模型反复进出场景不重复拉取。 */
+    /**
+     * 允许回给浏览器的模型 MIME 白名单（工单 #310）。
+     *
+     * <p>只放 glTF 规范的两种标准类型与通用二进制；其余（尤其 {@code text/html}）
+     * 一律降级为 octet-stream，避免「客户端自报 Content-Type」被浏览器采信。</p>
+     */
+    private static final Set<String> MODEL_CONTENT_TYPES = Set.of(
+        "model/gltf-binary", "model/gltf+json", "application/octet-stream");
+
     private static final long CACHE_MAX_AGE_SECONDS = 3600L;
 
     /** 下载文件名兜底（名称为空时用它，避免 Content-Disposition 出现空文件名）。 */
@@ -144,9 +155,13 @@ public class IotTwinModelController {
             return notModified.build();
         }
         ResponseEntity.BodyBuilder builder = ResponseEntity.ok()
-            .contentType(MediaType.parseMediaType(content.contentType()))
+            .contentType(safeContentType(content.contentType()))
             .header(HttpHeaders.CONTENT_DISPOSITION,
                 "inline; filename*=UTF-8''" + urlEncode(content.fileName()))
+            // 纵深防御（工单 #310）：Content-Disposition: inline + 缺 nosniff 时，
+            // 老版浏览器/部分爬虫会按**内容嗅探** MIME。contentType 来自上传时客户端
+            // 自报的值，若不 nosniff，一个「内容是 HTML」的文件可能被当 HTML 执行。
+            .header("X-Content-Type-Options", "nosniff")
             .header(HttpHeaders.CACHE_CONTROL, "private, max-age=" + CACHE_MAX_AGE_SECONDS);
         if (content.size() > 0) {
             builder.contentLength(content.size());
@@ -198,5 +213,28 @@ public class IotTwinModelController {
         } catch (IOException ex) {
             log.warn("[iot] 关闭模型内容流失败：assetId={}", id, ex);
         }
+    }
+
+    /**
+     * 把上传时记录的 contentType **收敛到白名单**后再回给浏览器。
+     *
+     * <p>为什么不能原样回显（工单 #310）：`Content-Type` 是**客户端自报**的
+     * （`MultipartFile#getContentType`），原样回显等于让上传者决定响应头。
+     * 收敛到 3D 模型应有的类型后，即使有人上传「内容是 HTML」的文件，
+     * 浏览器也只会把它当模型/二进制处理（配合 `nosniff` 双保险）。</p>
+     *
+     * @param stored 上传时记录的 contentType（可能为空或任意值）
+     * @return 白名单内的 MediaType；不在白名单内一律降级为 octet-stream
+     */
+    private MediaType safeContentType(String stored) {
+        if (stored == null || stored.isBlank()) {
+            return MediaType.APPLICATION_OCTET_STREAM;
+        }
+        String normalized = stored.trim().toLowerCase(Locale.ROOT);
+        // 只允许 glTF 的两种标准 MIME 与通用二进制
+        if (MODEL_CONTENT_TYPES.contains(normalized)) {
+            return MediaType.parseMediaType(normalized);
+        }
+        return MediaType.APPLICATION_OCTET_STREAM;
     }
 }

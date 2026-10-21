@@ -332,20 +332,19 @@ public class TwinBindingResolver {
      */
     public void healStaleCache(Collection<IotTwinPointBinding> bindings,
                                 Map<Long, ResolvedBinding> resolved) {
-        List<IotTwinPointBinding> healing = new ArrayList<>();
+        List<Map<String, Object>> healing = new ArrayList<>();
         for (IotTwinPointBinding binding : bindings) {
             ResolvedBinding hit = resolved.get(binding.getId());
             if (hit == null || Boolean.TRUE.equals(hit.getStale()) || hit.getPropertyId() == null) {
                 continue;
             }
             if (!hit.getPropertyId().equals(binding.getPropertyId())) {
-                // 只带批量更新需要的字段（不整行回写：那样会把读侧碰巧拿到的旧值写回去）
-                IotTwinPointBinding patch = new IotTwinPointBinding();
-                patch.setId(binding.getId());
-                patch.setPointId(binding.getPointId());
-                patch.setServiceIdentifier(binding.getServiceIdentifier());
-                patch.setPropertyIdentifier(binding.getPropertyIdentifier());
-                patch.setPropertyId(hit.getPropertyId());
+                // 每项带上**读到的旧值**（oldPropertyId），供 SQL 做乐观并发条件：
+                // 只有「库中仍是这一版」的行才会被更新（工单 #307）。
+                Map<String, Object> patch = new HashMap<>(4);
+                patch.put("id", binding.getId());
+                patch.put("oldPropertyId", binding.getPropertyId());
+                patch.put("propertyId", hit.getPropertyId());
                 healing.add(patch);
             }
         }
@@ -355,9 +354,18 @@ public class TwinBindingResolver {
         try {
             // **一条 CASE WHEN 语句**完成全部回写（不在循环里逐条 update——
             // 读路径上的写放大会直接把「打开场景」变成 N 次往返）。
-            twinPointBindingMapper.batchHealPropertyId(healing);
-            log.info("[iot] 孪生绑定主键缓存已自愈回写：count={} 条（属性行因 TSL 重导入换了主键）",
-                healing.size());
+            int affected = twinPointBindingMapper.batchHealPropertyId(healing);
+            if (affected == healing.size()) {
+                log.info("[iot] 孪生绑定主键缓存已自愈回写：count={} 条"
+                    + "（属性行因 TSL 重导入换了主键）", affected);
+            } else {
+                // 行数不符 ⇒ 期间有并发改写（另一请求已替换绑定或已完成自愈）。
+                // **必须记 WARN 而不是静默**：否则「自愈结论与库中值长期不一致、
+                // 来回抖动」这种问题只能靠翻痕迹猜。
+                log.warn("[iot] 孪生绑定主键缓存自愈部分跳过：期望 {} 条，实际 {} 条。"
+                        + "差额说明这些行在读取与回写之间被并发改写过（本次不覆盖新值，属预期保护）",
+                    healing.size(), affected);
+            }
         } catch (RuntimeException ex) {
             // 读路径不该因写失败而整体失败：记录完整堆栈并继续返回本次已解析的结果
             log.warn("[iot] 孪生绑定主键缓存回写失败（不影响本次读取）：count={} 条",

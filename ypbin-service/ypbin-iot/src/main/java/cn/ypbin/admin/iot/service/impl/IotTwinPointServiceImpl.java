@@ -324,10 +324,35 @@ public class IotTwinPointServiceImpl extends BaseServiceImpl<IotTwinPointMapper,
         if (bindings.isEmpty()) {
             return List.of();
         }
+        // **服务侧上限复核（工单 #309 的防御式双保险）**。
+        //
+        // 设计 D0.13 要求把上限「同时写进 Req 的 @Size 与服务侧复核」，因为 @Size 只在
+        // MVC 的 @Valid 入口生效，以下路径会绕过它：内部服务直接调用 create/update、
+        // 将来的批量导入/复制点位入口、定时任务回填。只做 DTO 一层等于没兑现设计。
+        //
+        // 错误文案与 DTO 的 message 保持一致，避免同一问题两种说法。
+        if (bindings.size() > TwinLimits.MAX_BINDINGS_PER_POINT) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "单个点位最多绑定 " + TwinLimits.MAX_BINDINGS_PER_POINT + " 个属性（当前 "
+                    + bindings.size() + " 个）");
+        }
         Set<String> seen = new HashSet<>();
         int primaryCount = 0;
         List<TwinBindingReq> normalized = new ArrayList<>(bindings.size());
         for (TwinBindingReq binding : bindings) {
+            // 数值维度也复核：@Size 只约束长度，decimals 的**取值范围**它管不了
+            if (binding.getDecimals() != null
+                && (binding.getDecimals() < 0
+                    || binding.getDecimals() > TwinLimits.MAX_DECIMALS)) {
+                throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                    "小数位必须在 0~" + TwinLimits.MAX_DECIMALS + " 之间（当前 "
+                        + binding.getDecimals() + "）");
+            }
+            if (binding.getUnitOverride() != null
+                && binding.getUnitOverride().length() > TwinLimits.MAX_UNIT_LENGTH) {
+                throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                    "单位长度不能超过 " + TwinLimits.MAX_UNIT_LENGTH + " 个字符");
+            }
             TwinDisplayType displayType = TwinDisplayType.of(binding.getDisplayType());
             if (displayType == null) {
                 throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,

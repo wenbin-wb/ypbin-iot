@@ -12,6 +12,7 @@ package cn.ypbin.admin.iot.mapper;
 import cn.ypbin.admin.iot.entity.IotTwinPointBinding;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import java.util.List;
+import java.util.Map;
 import org.apache.ibatis.annotations.Delete;
 import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Param;
@@ -84,6 +85,26 @@ public interface IotTwinPointBindingMapper extends BaseMapper<IotTwinPointBindin
      *             propertyId；调用方保证非空）
      * @return 影响行数
      */
+    /**
+     * 批量自愈回写 {@code property_id} 缓存（单条 CASE WHEN，无 N+1）。
+     *
+     * <p><b>为什么 `WHERE` 里必须有 {@code oldPropertyId} 条件（工单 #307）</b>：
+     * 本方法在写事务内执行，而「读绑定 → 解析 → 回写」之间存在并发窗口
+     * （另一请求可能已完成整体替换绑定，或完成了一次自愈）。若无旧值条件，
+     * 本事务会用**读到的旧结论**无条件覆盖，把别人刚写的新值改回旧值 ⇒
+     * 自愈结论与库中值长期不一致、来回抖动，日志重复刷「已自愈回写」掩盖真实问题。</p>
+     *
+     * <p>加旧值条件后，被并发改过的行自然 0 行受影响（调用方据此记 WARN，不静默）。</p>
+     *
+     * <p>取值为 {@code NULL} 的旧值需要单独分支：SQL 里 {@code property_id = NULL} 恒为
+     * UNKNOWN，必须用 {@code IS NULL}。</p>
+     *
+     * @param list 每项是一个 Map，含 {@code id} / {@code propertyId}（新值）/
+     *             {@code oldPropertyId}（读到的旧值）。
+     *             用 Map 而不是给实体加字段：{@code oldPropertyId} 不是表列，
+     *             塞进实体会被 MyBatis-Plus 当成不存在的列。
+     * @return 实际更新行数（可能小于入参，说明发生并发改写）
+     */
     @Update("<script>UPDATE iot_twin_point_binding SET property_id = CASE "
         + "<foreach collection='list' item='item'>"
         + "WHEN id = #{item.id} THEN #{item.propertyId} "
@@ -91,6 +112,16 @@ public interface IotTwinPointBindingMapper extends BaseMapper<IotTwinPointBindin
         + "END, update_time = NOW() WHERE id IN "
         + "<foreach collection='list' item='item' open='(' separator=',' close=')'>"
         + "#{item.id}"
-        + "</foreach></script>")
-    int batchHealPropertyId(@Param("list") List<IotTwinPointBinding> list);
+        + "</foreach>"
+        // 旧值条件：只更新「仍是我们读到的那一版」的行。
+        // 注意 NULL 与 NOT NULL 必须分开写：SQL 的三值逻辑里 `col = NULL` 永远不成立。
+        + " AND ( "
+        + "<foreach collection='list' item='item' separator=' OR '>"
+        + "(id = #{item.id} AND ("
+        + "(#{item.oldPropertyId} IS NULL AND property_id IS NULL) OR "
+        + "(#{item.oldPropertyId} IS NOT NULL AND property_id = #{item.oldPropertyId})"
+        + "))"
+        + "</foreach>"
+        + " )</script>")
+    int batchHealPropertyId(@Param("list") List<Map<String, Object>> list);
 }

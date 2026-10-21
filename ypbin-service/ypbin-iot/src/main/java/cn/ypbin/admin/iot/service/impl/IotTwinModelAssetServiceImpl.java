@@ -137,7 +137,20 @@ public class IotTwinModelAssetServiceImpl
         checkAssetNameUnique(resolvedName);
         // ③ 内容头部（魔数 / glTF 版本）
         try (InputStream probeStream = file.getInputStream()) {
-            fileGuard.probe(format, probeStream);
+            TwinModelFileGuard.ProbeResult probeResult =
+                fileGuard.probe(format, probeStream);
+            // **消费 probe 的结论**（工单 #310）：`.glb` 头部声明了总长度，
+            // 但不与真实文件大小比对就等于「算了不用」。手工构造一个头部声明
+            // length=0xFFFFFFFF 的小文件可绕过全部校验落存储，渲染端 three.js 会按声明
+            // 长度分配缓冲（GB 量级）⇒ 用户浏览器崩溃。
+            // `.gltf` 无法从头部预知长度（declaredLength = -1），跳过该比对。
+            if (probeResult.declaredLength() > 0
+                && probeResult.declaredLength() != file.getSize()) {
+                throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                    "GLB 文件头声明的长度（" + probeResult.declaredLength()
+                        + " 字节）与实际文件大小（" + file.getSize()
+                        + " 字节）不一致，文件可能已损坏或被截断");
+            }
         }
         List<String> normalizedNodeNames = fileGuard.normalizeNodeNames(nodeNames);
         String nodeNamesJson = serializeNodeNames(normalizedNodeNames);
@@ -417,6 +430,15 @@ public class IotTwinModelAssetServiceImpl
     private String contentUrl(IotTwinModelAsset asset) {
         if (TwinAssetType.EXTERNAL.getCode().equals(asset.getAssetType())) {
             return asset.getExternalUrl();
+        }
+        // 未落库的资产**没有**可下载地址（工单 #311）。
+        // 旧实现直接拼字符串 ⇒ `asset.getId()` 为 null 时产出
+        // `/iot/twin/model-assets/null/content` 这种坏地址，而单测把这个坏行为
+        // 写成了期望值（等于把错误固化成契约）。
+        // 这里显式失败：拼出一个必然 404 的 URL 比直接报错更难排查。
+        if (asset.getId() == null) {
+            throw new IllegalStateException(
+                "模型资产尚未落库（id 为空），无法生成下载地址");
         }
         return CONTENT_URL_PREFIX + asset.getId() + CONTENT_URL_SUFFIX;
     }

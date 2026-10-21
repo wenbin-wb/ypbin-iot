@@ -20,7 +20,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import tools.jackson.core.JacksonException;
-import tools.jackson.databind.JsonNode;
+import tools.jackson.core.JsonParser;
+import tools.jackson.core.JsonToken;
 import tools.jackson.databind.ObjectMapper;
 
 /**
@@ -47,6 +48,15 @@ public class TwinModelFileGuard {
 
     /** glTF 2.x 的版本前缀（规范写法：{@code "2.0"}）。 */
     private static final String GLTF_VERSION_PREFIX = "2.";
+
+    /**
+     * {@code .gltf} 探测允许扫描的 JSON 令牌上限。
+     *
+     * <p>防「结构合法但超长」的文件拖住线程：token 流式读取是 O(文件大小)，
+     * 一个 64MB、含百万级数组元素的文件仍会占住线程较久。100 万令牌对真实模型足够宽裕
+     * （合法 glTF 的 {@code asset} 总在文档前部附近）。</p>
+     */
+    private static final int MAX_JSON_TOKENS = 1_000_000;
 
     private final ObjectMapper objectMapper;
 
@@ -113,49 +123,106 @@ public class TwinModelFileGuard {
     }
 
     /**
-     * 探测 {@code .gltf}（JSON 文本）。
+     * 探测 {@code .gltf}（JSON 文本）——**真正的流式 token 读取**。
      *
-     * <p><b>必须流式解析整个文档，不能「只读前 N 字节再当完整 JSON 解析」</b>——
-     * 这是曾经的真实缺陷（独立复核实测发现）：旧实现只读前 64KB 就当完整 JSON 解析，
-     * 于是一个合法但较大的 {@code .gltf}（{@code asset} 出现在 64KB 之后）会被判为
-     * 「不是有效的 glTF JSON」而**无法上传**。而且截断还会把二进制文件解析成
-     * 一堆 U+FFFD 替换字符，错误信息同样误导。</p>
+     * <h3>为什么不能只读前 N 字节（历史缺陷 1）</h3>
+     * 旧实现只读前 64KB 就当完整 JSON 解析 ⇒ 一个合法但较大的 {@code .gltf}
+     * （{@code asset} 出现在 64KB 之后）会被判为「不是有效的 glTF JSON」而**无法上传**。
+     * 且截断会把二进制内容解成一堆 U+FFFD，错误信息同样误导。
      *
-     * <p>改为 {@code objectMapper.readTree(InputStream)}：Jackson 流式消费，<b>不把整个
-     * 文件读进内存</b>（64MB 上限的文本模型不会撑爆堆），同时能读到文档任意位置的
-     * {@code asset.version}。读完后只取需要的字段，其余内容随流丢弃。</p>
+     * <h3>为什么也不能用 {@code readTree(InputStream)}（历史缺陷 2，实测取证）</h3>
+     * 上一版改成 {@code objectMapper.readTree(content)} 并注释「流式消费、不把文件读进内存」，
+     * 这个说法是<b>错的</b>：{@code readTree} 返回**完整 JsonNode 树**，"流式"的只是 IO，
+     * 不是内存占用。实测 18.8MB 的合法 glTF 消耗约 <b>242MB 堆</b>（单节点开销远大于原始
+     * 文本，约 10~15 倍），按 64MB 上限推算需 800MB~1GB ⇒ **一次上传就可能把 iot 服务
+     * 打爆**（不只是该请求失败）。
+     *
+     * <h3>现在的做法</h3>
+     * 用 {@link JsonParser} 逐 token 扫描：只在顶层 {@code asset} 对象里取
+     * {@code version}，读到即返回，**内存占用与文件大小无关**。
+     * 同时用 {@link #MAX_JSON_TOKENS} 限制扫描的 token 总数，防止「超长数组」拖住 CPU。
+     *
+     * <p>两种历史缺陷的能力要求都保留：能读到文档<b>任意位置</b>的 {@code asset.version}
+     * （不退回只读前 N 字节），且不整体驻留内存。</p>
      *
      * @param content 文件内容流
-     * @return 探测结果
+     * @return 探测结果（{@code .gltf} 无法从头部预知总长度，声明长度返回 -1）
      * @throws IOException 读取失败
      */
     private ProbeResult probeGltf(InputStream content) throws IOException {
-        JsonNode root;
-        try {
-            // 流式解析：Jackson 边读边解析，不会把 64MB 文本整体载入堆内存
-            root = objectMapper.readTree(content);
+        // 当前嵌套深度：顶层对象内部为 1
+        int depth = 0;
+        // 是否已见到顶层 asset 对象
+        boolean seenAsset = false;
+        // 进入 asset 时的深度（离开该深度即说明 asset 已结束）
+        int assetDepth = -1;
+        int tokenCount = 0;
+        String fieldName = null;
+        boolean sawAnyToken = false;
+        try (JsonParser parser = objectMapper.createParser(content)) {
+            for (JsonToken token = parser.nextToken(); token != null;
+                 token = parser.nextToken()) {
+                sawAnyToken = true;
+                tokenCount++;
+                if (tokenCount > MAX_JSON_TOKENS) {
+                    throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                        "文件结构过于复杂（JSON 令牌数超过 " + MAX_JSON_TOKENS
+                            + "），已拒绝。请先用 gltf-pipeline 等工具优化模型后再上传");
+                }
+                if (token == JsonToken.START_OBJECT || token == JsonToken.START_ARRAY) {
+                    depth++;
+                    continue;
+                }
+                if (token == JsonToken.END_OBJECT || token == JsonToken.END_ARRAY) {
+                    depth--;
+                    if (assetDepth >= 0 && depth < assetDepth) {
+                        // asset 对象已结束：若期间没读到 version ⇒ 缺失（规范必须）
+                        assetDepth = -1;
+                    }
+                    continue;
+                }
+                if (token == JsonToken.PROPERTY_NAME) {
+                    fieldName = parser.currentName();
+                    if (depth == 1 && "asset".equals(fieldName)) {
+                        // asset 必须是对象；否则结构不合法
+                        if (parser.nextToken() != JsonToken.START_OBJECT) {
+                            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                                "文件不是有效的 glTF：asset 不是对象（glTF 2.0 规范要求）");
+                        }
+                        depth++;
+                        seenAsset = true;
+                        assetDepth = depth;
+                    }
+                    continue;
+                }
+                // 值 token：只在「顶层 asset 的直接子字段 version」上取值
+                if (assetDepth == depth && "version".equals(fieldName)) {
+                    String version = token == JsonToken.VALUE_STRING ? parser.getText() : null;
+                    if (version == null || !version.startsWith(GLTF_VERSION_PREFIX)) {
+                        throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                            "不支持的 glTF 版本：" + (version == null ? "未声明" : version)
+                                + "（只支持 glTF " + TwinLimits.GLTF_VERSION + "）");
+                    }
+                    // 拿到 version 即可下结论，**不必继续扫完整个文件**
+                    return new ProbeResult(-1);
+                }
+            }
         } catch (JacksonException ex) {
             log.warn("[iot] .gltf 文件不是合法 JSON，已拒绝", ex);
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
                 "文件不是有效的 glTF JSON：" + ex.getOriginalMessage()
                     + "。若这是二进制 GLB 文件，请把扩展名改为 .glb 后重新上传");
         }
-        if (root == null || root.isNull() || root.isMissingNode()) {
+        if (!sawAnyToken) {
+            // 空文件是**独立**的失败原因，不该被归为「缺少 asset」（两者修复动作不同）
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "文件内容为空");
         }
-        JsonNode asset = root.get("asset");
-        if (asset == null || !asset.isObject()) {
+        if (!seenAsset) {
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
                 "文件不是有效的 glTF：顶层缺少 asset 对象（glTF 2.0 规范要求）");
         }
-        JsonNode versionNode = asset.get("version");
-        String version = versionNode == null || versionNode.isNull() ? null : versionNode.asString();
-        if (version == null || !version.startsWith(GLTF_VERSION_PREFIX)) {
-            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
-                "不支持的 glTF 版本：" + (version == null ? "未声明" : version)
-                    + "（只支持 glTF " + TwinLimits.GLTF_VERSION + "）");
-        }
-        return new ProbeResult(-1L);
+        throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+            "不支持的 glTF 版本：未声明（只支持 glTF " + TwinLimits.GLTF_VERSION + "）");
     }
 
     /**

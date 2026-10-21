@@ -41,6 +41,7 @@ import cn.ypbin.starter.tenant.core.TenantContext;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
@@ -377,5 +378,73 @@ class IotTwinPointServiceImplTest {
         binding.setPropertyIdentifier(propertyIdentifier);
         binding.setDisplayType("value");
         return binding;
+    }
+
+    @Test
+    @DisplayName("★ 13 条绑定被服务侧拒绝（不依赖 MVC 的 @Valid，#309）")
+    void rejectsTooManyBindingsAtServiceLayer() {
+        // 绕过 MVC 校验：直接调 service（内部调用/批量导入/定时任务都走这条路）
+        List<TwinBindingReq> tooMany = new ArrayList<>();
+        for (int index = 0; index < TwinLimits.MAX_BINDINGS_PER_POINT + 1; index++) {
+            tooMany.add(binding("Environment", "prop" + index));
+        }
+        IotTwinPointReq req = req();
+        req.setBindings(tooMany);
+
+        assertThatThrownBy(() -> service.create(SCENE_ID, req))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("最多绑定 " + TwinLimits.MAX_BINDINGS_PER_POINT);
+    }
+
+    @Test
+    @DisplayName("★ 恰好 12 条绑定被接受（边界值不误杀）")
+    void acceptsExactlyMaxBindings() {
+        List<TwinBindingReq> exact = new ArrayList<>();
+        for (int index = 0; index < TwinLimits.MAX_BINDINGS_PER_POINT; index++) {
+            TwinBindingReq item = binding("Environment", "prop" + index);
+            // 只有第一条是 primary，其余 secondary
+            item.setDisplayRole(index == 0 ? "primary" : "secondary");
+            exact.add(item);
+        }
+        IotTwinPointReq req = req();
+        req.setBindings(exact);
+        when(bindingResolver.resolvePropertyIds(anyLong(), any())).thenReturn(Map.of());
+
+        TenantContext.executeWithTenant(TENANT_ID, () -> service.create(SCENE_ID, req));
+        verify(bindingResolver).validateBindings(eq(PRODUCT_ID), any());
+    }
+
+    @Test
+    @DisplayName("★ decimals 越界被服务侧拒绝（@Size 管不了取值范围，#309）")
+    void rejectsOutOfRangeDecimals() {
+        TwinBindingReq bad = binding("Environment", "temperature");
+        bad.setDecimals(TwinLimits.MAX_DECIMALS + 1);
+        IotTwinPointReq req = req();
+        req.setBindings(List.of(bad));
+
+        assertThatThrownBy(() -> service.create(SCENE_ID, req))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("小数位必须在 0~" + TwinLimits.MAX_DECIMALS);
+
+        TwinBindingReq negative = binding("Environment", "temperature");
+        negative.setDecimals(-1);
+        IotTwinPointReq req2 = req();
+        req2.setBindings(List.of(negative));
+        assertThatThrownBy(() -> service.create(SCENE_ID, req2))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("小数位必须在 0~" + TwinLimits.MAX_DECIMALS);
+    }
+
+    @Test
+    @DisplayName("★ 单位超长被服务侧拒绝（#309）")
+    void rejectsTooLongUnitOverride() {
+        TwinBindingReq bad = binding("Environment", "temperature");
+        bad.setUnitOverride("x".repeat(TwinLimits.MAX_UNIT_LENGTH + 1));
+        IotTwinPointReq req = req();
+        req.setBindings(List.of(bad));
+
+        assertThatThrownBy(() -> service.create(SCENE_ID, req))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("单位长度不能超过 " + TwinLimits.MAX_UNIT_LENGTH);
     }
 }

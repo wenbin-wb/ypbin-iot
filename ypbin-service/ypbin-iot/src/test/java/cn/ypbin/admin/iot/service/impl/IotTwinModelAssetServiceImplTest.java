@@ -139,7 +139,13 @@ class IotTwinModelAssetServiceImplTest {
         info.setPath("models/2026/10/21/abc.glb");
         when(fileStorageService.upload(any(), anyString()).platform(anyString())
             .path(anyString()).contentType(any()).size(anyLong()).execute()).thenReturn(info);
-        when(assetMapper.insert(any(IotTwinModelAsset.class))).thenReturn(1);
+        // 真实环境里 save() 会把雪花 id 回填到实体（MyBatis-Plus 主键回写）；
+        // mock 必须模拟这一点，否则 contentUrl 的「未落库」保护会误触发（#311）。
+        when(assetMapper.insert(any(IotTwinModelAsset.class))).thenAnswer(invocation -> {
+            IotTwinModelAsset inserted = invocation.getArgument(0);
+            inserted.setId(4_242L);
+            return 1;
+        });
         when(assetMapper.countSceneReferences(any())).thenReturn(List.of());
 
         IotTwinModelAssetResp resp = service.upload(file, "厂房模型", List.of("A", "B"));
@@ -147,7 +153,9 @@ class IotTwinModelAssetServiceImplTest {
         assertThat(resp.getAssetName()).isEqualTo("厂房模型");
         assertThat(resp.getAssetType()).isEqualTo("upload");
         assertThat(resp.getModelFormat()).isEqualTo("glb");
-        assertThat(resp.getContentUrl()).isEqualTo("/iot/twin/model-assets/null/content");
+        // upload 场景：contentUrl 指向平台下载端点，且 id 非空时拼接正确（工单 #311）
+        assertThat(resp.getContentUrl())
+            .isEqualTo("/iot/twin/model-assets/4242/content");
         assertThat(resp.getContentHash()).isNotBlank();
         assertThat(resp.getNodeNames()).containsExactly("A", "B");
         verify(assetMapper).insert(any(IotTwinModelAsset.class));
@@ -195,6 +203,12 @@ class IotTwinModelAssetServiceImplTest {
         when(fileStorageService.upload(any(), anyString()).platform(anyString())
             .path(anyString()).contentType(any()).size(anyLong()).execute()).thenReturn(info);
         when(assetMapper.countSceneReferences(any())).thenReturn(List.of());
+        // 模拟 save() 的主键回填（contentUrl 依赖 id 非空，见 #311）
+        when(assetMapper.insert(any(IotTwinModelAsset.class))).thenAnswer(invocation -> {
+            IotTwinModelAsset inserted = invocation.getArgument(0);
+            inserted.setId(4_243L);
+            return 1;
+        });
 
         IotTwinModelAssetResp resp = service.upload(file, null, null);
 
@@ -430,5 +444,45 @@ class IotTwinModelAssetServiceImplTest {
         asset.setContentHash("hash");
         asset.setOriginalName("a.glb");
         return asset;
+    }
+
+    @Test
+    @DisplayName("★ GLB 头部声明长度与实际大小不符时拒绝上传（#310）")
+    void rejectsGlbWithMismatchedDeclaredLength() throws IOException {
+        // 手工构造：魔数正确、版本正确，但头部声明 length = 0xFFFFFFFF，
+        // 实际只有 28 字节。旧实现「算了不用」⇒ 这种文件能通过全部校验落存储，
+        // 渲染端 three.js 会按声明长度分配 GB 级缓冲 ⇒ 用户浏览器崩溃。
+        byte[] glb = new byte[28];
+        writeIntLe(glb, 0, TwinLimits.GLB_MAGIC);
+        writeIntLe(glb, 4, TwinLimits.GLTF_VERSION);
+        writeIntLe(glb, 8, 0xFFFFFFFF);
+        MockMultipartFile file = new MockMultipartFile("file", "evil.glb",
+            "model/gltf-binary", glb);
+
+        assertThatThrownBy(() -> service.upload(file, "恶意模型", null))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("不一致");
+    }
+
+    @Test
+    @DisplayName("★ 声明长度与实际一致时正常通过（校验不误杀）")
+    void acceptsGlbWithConsistentDeclaredLength() throws IOException {
+        byte[] glb = glbBytes(); // 声明长度 = 实际长度 = 28
+        MockMultipartFile file = new MockMultipartFile("file", "ok.glb",
+            "model/gltf-binary", glb);
+        FileInfo info = new FileInfo();
+        info.setPlatform("twin");
+        info.setBucket("");
+        info.setPath("models/ok.glb");
+        when(fileStorageService.upload(any(), anyString()).platform(anyString())
+            .path(anyString()).contentType(any()).size(anyLong()).execute()).thenReturn(info);
+        when(assetMapper.insert(any(IotTwinModelAsset.class))).thenAnswer(invocation -> {
+            IotTwinModelAsset inserted = invocation.getArgument(0);
+            inserted.setId(4_244L);
+            return 1;
+        });
+        when(assetMapper.countSceneReferences(any())).thenReturn(List.of());
+
+        assertThat(service.upload(file, "正常模型", null).getAssetName()).isEqualTo("正常模型");
     }
 }
