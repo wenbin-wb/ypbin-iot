@@ -10,6 +10,7 @@
 package cn.ypbin.admin.iot.service;
 
 import cn.ypbin.admin.iot.model.req.IotTwinModelExternalReq;
+import cn.ypbin.admin.iot.model.req.IotTwinModelRenameReq;
 import cn.ypbin.admin.iot.model.resp.IotTwinModelAssetResp;
 import java.io.IOException;
 import java.io.InputStream;
@@ -53,6 +54,20 @@ public interface IotTwinModelAssetService {
      * @return 新资产
      */
     IotTwinModelAssetResp createExternal(IotTwinModelExternalReq req);
+
+    /**
+     * 重命名模型资产（**只改名称**，不动文件与存储信息）。
+     *
+     * <p>为什么需要这个能力：模型名称在上传时若未显式指定，会用文件名去扩展名
+     * （如 {@code factory}），而用户从台账里认模型靠的就是名字。没有改名入口时，
+     * 只能「删掉重新上传」——但删掉会被引用保护拦住（`countSceneReferences > 0`），
+     * 用户因此**永远改不了名字**，属完整功能缺口。</p>
+     *
+     * @param id  资产主键
+     * @param req 重命名请求（仅含新名称）
+     * @return 更新后的资产（含 contentUrl 与引用数）
+     */
+    IotTwinModelAssetResp rename(Long id, IotTwinModelRenameReq req);
 
     /**
      * 打开模型内容流（仅 {@code asset_type=upload}）。

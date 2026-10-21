@@ -15,6 +15,7 @@ import cn.ypbin.admin.iot.enums.TwinAssetType;
 import cn.ypbin.admin.iot.mapper.IotTwinModelAssetMapper;
 import cn.ypbin.admin.iot.mapper.IotTwinSceneMapper;
 import cn.ypbin.admin.iot.model.req.IotTwinModelExternalReq;
+import cn.ypbin.admin.iot.model.req.IotTwinModelRenameReq;
 import cn.ypbin.admin.iot.model.resp.IotTwinModelAssetResp;
 import cn.ypbin.admin.iot.service.IotTwinModelAssetService;
 import cn.ypbin.admin.iot.twin.TwinLimits;
@@ -206,6 +207,40 @@ public class IotTwinModelAssetServiceImpl
         asset.setModelFormat(format);
         asset.setExternalUrl(url);
         save(asset);
+        return toRespList(List.of(asset)).getFirst();
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public IotTwinModelAssetResp rename(Long id, IotTwinModelRenameReq req) {
+        IotTwinModelAsset asset = requireAsset(id);
+        String newName = req.getAssetName().trim();
+        if (newName.length() > TwinLimits.MAX_ASSET_NAME_LENGTH) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "模型名称长度不能超过 " + TwinLimits.MAX_ASSET_NAME_LENGTH);
+        }
+        // **幂等**：改成和原来一样的名字直接返回成功。
+        // 为什么不做成报错：前端可能因为重复点击/网络重试再发一次同名请求，
+        // 报错会让用户以为「改名失败」，而实际上目标状态已经满足。
+        if (newName.equals(asset.getAssetName())) {
+            return toRespList(List.of(asset)).getFirst();
+        }
+        // 前置查重（排除自身）：给出可读文案，而不是把 DuplicateKeyException 抛给用户
+        Long sameName = baseMapper.selectCount(new LambdaQueryWrapper<IotTwinModelAsset>()
+            .eq(IotTwinModelAsset::getAssetName, newName)
+            .ne(IotTwinModelAsset::getId, id));
+        if (sameName != null && sameName > 0) {
+            throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
+                "模型名称已存在：" + newName + "。请换一个名称（同一租户内模型名必须唯一）");
+        }
+
+        // 只改名称：格式/存储路径/内容哈希/节点名快照都描述「文件本身」，改名不该动它们
+        IotTwinModelAsset patch = new IotTwinModelAsset();
+        patch.setId(asset.getId());
+        patch.setAssetName(newName);
+        updateById(patch);
+
+        asset.setAssetName(newName);
         return toRespList(List.of(asset)).getFirst();
     }
 

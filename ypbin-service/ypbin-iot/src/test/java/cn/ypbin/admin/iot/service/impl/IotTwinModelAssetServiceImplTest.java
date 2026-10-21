@@ -12,6 +12,7 @@ package cn.ypbin.admin.iot.service.impl;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doThrow;
@@ -25,6 +26,7 @@ import cn.ypbin.admin.iot.entity.IotTwinModelAsset;
 import cn.ypbin.admin.iot.entity.IotTwinScene;
 import cn.ypbin.admin.iot.mapper.IotTwinModelAssetMapper;
 import cn.ypbin.admin.iot.mapper.IotTwinSceneMapper;
+import cn.ypbin.admin.iot.model.req.IotTwinModelRenameReq;
 import cn.ypbin.admin.iot.model.req.IotTwinModelExternalReq;
 import cn.ypbin.admin.iot.model.resp.IotTwinModelAssetResp;
 import cn.ypbin.admin.iot.service.IotTwinModelAssetService;
@@ -484,5 +486,103 @@ class IotTwinModelAssetServiceImplTest {
         when(assetMapper.countSceneReferences(any())).thenReturn(List.of());
 
         assertThat(service.upload(file, "正常模型", null).getAssetName()).isEqualTo("正常模型");
+    }
+
+    @Test
+    @DisplayName("★ 改名：只改 assetName，不动存储/格式/哈希/节点名")
+    void renameOnlyChangesName() {
+        IotTwinModelAsset existing = asset("upload");
+        existing.setId(7_001L);
+        existing.setAssetName("旧名字");
+        existing.setModelFormat("glb");
+        existing.setStoragePath("models/a.glb");
+        existing.setContentHash("abc123");
+        existing.setNodeNamesJson("[\"Floor\"]");
+        when(assetMapper.selectById(7_001L)).thenReturn(existing);
+        when(assetMapper.selectCount(any())).thenReturn(0L);
+        when(assetMapper.updateById(any(IotTwinModelAsset.class))).thenReturn(1);
+        when(assetMapper.countSceneReferences(any())).thenReturn(List.of());
+
+        IotTwinModelRenameReq req = new IotTwinModelRenameReq();
+        req.setAssetName("新名字");
+        IotTwinModelAssetResp resp = service.rename(7_001L, req);
+
+        assertThat(resp.getAssetName()).isEqualTo("新名字");
+        // 其余字段必须原样保留（改名不能变成"重建资产"）
+        assertThat(resp.getModelFormat()).isEqualTo("glb");
+        assertThat(resp.getContentHash()).isEqualTo("abc123");
+        assertThat(resp.getNodeNames()).containsExactly("Floor");
+        // **只提交 id + assetName**（补丁对象）——这正是「只改名称」的证据：
+        // 若把整行回写，会把读侧碰巧拿到的旧值也写回去，还可能覆盖并发修改。
+        verify(assetMapper).updateById(argThat(
+            (IotTwinModelAsset patch) -> "新名字".equals(patch.getAssetName())
+                && patch.getId() != null
+                && patch.getStoragePath() == null
+                && patch.getContentHash() == null));
+    }
+
+    @Test
+    @DisplayName("★ 改名幂等：改成同名直接成功，且不发 UPDATE")
+    void renameToSameNameIsIdempotent() {
+        IotTwinModelAsset existing = asset("upload");
+        existing.setId(7_002L);
+        existing.setAssetName("同一个名字");
+        when(assetMapper.selectById(7_002L)).thenReturn(existing);
+        when(assetMapper.countSceneReferences(any())).thenReturn(List.of());
+
+        IotTwinModelRenameReq req = new IotTwinModelRenameReq();
+        req.setAssetName("同一个名字");
+        IotTwinModelAssetResp resp = service.rename(7_002L, req);
+
+        assertThat(resp.getAssetName()).isEqualTo("同一个名字");
+        // 幂等：不该产生写操作（前端重复点击/重试不应制造多余 UPDATE）
+        verify(assetMapper, never()).updateById(any(IotTwinModelAsset.class));
+    }
+
+    @Test
+    @DisplayName("★ 改名重名：给出可读文案（不把 DuplicateKeyException 抛给用户）")
+    void renameToDuplicateNameRejected() {
+        IotTwinModelAsset existing = asset("upload");
+        existing.setId(7_003L);
+        existing.setAssetName("当前名字");
+        when(assetMapper.selectById(7_003L)).thenReturn(existing);
+        when(assetMapper.selectCount(any())).thenReturn(1L);
+
+        IotTwinModelRenameReq req = new IotTwinModelRenameReq();
+        req.setAssetName("已被占用的名字");
+
+        assertThatThrownBy(() -> service.rename(7_003L, req))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("模型名称已存在")
+            .hasMessageContaining("已被占用的名字");
+        verify(assetMapper, never()).updateById(any(IotTwinModelAsset.class));
+    }
+
+    @Test
+    @DisplayName("★ 改名：资产不存在时明确报错")
+    void renameMissingAssetRejected() {
+        when(assetMapper.selectById(9_999L)).thenReturn(null);
+        IotTwinModelRenameReq req = new IotTwinModelRenameReq();
+        req.setAssetName("随便");
+
+        assertThatThrownBy(() -> service.rename(9_999L, req))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("模型资产不存在");
+    }
+
+    @Test
+    @DisplayName("★ 改名：超长名称被拒绝（与 DDL 列宽一致）")
+    void renameTooLongRejected() {
+        IotTwinModelAsset existing = asset("upload");
+        existing.setId(7_004L);
+        existing.setAssetName("短名字");
+        when(assetMapper.selectById(7_004L)).thenReturn(existing);
+
+        IotTwinModelRenameReq req = new IotTwinModelRenameReq();
+        req.setAssetName("x".repeat(TwinLimits.MAX_ASSET_NAME_LENGTH + 1));
+
+        assertThatThrownBy(() -> service.rename(7_004L, req))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("长度不能超过 " + TwinLimits.MAX_ASSET_NAME_LENGTH);
     }
 }

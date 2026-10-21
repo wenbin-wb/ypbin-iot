@@ -10,6 +10,7 @@
 package cn.ypbin.admin.iot.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
+import cn.ypbin.admin.iot.model.req.IotTwinModelRenameReq;
 import cn.ypbin.admin.iot.model.req.IotTwinModelExternalReq;
 import cn.ypbin.admin.iot.model.resp.IotTwinModelAssetResp;
 import cn.ypbin.admin.iot.service.IotTwinModelAssetService;
@@ -37,6 +38,7 @@ import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -170,6 +172,24 @@ public class IotTwinModelController {
             builder.eTag(content.contentHash());
         }
         return builder.body(new InputStreamResource(content.stream()));
+    }
+
+    /**
+     * 重命名模型资产（只改名称，不动文件与存储信息）。
+     *
+     * <p>权限用 {@code iot:twin:update}：改名属于「修改已有配置」，
+     * 与创建/删除分开授权更合理（允许设计师改文案式名称、但不允许他删模型）。</p>
+     *
+     * @param id  资产主键
+     * @param req 重命名请求
+     * @return 更新后的资产
+     */
+    @PutMapping("/{id}/name")
+    @SaCheckPermission("iot:twin:update")
+    @Log("重命名数字孪生模型")
+    public R<IotTwinModelAssetResp> rename(@PathVariable Long id,
+                                           @Valid @RequestBody IotTwinModelRenameReq req) {
+        return R.ok(twinModelAssetService.rename(id, req));
     }
 
     /**
