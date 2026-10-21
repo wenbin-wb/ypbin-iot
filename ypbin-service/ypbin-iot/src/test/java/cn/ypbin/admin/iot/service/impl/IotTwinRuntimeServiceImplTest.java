@@ -14,6 +14,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -123,7 +124,7 @@ class IotTwinRuntimeServiceImplTest {
         when(pointMapper.selectList(any())).thenReturn(List.of(
             point(POINT_ID, DEVICE_ID), point(POINT_ID + 1, DEVICE_ID + 1)));
         when(bindingMapper.selectList(any())).thenReturn(List.of());
-        when(bindingResolver.resolve(anyCollection())).thenReturn(Map.of());
+        when(bindingResolver.resolve(anyCollection(), anyMap())).thenReturn(Map.of());
         when(deviceMapper.selectBatchIds(anyCollection())).thenReturn(List.of(device(DEVICE_ID)));
         when(latestValueQueryService.listLatestBatch(anyList())).thenReturn(Map.of());
         when(alertInstanceService.activeCountsByDevice(anyList())).thenReturn(Map.of());
@@ -146,7 +147,8 @@ class IotTwinRuntimeServiceImplTest {
         TwinBindingResolver.ResolvedBinding resolved = new TwinBindingResolver.ResolvedBinding();
         resolved.setBindingId(binding.getId());
         resolved.setStale(false);
-        when(bindingResolver.resolve(anyCollection())).thenReturn(Map.of(binding.getId(), resolved));
+        when(bindingResolver.resolve(anyCollection(), anyMap()))
+            .thenReturn(Map.of(binding.getId(), resolved));
         when(deviceMapper.selectBatchIds(anyCollection())).thenReturn(List.of(device(DEVICE_ID)));
         LatestValueResp latest = new LatestValueResp();
         latest.setPropertyId("temperature");
@@ -177,7 +179,8 @@ class IotTwinRuntimeServiceImplTest {
         resolved.setBindingId(binding.getId());
         resolved.setStale(true);
         resolved.setPropertyName("gone");
-        when(bindingResolver.resolve(anyCollection())).thenReturn(Map.of(binding.getId(), resolved));
+        when(bindingResolver.resolve(anyCollection(), anyMap()))
+            .thenReturn(Map.of(binding.getId(), resolved));
         when(deviceMapper.selectBatchIds(anyCollection())).thenReturn(List.of(device(DEVICE_ID)));
         when(latestValueQueryService.listLatestBatch(anyList())).thenReturn(Map.of());
         when(alertInstanceService.activeCountsByDevice(anyList())).thenReturn(Map.of());
@@ -192,7 +195,7 @@ class IotTwinRuntimeServiceImplTest {
     void deletedDeviceKeptWithNullFields() {
         when(pointMapper.selectList(any())).thenReturn(List.of(point(POINT_ID, DEVICE_ID)));
         when(bindingMapper.selectList(any())).thenReturn(List.of());
-        when(bindingResolver.resolve(anyCollection())).thenReturn(Map.of());
+        when(bindingResolver.resolve(anyCollection(), anyMap())).thenReturn(Map.of());
         when(deviceMapper.selectBatchIds(anyCollection())).thenReturn(List.of());
         when(latestValueQueryService.listLatestBatch(anyList())).thenReturn(Map.of());
         when(alertInstanceService.activeCountsByDevice(anyList())).thenReturn(Map.of());
@@ -212,7 +215,7 @@ class IotTwinRuntimeServiceImplTest {
     void alertDisabledDegradesToZero() {
         when(pointMapper.selectList(any())).thenReturn(List.of(point(POINT_ID, DEVICE_ID)));
         when(bindingMapper.selectList(any())).thenReturn(List.of());
-        when(bindingResolver.resolve(anyCollection())).thenReturn(Map.of());
+        when(bindingResolver.resolve(anyCollection(), anyMap())).thenReturn(Map.of());
         when(deviceMapper.selectBatchIds(anyCollection())).thenReturn(List.of(device(DEVICE_ID)));
         when(latestValueQueryService.listLatestBatch(anyList())).thenReturn(Map.of());
         when(alertInstanceService.activeCountsByDevice(anyList()))
@@ -228,7 +231,7 @@ class IotTwinRuntimeServiceImplTest {
     void deviceSnapshotFieldsCopied() {
         when(pointMapper.selectList(any())).thenReturn(List.of(point(POINT_ID, DEVICE_ID)));
         when(bindingMapper.selectList(any())).thenReturn(List.of());
-        when(bindingResolver.resolve(anyCollection())).thenReturn(Map.of());
+        when(bindingResolver.resolve(anyCollection(), anyMap())).thenReturn(Map.of());
         IotDevice device = device(DEVICE_ID);
         device.setDeviceCode("PUMP-03");
         device.setDeviceName("3 号泵");
@@ -254,7 +257,7 @@ class IotTwinRuntimeServiceImplTest {
     void metadataConsistent() {
         when(pointMapper.selectList(any())).thenReturn(List.of(point(POINT_ID, DEVICE_ID)));
         when(bindingMapper.selectList(any())).thenReturn(List.of());
-        when(bindingResolver.resolve(anyCollection())).thenReturn(Map.of());
+        when(bindingResolver.resolve(anyCollection(), anyMap())).thenReturn(Map.of());
         when(deviceMapper.selectBatchIds(anyCollection())).thenReturn(List.of(device(DEVICE_ID)));
         when(latestValueQueryService.listLatestBatch(anyList())).thenReturn(Map.of());
         when(alertInstanceService.activeCountsByDevice(anyList())).thenReturn(Map.of());

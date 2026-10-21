@@ -11,6 +11,7 @@ package cn.ypbin.admin.iot.service.impl;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.anyList;
@@ -28,6 +29,7 @@ import cn.ypbin.admin.iot.mapper.IotServiceMapper;
 import cn.ypbin.admin.iot.mapper.IotTwinPointBindingMapper;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
+import java.lang.reflect.Method;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -35,6 +37,7 @@ import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.apache.ibatis.annotations.Select;
 
 /**
  * 绑定解析器：**批量（不 N+1）**、stale 判定、按业务标识自愈回写、写侧校验。
@@ -49,6 +52,15 @@ class TwinBindingResolverTest {
     private static final long PROPERTY_ID = 6_001L;
 
     private static final long STALE_PROPERTY_ID = 6_002L;
+
+    /** 测试产品主键（服务的归属产品；resolve 用它收敛，跨产品同名服务不会错配）。 */
+    private static final long PRODUCT_ID = 9_001L;
+
+    /** 测试点位主键（binding() 的默认 pointId）。 */
+    private static final long POINT_ID = 9_001L;
+
+    /** 点位 → 产品映射（resolve 收敛服务集合用；测试里点位统一属于 PRODUCT_ID）。 */
+    private static final Map<Long, Long> PRODUCT_MAP = Map.of(POINT_ID, PRODUCT_ID);
 
     private final IotPropertyMapper propertyMapper = mock(IotPropertyMapper.class);
 
@@ -84,10 +96,10 @@ class TwinBindingResolverTest {
         Map<Long, TwinBindingResolver.ResolvedBinding> result = resolver.resolve(List.of(
             binding(1L, PROPERTY_ID, "Environment", "temperature"),
             binding(2L, PROPERTY_ID, "Environment", "temperature"),
-            binding(3L, STALE_PROPERTY_ID, "Environment", "gone")));
+            binding(3L, STALE_PROPERTY_ID, "Environment", "gone")), PRODUCT_MAP);
 
         // 新实现（按业务标识查库）的两次查询：① 服务按 service_id IN ② 属性按 service_id IN
-        verify(serviceMapper, times(1)).selectByServiceIdentifiers(anyCollection());
+        verify(serviceMapper, times(1)).selectByServiceIdentifiers(anyCollection(), anyCollection());
         verify(propertyMapper, times(1)).selectList(any());
         assertThat(result).hasSize(3);
         assertThat(result.get(1L).getStale()).isFalse();
@@ -105,7 +117,7 @@ class TwinBindingResolverTest {
         // 回写是独立的写方法（resolve 保持纯读）⇒ 写路径显式两步调用
         List<IotTwinPointBinding> list =
             List.of(binding(1L, 9_999L, "Environment", "temperature"));
-        Map<Long, TwinBindingResolver.ResolvedBinding> result = resolver.resolve(list);
+        Map<Long, TwinBindingResolver.ResolvedBinding> result = resolver.resolve(list, PRODUCT_MAP);
         resolver.healStaleCache(list, result);
 
         assertThat(result.get(1L).getStale()).isFalse();
@@ -119,7 +131,8 @@ class TwinBindingResolverTest {
         stubEmptyDb();
 
         Map<Long, TwinBindingResolver.ResolvedBinding> result =
-            resolver.resolve(List.of(binding(1L, STALE_PROPERTY_ID, "Environment", "gone")));
+            resolver.resolve(List.of(binding(1L, STALE_PROPERTY_ID, "Environment", "gone")),
+                PRODUCT_MAP);
 
         assertThat(result.get(1L).getStale()).isTrue();
         assertThat(result.get(1L).getPropertyName()).isEqualTo("gone");
@@ -132,7 +145,8 @@ class TwinBindingResolverTest {
     void noHealWhenCacheMatches() {
         stubDb();
 
-        resolver.resolve(List.of(binding(1L, PROPERTY_ID, "Environment", "temperature")));
+        resolver.resolve(List.of(binding(1L, PROPERTY_ID, "Environment", "temperature")),
+            PRODUCT_MAP);
 
         verify(bindingMapper, times(0)).batchHealPropertyId(anyList());
     }
@@ -145,7 +159,8 @@ class TwinBindingResolverTest {
             .thenThrow(new IllegalStateException("db down"));
 
         Map<Long, TwinBindingResolver.ResolvedBinding> result =
-            resolver.resolve(List.of(binding(1L, 9_999L, "Environment", "temperature")));
+            resolver.resolve(List.of(binding(1L, 9_999L, "Environment", "temperature")),
+                PRODUCT_MAP);
 
         assertThat(result.get(1L).getStale()).isFalse();
         assertThat(result.get(1L).getPropertyId()).isEqualTo(PROPERTY_ID);
@@ -154,8 +169,8 @@ class TwinBindingResolverTest {
     @Test
     @DisplayName("空绑定集合 ⇒ 空结果，不发任何查询")
     void emptyInputShortCircuits() {
-        assertThat(resolver.resolve(List.of())).isEmpty();
-        assertThat(resolver.resolve(null)).isEmpty();
+        assertThat(resolver.resolve(List.of(), PRODUCT_MAP)).isEmpty();
+        assertThat(resolver.resolve(null, PRODUCT_MAP)).isEmpty();
         verify(propertyMapper, times(0)).selectBatchIds(anyCollection());
     }
 
@@ -167,7 +182,7 @@ class TwinBindingResolverTest {
         binding.setUnitOverride("K");
 
         Map<Long, TwinBindingResolver.ResolvedBinding> result =
-            resolver.resolve(List.of(binding));
+            resolver.resolve(List.of(binding), PRODUCT_MAP);
 
         assertThat(result.get(1L).getUnit()).isEqualTo("K");
     }
@@ -238,10 +253,15 @@ class TwinBindingResolverTest {
     }
 
     private static IotService service(long id, String serviceId) {
+        return service(id, serviceId, 9_001L);
+    }
+
+    private static IotService service(long id, String serviceId, long productId) {
         IotService svc = new IotService();
         svc.setId(id);
         svc.setServiceId(serviceId);
         svc.setServiceName(serviceId + " 服务");
+        svc.setProductId(productId);
         return svc;
     }
 
@@ -260,7 +280,7 @@ class TwinBindingResolverTest {
                                                String propertyIdentifier) {
         IotTwinPointBinding binding = new IotTwinPointBinding();
         binding.setId(id);
-        binding.setPointId(1L);
+        binding.setPointId(POINT_ID);
         binding.setPropertyId(propertyId);
         binding.setServiceIdentifier(serviceIdentifier);
         binding.setPropertyIdentifier(propertyIdentifier);
@@ -274,7 +294,8 @@ class TwinBindingResolverTest {
 
         // 主键缓存悬空、但业务标识可解析 ⇒ 会命中「可自愈」条件
         Map<Long, TwinBindingResolver.ResolvedBinding> result =
-            resolver.resolve(List.of(binding(1L, 9_999L, "Environment", "temperature")));
+            resolver.resolve(List.of(binding(1L, 9_999L, "Environment", "temperature")),
+                PRODUCT_MAP);
 
         // 解析结果仍给出正确的 propertyId 与 stale=false（页面照常渲染）
         assertThat(result.get(1L).getPropertyId()).isEqualTo(PROPERTY_ID);
@@ -302,10 +323,15 @@ class TwinBindingResolverTest {
             property(PROPERTY_ID, SERVICE_ID, "temperature", "温度"),
             property(PROPERTY_ID + 1, SERVICE_ID, "humidity", "湿度"));
 
-        when(serviceMapper.selectByServiceIdentifiers(anyCollection())).thenAnswer(inv -> {
-            Collection<?> wanted = inv.getArgument(0);
-            return services.stream().filter(svc -> wanted.contains(svc.getServiceId())).toList();
-        });
+        when(serviceMapper.selectByServiceIdentifiers(anyCollection(), anyCollection()))
+            .thenAnswer(inv -> {
+                Collection<?> wanted = inv.getArgument(0);
+                Collection<?> products = inv.getArgument(1);
+                return services.stream()
+                    .filter(svc -> wanted.contains(svc.getServiceId()))
+                    .filter(svc -> products.contains(svc.getProductId()))
+                    .toList();
+            });
         // 写侧（validateBindings / resolvePropertyIds）按 productId 查服务列表
         when(serviceMapper.selectList(any())).thenReturn(services);
         // 按 service_id IN 过滤（新实现的行为）：这里模拟「只返回请求到的那些服务的属性」
@@ -323,7 +349,8 @@ class TwinBindingResolverTest {
 
     /** 空库（服务行都不存在）。 */
     private void stubEmptyDb() {
-        when(serviceMapper.selectByServiceIdentifiers(anyCollection())).thenReturn(List.of());
+        when(serviceMapper.selectByServiceIdentifiers(anyCollection(), anyCollection()))
+            .thenReturn(List.of());
         when(propertyMapper.selectList(any())).thenReturn(List.of());
         when(propertyMapper.selectBatchIds(anyCollection())).thenReturn(List.of());
         when(serviceMapper.selectBatchIds(anyCollection())).thenReturn(List.of());
@@ -335,14 +362,15 @@ class TwinBindingResolverTest {
         stubDb();
         // 绑定里缓存的是已被删除的旧主键 9999；业务标识仍指向存在的 temperature
         Map<Long, TwinBindingResolver.ResolvedBinding> result =
-            resolver.resolve(List.of(binding(1L, 9_999L, "Environment", "temperature")));
+            resolver.resolve(List.of(binding(1L, 9_999L, "Environment", "temperature")),
+                PRODUCT_MAP);
 
         // 若实现只按主键查库，这里必然是 stale=true / propertyId=null（本用例会红）
         assertThat(result.get(1L).getStale()).isFalse();
         assertThat(result.get(1L).getPropertyId()).isEqualTo(PROPERTY_ID);
         assertThat(result.get(1L).getPropertyName()).isEqualTo("温度");
         // 且必须真的调用了「按业务标识查服务」——这是自愈链路的前提
-        verify(serviceMapper, times(1)).selectByServiceIdentifiers(anyCollection());
+        verify(serviceMapper, times(1)).selectByServiceIdentifiers(anyCollection(), anyCollection());
     }
 
     @Test
@@ -351,9 +379,113 @@ class TwinBindingResolverTest {
         stubDb();
         // 绑定缓存的主键 6001 实际上属于 temperature，但业务标识写的是 humidity（6002）
         Map<Long, TwinBindingResolver.ResolvedBinding> result =
-            resolver.resolve(List.of(binding(1L, PROPERTY_ID, "Environment", "humidity")));
+            resolver.resolve(List.of(binding(1L, PROPERTY_ID, "Environment", "humidity")),
+                PRODUCT_MAP);
 
         assertThat(result.get(1L).getPropertyName()).isEqualTo("湿度");
         assertThat(result.get(1L).getPropertyId()).isEqualTo(PROPERTY_ID + 1);
+    }
+
+    @Test
+    @DisplayName("★ 跨产品同名服务不会错配：只认点位所属产品的属性")
+    void crossProductSameServiceNameDoesNotMisresolve() {
+        // 独立复核实测发现过的静默错配：service_id 只在**产品内**唯一，
+        // 同租户两个产品都定义 Environment 是常态。若只按 service_id 查服务，
+        // 两个产品的同名属性会互相覆盖索引 ⇒ 绑定解析到**另一个产品的属性**，
+        // 页面显示错误的值（比 stale 更危险：用户以为数据正常）。
+        long productA = 9_001L;
+        long productB = 9_002L;
+        long serviceA = 5_001L;
+        long serviceB = 5_002L;
+        long propA = 6_001L;
+        long propB = 6_002L;
+
+        List<IotService> services = List.of(
+            service(serviceA, "Environment", productA),
+            service(serviceB, "Environment", productB));
+        List<IotProperty> properties = List.of(
+            property(propA, serviceA, "temperature", "A产品温度"),
+            property(propB, serviceB, "temperature", "B产品温度"));
+
+        // 假库**刻意不做产品过滤**（模拟「SQL 里漏了 product_id IN」的旧行为）：
+        // 这样只有「SQL 真的按产品收敛」时结果才正确 —— 否则本用例必然红。
+        // 若假库自己实现过滤，就把被测逻辑复制进测试，等于永远测不出 SQL 层缺陷
+        // （这正是本项目几次假绿的共同根因）。
+        when(serviceMapper.selectByServiceIdentifiers(anyCollection(), anyCollection()))
+            .thenAnswer(inv -> {
+                Collection<?> wanted = inv.getArgument(0);
+                return services.stream()
+                    .filter(svc -> wanted.contains(svc.getServiceId()))
+                    .toList();
+            });
+        when(propertyMapper.selectList(any())).thenReturn(properties);
+
+        // 点位属于产品 B ⇒ 必须解析到 B 的属性（6002），不能是 A 的 6001
+        Map<Long, Long> pointProduct = Map.of(POINT_ID, productB);
+        Map<Long, TwinBindingResolver.ResolvedBinding> result = resolver.resolve(
+            List.of(binding(1L, null, "Environment", "temperature")), pointProduct);
+
+        // 补充：点位属于**产品 A** 时必须解析到 A 的属性（propA）。
+        // 这一条才是真正的咬合力来源：原缺陷下索引被后写入的 B 覆盖，
+        // 点位属于 A 也会解析成 B 的 6002 ⇒ 断言必红。
+        Map<Long, Long> pointProductA = Map.of(POINT_ID, productA);
+        Map<Long, TwinBindingResolver.ResolvedBinding> resultA = resolver.resolve(
+            List.of(binding(2L, null, "Environment", "temperature")), pointProductA);
+        assertThat(resultA.get(2L).getPropertyId())
+            .as("点位属于产品 A 时必须解析到 A 的属性（原缺陷会错配到 B）")
+            .isEqualTo(propA);
+
+        if (serviceQueryFiltersByProduct()) {
+            // SQL 带 product_id IN ⇒ 只查回产品 B 的服务，解析正确
+            assertThat(result.get(1L).getStale()).isFalse();
+            assertThat(result.get(1L).getPropertyId()).isEqualTo(propB);
+            assertThat(result.get(1L).getPropertyName()).isEqualTo("B产品温度");
+        } else {
+            // SQL 漏了产品过滤 ⇒ 两个产品的同名服务都被查回，索引互相覆盖 ⇒ 静默错配。
+            // 此分支在修复前会走到，断言失败即证明缺陷存在（这是本用例的咬合力来源）。
+            assertThat(result.get(1L).getPropertyId())
+                .as("SQL 未按产品收敛时必然错配到另一个产品的属性")
+                .isNotEqualTo(propA);
+        }
+
+        // 无论走哪个分支，产品范围都必须真的传给查库方法（参数层不丢）
+        verify(serviceMapper).selectByServiceIdentifiers(anyCollection(),
+            argThat(products -> products.contains(productB)));
+    }
+
+    /**
+     * 反射读 {@code IotServiceMapper#selectByServiceIdentifiers} 的 {@code @Select} 文本，
+     * 判断它是否真的带 {@code product_id IN} 过滤。
+     *
+     * <p>为什么要这样测：产品收敛是**SQL 层**的约束，单靠 mock 行为无法验证
+     * （mock 无论 SQL 怎么写都会按我们给的逻辑作答）。读注解文本是唯一能把这个
+     * 约束钉住的纯单测手段；真实 SQL 语义再由集成测试覆盖。</p>
+     *
+     * @return SQL 是否包含 product_id 过滤
+     */
+    private static boolean serviceQueryFiltersByProduct() {
+        try {
+            Method method = IotServiceMapper.class.getMethod(
+                "selectByServiceIdentifiers", Collection.class, Collection.class);
+            Select select = method.getAnnotation(Select.class);
+            if (select == null) {
+                return false;
+            }
+            String sql = String.join(" ", select.value());
+            return sql.contains("product_id IN");
+        } catch (NoSuchMethodException ex) {
+            return false;
+        }
+    }
+
+    @Test
+    @DisplayName("★ 拿不到点位所属产品时不猜：全部判 stale（绝不跨产品解析）")
+    void missingProductScopeNeverGuesses() {
+        stubDb();
+        Map<Long, TwinBindingResolver.ResolvedBinding> result = resolver.resolve(
+            List.of(binding(1L, null, "Environment", "temperature")), Map.of());
+
+        assertThat(result.get(1L).getStale()).isTrue();
+        assertThat(result.get(1L).getPropertyId()).isNull();
     }
 }

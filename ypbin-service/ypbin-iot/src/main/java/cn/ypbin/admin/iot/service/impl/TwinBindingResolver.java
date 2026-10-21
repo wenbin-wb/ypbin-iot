@@ -100,12 +100,34 @@ public class TwinBindingResolver {
      *
      * <p>解析不到属性的绑定返回 {@code stale=true}，由页面提示用户重配——**不猜、不静默丢弃**。</p>
      *
-     * @param bindings 绑定实体（可为空列表）
+     * @param bindings        绑定实体（可为空列表）
+     * @param pointProductIds 点位主键 → 其设备所属产品主键（**用于收敛服务集合**；
+     *                        传 null 或缺失时该绑定判 stale，绝不跨产品猜）
      * @return 绑定主键 → 解析结果
      */
-    public Map<Long, ResolvedBinding> resolve(Collection<IotTwinPointBinding> bindings) {
+    public Map<Long, ResolvedBinding> resolve(Collection<IotTwinPointBinding> bindings,
+                                              Map<Long, Long> pointProductIds) {
         Map<Long, ResolvedBinding> result = new LinkedHashMap<>();
         if (bindings == null || bindings.isEmpty()) {
+            return result;
+        }
+        // 收敛产品范围：绑定属于某个点位，点位属于某台设备，设备才关联产品。
+        // 不收敛会让同一租户下「两个产品都有 Environment 服务」时互相覆盖索引
+        // （实测会解析到另一个产品的属性——比 stale 更危险的静默错配）。
+        Set<Long> productIds = new LinkedHashSet<>();
+        for (IotTwinPointBinding binding : bindings) {
+            Long productId = pointProductIds == null ? null
+                : pointProductIds.get(binding.getPointId());
+            if (productId != null) {
+                productIds.add(productId);
+            }
+        }
+        if (productIds.isEmpty()) {
+            // 拿不到产品范围（设备已被删除 / 调用方未提供）：不做任何猜测。
+            // 逐个绑定判 stale，由页面提示用户重配——错配属性远比「显示失效」更危险。
+            for (IotTwinPointBinding binding : bindings) {
+                result.put(binding.getId(), toResolved(binding, null, Map.of()));
+            }
             return result;
         }
         // ① **按业务标识查库**（不是按主键缓存）——这一步是自愈的前提，不能省。
@@ -129,7 +151,7 @@ public class TwinBindingResolver {
             // ① 语义自明，review 时一眼看出「业务标识真的参与了查库」；
             // ② 单测可断言这个方法被调用，堵住「mock 无视入参」的假绿。
             for (IotService service : iotServiceMapper
-                .selectByServiceIdentifiers(serviceIdentifiers)) {
+                .selectByServiceIdentifiers(serviceIdentifiers, productIds)) {
                 serviceById.put(service.getId(), service);
             }
         }
@@ -139,20 +161,45 @@ public class TwinBindingResolver {
             : iotPropertyMapper.selectList(new LambdaQueryWrapper<IotProperty>()
                 .in(IotProperty::getServiceId, serviceById.keySet()));
 
-        // ③ 建「业务标识 → 属性」索引（**唯一索引**：只认业务标识，见 matchProperty 注释）
-        Map<String, IotProperty> propertyByKey = new HashMap<>();
+        // ③ 建「(产品, 服务业务标识, 属性标识) → 属性」索引。
+        //
+        //    ⚠️ 键里**必须带产品主键**：service_id 只在产品内唯一，同租户两个产品都定义
+        //    `Environment` 是常态。若键只用 (serviceId, identifier)，两个产品的同名属性
+        //    会互相覆盖，绑定就被解析到**另一个产品的属性** —— 页面显示错误的值，
+        //    比 stale 更危险（用户以为数据正常）。独立复核实测发现过该错配。
+        Map<BindingKeyWithProduct, IotProperty> propertyByKey = new HashMap<>();
         for (IotProperty property : properties) {
             IotService service = serviceById.get(property.getServiceId());
-            if (service != null) {
-                propertyByKey.put(key(service.getServiceId(), property.getIdentifier()), property);
+            if (service != null && service.getProductId() != null) {
+                propertyByKey.put(
+                    new BindingKeyWithProduct(service.getProductId(), service.getServiceId(),
+                        property.getIdentifier()),
+                    property);
             }
         }
 
         for (IotTwinPointBinding binding : bindings) {
-            IotProperty matched = matchProperty(binding, propertyByKey);
+            Long productId = pointProductIds == null ? null
+                : pointProductIds.get(binding.getPointId());
+            IotProperty matched = productId == null ? null
+                : propertyByKey.get(new BindingKeyWithProduct(productId,
+                    binding.getServiceIdentifier(), binding.getPropertyIdentifier()));
             result.put(binding.getId(), toResolved(binding, matched, serviceById));
         }
         return result;
+    }
+
+    /**
+     * 解析索引键：产品 + 服务业务标识 + 属性标识（三者共同唯一确定一个属性）。
+     *
+     * <p>用 record 而不是拼字符串：避免分隔符出现在标识里造成的键碰撞。</p>
+     *
+     * @param productId          产品主键
+     * @param serviceIdentifier  服务业务标识
+     * @param propertyIdentifier 属性标识
+     */
+    private record BindingKeyWithProduct(Long productId, String serviceIdentifier,
+                                         String propertyIdentifier) {
     }
 
     /**
@@ -241,27 +288,6 @@ public class TwinBindingResolver {
             serviceById.put(service.getId(), service);
         }
         return serviceById;
-    }
-
-    /**
-     * 先用主键缓存命中，再按业务标识兜底（主键悬空时）。
-     *
-     * @param binding       绑定实体
-     * @param propertyByKey 业务键索引
-     * @return 命中的属性行；都命中不到时返回 null
-     */
-    private IotProperty matchProperty(IotTwinPointBinding binding,
-                                      Map<String, IotProperty> propertyByKey) {
-        // **只按业务标识匹配**：它才是权威键。
-        //
-        // 为什么不回退到主键缓存（这是一个真实的错配源，单测抓到过）：
-        // 绑定里同时存了「业务标识」与「主键缓存」，两者可能不一致——例如属性行被删除后
-        // 主键被数据库复用给了另一个属性，或 TSL 重导入后新属性恰好占了旧主键。
-        // 此时按主键回退会把 A 属性解析成 B，页面显示的是**错误的值**（比 stale 更危险：
-        // stale 至少能让用户看见「这里坏了」，错配会让用户以为数据正常）。
-        // 因此业务标识命中不了就判 stale，由页面提示重配，绝不猜。
-        return propertyByKey.get(
-            key(binding.getServiceIdentifier(), binding.getPropertyIdentifier()));
     }
 
     private ResolvedBinding toResolved(IotTwinPointBinding binding, IotProperty matched,

@@ -48,6 +48,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -127,7 +128,11 @@ public class IotTwinPointServiceImpl extends BaseServiceImpl<IotTwinPointMapper,
                 .in(IotTwinPointBinding::getPointId, pointIds)
                 .orderByAsc(IotTwinPointBinding::getSort)
                 .orderByAsc(IotTwinPointBinding::getId));
-        Map<Long, TwinBindingResolver.ResolvedBinding> resolved = bindingResolver.resolve(bindings);
+        // 点位 → 产品：resolve 需要产品范围来收敛服务集合（跨产品同名服务会错配）。
+        // 一次批量查设备，不逐点位查。
+        Map<Long, Long> pointProductIds = resolvePointProductIds(points);
+        Map<Long, TwinBindingResolver.ResolvedBinding> resolved =
+            bindingResolver.resolve(bindings, pointProductIds);
         Map<Long, List<TwinBindingResp>> bindingByPoint = groupBindings(bindings, resolved);
         List<IotTwinPointResp> result = new ArrayList<>(points.size());
         for (IotTwinPoint point : points) {
@@ -478,13 +483,54 @@ public class IotTwinPointServiceImpl extends BaseServiceImpl<IotTwinPointMapper,
             // 显式两步：先纯读解析，再由本方法（写路径）主动触发回写。
             // 不把回写塞进 resolve 的可选分支——CodeQL 的 CSRF 判据是静态调用图可达性，
             // 只要 resolve 能到达 @Update 方法，GET 端点就会被判为疑似状态变更。
+            List<IotTwinPoint> points = baseMapper.selectList(new LambdaQueryWrapper<IotTwinPoint>()
+                .eq(IotTwinPoint::getSceneId, sceneId));
+            Map<Long, Long> pointProductIds = resolvePointProductIds(points);
             Map<Long, TwinBindingResolver.ResolvedBinding> resolved =
-                bindingResolver.resolve(bindings);
+                bindingResolver.resolve(bindings, pointProductIds);
             bindingResolver.healStaleCache(bindings, resolved);
         } catch (RuntimeException ex) {
             log.warn("[iot] 孪生绑定缓存自愈失败（不影响本次保存，下次保存会重试）：sceneId={}",
                 sceneId, ex);
         }
+    }
+
+    /**
+     * 构建「点位主键 → 设备所属产品主键」映射（resolve 收敛服务集合用）。
+     *
+     * <p>为什么必须有：{@code service_id} 只在产品内唯一，同一租户下两个产品都定义
+     * {@code Environment} 是常态。不收敛产品范围会让绑定解析到**另一个产品的同名属性**
+     * ——页面显示错误的值，比 stale 更危险（独立复核实测发现）。</p>
+     *
+     * <p>一次批量查设备（不逐点位查）；设备已删除或未绑产品时该点位不出现在结果里，
+     * 其绑定会被判 stale（不猜）。</p>
+     *
+     * @param points 本场景点位
+     * @return 点位主键 → 产品主键
+     */
+    private Map<Long, Long> resolvePointProductIds(List<IotTwinPoint> points) {
+        if (points.isEmpty()) {
+            return Map.of();
+        }
+        List<Long> deviceIds = points.stream().map(IotTwinPoint::getDeviceId)
+            .filter(Objects::nonNull).distinct().toList();
+        if (deviceIds.isEmpty()) {
+            return Map.of();
+        }
+        Map<Long, Long> productByDevice = new HashMap<>();
+        for (IotDevice device : deviceMapper.selectBatchIds(deviceIds)) {
+            if (device.getProductId() != null) {
+                productByDevice.put(device.getId(), device.getProductId());
+            }
+        }
+        Map<Long, Long> result = new HashMap<>();
+        for (IotTwinPoint point : points) {
+            Long productId = productByDevice.get(point.getDeviceId());
+            if (productId != null) {
+                result.put(point.getId(), productId);
+            }
+        }
+        return result;
     }
 
     // ---------- 响应转换 ----------

@@ -120,8 +120,6 @@ public class IotTwinRuntimeServiceImpl implements IotTwinRuntimeService {
         List<IotTwinPointBinding> bindings = twinPointBindingMapper.selectList(
             new LambdaQueryWrapper<IotTwinPointBinding>()
                 .in(IotTwinPointBinding::getPointId, pointIds));
-        Map<Long, TwinBindingResolver.ResolvedBinding> resolvedBindings =
-            bindingResolver.resolve(bindings);
         Map<Long, List<IotTwinPointBinding>> bindingsByPoint = bindings.stream()
             .collect(Collectors.groupingBy(IotTwinPointBinding::getPointId));
 
@@ -131,11 +129,25 @@ public class IotTwinRuntimeServiceImpl implements IotTwinRuntimeService {
             deviceById.put(device.getId(), device);
         }
 
-        // ⑤ 一次 Redis pipeline 取全部设备最新值
+        // ④' 点位 → 产品：resolve 需要产品范围收敛服务集合。
+        // 不收敛会让同租户「两个产品都有同名服务」时解析到另一个产品的属性（静默错配）。
+        // 必须在 deviceById 之后：产品信息来自设备。
+        Map<Long, Long> pointProductIds = new HashMap<>();
+        for (IotTwinPoint point : points) {
+            IotDevice device = deviceById.get(point.getDeviceId());
+            if (device != null && device.getProductId() != null) {
+                pointProductIds.put(point.getId(), device.getProductId());
+            }
+        }
+        // ⑤ 解析绑定（纯读；不写库）
+        Map<Long, TwinBindingResolver.ResolvedBinding> resolvedBindings =
+            bindingResolver.resolve(bindings, pointProductIds);
+
+        // ⑥ 一次 Redis pipeline 取全部设备最新值
         Map<Long, Map<String, LatestValueResp>> latestByDevice =
             toLatestByIdentifier(latestValueQueryService.listLatestBatch(deviceIds));
 
-        // ⑥ 一次分组统计活动告警数
+        // ⑦ 一次分组统计活动告警数
         Map<Long, Integer> alertCountByDevice = loadAlertCounts(deviceIds);
 
         List<TwinRuntimePointResp> pointResps = new ArrayList<>(points.size());
