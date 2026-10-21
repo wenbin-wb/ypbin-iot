@@ -467,6 +467,13 @@ services:
       # **无认证的 Actuator 端点**直接摆到公网。默认回环 ⇒ 只在宿主机内可 curl、公网不可达；
       # 要让宿主机外的客户端访问，先确认真的需要，再显式设 IOT_BIND_ADDR=0.0.0.0 并承担该暴露面。
       - "${IOT_BIND_ADDR:-127.0.0.1}:18084:18084"
+    volumes:
+      # 数字孪生模型文件（ypbin.storage.local[twin].base-path 的宿主机落地，见
+      # deploy/nacos/ypbin-iot.yaml 的 ypbin.storage 段）。
+      # 为什么必须有这个卷：不挂卷则模型写在容器可写层，`docker compose up -d --force-recreate`
+      # 重建容器后文件全丢，而 iot_twin_model_asset 的元数据还在库 ⇒ 场景全部「模型不存在」，
+      # 且用户无从知道原因（列表里资产还在，只是打不开）。
+      - ./data/twin:/data/ypbin/twin
     depends_on:
       nacos:
         condition: service_healthy

@@ -98,6 +98,14 @@
             <groupId>cn.ypbin</groupId>
             <artifactId>ypbin-starter-tools</artifactId>
         </dependency>
+        <!-- 文件存储：数字孪生模型上传/流式下载。
+             为什么不复用 system 的 /system/file/upload：该端点所在控制器标了 @PlatformAccess
+             （租户用户 403），且其依赖的 ypbin.storage 此前在本仓未配置；孪生的上传通道自建自管。
+             版本由根 pom 的 ypbin-starter-bom 统一管理，不写版本号。 -->
+        <dependency>
+            <groupId>cn.ypbin</groupId>
+            <artifactId>ypbin-starter-storage</artifactId>
+        </dependency>
         <!-- 显式声明：SSE 连接管理/心跳/跨实例扇出（SseEmitterManager/SseFanoutCodec）来自 messaging。
              原本只经 security 传递依赖引入，传递链一变就断；task-18 起本仓直接消费其公开 API，故显式声明。 -->
         <dependency>
