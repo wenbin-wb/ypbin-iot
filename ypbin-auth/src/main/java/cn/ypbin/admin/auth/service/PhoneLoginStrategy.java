@@ -13,6 +13,7 @@ import cn.ypbin.admin.auth.support.LoginConfigKeys;
 
 import cn.ypbin.admin.auth.dto.PhoneLoginReq;
 import cn.ypbin.admin.auth.support.AuthConfigReader;
+import cn.ypbin.admin.auth.support.LoginConfigKeys;
 import cn.ypbin.admin.system.model.dto.SysUserDto;
 import cn.ypbin.admin.system.enums.UserStatusEnum;
 import cn.ypbin.admin.system.model.resp.LoginResp;
@@ -31,7 +32,6 @@ import org.springframework.stereotype.Component;
 @Component
 @RequiredArgsConstructor
 public class PhoneLoginStrategy {
-
 
     private final SmsCodeService smsCodeService;
     private final AuthConfigReader configReader;

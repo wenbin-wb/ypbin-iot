@@ -1477,8 +1477,9 @@ INTERNAL_TOKEN=$INTERNAL_TOKEN
 GATEWAY_SIGN_TOKEN=$GATEWAY_SIGN_TOKEN
 REDIS_PASSWORD=$REDIS_PASSWORD
 XXL_JOB_ADMIN_PASSWORD=$XXL_JOB_ADMIN_PASSWORD
-# 留空：模板要求时 install.sh 会 fail-fast（值必须与 xxl-job-admin 里 ypbin-system 执行器一致）
+# 留空：模板要求时 install.sh 会 fail-fast（值须与 xxl-job-admin 里 ypbin-system 执行器一致）
 XXL_JOB_ACCESS_TOKEN=
+# IoT 独有（fork 保留）：时序库口令与开放 API 签名 pepper
 IOTDB_PASSWORD=$IOTDB_PASSWORD
 YPBIN_OPENAPI_SECRET_PEPPER=$YPBIN_OPENAPI_SECRET_PEPPER
 NACOS_ADDR=${NACOS_ADDR:-nacos:8848}

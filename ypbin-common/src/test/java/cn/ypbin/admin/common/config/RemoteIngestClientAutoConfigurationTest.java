@@ -64,8 +64,17 @@ class RemoteIngestClientAutoConfigurationTest {
      * {@code NoClassDefFoundError: cn/ypbin/admin/system/api/feign/ISystemClient}}，access 起不来。
      *
      * <p>本用例把 {@code ISystemClient} 从类路径遮掉，断言：① 上下文仍能启动；
-     * ② 两个「上报」Bean 都不装配（确实没有依赖可用）；③ <b>日志数据源 Bean 仍然装配</b>
-     * （它们不依赖 {@code ISystemClient}，不该被连坐）。</p>
+     * ② 两个「上报」Bean 都不装配（确实没有依赖可用）；③ <b>本类不再负责日志数据源的装配</b>
+     * ——该职责已随 {@code IdentityHeaderLogUserProvider} 一并交由 starter 的
+     * {@code SecurityLogClientAutoConfiguration}（它按 {@code UserContext} 自适应身份头/会话两种模式，
+     * 且同样 {@code @ConditionalOnMissingBean}，业务方可覆盖）。</p>
+     *
+     * <p><b>为什么断言「不再提供」而不是「仍然提供」</b>（2026-10-23 同步上游后调整）：
+     * 上游已删除本仓自建的 {@code IdentityHeaderLogUserProvider}（与 starter 官方实现重复，
+     * 架构门禁 {@code DuplicateClassNameGateTest} 会同时拦住这类副本）。本测试原先断言
+     * 「日志数据源 Bean 仍装配」，那是本仓自建实现的产物；现在该 Bean 由 starter 提供，
+     * 而本用例的 {@code ApplicationContextRunner} 只装载本类（不装 starter 自动配置），
+     * 因此正确断言是「本类不再声明它」。</p>
      */
     @Test
     @DisplayName("★ 类路径缺 ISystemClient（access 场景）：上下文仍能启动，日志数据源 Bean 不被连坐")
@@ -76,9 +85,13 @@ class RemoteIngestClientAutoConfigurationTest {
                     .hasNotFailed();
                 assertThat(context).doesNotHaveBean(RemoteLogIngestClient.class);
                 assertThat(context).doesNotHaveBean(RemoteTrackIngestClient.class);
-                assertThat(context).as("日志数据源不依赖 ISystemClient，必须仍然可用")
-                    .hasSingleBean(cn.ypbin.starter.log.core.LogUserProvider.class);
-                assertThat(context).hasSingleBean(cn.ypbin.starter.log.core.LogClientProvider.class);
+                assertThat(context)
+                    .as("日志数据源已交由 starter 的 SecurityLogClientAutoConfiguration 装配，"
+                        + "本类不再声明（避免与官方实现重复）")
+                    .doesNotHaveBean(cn.ypbin.starter.log.core.LogUserProvider.class);
+                assertThat(context)
+                    .as("同上：客户端信息数据源也由 starter 提供")
+                    .doesNotHaveBean(cn.ypbin.starter.log.core.LogClientProvider.class);
             });
     }
 

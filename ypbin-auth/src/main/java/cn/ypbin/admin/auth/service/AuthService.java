@@ -14,6 +14,7 @@ import cn.ypbin.admin.auth.support.LoginConfigKeys;
 import cn.dev33.satoken.stp.StpUtil;
 import cn.ypbin.admin.auth.dto.LoginReq;
 import cn.ypbin.admin.auth.support.AuthConfigReader;
+import cn.ypbin.admin.auth.support.LoginConfigKeys;
 import cn.ypbin.admin.system.model.resp.LoginResp;
 import cn.ypbin.admin.system.model.resp.RouteResp;
 import cn.ypbin.admin.system.model.resp.UserInfoResp;
@@ -51,7 +52,6 @@ import org.springframework.stereotype.Service;
 @Service
 @RequiredArgsConstructor
 public class AuthService {
-
 
     private final ISystemClient permissionFeignClient;
     private final LoginSupport loginSupport;

@@ -14,6 +14,7 @@ import cn.ypbin.admin.auth.support.LoginConfigKeys;
 import cloud.tianai.captcha.common.response.ApiResponse;
 import cloud.tianai.captcha.validator.common.model.dto.ImageCaptchaTrack;
 import cn.ypbin.admin.auth.support.AuthConfigReader;
+import cn.ypbin.admin.auth.support.LoginConfigKeys;
 import cn.ypbin.starter.captcha.core.CaptchaService;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.core.model.R;
@@ -35,7 +36,6 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/captcha")
 @RequiredArgsConstructor
 public class CaptchaController {
-
 
     private final CaptchaService captchaService;
     private final AuthConfigReader configReader;

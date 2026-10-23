@@ -39,7 +39,7 @@ public final class AdminConstants {
      *
      * <p><strong>不再是本仓的字面量定义</strong>：该契约由 starter 单点定义
      * （{@code cn.ypbin.starter.security.satoken.StpPermissionAdapter#SUPER_ADMIN}），本仓只做引用，
-     * 避免同一份契约两个定义点、漂移时静默越权/漏权（issue #88 第③项）。</p>
+     * 避免同一份契约两个定义点、漂移时静默越权/漏权。iot 侧已改为引用 starter 常量，本仓跟随。</p>
      */
     public static final String ALL_PERMISSION = StpPermissionAdapter.SUPER_ADMIN;
 

@@ -28,6 +28,8 @@ import cn.ypbin.admin.system.model.req.InboxMessageSendReq;
 import cn.ypbin.admin.system.model.req.MailSendReq;
 import cn.ypbin.admin.system.service.SocialBindService;
 import cn.ypbin.admin.system.service.SysMenuService;
+import cn.ypbin.admin.system.service.SysSpaceRelationService;
+import cn.ypbin.admin.system.service.SysSpaceService;
 import cn.ypbin.admin.system.service.SysPermissionService;
 import cn.ypbin.admin.system.service.SysUserService;
 import cn.ypbin.admin.system.social.SocialConfigReader;
@@ -65,6 +67,8 @@ class SystemInternalNotifyTest {
             mock(SocialConfigReader.class),
             mock(SocialBindService.class),
             mock(SysMenuService.class),
+            mock(SysSpaceService.class),
+            mock(SysSpaceRelationService.class),
             mock(LogDao.class),
             messageMapper,
             mailService,

@@ -291,9 +291,9 @@ public class SysConfigServiceImpl extends BaseServiceImpl<SysConfigMapper, SysCo
      *
      * <p><strong>口径已与内部端点（{@code SystemClientImpl#getConfigByKey}）统一</strong>：
      * 同一份 {@code sys_config} 经列表页与经 internal 端点读到的是同一个形态（{@code ****末4位}），
-     * 判据也同为「凭据类后缀集合」。此前列表页用 2 个精确键 + 置空 {@code ""}，而 internal 用 6 个后缀 +
-     * 掩码，两者判据不同 ⇒ <b>存在「internal 打码、列表页返回明文」的泄露面</b>（凡命中后缀但不属那 2 个
-     * 精确键的配置项，管理面会把密钥原文回显）。现统一到 {@link ConfigValueMasker} 一处，该泄露面消除。</p>
+     * 判据也同为「后缀集合」。此前列表页用 2 个精确键 + 置空 {@code ""}，而 internal 用 6 个后缀 + 掩码，
+     * 两者判据不同 ⇒ <b>存在「internal 打码、列表页返回明文」的泄露面</b>（凡命中后缀但不属那 2 个精确键
+     * 的配置项，管理面会把密钥原文回显）。现统一到 {@link ConfigValueMasker} 一处，该泄露面消除。</p>
      *
      * @param config 系统参数实体
      * @return 脱敏后的响应

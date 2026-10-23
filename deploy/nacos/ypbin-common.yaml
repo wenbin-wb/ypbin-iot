@@ -89,18 +89,30 @@ ypbin:
   #   迁移去向与废弃清单见 SYNC.md「2026-10-18 一揽子下沉」；门禁：tools/check-deprecated-config-keys.sh。
   security:
     identity:
+      # starter 3.6.0 起：enabled=true 时 trusted-source-token 是**必填**项，缺失即启动失败
+      # （IdentityAutoConfiguration#identityHeaderFilterRegistration 抛 IllegalStateException，
+      # fail-closed 而非降级）——本仓模板曾长期缺该键（issue #78），用本模板 + 3.6.0 以上制品
+      # 构建的 auth/system/ai 都起不来。值必须与网关 ypbin.gateway.auth.trusted-source-token 同串，
+      # 否则下游会拒绝一切经网关的合法请求（现象：全站 403）。
       enabled: true
       trusted-source-token: ${GATEWAY_SIGN_TOKEN}
+    # ---------- 内部调用凭证（starter 4.0.0 官方守卫 + 官方 Feign 携带）----------
+    # 入站：guard-enabled=true 时装配 ENVELOPE 语义拦截器（默认 /internal/**，失败转 HTTP 200 + R.code=401）；
+    #   raw401-path-patterns 命中者写**原始 401**（对端只看状态码的场景，如 EMQX HTTP 动作用）。
+    #   凭证为空即 fail-closed 一律拒绝。auth/system/ai 三服务共用本共享配置（同一凭证）。
+    # 出站：ypbin.cloud.feign.internal-token 让 starter 的 FeignHeaderInterceptor 为**每个** Feign 请求
+    #   写入 X-Internal-Token（不再需要在各 -api 模块手写 RequestInterceptor）。
+    # 真值不入库：install.sh 导入 Nacos 时替换为 deploy/.env 的 INTERNAL_TOKEN。
+    # ⚠️ 旧键 ypbin.internal.token 已废弃（4.0.0 起 starter 与业务代码都不再读取）。
     internal-token:
       guard-enabled: true
       token: ${INTERNAL_TOKEN}
-      # IoT 的 MQTT 入站（EMQX HTTP 动作）是**唯一**要求真 HTTP 状态码的端点：EMQX 只看状态码，
-      # 200 会被判「投递成功」而静默丢数据 ⇒ 该前缀必须走 RAW_401（不是 ENVELOPE）。
+      # IoT 独有（fork 保留）：本仓的 MQTT 入站（EMQX HTTP 动作）是**唯一**要求真 HTTP 状态码的端点。
+      # EMQX 只看状态码，200 会被判「投递成功」而静默丢数据 ⇒ 该前缀必须走 RAW_401（不是 ENVELOPE）。
       raw401-path-patterns:
         - /internal/mqtt/*
   cloud:
     feign:
       internal-token: ${INTERNAL_TOKEN}
-      # 身份头来源校验：仅信任带网关签名标记的身份头；未配置密钥则拒绝启动（fail-fast）
-      trusted-source-token: ${GATEWAY_SIGN_TOKEN}
-      require-trusted-source: true
+      # ⚠️ trusted-source-token 与 require-trusted-source 按服务配置（见 ypbin-auth.yaml /
+      # ypbin-system.yaml / ypbin-ai.yaml），不在此处兜底，避免给所有加载 common 的应用强制套上严格模式。
