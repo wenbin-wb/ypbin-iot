@@ -151,7 +151,25 @@ class IotMaintenanceAdminGateTest {
      * 目标菜单来自被查询的行而非常量，静态判不了 ⇒ 门禁必须**报出来**要求人工裁定，
      * 而不是静默放过。确需保留时在此登记；豁免项在脚本里已不存在时，门禁会转红（防陈旧豁免）。</p>
      */
-    private static final Map<String, String> UNRESOLVED_GRANT_EXEMPTIONS = Map.of();
+    private static final Map<String, String> UNRESOLVED_GRANT_EXEMPTIONS = Map.of(
+        "2026-10-23-space-management.sql: INSERT INTO sys_role_menu (role_id, menu_id) "
+            + "SELECT 1, m.id FROM sys_menu m WHERE m.auth_code IN "
+            + "('system:space:list', 'system:space:add', 'system:space:edit', "
+            + "'system:space:delete', 'system:space:bind') AND m.is_deleted = 0 "
+            + "AND NOT EXISTS (SELECT 1 FROM sys_role_menu rm WHERE rm.role_id = 1 "
+            + "AND rm.menu_id = m.id)",
+        "空间菜单的平台级/租户可见属性由 auth_code 决定（5 个全是 platform_only=0），"
+            + "而菜单 id 由迁移动态分配（IFNULL(MAX(id),0)+1），故授权必须按 auth_code 反查——"
+            + "写死 id 会因实际分配到的 id 不同而一条都授不上（2026-10-24 DEV 实测：授权为 0、页面无入口）。"
+            + "目标菜单集合是可静态核对的常量（5 个 auth_code 全列在语句里），只是 id 未知",
+        "2026-10-23-space-management.sql: INSERT INTO sys_template_menu (template_id, menu_id) "
+            + "SELECT 1, m.id FROM sys_menu m WHERE m.auth_code IN "
+            + "('system:space:list', 'system:space:add', 'system:space:edit', "
+            + "'system:space:delete', 'system:space:bind') AND m.is_deleted = 0 "
+            + "AND NOT EXISTS (SELECT 1 FROM sys_template_menu tm WHERE tm.template_id = 1 "
+            + "AND tm.menu_id = m.id)",
+        "同上：租户模板侧授权，目标菜单同样按 auth_code 反查（5 个菜单均为 platform_only=0，"
+            + "必须进模板，否则租户管理员新建/改角色时报「授权包含模板之外的菜单」)");
 
     private static List<Path> grantSqlSources() {
         List<Path> sources = new ArrayList<>();

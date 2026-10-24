@@ -227,23 +227,23 @@ WHERE NOT EXISTS (SELECT 1 FROM sys_menu WHERE auth_code = 'system:space:bind');
 --    菜单 id 被占用时插入会被守卫跳过，写死 id 就会把权限白授给别人的菜单（实测）。
 -- 用 INSERT ... SELECT WHERE NOT EXISTS（去掉 INSERT IGNORE）：守卫列就是主键两列，
 -- IGNORE 在此只是冗余，而它会掩盖守卫之外的冲突。
--- 授权用**显式 id 清单**（而不是按 auth_code 反查）：本仓的 SQL 门禁
--- （IotMaintenanceAdminGateTest）只能静态判定 `id IN (数字清单)` 形态；
--- 按 auth_code 反查属「目标菜单来自查询结果」，门禁会判为不可判定并要求登记豁免。
--- 显式 id 的前提是上面的菜单插入用了固定 id —— 若 id 被占用，前面会因 NOT EXISTS 跳过插入
--- 而这里就会授权给别人的菜单，故紧随其后做一次自检（见文件末尾）。
+-- 授权按 **auth_code 反查真实 id**，不写死 id。
+-- 原因（2026-10-24 DEV 实测缺陷）：上面的菜单插入用 `IFNULL(MAX(id),0)+1` 动态分配 id，
+-- 实际落在 321004~321008（撞进 IoT 的 32xx 段），而授权语句若写死 `id IN (2410,...)`
+-- 就会一条都匹配不到 ⇒ **菜单装上了但没人被授权，页面看不到入口**（DEV 实测 role/template 授权均为 0）。
+-- 故授权必须跟着 auth_code 走，与菜单 id 如何分配无关。
+-- 注：本仓 SQL 门禁（IotMaintenanceAdminGateTest）会把此类「目标 id 来自查询」的语句
+-- 报为不可静态判定；已按该门禁的豁免机制处理（见门禁 UNRESOLVED_GRANT_EXEMPTIONS）。
 INSERT INTO sys_role_menu (role_id, menu_id)
 SELECT 1, m.id FROM sys_menu m
-WHERE m.id IN (2410, 241001, 241002, 241003, 241004)
-  AND m.auth_code IN ('system:space:list', 'system:space:add', 'system:space:edit',
+WHERE m.auth_code IN ('system:space:list', 'system:space:add', 'system:space:edit',
                       'system:space:delete', 'system:space:bind')
   AND m.is_deleted = 0
   AND NOT EXISTS (SELECT 1 FROM sys_role_menu rm WHERE rm.role_id = 1 AND rm.menu_id = m.id);
 
 INSERT INTO sys_template_menu (template_id, menu_id)
 SELECT 1, m.id FROM sys_menu m
-WHERE m.id IN (2410, 241001, 241002, 241003, 241004)
-  AND m.auth_code IN ('system:space:list', 'system:space:add', 'system:space:edit',
+WHERE m.auth_code IN ('system:space:list', 'system:space:add', 'system:space:edit',
                       'system:space:delete', 'system:space:bind')
   AND m.is_deleted = 0
   AND NOT EXISTS (SELECT 1 FROM sys_template_menu tm WHERE tm.template_id = 1 AND tm.menu_id = m.id);

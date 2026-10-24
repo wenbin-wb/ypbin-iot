@@ -18,9 +18,9 @@ import org.springframework.context.annotation.Configuration;
  * <p><strong>为什么单独立一个配置类，而不是把
  * {@code @EnableConfigurationProperties(AiModelConfigProperties.class)} 挂在
  * {@code AiServiceApplication} 上</strong>：启动类是本仓<b>继承自 admin 的既有文件</b>，
- * 而本仓的启动类与 admin 已有实质分歧（本仓没有 admin 的
- * {@code RemoteIngestClientConfiguration}，跨服务上报改由 starter 的自动配置 +
- * 本仓的 {@code RemoteIngestClientAutoConfiguration} 承担）。
+ * 而本仓的启动类与 admin 已有实质分歧（2026-10-23 同步 upstream 后两仓已一致：
+ * 跨服务上报由 {@code cn.ypbin.admin.common.ingest.RemoteIngestClientConfiguration}
+ * 经 {@code @Import} 引入；但本类仍是「新配置类承载装配」的做法，不必再改回启动类）。
  * 在启动类上再加一行会把这个分歧面继续扩大，且违反「IoT 侧改动优先放新文件」的同步纪律。
  * 用一个只在 ai 模块内的新配置类承载装配，语义等价（都是「让该 properties 类成为 Bean」），
  * 却不新增任何白名单条目。</p>

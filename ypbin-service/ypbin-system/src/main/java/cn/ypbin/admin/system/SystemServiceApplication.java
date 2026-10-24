@@ -10,7 +10,6 @@
 package cn.ypbin.admin.system;
 
 import cn.ypbin.admin.common.config.LicenseIssuerProperties;
-import cn.ypbin.admin.common.config.RemoteIngestClientAutoConfiguration;
 import cn.ypbin.admin.system.api.feign.ISystemClientFallback;
 import org.mybatis.spring.annotation.MapperScan;
 import org.springframework.boot.SpringApplication;
@@ -22,22 +21,21 @@ import org.springframework.context.annotation.FilterType;
 /**
  * System 服务启动器（微服务版）。
  *
- * <p><b>为什么排除 {@link RemoteIngestClientAutoConfiguration}</b>（2026-10-20 dev 真实启动失败）：
- * 该自动配置按<b>类型</b>注入 {@code ISystemClient}，用于把日志/埋点<b>上报给 system</b>；而 system
- * 自己就是被上报方，不该反向 HTTP 调自己。更直接的后果是「一个类型两个 Bean」：
- * 本仓 {@code SystemClientImpl}（{@code @RestController} 实现 {@code ISystemClient}，服务端）
- * 与 {@code ISystemClientFallback}（{@code @Component}，且在 system 的扫描根
- * {@code cn.ypbin.admin.system.**} 内）同时存在 ⇒ 注入点报
- * {@code required a single bean, but 2 were found}。故在 system 侧排除该自动配置。</p>
- *
- * <p><b>为什么同时把 {@link ISystemClientFallback} 排除出扫描</b>：system 是服务端，降级实现
- * 在它内部只会制造歧义（它真正需要的是 {@code SystemClientImpl}）。两处一起排除后，system 里
+ * <p><b>为什么把 {@link ISystemClientFallback} 排除出扫描</b>：system 是服务端，降级实现
+ * 在它内部只会制造歧义（它真正需要的是 {@code SystemClientImpl}）。排除后 system 里
  * {@code ISystemClient} 只剩服务端实现，语义清晰。</p>
+ *
+ * <p><b>历史：此前还 exclude 了 {@code RemoteIngestClientAutoConfiguration}</b>（2026-10-20
+ * dev 启动失败：该自动配置按类型注入 {@code ISystemClient}，与上面的两个 Bean 歧义冲突）。
+ * 2026-10-23 同步 upstream 后该问题<b>已从根上消失</b>：跨服务上报改由普通 {@code @Configuration}
+ * {@code cn.ypbin.admin.common.ingest.RemoteIngestClientConfiguration} 承担，且<b>只由 auth/ai 通过
+ * {@code @Import} 引入</b>——system 不引入它，就不存在「Feign 回自己」的回环。故本类不再 exclude
+ * （Spring Boot 4 会对「exclude 一个不是自动配置类的类型」直接 fail-fast，2026-10-24 dev 实测）。</p>
  *
  * @author wenbin
  * @since 2026-09-01
  */
-@SpringBootApplication(exclude = RemoteIngestClientAutoConfiguration.class)
+@SpringBootApplication
 @ComponentScan(excludeFilters = @ComponentScan.Filter(type = FilterType.ASSIGNABLE_TYPE,
     classes = ISystemClientFallback.class))
 @MapperScan("cn.ypbin.admin.**.mapper")
