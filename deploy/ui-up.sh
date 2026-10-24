@@ -41,6 +41,16 @@ if [ "${SKIP_BUILD:-0}" != "1" ]; then
   ( cd "$UI_REPO" && pnpm install --frozen-lockfile && pnpm -F "$APP_FILTER" build )
   SRC="$UI_REPO/apps/web-antd/dist"
   [ -d "$SRC" ] || die "构建完成但找不到产物目录：$SRC"
+  # 生产构建必须已把 VITE_APP_STORE_SECURE_KEY 编译进产物：packages/stores/src/setup.ts 的
+  # assertStoreSecureKey 在 import.meta.env.PROD 下遇到空值/占位符会**直接 throw** ⇒ 用户打开即白屏。
+  # 2026-10-21 与 2026-10-24 各踩一次（第二次是手工 `pnpm build` 绕过本脚本的 set -a）。
+  # 这里做**存在性**检查（不打印密钥值）：产物里找不到真实值就拒绝继续。
+  [ -n "${VITE_APP_STORE_SECURE_KEY:-}" ] \
+    || die "VITE_APP_STORE_SECURE_KEY 未设置（deploy/.env 缺该键，或未以 set -a 导出）—— 生产构建会白屏，拒绝继续"
+  if ! grep -rqF "$VITE_APP_STORE_SECURE_KEY" "$SRC" 2>/dev/null; then
+    die "构建产物里找不到 VITE_APP_STORE_SECURE_KEY 的真实值 —— 说明构建时该变量未生效（常见原因：手工 pnpm build 绕过了本脚本的 env 导出），上线会白屏"
+  fi
+  log "构建产物已含 STORE_SECURE_KEY（存在性检查通过，不打印值）"
   log "暂存产物：$SRC → $DIST_DIR"
   # 护栏：只允许删「本仓 deploy 目录的兄弟/子目录」，避免 IOT_UI_DIST_DIR 误指到别处被 rm -rf
   case "$DIST_DIR" in
