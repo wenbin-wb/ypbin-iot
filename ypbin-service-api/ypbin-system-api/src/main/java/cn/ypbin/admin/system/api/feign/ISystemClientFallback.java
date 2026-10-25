@@ -189,6 +189,11 @@ public class ISystemClientFallback implements ISystemClient {
         return unavailable();
     }
 
+    @Override
+    public R<Void> sendMail(MailSendReq req) {
+        return unavailable();
+    }
+
     // ---------- 空间：一律返回失败 R，不静默降级 ----------
     //
     // 这里刻意不给任何「空空间/空列表」的兜底：空间查询失败若返回空列表，
@@ -197,11 +202,6 @@ public class ISystemClientFallback implements ISystemClient {
 
     @Override
     public R<SysSpaceDto> getSpaceById(Long spaceId) {
-        return unavailable();
-    }
-
-    @Override
-    public R<Void> sendMail(MailSendReq req) {
         return unavailable();
     }
 
