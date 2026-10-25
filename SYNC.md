@@ -117,6 +117,25 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 | `ypbin-common/.../log/IdentityHeaderLogUserProvider.java`、`ypbin-auth/.../service/LoginEventTracker.java`、`ypbin-auth/src/test/.../log/AuthLogIngestTest.java`、`ypbin-common/src/test/.../log/RemoteLogDaoTest.java`、`ypbin-common/src/test/.../log/RemoteLogWiringTest.java` | **连带更新**（注释改指新装配；两个既有单测随实现迁移到 SPI 形态） | **2026-10-18 加（第 42–46 项）**：随上面 4 个类删除而必须同步的连带改动。两个测试的**断言口径逐条保留**（上报即采集模型本身、失败必须上抛而非静默、失败带完整堆栈、异常被监听器吸收），只把被测对象从 `RemoteLogDao` 换成 `SystemRemoteLogIngestClient`。 |
 | `admin-ui`（后续） | 路由/菜单注册 | 前端增量时再补清单 |
 
+> **2026-10-25 专条：`ypbin-system-api` 整模块的同步口径已可判定（不必再逐段合并）**
+>
+> 用户提出「两仓 `ypbin-system-api` 应当只有 IoT 多出的业务，其余一样」——**已实测确认成立**：
+>
+> | 维度 | 实测结果 |
+> |---|---|
+> | 同名文件 | 136 个，**仅 2 个**有差异（`ISystemClient.java` / `ISystemClientFallback.java`） |
+> | 归一化后（去注释/空行）admin 独有内容 | **0 行** |
+> | 本仓独有内容 | `ISystemClient` 7 行 + `Fallback` 4 行，全是站内信/邮件 |
+> | 端点顺序 | 去掉本仓独有的 2 个端点后与 admin **完全一致** |
+> | 文件清单 | 本仓仅多 `InboxMessageSendReq` / `MailSendReq` 两个请求体 |
+>
+> **处置**：同步该模块时**整份取 admin 版本，再插入这两块**（`sendInboxMessage` +
+> `sendMail` 的方法/兜底及其 import），其余逐字保留 admin —— 比逐段合并快且不会引入顺序漂移。
+>
+> ⚠️ 顺带记一条教训：手工「两边都保留」式合并容易只保证**内容**正确而打乱**顺序**
+> （import 排序、方法块位置）。这不影响编译，但每次同步都产生大段无意义 diff，
+> 且审查时极易把「顺序变了」误读成「逻辑变了」——2026-10-25 已按上述口径修正过一次。
+
 > **2026-10-19 专条（#106 树组装 / #107 数据范围）：优先「逐字采纳上游」，而不是各写一份**
 >
 > admin 的 `main`（`fd4dc07`）已完成 starter #106/#107 的宿主侧迁移。本仓这一批的处置原则是
@@ -254,6 +273,25 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
    > `git merge upstream/main` 更可能冲突（该文件本就在白名单内，冲突属预期）；收益是 curl 一键安装
    > 不再是「半个系统」。纯 admin 用户可用 `YPBIN_ADMIN_REPO` 恢复 upstream 语义。
 4. **同步后要重扫 CodeQL**：同步会把 admin 的新代码带进来，其新增/结案状态同样要按第 1 条镜像处置。
+5. **`~/.m2` 里两仓的 `ypbin-system-api` 会互相覆盖**（2026-10-25 实测踩了两次）：
+   本仓与 admin 的该模块**坐标完全相同**（`cn.ypbin.admin:ypbin-system-api:1.0.0-SNAPSHOT`），
+   `mvn install` 装的是同一个 jar 路径 —— 谁后装谁的赢。
+   症状很迷惑：**源码里明明有某方法，编译却报 `cannot find symbol` / `does not override`
+   / `method is already defined`**，因为编译用的是**另一仓的**接口。
+   两仓接口的差异点固定且已知（本仓多 `sendInboxMessage` / `sendMail`，见第二节），
+   所以这类错误的真实含义是「jar 版本不对」，不是「代码写错了」。
+
+   处置（按场景选一条）：
+   - **跨仓交替构建**：用 `-Dmaven.repo.local=/tmp/m2-<仓名>` 隔离本地仓库，
+     不要在同一个 `~/.m2` 里来回 `install`；
+   - **单次构建前**：先 `mvn -pl ypbin-service-api/ypbin-system-api install -DskipTests`
+     把**当前仓**的 api 模块装一遍再编译下游（本文多数排障流程适用）；
+   - **判断当前 jar 属于哪一仓**：
+     ```bash
+     unzip -l ~/.m2/repository/cn/ypbin/admin/ypbin-system-api/1.0.0-SNAPSHOT/ypbin-system-api-1.0.0-SNAPSHOT.jar \
+       | grep -cE "InboxMessageSendReq|MailSendReq"   # >0 = 本仓（fork），=0 = admin
+     ```
+   - **改完接口后**：务必重装 api 模块再编译下游，`-o`（离线）模式下尤其容易拿到旧 jar。
 
 ### 三·六、本仓的发布 tag 政策（2026-10-13 定）
 
