@@ -37,6 +37,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -266,6 +267,30 @@ public class IotDeviceServiceImpl extends BaseServiceImpl<IotDeviceMapper, IotDe
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "设备 ID 不能为空");
         }
         return ids.stream().distinct().toList();
+    }
+
+    @Override
+    public List<String> spacesOfDevice(Long deviceId) {
+        if (deviceId == null) {
+            return List.of();
+        }
+        // 复用适配层的批量反查（单对象也是走同一条路径，避免第二套取数逻辑）
+        Map<Long, List<SysSpaceRelationDto>> grouped =
+            deviceSpaceAdapter.relationsOf(List.of(deviceId));
+        List<SysSpaceRelationDto> relations = grouped.get(deviceId);
+        if (relations == null || relations.isEmpty()) {
+            return List.of();
+        }
+        // 主空间排前面，其余按关联 ID 顺序（与列表展示口径一致）
+        return relations.stream()
+            .sorted(Comparator
+                .comparing((SysSpaceRelationDto r) -> r.getIsPrimary() != null
+                    && SpaceConstants.PRIMARY_YES == r.getIsPrimary() ? 0 : 1)
+                .thenComparing(SysSpaceRelationDto::getId,
+                    Comparator.nullsLast(Comparator.naturalOrder())))
+            .map(r -> String.valueOf(r.getSpaceId()))
+            .distinct()
+            .toList();
     }
 
     @Override

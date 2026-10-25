@@ -110,6 +110,14 @@ public interface IotDeviceService {
     int bindSpace(Long spaceId, List<Long> deviceIds, boolean isPrimary, boolean clearOthers);
 
     /**
+     * 取设备当前所在的空间 ID 列表（表单回显用）。
+     *
+     * @param deviceId 设备 ID
+     * @return 空间 ID 列表（字符串形态，与前端 ID 全程字符串的约定一致；无关联时为空列表）
+     */
+    List<String> spacesOfDevice(Long deviceId);
+
+    /**
      * 解绑一批设备与指定空间。
      *
      * @param spaceId   空间 ID

@@ -25,6 +25,7 @@ import cn.dev33.satoken.annotation.SaCheckPermission;
 import jakarta.validation.Valid;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -186,6 +187,18 @@ public class IotDeviceController {
      * @param req       绑定请求（设备 ID 列表 + 是否主空间 + 是否清空其他位置）
      * @return 实际生效的关联条数
      */
+    /**
+     * 取设备当前所在的空间 ID 列表（表单回显用）。
+     *
+     * @param id 设备 ID
+     * @return 空间 ID 列表（无关联时为空数组）
+     */
+    @GetMapping("/{id}/spaces")
+    @SaCheckPermission("iot:device:list")
+    public R<List<String>> spacesOf(@PathVariable Long id) {
+        return R.ok(iotDeviceService.spacesOfDevice(id));
+    }
+
     @PostMapping("/space/{id}/bind")
     @SaCheckPermission("iot:device:update")
     @Idempotent
