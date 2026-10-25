@@ -63,8 +63,11 @@ class IotDeviceServiceImplTest {
 
     private final IotProductMapper productMapper = mock(IotProductMapper.class);
     private final TenantLedgerService ledgerService = mock(TenantLedgerService.class);
+    private final cn.ypbin.admin.iot.space.DeviceSpaceAdapter spaceAdapter =
+        mock(cn.ypbin.admin.iot.space.DeviceSpaceAdapter.class);
+
     private final IotDeviceServiceImpl service = new IotDeviceServiceImpl(
-        productMapper, ledgerService, mock(IotRealtimeService.class));
+        productMapper, ledgerService, mock(IotRealtimeService.class), spaceAdapter);
 
     /**
      * 初始化 MyBatis-Plus 的实体元信息。

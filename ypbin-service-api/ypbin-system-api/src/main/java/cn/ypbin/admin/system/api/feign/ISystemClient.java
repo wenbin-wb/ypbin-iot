@@ -11,6 +11,7 @@ package cn.ypbin.admin.system.api.feign;
 
 import cn.ypbin.admin.system.model.dto.ConfigValue;
 import cn.ypbin.admin.system.model.req.InboxMessageSendReq;
+import cn.ypbin.admin.system.model.req.SpaceSyncReq;
 import cn.ypbin.admin.system.model.req.MailSendReq;
 import cn.ypbin.admin.system.model.dto.SocialAuthConfig;
 import cn.ypbin.admin.system.model.dto.SysSpaceDto;
@@ -358,6 +359,24 @@ public interface ISystemClient {
     @PostMapping("/space-relation-counts")
     R<Map<Long, Map<String, Long>>> countSpaceRelationsBySpaceTrees(
         @RequestBody List<Long> spaceIds);
+
+    /**
+     * 整体设置某业务对象的空间集合（**单事务语义**：算差集后批量增删）。
+     *
+     * <p><b>为什么需要它而不是让调用方 bind+unbind</b>：设备换位置时若由调用方自己做
+     * 「先解绑旧的、再绑新的」，两步之间失败就留下不一致状态（两头都不在，或都在）。
+     * 本端点在一个事务里完成整体替换。</p>
+     *
+     * @param req 同步请求（targetType + targetId + 目标 spaceIds）
+     * @return 实际变更的关联条数
+     */
+    @PostMapping("/space-relations-sync")
+    R<Integer> syncSpaceRelations(@RequestBody SpaceSyncReq req);
+
+    @PostMapping("/space-relations-batch")
+    R<Map<Long, List<SysSpaceRelationDto>>> listSpaceRelationsByTargets(
+        @RequestParam("targetType") String targetType,
+        @RequestBody List<Long> targetIds);
 
     /**
      * 把一批业务对象绑定到指定空间（幂等：已存在的关联会被更新而不是重复插入）。

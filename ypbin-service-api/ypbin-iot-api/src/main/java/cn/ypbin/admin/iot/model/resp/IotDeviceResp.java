@@ -11,6 +11,7 @@ package cn.ypbin.admin.iot.model.resp;
 
 import cn.ypbin.starter.json.ref.RefText;
 import java.time.LocalDateTime;
+import java.util.List;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -65,4 +66,20 @@ public class IotDeviceResp {
 
     /** 创建时间。 */
     private LocalDateTime createTime;
+
+    /**
+     * 所在空间 ID 列表（**来自 system 的空间关联，不是本表字段**）。
+     *
+     * <p>设备可同时挂在多个空间点（如「机房」与「机房所在的 3F」），故是列表。
+     * 数据源是 system 的 {@code sys_space_relation}（targetType=device）——
+     * IoT 不复制空间表，也不在本表加 {@code space_id} 列：多对多加列只能表达单点。</p>
+     */
+    private List<Long> spaceIds;
+
+    /**
+     * 所在空间的展示文本（主空间路径 + 「+N」）。
+     *
+     * <p>由列表查询时的一次批量反查填充，**不是本表字段**。</p>
+     */
+    private String spaceText;
 }

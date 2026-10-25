@@ -18,6 +18,10 @@ import cn.ypbin.admin.iot.lease.TenantLedgerService;
 import cn.ypbin.admin.iot.mapper.IotDeviceMapper;
 import cn.ypbin.admin.iot.mapper.IotProductMapper;
 import cn.ypbin.admin.iot.model.query.IotDeviceQuery;
+import cn.ypbin.admin.iot.space.DeviceSpaceAdapter;
+import cn.ypbin.admin.system.constant.SpaceConstants;
+import cn.ypbin.admin.system.model.dto.SysSpaceDto;
+import cn.ypbin.admin.system.model.dto.SysSpaceRelationDto;
 import cn.ypbin.admin.iot.model.req.IotDeviceReq;
 import cn.ypbin.admin.iot.model.resp.IotDeviceResp;
 import cn.ypbin.admin.iot.realtime.IotRealtimeService;
@@ -36,6 +40,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.stream.Collectors;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -72,19 +77,74 @@ public class IotDeviceServiceImpl extends BaseServiceImpl<IotDeviceMapper, IotDe
     /** 实时事件流（启停状态更新成功后旁路发布 device-status）。 */
     private final IotRealtimeService realtimeService;
 
+    /**
+     * 空间适配层（设备所在空间、按空间筛选）。
+     *
+     * <p>空间是 system 的主数据，IoT 不持有空间表——全部经本适配层调 system 契约。</p>
+     */
+    private final DeviceSpaceAdapter deviceSpaceAdapter;
+
     public IotDeviceServiceImpl(IotProductMapper iotProductMapper,
                                 TenantLedgerService tenantLedgerService,
-                                IotRealtimeService realtimeService) {
+                                IotRealtimeService realtimeService,
+                                DeviceSpaceAdapter deviceSpaceAdapter) {
         this.iotProductMapper = iotProductMapper;
         this.tenantLedgerService = tenantLedgerService;
         this.realtimeService = realtimeService;
+        this.deviceSpaceAdapter = deviceSpaceAdapter;
     }
 
     @Override
     public PageResult<IotDeviceResp> pageDevices(IotDeviceQuery query) {
         PageResult<IotDevice> source = page(query, buildWrapper(query));
-        List<IotDeviceResp> items = source.getItems().stream().map(this::toResp).toList();
+        List<IotDeviceResp> items = new ArrayList<>(source.getItems().stream()
+            .map(this::toResp).toList());
+        fillSpaces(items);
         return PageResult.of(items, source.getTotal(), source.getPage(), source.getPageSize());
+    }
+
+    /**
+     * 批量填充设备的空间信息（列表页「所在空间」列）。
+     *
+     * <p><b>一次批量反查，不逐行调</b>：一页几十条设备，逐条调 system 就是 N 次跨服务 HTTP。
+     * 适配层内部一次拿回全部关联。</p>
+     *
+     * @param items 设备响应列表（原地填充）
+     */
+    private void fillSpaces(List<IotDeviceResp> items) {
+        if (items.isEmpty()) {
+            return;
+        }
+        List<Long> ids = items.stream().map(IotDeviceResp::getId).toList();
+        Map<Long, List<SysSpaceRelationDto>> grouped = deviceSpaceAdapter.relationsOf(ids);
+        // 空间路径要展示「A栋/1F/101室」，需按 spaceId 取摘要
+        Set<Long> spaceIds = grouped.values().stream()
+            .flatMap(List::stream)
+            .map(SysSpaceRelationDto::getSpaceId)
+            .collect(Collectors.toCollection(LinkedHashSet::new));
+        Map<Long, SysSpaceDto> spaceById = deviceSpaceAdapter.spacesOf(spaceIds);
+        for (IotDeviceResp item : items) {
+            List<SysSpaceRelationDto> relations = grouped.get(item.getId());
+            if (relations == null || relations.isEmpty()) {
+                item.setSpaceIds(List.of());
+                item.setSpaceText("");
+                continue;
+            }
+            // 主空间优先展示，其余用「+N」
+            SysSpaceRelationDto primary = relations.stream()
+                .filter(r -> r.getIsPrimary() != null
+                    && SpaceConstants.PRIMARY_YES == r.getIsPrimary())
+                .findFirst()
+                .orElse(relations.getFirst());
+            SysSpaceDto space = spaceById.get(primary.getSpaceId());
+            String text = space == null ? "" : space.getSpacePath();
+            if (text == null || text.isBlank()) {
+                text = space == null ? "" : space.getName();
+            }
+            int others = relations.size() - 1;
+            item.setSpaceText(others > 0 ? text + " +" + others : text);
+            item.setSpaceIds(relations.stream().map(SysSpaceRelationDto::getSpaceId).toList());
+        }
     }
 
     @Override
@@ -206,6 +266,71 @@ public class IotDeviceServiceImpl extends BaseServiceImpl<IotDeviceMapper, IotDe
             throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR, "设备 ID 不能为空");
         }
         return ids.stream().distinct().toList();
+    }
+
+    @Override
+    public int bindSpace(Long spaceId, List<Long> deviceIds, boolean isPrimary, boolean clearOthers) {
+        if (spaceId == null) {
+            throw new BusinessException("空间 ID 不能为空");
+        }
+        List<Long> ids = requireExistingDevices(deviceIds);
+        // 写侧不降级：system 不可用时适配层抛异常，由 GlobalExceptionHandler 转成明确错误
+        return deviceSpaceAdapter.bind(spaceId, ids, isPrimary, clearOthers);
+    }
+
+    @Override
+    public int unbindSpace(Long spaceId, List<Long> deviceIds) {
+        if (spaceId == null) {
+            throw new BusinessException("空间 ID 不能为空");
+        }
+        List<Long> ids = requireExistingDevices(deviceIds);
+        return deviceSpaceAdapter.unbind(spaceId, ids);
+    }
+
+    @Override
+    public int syncDeviceSpaces(Long deviceId, List<Long> spaceIds) {
+        if (deviceId == null) {
+            throw new BusinessException("设备 ID 不能为空");
+        }
+        if (spaceIds == null) {
+            // null 等同于「调用方忘了传」，静默清空属危险默认值（与 system 侧同一判据）
+            throw new BusinessException("目标空间集合不能为空（清空请传空数组）");
+        }
+        if (getById(deviceId) == null) {
+            throw new BusinessException("设备不存在：id=" + deviceId);
+        }
+        deviceSpaceAdapter.syncDeviceSpaces(deviceId, spaceIds);
+        // 适配层无返回值语义（sync 只关心成败），这里返回目标集合大小便于调用方判断
+        return new LinkedHashSet<>(spaceIds).size();
+    }
+
+    /**
+     * 校验设备 ID 列表非空且**都真实存在**。
+     *
+     * <p><b>为什么必须在 IoT 侧先校验</b>：system 只知道 {@code targetId}，不知道它对 IoT
+     * 是否有效。若把不存在的设备 ID 传过去，会写出一条指向「空气」的关联，
+     * 而空间页上会显示「这个空间上有 3 台设备」却发现点进去什么都没有。</p>
+     *
+     * @param deviceIds 设备 ID 列表
+     * @return 去重后的设备 ID 列表
+     * @throws BusinessException 列表为空或含不存在的设备
+     */
+    private List<Long> requireExistingDevices(List<Long> deviceIds) {
+        if (deviceIds == null || deviceIds.isEmpty()) {
+            throw new BusinessException("设备 ID 列表不能为空");
+        }
+        List<Long> ids = List.copyOf(new LinkedHashSet<>(deviceIds));
+        if (ids.size() > MAX_BATCH_SIZE) {
+            throw new BusinessException(
+                "单次最多操作 " + MAX_BATCH_SIZE + " 台设备，当前 " + ids.size());
+        }
+        long existing = count(new LambdaQueryWrapper<IotDevice>().in(IotDevice::getId, ids));
+        if (existing != ids.size()) {
+            // 不列出具体哪个 ID 不存在（可能是越权探测）：只报数量差
+            throw new BusinessException(
+                "存在无效设备 ID：" + ids.size() + " 个中仅 " + existing + " 个有效");
+        }
+        return ids;
     }
 
     @Override
@@ -354,6 +479,19 @@ public class IotDeviceServiceImpl extends BaseServiceImpl<IotDeviceMapper, IotDe
         }
         if (query.getProductId() != null) {
             wrapper.eq(IotDevice::getProductId, query.getProductId());
+        }
+        if (query.getSpaceId() != null) {
+            // 按空间（含全部后代）筛选：先问 system 要该子树上的设备 ID，再 IN 过滤。
+            // 不能在本表加 space_id 列做（多对多，且空间表在 system）。
+            List<Long> deviceIds = deviceSpaceAdapter.deviceIdsInSpaceTree(query.getSpaceId());
+            if (deviceIds.isEmpty()) {
+                // **必须显式短路**：空 ID 列表若继续传给 IN，MyBatis-Plus 会生成
+                // `IN ()`（SQL 语法错）或退化成「不过滤」⇒ 返回全部设备（严重错误）。
+                // 用恒假条件保证「该空间没有设备时查出 0 条」。
+                wrapper.eq(IotDevice::getId, -1L);
+            } else {
+                wrapper.in(IotDevice::getId, deviceIds);
+            }
         }
         return wrapper;
     }

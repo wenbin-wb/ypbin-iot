@@ -96,6 +96,38 @@ public interface IotDeviceService {
     int batchRemove(List<Long> ids);
 
     /**
+     * 绑定一批设备到指定空间。
+     *
+     * <p><b>失败必须抛异常</b>：用户明确点了「绑定到 A栋」，静默失败会让他在列表里
+     * 看不到刚绑的设备，而系统毫无提示。</p>
+     *
+     * @param spaceId     空间 ID
+     * @param deviceIds   设备 ID 列表
+     * @param isPrimary   是否主空间
+     * @param clearOthers 是否先清空这些设备在其他空间的关联（设备挪位置 = true）
+     * @return 实际生效的关联条数
+     */
+    int bindSpace(Long spaceId, List<Long> deviceIds, boolean isPrimary, boolean clearOthers);
+
+    /**
+     * 解绑一批设备与指定空间。
+     *
+     * @param spaceId   空间 ID
+     * @param deviceIds 设备 ID 列表
+     * @return 实际删除的关联条数
+     */
+    int unbindSpace(Long spaceId, List<Long> deviceIds);
+
+    /**
+     * 整体设置某设备的空间集合（单事务语义，用于编辑设备时一次提交）。
+     *
+     * @param deviceId 设备 ID
+     * @param spaceIds 目标空间集合（空集合 = 清空该设备全部空间关联）
+     * @return 实际变更条数
+     */
+    int syncDeviceSpaces(Long deviceId, List<Long> spaceIds);
+
+    /**
      * 导出本租户设备台账 CSV（复用列表筛选条件 {@code keyword/protocol/productId}；分页参数忽略）。
      *
      * <p>单租户最多导出 <b>10000</b> 条：超过抛 {@link cn.ypbin.starter.core.exception.BusinessException}

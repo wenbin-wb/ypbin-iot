@@ -13,6 +13,8 @@ import cn.ypbin.admin.iot.model.query.IotDeviceQuery;
 import cn.ypbin.admin.iot.model.req.IotDeviceBatchDeleteReq;
 import cn.ypbin.admin.iot.model.req.IotDeviceBatchStatusReq;
 import cn.ypbin.admin.iot.model.req.IotDeviceReq;
+import cn.ypbin.admin.iot.model.req.DeviceSpaceSyncReq;
+import cn.ypbin.admin.iot.model.req.DeviceSpaceBindReq;
 import cn.ypbin.admin.iot.model.resp.IotDeviceResp;
 import cn.ypbin.admin.iot.service.IotDeviceService;
 import cn.ypbin.starter.core.model.R;
@@ -177,6 +179,57 @@ public class IotDeviceController {
      * @param req 批量删除请求
      * @return 实际删除台数
      */
+    /**
+     * 绑定一批设备到指定空间。
+     *
+     * @param id        空间 ID
+     * @param req       绑定请求（设备 ID 列表 + 是否主空间 + 是否清空其他位置）
+     * @return 实际生效的关联条数
+     */
+    @PostMapping("/space/{id}/bind")
+    @SaCheckPermission("iot:device:update")
+    @Idempotent
+    @Log("设备绑定空间")
+    public R<Integer> bindSpace(@PathVariable Long id, @Valid @RequestBody DeviceSpaceBindReq req) {
+        return R.ok(iotDeviceService.bindSpace(id, req.getDeviceIds(),
+            Boolean.TRUE.equals(req.getIsPrimary()), Boolean.TRUE.equals(req.getClearOthers())));
+    }
+
+    /**
+     * 解绑一批设备与指定空间。
+     *
+     * @param id  空间 ID
+     * @param req 解绑请求（设备 ID 列表）
+     * @return 实际删除的关联条数
+     */
+    @PostMapping("/space/{id}/unbind")
+    @SaCheckPermission("iot:device:update")
+    @Idempotent
+    @Log("设备解绑空间")
+    public R<Integer> unbindSpace(@PathVariable Long id,
+        @Valid @RequestBody DeviceSpaceBindReq req) {
+        return R.ok(iotDeviceService.unbindSpace(id, req.getDeviceIds()));
+    }
+
+    /**
+     * 整体设置某设备的空间集合（单事务：算差集后批量增删）。
+     *
+     * <p>编辑设备时用这个而不是 bind+unbind：换位置若由前端做两步，
+     * 中间失败会留下「两头都不在」或「两头都在」的不一致状态。</p>
+     *
+     * @param id  设备 ID
+     * @param req 同步请求（目标空间集合，空数组 = 清空）
+     * @return 实际变更条数
+     */
+    @PostMapping("/{id}/spaces/sync")
+    @SaCheckPermission("iot:device:update")
+    @Idempotent
+    @Log("同步设备空间")
+    public R<Integer> syncSpaces(@PathVariable Long id,
+        @Valid @RequestBody DeviceSpaceSyncReq req) {
+        return R.ok(iotDeviceService.syncDeviceSpaces(id, req.getSpaceIds()));
+    }
+
     @PostMapping("/batch/delete")
     @SaCheckPermission("iot:device:delete")
     @Idempotent
