@@ -23,6 +23,7 @@ import jakarta.validation.Valid;
 import cn.ypbin.starter.log.model.LogRecord;
 import cn.ypbin.starter.tracking.core.TrackEvent;
 import java.util.List;
+import java.util.Map;
 import org.springframework.cloud.openfeign.FeignClient;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -321,6 +322,42 @@ public interface ISystemClient {
     R<List<SysSpaceRelationDto>> listSpaceRelationsByTarget(
         @RequestParam("targetType") String targetType,
         @RequestParam("targetId") Long targetId);
+
+    /**
+     * 取指定空间及其全部后代 ID（供业务侧「按空间筛选」实现含子树语义）。
+     *
+     * <p>业务侧（如 IoT）需要「选 A栋 时看到其下所有设备」，而设备挂在最末级房间；
+     * 业务服务没有空间表，也不该自己递归查 system 的表——故由 system 一次算好。</p>
+     *
+     * @param spaceId 根空间 ID
+     * @return 该空间及全部后代 ID（含自身；不存在时为空列表）
+     */
+    @GetMapping("/space-subtree-ids")
+    R<List<Long>> listSpaceSubtreeIds(@RequestParam("spaceId") Long spaceId);
+
+    /**
+     * 按空间（**含全部后代**）取挂在其上的业务对象 ID。
+     *
+     * <p>供业务侧「空间视角看设备」用：设备挂在末级房间，用户在空间页点「A栋」
+     * 要看到其下所有设备，故必须含子树。</p>
+     *
+     * @param spaceId    根空间 ID
+     * @param targetType 关联对象类型（可空：不限定类型）
+     * @return 业务对象 ID 列表（去重）
+     */
+    @GetMapping("/space-target-ids-by-space")
+    R<List<Long>> listSpaceTargetIdsBySpace(@RequestParam("spaceId") Long spaceId,
+        @RequestParam(value = "targetType", required = false) String targetType);
+
+    /**
+     * 按空间（含后代）统计各类型业务对象数量（供空间列表「设备数」列）。
+     *
+     * @param spaceIds 根空间 ID 列表
+     * @return 空间 ID → (对象类型 → 数量)
+     */
+    @PostMapping("/space-relation-counts")
+    R<Map<Long, Map<String, Long>>> countSpaceRelationsBySpaceTrees(
+        @RequestBody List<Long> spaceIds);
 
     /**
      * 把一批业务对象绑定到指定空间（幂等：已存在的关联会被更新而不是重复插入）。

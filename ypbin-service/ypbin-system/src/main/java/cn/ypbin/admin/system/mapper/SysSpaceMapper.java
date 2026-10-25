@@ -16,6 +16,7 @@
 package cn.ypbin.admin.system.mapper;
 
 import cn.ypbin.admin.system.entity.SysSpace;
+import cn.ypbin.admin.system.model.resp.SpaceTreeNodeResp;
 import com.baomidou.mybatisplus.annotation.InterceptorIgnore;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import java.util.List;
@@ -167,5 +168,75 @@ public interface SysSpaceMapper extends BaseMapper<SysSpace> {
         SELECT MAX(relDepth) FROM subtree
         """)
     Integer selectSubtreeMaxRelDepth(@Param("rootId") Long rootId, @Param("tenantId") Long tenantId,
+        @Param("maxDepth") int maxDepth);
+
+    /**
+     * 懒加载树：查某一层的子节点（{@code pid} 相同），并**一次分组**算出各自有无子节点。
+     *
+     * <p><b>为什么要一次 SQL 带上 hasChildren</b>：若先查子节点、再对每个子节点查「有没有下级」，
+     * 就是 N+1（一层 50 个节点 = 51 次查询）。这里用 {@code EXISTS} 子查询在同一个语句里算完。</p>
+     *
+     * <p>租户条件由插件自动追加（本语句无 CTE，插件能正确识别表名）。</p>
+     *
+     * @param parentId 父空间 ID（{@code 0} 表示查根节点）
+     * @param keyword  名称/编码模糊匹配（可空；非空时**跨层级搜索**，不受 parentId 限制）
+     * @return 该层节点（含 {@code hasChildren}）
+     */
+    @Select("""
+        <script>
+        SELECT s.id, s.pid, s.name, s.code,
+               s.space_type AS spaceType, s.sort, s.status,
+               (SELECT COUNT(*) FROM sys_space c WHERE c.pid = s.id AND c.is_deleted = 0) > 0
+                   AS hasChildren
+        FROM sys_space s
+        WHERE s.is_deleted = 0
+        <choose>
+            <when test="keyword != null and keyword != ''">
+                AND (s.name LIKE CONCAT('%', #{keyword}, '%')
+                     OR s.code LIKE CONCAT('%', #{keyword}, '%'))
+            </when>
+            <otherwise>
+                AND s.pid = #{parentId}
+            </otherwise>
+        </choose>
+        ORDER BY s.sort ASC, s.id ASC
+        </script>
+        """)
+    List<SpaceTreeNodeResp> selectChildrenWithHasChildren(@Param("parentId") Long parentId,
+        @Param("keyword") String keyword);
+
+    /**
+     * 取指定空间**及其全部后代**的 ID（用于「按空间筛选」的含子树语义）。
+     *
+     * <p><b>为什么必须有</b>：设备挂在「A栋 1F 101室」，用户在设备列表选「A栋」筛选时，
+     * 期望看到 A栋 下所有设备（含 1F、101室里的）。只按 {@code space_id = A栋} 匹配会漏掉
+     * 全部实际挂在房间里的设备——而业务上设备几乎总是挂在最末级房间。</p>
+     *
+     * <p><b>为什么用一条 CTE 而不是 Java 递归</b>：Java 里逐层查子节点是循环内 DB 调用
+     * （架构门禁判红），且查询次数随深度增长。CTE 一次算完。</p>
+     *
+     * <p>与其他 CTE 语句同一处置：跳过租户插件 + SQL 显式写 {@code tenant_id}
+     * （插件认不出 CTE 名，会生成引用不存在列的 SQL）。</p>
+     *
+     * @param rootId   根空间 ID
+     * @param tenantId 当前租户 ID
+     * @param maxDepth CTE 递归深度上限（含余量）
+     * @return 该空间及全部后代的 ID（含自身；根不存在时为空列表）
+     */
+    @InterceptorIgnore(tenantLine = "true")
+    @Select("""
+        WITH RECURSIVE subtree AS (
+            SELECT id, 0 AS relDepth
+            FROM sys_space
+            WHERE id = #{rootId} AND tenant_id = #{tenantId} AND is_deleted = 0
+            UNION ALL
+            SELECT s.id, t.relDepth + 1
+            FROM sys_space s
+            INNER JOIN subtree t ON s.pid = t.id
+            WHERE s.tenant_id = #{tenantId} AND s.is_deleted = 0 AND t.relDepth < #{maxDepth}
+        )
+        SELECT id FROM subtree ORDER BY relDepth ASC, id ASC
+        """)
+    List<Long> selectSubtreeIds(@Param("rootId") Long rootId, @Param("tenantId") Long tenantId,
         @Param("maxDepth") int maxDepth);
 }

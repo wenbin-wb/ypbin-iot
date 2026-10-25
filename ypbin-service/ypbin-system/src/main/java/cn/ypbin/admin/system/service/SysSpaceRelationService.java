@@ -22,6 +22,7 @@ import cn.ypbin.admin.system.model.req.SpaceSyncReq;
 import cn.ypbin.admin.system.model.resp.SpaceRelationResp;
 import cn.ypbin.starter.crud.service.BaseService;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 空间关联服务（空间 ↔ 任意业务对象）。
@@ -81,6 +82,42 @@ public interface SysSpaceRelationService extends BaseService<SysSpaceRelation> {
      * @return 关联列表
      */
     List<SpaceRelationResp> listBySpace(Long spaceId, String targetType);
+
+    /**
+     * 批量反查：一次查多个业务对象各自的空间（列表页展示「所在空间」列用）。
+     *
+     * <p><b>为什么必须有</b>：列表页一页 10~50 条记录，若逐条调 {@link #listByTarget}，
+     * 就是 N 次 HTTP + N 次 SQL（N+1）。本方法一次 `IN` 查询取回全部关联，
+     * 再按对象分组返回，查询次数恒为 2（关联 1 次 + 空间信息 1 次）。</p>
+     *
+     * <p><b>返回 Map 而不是平铺列表</b>：调用方拿到的是「每条记录对应哪些空间」，
+     * 分组结构让它可以直接按 targetId 取值，不必自己 groupBy。</p>
+     *
+     * @param targetType 关联对象类型
+     * @param targetIds  关联对象 ID 列表（空集合返回空 Map，不查库）
+     * @return 对象 ID → 该对象的空间关联列表（无关联的对象不出现在结果里）
+     */
+    Map<Long, List<SpaceRelationResp>> listByTargets(String targetType, List<Long> targetIds);
+
+    /**
+     * 按空间（含其全部后代）取挂在其上的业务对象 ID（供业务侧「空间视角看设备」用）。
+     *
+     * <p><b>为什么要含子树</b>：设备通常挂在末级房间（A栋/1F/101室）。用户在空间页点「A栋」
+     * 期望看到其下所有设备；只查 `space_id = A栋` 会得到空列表。</p>
+     *
+     * @param spaceId    根空间 ID
+     * @param targetType 关联对象类型（可空：不限定类型）
+     * @return 业务对象 ID 列表（去重）
+     */
+    List<Long> listTargetIdsBySpaceTree(Long spaceId, String targetType);
+
+    /**
+     * 按空间（含后代）统计各类型业务对象的数量（供空间列表「设备数」列用）。
+     *
+     * @param spaceIds 根空间 ID 列表（空集合返回空 Map，不查库）
+     * @return 空间 ID → (对象类型 → 数量)
+     */
+    Map<Long, Map<String, Long>> countBySpaceTrees(List<Long> spaceIds);
 
     /**
      * 删除某业务对象的<b>全部</b>空间关联（业务侧删除对象时调用）。

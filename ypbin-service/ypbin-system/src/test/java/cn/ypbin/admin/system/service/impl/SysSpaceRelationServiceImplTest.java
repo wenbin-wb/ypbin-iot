@@ -18,6 +18,8 @@ package cn.ypbin.admin.system.service.impl;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
@@ -26,10 +28,13 @@ import static org.mockito.Mockito.spy;
 import org.mockito.ArgumentCaptor;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import cn.ypbin.admin.system.constant.SpaceConstants;
+import cn.ypbin.starter.security.core.LoginUser;
+import cn.ypbin.starter.security.identity.IdentityContext;
 import cn.ypbin.admin.system.entity.SysDictItem;
 import cn.ypbin.admin.system.entity.SysSpace;
 import cn.ypbin.admin.system.entity.SysSpaceRelation;
@@ -43,7 +48,10 @@ import cn.ypbin.admin.system.model.resp.SpaceRelationResp;
 import cn.ypbin.starter.core.exception.BusinessException;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.function.Supplier;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.apache.ibatis.executor.BatchResult;
 import org.junit.jupiter.api.BeforeAll;
@@ -69,6 +77,8 @@ import org.springframework.test.util.ReflectionTestUtils;
  */
 class SysSpaceRelationServiceImplTest {
 
+    private static final Long TENANT_ID = 1L;
+
     private static final Long SPACE_ID = 10L;
 
     private static final Long OTHER_SPACE_ID = 20L;
@@ -88,6 +98,28 @@ class SysSpaceRelationServiceImplTest {
             SysSpaceRelation.class);
         TableInfoHelper.initTableInfo(new MapperBuilderAssistant(configuration, "space-relation"),
             SysSpace.class);
+    }
+
+    /**
+     * 在「已登录 + 固定租户」上下文里执行。
+     *
+     * <p>子树查询与 count 走的是 {@code UserContext.getTenantId()}（读网关身份头），
+     * 没有上下文会抛「无法确定当前租户」——这正是生产里无身份头时的 fail-closed 行为，
+     * 故测试必须显式提供上下文，不能把租户做成可空参数来「绕过」。</p>
+     *
+     * @param action 待执行动作
+     * @return 动作返回值
+     */
+    private <T> T withTenant(Supplier<T> action) {
+        LoginUser loginUser = new LoginUser();
+        loginUser.setId(1L);
+        loginUser.setTenantId(TENANT_ID);
+        IdentityContext.setLoginUser(loginUser);
+        try {
+            return action.get();
+        } finally {
+            IdentityContext.clear();
+        }
     }
 
     @BeforeEach
@@ -391,6 +423,122 @@ class SysSpaceRelationServiceImplTest {
         verify(service, atLeastOnce()).updateBatchById(anyList());
     }
 
+
+    // ---------- 批量反查（列表页 N+1 的解法） ----------
+
+    @Test
+    @DisplayName("★ 批量反查：10 个对象只查 2 次库（1 次关联 + 1 次空间），不是 10 次")
+    void shouldQueryTwiceForBatchReverseLookup() {
+        when(dictItemMapper.selectByDictCode("space_target_type")).thenReturn(List.of(dictItem("device")));
+        // 10 个对象各 1 条关联
+        List<SysSpaceRelation> rels = new ArrayList<>();
+        for (long i = 1; i <= 10; i++) {
+            // 每条关联属于**不同对象**（targetId = i），空间 ID 各不相同
+            rels.add(relation(i, 100L + i, i));
+        }
+        when(relationMapper.selectList(any())).thenReturn(rels);
+        when(spaceMapper.selectByIds(anyList())).thenReturn(List.of(space(101L), space(102L)));
+        when(spaceMapper.selectList(any())).thenReturn(List.of(space(101L), space(102L)));
+
+        Map<Long, List<SpaceRelationResp>> grouped =
+            service.listByTargets("device", List.of(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L));
+
+        assertThat(grouped).hasSize(10);
+        // 关键断言：关联查询 1 次 + 空间批量查询 1 次（fillSpacePaths 内部再取 1 次全量）
+        verify(relationMapper, times(1)).selectList(any());
+        verify(spaceMapper, times(1)).selectByIds(anyList());
+    }
+
+    @Test
+    @DisplayName("批量反查：空 ID 列表直接返回空 Map，不查库（空 IN () 是 SQL 语法错）")
+    void shouldNotQueryWhenBatchIdsEmpty() {
+        // 类型校验仍会执行（这是刻意的：调用方传错类型要报错，不能因为"没数据"就静默放过）
+        when(dictItemMapper.selectByDictCode("space_target_type")).thenReturn(List.of(dictItem("device")));
+        Map<Long, List<SpaceRelationResp>> grouped = service.listByTargets("device", List.of());
+        assertThat(grouped).isEmpty();
+        verify(relationMapper, never()).selectList(any());
+    }
+
+    @Test
+    @DisplayName("批量反查：无关联时返回空 Map（不是 null）")
+    void shouldReturnEmptyMapWhenNoRelationInBatch() {
+        when(dictItemMapper.selectByDictCode("space_target_type")).thenReturn(List.of(dictItem("device")));
+        when(relationMapper.selectList(any())).thenReturn(List.of());
+
+        assertThat(service.listByTargets("device", List.of(1L, 2L))).isEmpty();
+    }
+
+    @Test
+    @DisplayName("批量反查：类型非法时拒绝（与其他入口同一判据）")
+    void shouldRejectUnknownTypeInBatch() {
+        when(dictItemMapper.selectByDictCode("space_target_type")).thenReturn(List.of(dictItem("dept")));
+
+        assertThatThrownBy(() -> service.listByTargets("spaceship", List.of(1L)))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("关联对象类型不合法");
+    }
+
+
+    // ---------- 空间视角 / 数量统计（IoT 设备资产管理依赖） ----------
+
+    @Test
+    @DisplayName("★ 按空间取对象 ID：含子树（设备挂末级房间，选 A栋 要能看到）")
+    void shouldIncludeSubtreeWhenListingTargetIdsBySpace() {
+        when(dictItemMapper.selectByDictCode("space_target_type")).thenReturn(List.of(dictItem("device")));
+        when(spaceMapper.selectSubtreeIds(eq(2L), any(), anyInt()))
+            .thenReturn(List.of(2L, 3L, 4L)); // A栋 + 1F + 101室
+        when(relationMapper.selectList(any())).thenReturn(
+            List.of(relation(1L, 2L, 100L), relation(2L, 3L, 100L), relation(3L, 4L, 200L)));
+
+        List<Long> ids = withTenant(() -> service.listTargetIdsBySpaceTree(2L, "device"));
+
+        // 100 同时挂在 A栋 与 1F（多对多允许），去重后只出现 1 次
+        assertThat(ids).containsExactlyInAnyOrder(100L, 200L);
+        verify(spaceMapper).selectSubtreeIds(eq(2L), any(), anyInt());
+    }
+
+    @Test
+    @DisplayName("按空间取对象 ID：空间不存在/子集为空时返回空列表，不查关联表")
+    void shouldNotQueryRelationsWhenSubtreeEmpty() {
+        when(dictItemMapper.selectByDictCode("space_target_type")).thenReturn(List.of(dictItem("device")));
+        when(spaceMapper.selectSubtreeIds(eq(99L), any(), anyInt())).thenReturn(List.of());
+
+        assertThat(withTenant(() -> service.listTargetIdsBySpaceTree(99L, "device"))).isEmpty();
+        verify(relationMapper, never()).selectList(any());
+    }
+
+    @Test
+    @DisplayName("★ 数量统计：同一设备挂多层空间时只算 1 台（去重）")
+    void shouldDedupWhenCountingBySpaceTree() {
+        when(spaceMapper.selectSubtreeIds(eq(2L), any(), anyInt())).thenReturn(List.of(2L, 3L));
+        when(relationMapper.selectList(any())).thenReturn(
+            List.of(relation(1L, 2L, 100L), relation(2L, 3L, 100L), relation(3L, 3L, 200L)));
+
+        Map<Long, Map<String, Long>> counts = withTenant(() -> service.countBySpaceTrees(List.of(2L)));
+
+        // 关联 3 条，但只有 2 台不同设备
+        assertThat(counts.get(2L)).containsEntry("dept", 2L);
+    }
+
+    @Test
+    @DisplayName("数量统计：空集合返回空 Map，不查库")
+    void shouldNotQueryWhenCountSpaceIdsEmpty() {
+        assertThat(service.countBySpaceTrees(List.of())).isEmpty();
+        verify(relationMapper, never()).selectList(any());
+    }
+
+    @Test
+    @DisplayName("数量统计：超过批量上限时拒绝（防一次请求打爆数据库）")
+    void shouldRejectTooManySpaceIdsWhenCounting() {
+        List<Long> tooMany = new ArrayList<>();
+        for (long i = 0; i < SpaceConstants.MAX_BATCH_TARGETS + 1L; i++) {
+            tooMany.add(i + 1);
+        }
+        assertThatThrownBy(() -> service.countBySpaceTrees(tooMany))
+            .isInstanceOf(BusinessException.class)
+            .hasMessageContaining("超过上限");
+    }
+
     // ---------- 辅助 ----------
 
     private SpaceSyncReq syncReq(String targetType, Long targetId, List<Long> spaceIds) {
@@ -419,11 +567,26 @@ class SysSpaceRelationServiceImplTest {
     }
 
     private static SysSpaceRelation relation(Long id, Long spaceId) {
+        return relation(id, spaceId, 1L);
+    }
+
+    /**
+     * 构造关联行（可指定 targetId）。
+     *
+     * <p>批量反查的用例必须让**不同对象**有不同的 targetId，否则所有关联都被归到同一个对象，
+     * 断言「分组数」会失真（实测踩过：10 条关联全带 targetId=1，分组结果只有 1 组）。</p>
+     *
+     * @param id       关联行 ID
+     * @param spaceId  空间 ID
+     * @param targetId 关联对象 ID
+     * @return 关联实体
+     */
+    private static SysSpaceRelation relation(Long id, Long spaceId, Long targetId) {
         SysSpaceRelation relation = new SysSpaceRelation();
         relation.setId(id);
         relation.setSpaceId(spaceId);
         relation.setTargetType("dept");
-        relation.setTargetId(1L);
+        relation.setTargetId(targetId);
         relation.setIsPrimary(SpaceConstants.PRIMARY_NO);
         relation.setStatus(1);
         return relation;

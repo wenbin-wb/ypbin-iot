@@ -19,6 +19,7 @@ import cn.ypbin.admin.system.entity.SysSpace;
 import cn.ypbin.admin.system.model.query.SpaceQuery;
 import cn.ypbin.admin.system.model.req.SpaceSaveReq;
 import cn.ypbin.admin.system.model.resp.SpaceResp;
+import cn.ypbin.admin.system.model.resp.SpaceTreeNodeResp;
 import cn.ypbin.starter.crud.model.PageResult;
 import cn.ypbin.starter.crud.service.BaseService;
 import java.util.List;
@@ -37,6 +38,19 @@ public interface SysSpaceService extends BaseService<SysSpace> {
      * @return 空间树（叶子节点 children 为 null）
      */
     List<SpaceResp> tree();
+
+    /**
+     * 懒加载树：只查某一层（或按关键词跨层搜索）。
+     *
+     * <p><b>与 {@link #tree()} 的分工</b>：{@code tree()} 一次性返回全量树，适合空间数量小的租户
+     * （几十~几百个，且要一次渲染完整层级）；本方法按需逐层加载，适合**万级空间**
+     * ——全量树在那种量级下响应体会到 MB 级，且前端递归渲染会卡。</p>
+     *
+     * @param parentId 父空间 ID（{@code null}/{@code 0} 表示查根层）
+     * @param keyword  关键词（非空时跨层级搜索，忽略 parentId）
+     * @return 该层节点（含 {@code hasChildren}，供前端决定是否显示展开箭头）
+     */
+    List<SpaceTreeNodeResp> lazyTree(Long parentId, String keyword);
 
     /**
      * 空间平铺分页列表（供搜索/筛选）。
@@ -84,4 +98,16 @@ public interface SysSpaceService extends BaseService<SysSpace> {
      * @return 路径；空间不存在时返回空串
      */
     String buildSpacePath(Long id);
+
+    /**
+     * 取指定空间及其全部后代的 ID（供业务侧「按空间筛选」用）。
+     *
+     * <p><b>为什么业务侧需要它而不是自己按 pid 递归</b>：设备挂在最末级房间，
+     * 用户选「A栋」筛选时期望含其下所有设备。业务服务（如 IoT）不持有空间表，
+     * 也不该自己递归查 system 的表——故由 system 一次算好返回。</p>
+     *
+     * @param spaceId 根空间 ID
+     * @return 该空间及全部后代 ID（含自身；不存在时为空列表）
+     */
+    List<Long> listSubtreeIds(Long spaceId);
 }

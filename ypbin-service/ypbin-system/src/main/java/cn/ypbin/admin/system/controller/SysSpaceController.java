@@ -23,6 +23,7 @@ import cn.ypbin.admin.system.model.req.SpaceSaveReq;
 import cn.ypbin.admin.system.model.req.SpaceSyncReq;
 import cn.ypbin.admin.system.model.resp.SpaceRelationResp;
 import cn.ypbin.admin.system.model.resp.SpaceResp;
+import cn.ypbin.admin.system.model.resp.SpaceTreeNodeResp;
 import cn.ypbin.admin.system.service.SysSpaceRelationService;
 import cn.ypbin.admin.system.service.SysSpaceService;
 import cn.ypbin.starter.core.model.R;
@@ -31,6 +32,7 @@ import cn.ypbin.starter.log.annotation.Log;
 import cn.ypbin.starter.tools.idempotent.Idempotent;
 import jakarta.validation.Valid;
 import java.util.List;
+import java.util.Map;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -74,6 +76,24 @@ public class SysSpaceController {
     @SaCheckPermission("system:space:list")
     public R<List<SpaceResp>> tree() {
         return R.ok(spaceService.tree());
+    }
+
+    /**
+     * 懒加载树：只查一层（或按关键词跨层搜索）。
+     *
+     * <p>与 {@code /space/tree}（全量树）的分工：全量树适合空间数量小的租户，
+     * 一次渲染完整层级；万级空间用本端点按需展开，避免 MB 级响应与前端递归渲染卡顿。</p>
+     *
+     * @param parentId 父空间 ID（不传=查根层）
+     * @param keyword  关键词（非空时跨层级搜索，忽略 parentId）
+     * @return 该层节点（含 hasChildren）
+     */
+    @GetMapping("/tree/lazy")
+    @SaCheckPermission("system:space:list")
+    public R<List<SpaceTreeNodeResp>> lazyTree(
+        @RequestParam(required = false) Long parentId,
+        @RequestParam(required = false) String keyword) {
+        return R.ok(spaceService.lazyTree(parentId, keyword));
     }
 
     /**
@@ -219,6 +239,23 @@ public class SysSpaceController {
     public R<List<SpaceRelationResp>> relationsBySpace(@PathVariable Long id,
         @RequestParam(required = false) String targetType) {
         return R.ok(relationService.listBySpace(id, targetType));
+    }
+
+    /**
+     * 批量反查：一次查多个业务对象各自的空间（列表页「所在空间」列用）。
+     *
+     * <p>列表页有 N 条记录时，逐条调单对象反查就是 N 次 HTTP（N+1）；本端点一次返回。</p>
+     *
+     * @param targetType 关联对象类型
+     * @param targetIds  关联对象 ID 列表
+     * @return 对象 ID → 空间关联列表（无关联的对象不出现在结果里）
+     */
+    @GetMapping("/relations/by-targets")
+    @SaCheckPermission("system:space:list")
+    public R<Map<Long, List<SpaceRelationResp>>> relationsByTargets(
+        @RequestParam String targetType,
+        @RequestParam List<Long> targetIds) {
+        return R.ok(relationService.listByTargets(targetType, targetIds));
     }
 
     /**

@@ -62,6 +62,7 @@ import java.util.UUID;
 import org.springframework.util.StringUtils;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -554,6 +555,27 @@ public class SystemClientImpl implements ISystemClient {
         } catch (BusinessException e) {
             return R.fail(e.getMessage());
         }
+    }
+
+    @Override
+    public R<List<Long>> listSpaceSubtreeIds(Long spaceId) {
+        if (spaceId == null) {
+            return R.fail("空间 ID 不能为空");
+        }
+        return R.ok(spaceService.listSubtreeIds(spaceId));
+    }
+
+    @Override
+    public R<List<Long>> listSpaceTargetIdsBySpace(Long spaceId, String targetType) {
+        if (spaceId == null) {
+            return R.fail("空间 ID 不能为空");
+        }
+        return R.ok(spaceRelationService.listTargetIdsBySpaceTree(spaceId, targetType));
+    }
+
+    @Override
+    public R<Map<Long, Map<String, Long>>> countSpaceRelationsBySpaceTrees(List<Long> spaceIds) {
+        return R.ok(spaceRelationService.countBySpaceTrees(spaceIds));
     }
 
     @Override

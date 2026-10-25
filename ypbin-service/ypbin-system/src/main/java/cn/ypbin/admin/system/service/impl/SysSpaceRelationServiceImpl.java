@@ -18,6 +18,7 @@ package cn.ypbin.admin.system.service.impl;
 import cn.ypbin.admin.system.constant.SpaceConstants;
 import cn.ypbin.admin.system.entity.SysDictItem;
 import cn.ypbin.admin.system.entity.SysSpace;
+import cn.ypbin.starter.security.core.UserContext;
 import cn.ypbin.admin.system.entity.SysSpaceRelation;
 import cn.ypbin.admin.system.mapper.SysDictItemMapper;
 import cn.ypbin.admin.system.mapper.SysSpaceMapper;
@@ -37,9 +38,9 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
-import java.util.Set;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -361,6 +362,179 @@ public class SysSpaceRelationServiceImpl extends BaseServiceImpl<SysSpaceRelatio
             result.add(resp);
         }
         fillSpacePaths(result);
+        return result;
+    }
+
+    @Override
+    public Map<Long, List<SpaceRelationResp>> listByTargets(String targetType,
+        List<Long> targetIds) {
+        if (!StringUtils.hasText(targetType)) {
+            throw new BusinessException("关联对象类型不能为空");
+        }
+        String normalizedType = normalizeTargetType(targetType);
+        List<Long> ids = distinctIds(targetIds);
+        if (ids.isEmpty()) {
+            // 空集合直接返回空 Map：查库无意义，且空 IN () 是 SQL 语法错
+            return Map.of();
+        }
+        // 查询次数恒为 2：① 一次 IN 取全部关联；② 一次批量取空间信息（fillSpacePaths 内部）。
+        // 不逐对象调 listByTarget —— 那是 N+1。
+        List<SysSpaceRelation> relations = list(new LambdaQueryWrapper<SysSpaceRelation>()
+            .eq(SysSpaceRelation::getTargetType, normalizedType)
+            .in(SysSpaceRelation::getTargetId, ids)
+            .orderByDesc(SysSpaceRelation::getIsPrimary)
+            .orderByAsc(SysSpaceRelation::getId));
+        if (relations.isEmpty()) {
+            return Map.of();
+        }
+        List<Long> spaceIds = relations.stream().map(SysSpaceRelation::getSpaceId).distinct().toList();
+        List<SysSpace> spaces = spaceMapper.selectByIds(spaceIds);
+        Map<Long, SysSpace> spaceById = new HashMap<>(spaces.size());
+        for (SysSpace space : spaces) {
+            spaceById.put(space.getId(), space);
+        }
+        // 按对象分组（LinkedHashMap 保持稳定顺序，便于前端渲染）
+        Map<Long, List<SpaceRelationResp>> grouped = new LinkedHashMap<>();
+        List<SpaceRelationResp> all = new ArrayList<>(relations.size());
+        for (SysSpaceRelation relation : relations) {
+            SpaceRelationResp resp = toRelationResp(relation,
+                spaceById.get(relation.getSpaceId()));
+            grouped.computeIfAbsent(relation.getTargetId(), key -> new ArrayList<>()).add(resp);
+            all.add(resp);
+        }
+        // 路径一次性批量填充（内部取全量空间在内存拼，不逐条 CTE）
+        fillSpacePaths(all);
+        return grouped;
+    }
+
+    /**
+     * 关联实体 → 响应（含空间侧字段）。
+     *
+     * <p>抽出来是因为 {@code listByTarget} / {@code listBySpace} / {@code listByTargets}
+     * 三处都要做同一件事；复制三份会在加字段时漏改其中一处。</p>
+     *
+     * <p>空间类型的展示文本由 {@code SpaceRelationResp.spaceType} 上的 {@code @DictText} 在序列化时
+     * 输出 {@code spaceTypeText}，<b>不在这里手工翻译</b>（否则与 starter 形成两份实现）。</p>
+     *
+     * @param relation 关联实体
+     * @param space    空间实体（可为 null：空间被删但关联残留）
+     * @return 关联响应
+     */
+    /**
+     * 当前租户 ID。
+     *
+     * <p>用 {@code UserContext}（读网关身份头）而不是 {@code TenantContext}——
+     * 与 {@code SysSpaceServiceImpl#currentTenantId()} 同一口径。两者在普通请求里行为不同：
+     * {@code TenantContext} 只在显式 {@code executeWithTenant} 块内/插件取默认值时才有值，
+     * 直接用它会抛「无法确定当前租户」（本仓踩过，见 SysSpaceServiceImpl 的同名方法注释）。</p>
+     *
+     * @return 当前租户 ID
+     */
+    private Long currentTenantId() {
+        return UserContext.getTenantId()
+            .orElseThrow(() -> new BusinessException("无法确定当前租户"));
+    }
+
+    /**
+     * 取空间及其全部后代 ID。
+     *
+     * <p><b>为什么直接用 {@code spaceMapper} 而不是注入 {@code SysSpaceService}</b>：
+     * {@code SysSpaceServiceImpl} 已经依赖本服务（删空间时要清关联），再反向注入会形成
+     * 循环依赖 —— Spring 虽能用 setter/`@Lazy` 绕过，但那是把设计问题藏起来。
+     * 这里只是「按 id 取一列」，直接用 Mapper 是同一模块内的正常协作。</p>
+     *
+     * @param spaceId 根空间 ID
+     * @return 该空间及全部后代 ID（含自身；不存在时为空列表）
+     */
+    private List<Long> subtreeIds(Long spaceId) {
+        if (spaceId == null) {
+            return List.of();
+        }
+        List<Long> ids = spaceMapper.selectSubtreeIds(spaceId, currentTenantId(),
+            SpaceConstants.MAX_SPACE_DEPTH + SpaceConstants.PARENT_CHAIN_MARGIN);
+        return ids == null ? List.of() : ids;
+    }
+
+    private SpaceRelationResp toRelationResp(SysSpaceRelation relation, SysSpace space) {
+        SpaceRelationResp resp = new SpaceRelationResp();
+        resp.setId(relation.getId());
+        resp.setSpaceId(relation.getSpaceId());
+        resp.setTargetType(relation.getTargetType());
+        resp.setTargetId(relation.getTargetId());
+        resp.setIsPrimary(relation.getIsPrimary());
+        resp.setRemark(relation.getRemark());
+        resp.setStatus(relation.getStatus());
+        resp.setCreateTime(relation.getCreateTime());
+        if (space != null) {
+            resp.setSpaceName(space.getName());
+            resp.setSpaceCode(space.getCode());
+            resp.setSpaceType(space.getSpaceType());
+        }
+        return resp;
+    }
+
+    @Override
+    public List<Long> listTargetIdsBySpaceTree(Long spaceId, String targetType) {
+        if (spaceId == null) {
+            return List.of();
+        }
+        // 先取子树 ID（一条递归 CTE），再按 IN 查关联——两次查询，与子树深度无关。
+        // 不在这里对每个后代空间逐个查关联（那是 N+1，且 N 随空间数增长）。
+        List<Long> spaceIds = subtreeIds(spaceId);
+        if (spaceIds.isEmpty()) {
+            return List.of();
+        }
+        LambdaQueryWrapper<SysSpaceRelation> wrapper = new LambdaQueryWrapper<SysSpaceRelation>()
+            .select(SysSpaceRelation::getTargetId)
+            .in(SysSpaceRelation::getSpaceId, spaceIds);
+        if (StringUtils.hasText(targetType)) {
+            wrapper.eq(SysSpaceRelation::getTargetType, normalizeTargetType(targetType));
+        }
+        List<SysSpaceRelation> relations = list(wrapper);
+        if (relations.isEmpty()) {
+            return List.of();
+        }
+        // 去重：同一设备可能同时挂在「房间」与「楼层」两个空间点上（多对多允许）
+        return relations.stream().map(SysSpaceRelation::getTargetId).distinct().toList();
+    }
+
+    @Override
+    public Map<Long, Map<String, Long>> countBySpaceTrees(List<Long> spaceIds) {
+        List<Long> roots = distinctIds(spaceIds);
+        if (roots.isEmpty()) {
+            // 空集合直接返回：空 IN () 是 SQL 语法错，且查库无意义
+            return Map.of();
+        }
+        // 每个根空间的子树各算一次 CTE。空间数量是「一页表格的行数」（几十），
+        // 不是业务数据量级 —— 但为与 listByTargets 保持同一量级，仍限制上限并说明。
+        if (roots.size() > SpaceConstants.MAX_BATCH_TARGETS) {
+            throw new BusinessException(
+                "批量统计的空间数超过上限：" + roots.size() + " > " + SpaceConstants.MAX_BATCH_TARGETS);
+        }
+        Map<Long, Map<String, Long>> result = new LinkedHashMap<>();
+        for (Long rootId : roots) {
+            List<Long> subtree = subtreeIds(rootId);
+            if (subtree.isEmpty()) {
+                result.put(rootId, Map.of());
+                continue;
+            }
+            List<SysSpaceRelation> relations = list(new LambdaQueryWrapper<SysSpaceRelation>()
+                .select(SysSpaceRelation::getTargetType, SysSpaceRelation::getTargetId)
+                .in(SysSpaceRelation::getSpaceId, subtree));
+            if (relations.isEmpty()) {
+                result.put(rootId, Map.of());
+                continue;
+            }
+            // 按类型分组去重计数：同一设备同时挂房间与楼层时只算 1 台
+            Map<String, Set<Long>> byType = new LinkedHashMap<>();
+            for (SysSpaceRelation relation : relations) {
+                byType.computeIfAbsent(relation.getTargetType(), key -> new LinkedHashSet<>())
+                    .add(relation.getTargetId());
+            }
+            Map<String, Long> counts = new LinkedHashMap<>();
+            byType.forEach((type, ids) -> counts.put(type, (long) ids.size()));
+            result.put(rootId, counts);
+        }
         return result;
     }
 
