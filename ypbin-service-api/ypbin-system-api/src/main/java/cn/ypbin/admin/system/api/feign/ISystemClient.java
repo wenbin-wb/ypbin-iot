@@ -280,6 +280,7 @@ public interface ISystemClient {
      */
     @PostMapping("/mail-send")
     R<Void> sendMail(@Valid @RequestBody MailSendReq req);
+
     // ---------- 空间（基础主数据的跨服务只读/写入通道） ----------
 
     /**
