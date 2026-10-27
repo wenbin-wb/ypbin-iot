@@ -95,13 +95,7 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 | `deploy/.env.example` | 端口段注释加 18084 | 环境变量示例（纯注释） |
 | `ypbin-architecture-tests/src/test/java/cn/ypbin/admin/arch/SourceConventionTest.java` | `LOOP_DB_EXEMPTIONS` **加一条误报豁免**（类名#接收者.方法 + 理由） | **唯一的上游测试类例外**，理由见下方专条 |
 | `ypbin-service/ypbin-ai/src/main/java/cn/ypbin/admin/ai/service/impl/AiModelConfigServiceImpl.java` | `testConnection` 的 HTTP 客户端改为**复用单个实例 + 显式 `HTTP/1.1` + 具名超时常量** | **2026-09-27 加**：修 admin 既有代码里的**缺陷**——该方法**每次调用新建 `HttpClient`**（丢掉连接池、超时策略散落）且**未指定协议版本**（JDK 默认 HTTP/2）。而它的调用形态恰是「新连接 + 带体 POST」，`baseUrl` 又允许明文 `http://` ⇒ 会踩已在 `ypbin-iot` 实测到的 h2c 坑（带体 POST 作为新连接首个请求 ⇒ `EOF reached while reading`）。**为什么不能用新文件**：问题就在这一行上，改的必须是这个既有方法。⚠️ **更好的长期做法是改上游 admin 仓**（本仓下次同步自然继承、分歧面回到 9）——本轮受「改动落在 ypbin-iot」的范围约束才走白名单。 |
-| `ypbin-service-api/ypbin-system-api/src/main/java/cn/ypbin/admin/system/api/feign/ISystemClient.java` | 新增两个**内部端点**契约：`POST /inbox-message-send`（普通站内信）、`POST /mail-send`（纯文本邮件） | **2026-09-28 加**（告警段 C2 通知投递，见 `ALERTING-DESIGN.md` §7.5-M2/M4）：告警投递必须复用 admin 的 `sys_message` 表与 system 侧既有 JavaMail 能力，新增端点只能声明在**既有 Feign 契约**上——Feign 接口是契约文件，无法用「新文件」表达「给既有契约加方法」 |
-| `ypbin-service-api/ypbin-system-api/src/main/java/cn/ypbin/admin/system/api/feign/ISystemClientFallback.java` | 为上面两个新端点补熔断兜底 | 既有 fallback 必须覆盖契约的全部方法（否则熔断时降级空洞），只能改既有文件 |
-| `ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/feign/SystemClientImpl.java` | 实现两个内部端点：站内信落库（校验收件人存在且属于声明的租户，§7.5-M4）、邮件发送（复用 `MailService`）；失败如实返回 `R` | 端点实现必须落在既有 `SystemClientImpl` 上（构造器同步注入 `SysMessageMapper`/`MailService`）；「给既有 Feign 实现加方法」同样无法用新文件表达 |
 | `ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/service/impl/SysConfigServiceImpl.java` | 列表页脱敏改为调用 `ConfigValueMasker`（与 internal 端点同一判据同一形态）＋ 三条写路径加「掩码值不落库」守卫 | **第 35 项，2026-10-18 加（#87 脱敏口径统一）**：admin 原实现是「2 个精确键 + 置空 `""`」，而 internal 端点用「6 个后缀 + `****末4位`」⇒ **存在「internal 打码、列表页返回明文」的真实泄露面**（凡命中后缀但不属那 2 个精确键的配置项，管理面列表页会把密钥原文回显）。修复必须改这个既有方法的脱敏实现，无法用新文件表达；同时 `createConfig`/`updateConfig`/`updateGroup` 要识别「提交回来的是掩码」并保留库内真实值（否则管理员改其它字段保存时会把密钥静默覆盖成 `****abcd`）。`ConfigValueMasker` 与其 3 个测试是**新文件**，不在白名单内。**代价如实登记**：上游若再改脱敏逻辑，同步时按语义合并——正确解是「采纳上游演进 + 保留单一判据」，不要恢复旧的精确键清单（那会重新引入泄露面）。 |
-| `ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/mapper/SysMessageMapper.java` | 增「按收件人查站内信」与落库辅助查询 | 站内信必须复用既有 `sys_message` 表与 Mapper（不新造站内信链路），查询方法只能加在既有 Mapper 上 |
-| `ypbin-service/ypbin-system/src/test/.../feign/SystemClientImplConfigMaskTest.java` | **新增**（#87 脱敏口径统一） | **2026-10-19 加（第 37 项）**：admin 新增该测试（#87），本仓同步时因 `SystemClientImpl` 构造器比 admin 多两个依赖（`SysMessageMapper`/`MailService`，本仓独有的站内信/邮件内部端点）⇒ 测试构造参数必须跟随本仓实现，与 upstream 构成 **add/add 冲突**（`Upstream Sync Check` 实测判红）。**为什么不能用新文件**：被测类构造器签名不同，换文件名改变不了这个事实。**代价如实登记**：上游若改该测试断言，同步时采纳上游断言 + 保留本仓构造参数。 |
-| `ypbin-service/ypbin-system/src/test/java/cn/ypbin/admin/system/feign/SystemClientImplUserByIdTest.java`、`SystemClientImplPlatformUserTest.java`、`SystemClientImplLogIngestTest.java` | 构造参数随 `SystemClientImpl` 注入新增，同步补 `mock(SysMessageMapper.class)`/`mock(MailService.class)` | 既有 3 个单测的构造器签名随被测类变化，属**连带更新**（3 个文件共 17 行） |
 | `ypbin-common/.../constant/AdminConstants.java`、`ypbin-service/ypbin-ai/.../core/AiEmbeddingConfigResolverImpl.java`、`ypbin-auth/.../CaptchaController.java`、`SmsLoginController.java`、`AuthService.java`、`PhoneLoginStrategy.java` | **补齐 admin #88 的 5 处漏同步** | **2026-10-19 加（第 49–54 项）**：① `AdminConstants` 删 3 个零引用死常量 + 通配码 `ALL_PERMISSION` 改引用 starter 的 `StpPermissionAdapter.SUPER_ADMIN`（同一契约两个定义点，漂移即静默越权/漏权）；② `AiEmbeddingConfigResolverImpl` 的 `orElse(1L)` 静默回退默认租户改为显式失败（与同模块 Chat resolver 同口径，禁静默降级）；③ 4 个 auth 类的登录开关配置键 `private` 重复定义收敛到新文件 `LoginConfigKeys`（新文件不受白名单限制）。**为什么不能用新文件**：问题就在这些既有类的方法体与常量定义上。 |
 | `docs/microservice-deployment.md` | 「初始口令」一句话更正 | **2026-09-26 加**：该句原写「Nacos 控制台默认 `nacos/nacos`」，而本仓已改为随机口令 + 开 auth（`NACOS-AUTH.md`）。留着一句**已不成立**的口令说明会误导运维，故只能改既有文件（无法用新文件表达「原句作废」） |
 | `README.md` | **整体重写为 IoT 版** | **2026-09-29 加**（M-6）：原 README 是 admin 原版（标题、徽章、截图、功能清单全是基座的），**读起来像另一个项目**。这是「仓库门面」性质的内容，**只能用既有文件表达**——新增 `README-IOT.md` 之类只会让访客仍然先看到错误的那个（GitHub 默认渲染 `README.md`）。同时它是**仓库首屏可信度**问题：README 里承诺的能力与实际不符属对外陈述。**代价如实登记**：README 是上游高频改动文件（徽章/截图/功能表），下一次 `git merge upstream/main` 必然冲突，且**必须整体取本仓版本**（不是逐行合并）——这份代价由「门面必须说真话」换取 |
@@ -117,24 +111,27 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 | `ypbin-common/.../log/IdentityHeaderLogUserProvider.java`、`ypbin-auth/.../service/LoginEventTracker.java`、`ypbin-auth/src/test/.../log/AuthLogIngestTest.java`、`ypbin-common/src/test/.../log/RemoteLogDaoTest.java`、`ypbin-common/src/test/.../log/RemoteLogWiringTest.java` | **连带更新**（注释改指新装配；两个既有单测随实现迁移到 SPI 形态） | **2026-10-18 加（第 42–46 项）**：随上面 4 个类删除而必须同步的连带改动。两个测试的**断言口径逐条保留**（上报即采集模型本身、失败必须上抛而非静默、失败带完整堆栈、异常被监听器吸收），只把被测对象从 `RemoteLogDao` 换成 `SystemRemoteLogIngestClient`。 |
 | `admin-ui`（后续） | 路由/菜单注册 | 前端增量时再补清单 |
 
-> **2026-10-25 专条：`ypbin-system-api` 整模块的同步口径已可判定（不必再逐段合并）**
+> **2026-10-25 专条（2026-10-27 更新）：`ypbin-system-api` 已与 admin 完全一致**
 >
 > 用户提出「两仓 `ypbin-system-api` 应当只有 IoT 多出的业务，其余一样」——**已实测确认成立**：
 >
-> | 维度 | 实测结果 |
-> |---|---|
-> | 同名文件 | 136 个，**仅 2 个**有差异（`ISystemClient.java` / `ISystemClientFallback.java`） |
-> | 归一化后（去注释/空行）admin 独有内容 | **0 行** |
-> | 本仓独有内容 | `ISystemClient` 7 行 + `Fallback` 4 行，全是站内信/邮件 |
-> | 端点顺序 | 去掉本仓独有的 2 个端点后与 admin **完全一致** |
-> | 文件清单 | 本仓仅多 `InboxMessageSendReq` / `MailSendReq` 两个请求体 |
+> | 维度 | 2026-10-26（下沉前） | 2026-10-27（下沉后） |
+> |---|---|---|
+> | 同名文件 | 136 个，仅 2 个有差异 | **136 个，0 个有差异** |
+> | 本仓独有内容 | `ISystemClient` 7 行 + `Fallback` 4 行（站内信/邮件） | **0 行** |
+> | `SystemClientImpl` | 105 行差异（fork 独有实现） | **0 行** |
+> | `SysMessageMapper` | 24 行差异（`insertPlainMessage`） | **0 行** |
 >
-> **处置**：同步该模块时**整份取 admin 版本，再插入这两块**（`sendInboxMessage` +
-> `sendMail` 的方法/兜底及其 import），其余逐字保留 admin —— 比逐段合并快且不会引入顺序漂移。
+> **变更原因**：站内信/邮件端点已**下沉到 admin**（用户判断「admin 也该有，保持一致」，
+> 核实成立：admin 本就有 `sys_message` 表、`SysMessage`、`MailService`，缺的只是暴露给业务域的端点）。
+> admin 补齐后本仓删除重复实现，并把已无引用的 `insertPlainMessage`（死代码）一并清掉。
 >
-> ⚠️ 顺带记一条教训：手工「两边都保留」式合并容易只保证**内容**正确而打乱**顺序**
-> （import 排序、方法块位置）。这不影响编译，但每次同步都产生大段无意义 diff，
-> 且审查时极易把「顺序变了」误读成「逻辑变了」——2026-10-25 已按上述口径修正过一次。
+> **同步口径随之改变**：该模块现在与其他既有文件**没有区别**——直接取 admin 版本即可，
+> 不再需要「取 admin + 插入两块」。这 8 条白名单也一并移除（见第二节）。
+>
+> ⚠️ 保留一条教训（对未来仍有价值）：手工「两边都保留」式合并容易只保证**内容**正确而打乱
+> **顺序**（import 排序、方法块位置）。这不影响编译，但每次同步都产生大段无意义 diff，
+> 且审查时极易把「顺序变了」误读成「逻辑变了」——2026-10-25 踩过并修正一次。
 
 > **2026-10-19 专条（#106 树组装 / #107 数据范围）：优先「逐字采纳上游」，而不是各写一份**
 >
