@@ -18,11 +18,11 @@ import cn.ypbin.admin.system.model.dto.SysUserSocialDto;
 import cn.ypbin.admin.system.model.req.InboxMessageSendReq;
 import cn.ypbin.admin.system.model.req.MailSendReq;
 import cn.ypbin.admin.system.model.req.SpaceSyncReq;
+import jakarta.validation.Valid;
 import cn.ypbin.admin.system.model.resp.RouteResp;
 import cn.ypbin.starter.core.model.R;
 import cn.ypbin.starter.log.model.LogRecord;
 import cn.ypbin.starter.tracking.core.TrackEvent;
-import jakarta.validation.Valid;
 import java.util.List;
 import java.util.Map;
 import org.springframework.cloud.openfeign.FeignClient;
@@ -254,15 +254,17 @@ public interface ISystemClient {
         @RequestParam(value = "avatar", required = false) String avatar,
         @RequestParam(value = "phone", required = false) String phone);
 
+    // ---------- 站内信 / 邮件（业务域投递通知用） ----------
+
     /**
-     * 写一条普通站内信（供 iot 等业务域投递站内通知用）。
+     * 写一条普通站内信（供业务域投递站内通知用）。
      *
      * <p>复用 {@code sys_message} 表与既有落库口径，不新造站内信链路；调用方显式声明租户，
      * 服务端进入该租户上下文写入（内部端点信任模型见 {@code InboxMessageSendReq}）。</p>
      *
      * <p>失败语义：system 不可达或落库失败时返回失败 {@code R}，调用方必须据
-     * {@code R.success}/{@code R.code} 判定并记完整堆栈——**禁止**把它当成功（否则通知会在无人知晓的
-     * 情况下丢失）。</p>
+     * {@code R.success}/{@code R.code} 判定并记完整堆栈——<b>禁止</b>把它当成功
+     * （否则通知会在无人知晓的情况下丢失）。</p>
      *
      * @param req 站内信请求（租户/接收人/标题/正文）
      * @return 统一响应体

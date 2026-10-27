@@ -69,9 +69,9 @@ class SystemInternalNotifyTest {
             mock(SysMenuService.class),
             mock(SysSpaceService.class),
             mock(SysSpaceRelationService.class),
-            mock(LogDao.class),
             messageMapper,
             mailService,
+            mock(LogDao.class),
             providerOfTrackRecorder());
     }
 
@@ -98,7 +98,7 @@ class SystemInternalNotifyTest {
     void inboxSuccess() {
         when(userService.getById(1001L)).thenReturn(new SysUser());
         AtomicReference<Long> tenantSeen = new AtomicReference<>();
-        when(messageMapper.insertPlainMessage(any(SysMessage.class))).thenAnswer(invocation -> {
+        when(messageMapper.insertNoticeMessage(any(SysMessage.class))).thenAnswer(invocation -> {
             tenantSeen.set(TenantContext.getTenantId().orElse(null));
             return 1;
         });
@@ -118,14 +118,14 @@ class SystemInternalNotifyTest {
 
         assertThat(result.isSuccess()).isFalse();
         assertThat(result.getMessage()).contains("收件人不存在");
-        verify(messageMapper, never()).insertPlainMessage(any(SysMessage.class));
+        verify(messageMapper, never()).insertNoticeMessage(any(SysMessage.class));
     }
 
     @Test
     @DisplayName("站内信落库异常 ⇒ 失败 R（不静默成功）")
     void inboxInsertFailureReturnsFail() {
         when(userService.getById(anyLong())).thenReturn(new SysUser());
-        when(messageMapper.insertPlainMessage(any(SysMessage.class)))
+        when(messageMapper.insertNoticeMessage(any(SysMessage.class)))
             .thenThrow(new IllegalStateException("模拟写库失败"));
 
         R<Void> result = controller().sendInboxMessage(inbox(1001L));

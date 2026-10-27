@@ -21,20 +21,19 @@ import cn.ypbin.admin.system.entity.SysUser;
 import cn.ypbin.admin.system.model.dto.SysUserDto;
 import cn.ypbin.admin.system.mapper.SysConfigMapper;
 import cn.ypbin.admin.system.mapper.SysLogMapper;
-import cn.ypbin.admin.system.mapper.SysMessageMapper;
 import cn.ypbin.admin.system.provider.DbLogProviders;
 import cn.ypbin.admin.system.service.SocialBindService;
 import cn.ypbin.admin.system.service.SysMenuService;
 import cn.ypbin.admin.system.service.SysSpaceRelationService;
+import cn.ypbin.admin.system.mapper.SysMessageMapper;
+import cn.ypbin.starter.messaging.mail.MailService;
 import cn.ypbin.admin.system.service.SysSpaceService;
 import cn.ypbin.admin.system.service.SysPermissionService;
 import cn.ypbin.admin.system.service.SysUserService;
 import cn.ypbin.admin.system.social.SocialConfigReader;
 import cn.ypbin.starter.core.model.R;
 import cn.ypbin.starter.tracking.core.TrackRecorder;
-import cn.ypbin.starter.messaging.mail.MailService;
 import org.junit.jupiter.api.DisplayName;
-import cn.ypbin.starter.messaging.mail.MailService;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.ObjectProvider;
 
@@ -69,9 +68,9 @@ class SystemClientImplUserByIdTest {
         mock(SysMenuService.class),
         mock(SysSpaceService.class),
         mock(SysSpaceRelationService.class),
-        new DbLogProviders.DbLogDao(mock(SysLogMapper.class)),
         mock(SysMessageMapper.class),
         mock(MailService.class),
+        new DbLogProviders.DbLogDao(mock(SysLogMapper.class)),
         providerOfTrackRecorder());
 
     @SuppressWarnings("unchecked")
