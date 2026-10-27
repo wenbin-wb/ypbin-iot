@@ -44,8 +44,9 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 > 长期不一致）。注：本仓 auth 模板显式开启 `ypbin.sse.enabled`，与上游「刻意不配」相反——属真实语义
 > 差异，本次只登记不改行为（改了会变更运行时装配，需单独评估）。
 
-> **白名单膨胀要记账**：目前 **54** 个文件（权威清单 = `tools/sync-whitelist-regex.sh`；本表与它必须逐项一致）。
-> **白名单膨胀要记账**：目前 **54** 个文件（权威清单 = `tools/sync-whitelist-regex.sh`；本表与它必须逐项一致）。
+> **白名单膨胀要记账**：目前 **46** 个文件（权威清单 = `tools/sync-whitelist-regex.sh`；本表与它必须逐项一致。
+> 2026-10-27 实测：脚本侧 46 条 = 本文第二节 38 行表格（行内 `、` 并列多文件展开后 46 项），逐项一致；
+> 此前文档长期写 54 是**未随条目删除更新的陈旧计数**，`sync-whitelist.yml` 头注释里的 54 同属陈旧，以脚本为准）。
 > 2026-10-19：**加第 48 项** —— `SysDeptServiceImpl.java` 补「叶子 children 归一为 null」（#106 树组装）。
 > **admin 的同一迁移漏了这一步**：`TreeUtils.build` 一律写回空集合，而迁移前只在有子节点时 `setChildren`，
 > 实测响应从 `[{"id":2,...}]` 变成 `[{"id":2,...,"children":[]}]`（`DeptResp` 带 `@JsonInclude(NON_NULL)`，
@@ -107,6 +108,7 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 | `ypbin-common/src/test/java/cn/ypbin/admin/common/log/SystemRemoteLogIngestClientTest.java` | **重命名**（原 `RemoteLogDaoTest.java`，R086）+ 断言口径随被测对象改名（自建 LogDao → SPI 实现） | **2026-10-19 加（第 47 项）**：随 starter #100 的上收，该测试的被测对象从 `RemoteLogDao` 换成 `SystemRemoteLogIngestClient`；Git 记为重命名但白名单门禁比对**新路径**，故需单独登记。**代价**：与旧条目同理（上游改该文件会冲突）。 |
 | `deploy/sql/006-iot-schema.sql`、`007-iot-data.sql` | **新文件** | 全新安装用 |
 | `deploy/sql/migration/*-iot-*.sql` | **新文件**（命名必须含 `-iot-`） | 已上线库用；按文件名排序拼接后与 `006+007` **语句等价**（有 CI 校验）。顺序即结构演进顺序：`device-schema` → `lease-schema` → `menu-data` |
+| `deploy/sql/migration/2026-10-23-space-management.sql` | 授权两段（`sys_role_menu` / `sys_template_menu`）由「写死 `id IN (2410,...)`」改为**按 `auth_code` 反查真实 id** | **第 55 项，2026-10-27 补登记（原为漏登记）**：admin 的菜单插入用 `IFNULL(MAX(id),0)+1` 动态分配 id（DEV 实测落在 321004~321008），而原授权语句写死 2410 段 ⇒ 同一 id 被占用时一条都授不上（2026-10-24 DEV 实测：菜单装上了、`sys_role_menu`/`sys_template_menu` 授权均为 0、页面无入口）。修复只能落在**该既有迁移脚本**里（已上线库要单独执行它）。连带：该形态在本仓 SQL 门禁 `IotMaintenanceAdminGateTest` 里属「目标 id 不可静态判定」，已按门禁既有机制登记 `UNRESOLVED_GRANT_EXEMPTIONS`（2 条，含理由与陈旧性反向校验）。**本轮补登记的起因**：修复已反哺上游后（admin@337d42b 起该文件两仓逐字节一致），白名单条目却一直没加 ⇒ `Sync Whitelist` 门禁**在 main 上恒红**（24 个真实改动的既有文件里 23 个在册，只漏它一个），随机红/恒红的门禁会被当噪音忽略。**代价如实登记**：上游再改这份迁移时**整体取本仓版本**。 |
 | `ypbin-common/.../log/RemoteLogAutoConfiguration.java`、`.../log/RemoteLogDao.java`、`.../tracking/RemoteTrackAutoConfiguration.java`、`.../tracking/RemoteTrackEventSink.java` | **删除**（4 个自建的跨服务上报自动配置与落库实现） | **2026-10-18 加（第 38–41 项）**：消费 `ypbin-starter` 4.1.0 的 starter #100 —— 基座已提供 `RemoteLogAutoConfiguration`/`RemoteTrackAutoConfiguration`（各自以 `@ConditionalOnBean(..IngestClient)` 为条件、`@Bean` 带 `@ConditionalOnMissingBean`）与 `RemoteLogDao`/`RemoteTrackEventSink`。本仓只保留 2 个 **SPI 实现**（`SystemRemoteLogIngestClient`/`SystemRemoteTrackIngestClient`）+ 1 个注册它们的自动配置（新文件）。**为什么不能用新文件表达**：要表达的是「删除既有实现」，留着就与基座重复（本仓反对的漂移面）。**代价如实登记**：上游再改这 4 个文件时，同步会以 modify/delete 暴露；正确解是上游也删（理由对上游同样成立）。 |
 | `ypbin-common/.../log/IdentityHeaderLogUserProvider.java`、`ypbin-auth/.../service/LoginEventTracker.java`、`ypbin-auth/src/test/.../log/AuthLogIngestTest.java`、`ypbin-common/src/test/.../log/RemoteLogDaoTest.java`、`ypbin-common/src/test/.../log/RemoteLogWiringTest.java` | **连带更新**（注释改指新装配；两个既有单测随实现迁移到 SPI 形态） | **2026-10-18 加（第 42–46 项）**：随上面 4 个类删除而必须同步的连带改动。两个测试的**断言口径逐条保留**（上报即采集模型本身、失败必须上抛而非静默、失败带完整堆栈、异常被监听器吸收），只把被测对象从 `RemoteLogDao` 换成 `SystemRemoteLogIngestClient`。 |
 | `admin-ui`（后续） | 路由/菜单注册 | 前端增量时再补清单 |
