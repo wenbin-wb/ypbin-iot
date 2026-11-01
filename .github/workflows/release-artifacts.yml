@@ -212,7 +212,7 @@ jobs:
           fetch-depth: 1
 
       - name: 下载 jar 作业已构建的制品（复用，不重复编译）
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: release-jars
           path: /tmp/release-jars
