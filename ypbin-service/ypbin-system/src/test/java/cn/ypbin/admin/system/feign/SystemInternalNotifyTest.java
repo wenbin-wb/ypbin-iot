@@ -36,6 +36,7 @@ import cn.ypbin.admin.system.social.SocialConfigReader;
 import cn.ypbin.starter.core.model.R;
 import cn.ypbin.starter.log.dao.LogDao;
 import cn.ypbin.starter.messaging.mail.MailService;
+import cn.ypbin.starter.messaging.sms.SmsService;
 import cn.ypbin.starter.tenant.core.TenantContext;
 import cn.ypbin.starter.tracking.core.TrackRecorder;
 import java.util.concurrent.atomic.AtomicReference;
@@ -71,8 +72,13 @@ class SystemInternalNotifyTest {
             mock(SysSpaceRelationService.class),
             messageMapper,
             mailService,
+            providerOfSms(),
             mock(LogDao.class),
             providerOfTrackRecorder());
+    }
+
+    private static ObjectProvider<SmsService> providerOfSms() {
+        return mock(ObjectProvider.class);
     }
 
     private static ObjectProvider<TrackRecorder> providerOfTrackRecorder() {

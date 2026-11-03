@@ -156,6 +156,10 @@ ALLOWED+='ypbin-service/ypbin-ai/src/main/java/cn/ypbin/admin/ai/core/AiEmbeddin
 # 为什么不能用新文件表达：修复必须落在该既有迁移脚本里（已上线库要单独执行它）。
 # 代价：上游若再改这份迁移，同步时**整体取本仓版本**（含上方那段 auth_code 反查理由）。
 ALLOWED+='deploy/sql/migration/2026-10-23-space-management\.sql|'
+# 第 47 项（2026-11-03 加）：SKILL.md 是 fork 同步纪律的载体（RED-11 白名单铁律、漏登记/计数漂移案例）。
+# 上游也维护该 skill 文档，但本仓独有的「同步白名单」章节必须保留，无法用新文件表达（skill 按固定路径加载）。
+# 代价：与 upstream 该文件冲突时按语义合并——保留本仓白名单章节 + 采纳上游其它规范更新。
+ALLOWED+='.claude/skills/ypbin-admin-dev/SKILL\.md|'
 ALLOWED+=')$'
 
 printf '%s' "$ALLOWED"

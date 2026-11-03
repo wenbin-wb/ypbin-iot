@@ -20,6 +20,10 @@ mvn -B -ntp -fae clean verify               # 同步后必须重跑门禁
 - **Dependabot 的 `github-actions` 更新 PR 一律不合**：它改的是 admin 拥有的
   `ci.yml` / `codeql.yml` / `release.yml` / `sync-starter-version.yml`，合进去就破坏了白名单
   （`Sync Whitelist` 门禁会自动把这类 PR 判红）。要升 actions 版本，**去 admin 仓升**，本仓通过同步拿到。
+- **最近同步**：2026-11-03，upstream `a8e64df`（24 个提交：公告分页/详情、强制首登改密、Nacos 鉴权、
+  AI 入参校验、空间重构等）。冲突处置：IoT 定制保留（CHANGELOG/README、网关 iot 路由、部署脚本的
+  IoT 变量）；`AiModelConfigServiceImpl` 采纳上游（本仓的 HTTP/1.1 修复已回灌 admin，白名单第 10 项
+  因此不再产生分歧，条目暂留以防再分叉）；部署脚本补 `SUPER_ADMIN_INIT_PASSWORD` 的生成与注入。
 
 ## 二、允许改 admin 的文件（全清单，越少越好）
 
@@ -44,7 +48,7 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 > 长期不一致）。注：本仓 auth 模板显式开启 `ypbin.sse.enabled`，与上游「刻意不配」相反——属真实语义
 > 差异，本次只登记不改行为（改了会变更运行时装配，需单独评估）。
 
-> **白名单膨胀要记账**：目前 **46** 个文件（权威清单 = `tools/sync-whitelist-regex.sh`；本表与它必须逐项一致。
+> **白名单膨胀要记账**：目前 **47** 个文件（权威清单 = `tools/sync-whitelist-regex.sh`；本表与它必须逐项一致。
 > 2026-10-27 实测：脚本侧 46 条 = 本文第二节 38 行表格（行内 `、` 并列多文件展开后 46 项），逐项一致；
 > 此前文档长期写 54 是**未随条目删除更新的陈旧计数**，`sync-whitelist.yml` 头注释里的 54 同属陈旧，以脚本为准）。
 > 2026-10-19：**加第 48 项** —— `SysDeptServiceImpl.java` 补「叶子 children 归一为 null」（#106 树组装）。
@@ -104,6 +108,7 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 | `deploy/nacos/ypbin-common.yaml` | 在既有 `ypbin.security.identity` 节下**补一行** `trusted-source-token: ${GATEWAY_SIGN_TOKEN}`（+ 注释） | **2026-09-29 加**（#6b 部署阻塞面，P0）：starter **3.6.0 起**，`ypbin.security.identity.enabled: true`（**本文件既有行**）会强制要求同节的 `trusted-source-token`，缺失即**启动失败**（jar 内 `IdentityAutoConfiguration#identityHeaderFilterRegistration` 抛 `IllegalStateException`）。**为什么不能用新文件**：问题就在**这一行**——`enabled=true` 已经写在这个既有文件里，约束是「给这个既有键补一个兄弟键」；另立 `ypbin-common-iot.yaml` 之类**不会**让既有 Key 的缺配消失（`ypbin-common.yaml` 仍会被 `install.sh` 导入 Nacos，且这是**共享**配置，所有 Servlet 服务都吃它）。**为什么必须进仓而不是只改运行中的 Nacos**：`install.sh` 会把 `deploy/nacos/*.yaml` **整体覆盖**到 Nacos ⇒ 只在实例上手工补键必然在下次重跑时退化（这正是上一轮的临时处置留下的风险）。**代价如实登记**：多一个 merge 冲突点（该文件上游改动频率低，且本次是纯加法一行，代价可接受）。⚠️ **更好的长期做法是改上游 admin 仓**（本仓下次同步自然继承、分歧面回到 18）——本轮受「改动落在 ypbin-iot」的范围约束才走白名单。回归由 `tools/check-identity-config.sh` 在 `Sync Whitelist` 门禁里守住（5 条变异均已实测转红） |
 | `ypbin-gateway/src/main/resources/application.yml` | 路由/清洗/免登录段并入本地配置 | **2026-10-01 加**（#11 第 1 批网关侧）：nacos 3.x 服务端脚本化读写 API 已移除（一手实测 GET/POST 全 404）⇒ 网关配置只能随 jar 发布，routes/exclude 必须落在网关既有 application.yml。可审计：若未来 nacos 支持 API，可回退到 nacos 配置（SYNC 分歧面 +1）。长期应反哺 admin 仓（网关工程属 upstream）。<br>**⚠️ 2026-10-08 更正**：本条当时的理由"nacos 3.x 服务端脚本化读写 API 已移除（全 404）"**不成立**——v1 确实全 404，但 **v3 admin API 读写均可用**（`/nacos/v3/auth/user/login` + `/nacos/v3/admin/cs/config` GET/POST，2026-10-08 实测；工具 `tools/set-nacos-flag.py`）⇒ 触发条件"若未来 nacos 支持 API"**已满足**，"网关配置回退到 Nacos"从"不可行"变成"**可行性已成立、决策未做**"。本白名单条目**暂不变**（未回退前仍需改该 application.yml），待另立评估 | 
 | `CHANGELOG.md` | 在 `## [未发布]` 段追加本批 deploy/IoT 修复条目 | **2026-10-12 加**：发布台账/对外门面，GitHub 与发布流程只认根 `CHANGELOG.md`，另写一份不会被看到（同 README.md 的理由）。**代价如实登记**：与 upstream 该文件冲突时**整体取本仓版本**（不是逐行合并）。改的是「允许改这个既有文件」，不改变任何门禁判据。 |
+| `.claude/skills/ypbin-admin-dev/SKILL.md` | 追加「同步白名单铁律（RED-11）」与漏登记/计数漂移案例 | **2026-11-03 加**：该 skill 是 fork 开发纪律的载体，本仓独有的白名单章节必须保留；skill 按固定路径加载，无法用新文件表达。**代价**：与 upstream 冲突时按语义合并——保留本仓白名单章节 + 采纳上游其它规范更新。 |
 | `deploy/nginx-microservice.conf` | 在 `/api/` location 加 `proxy_http_version 1.1` / `Connection ''` / `proxy_buffering off` / `proxy_cache off` | **2026-10-15 加**：SSE 实时流必须关闭代理缓冲，否则事件被攒在 proxy buffer 里、用户看到「实时流不动」。问题就在既有的 `/api/` location 上（无缓冲只能改这个文件），无法用新文件表达。**代价如实登记**：与 upstream 该文件冲突时按语义合并（保留 SSE 三行 + 采纳上游其它改动）。<br>**2026-10-21 追加**：新增 `location = /api/iot/twin/model-assets/upload`（数字孪生模型上传，`client_max_body_size 64m`）。**为什么是精确匹配而不是正则**：nginx 硬规则——正则 location 里的 `proxy_pass` 不允许带 URI 部分，而本处必须带 URI 剥 `/api` 前缀，写成正则会 `nginx -t` 直接 emerg（本机 nginx:alpine 实测）。实测结论：上传端点 5MB 走 64m 通道返回 200 且上游收到 `/iot/twin/...`；普通 `/api/` 端点 5MB 仍 413（3m 未误放开）。 |
 | `ypbin-common/src/test/java/cn/ypbin/admin/common/log/SystemRemoteLogIngestClientTest.java` | **重命名**（原 `RemoteLogDaoTest.java`，R086）+ 断言口径随被测对象改名（自建 LogDao → SPI 实现） | **2026-10-19 加（第 47 项）**：随 starter #100 的上收，该测试的被测对象从 `RemoteLogDao` 换成 `SystemRemoteLogIngestClient`；Git 记为重命名但白名单门禁比对**新路径**，故需单独登记。**代价**：与旧条目同理（上游改该文件会冲突）。 |
 | `deploy/sql/006-iot-schema.sql`、`007-iot-data.sql` | **新文件** | 全新安装用 |

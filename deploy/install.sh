@@ -1458,6 +1458,8 @@ if [ ! -f "$ENV_FILE" ]; then
   # XXL-JOB 调度中心初始口令：随机生成（不复用 MYSQL_ROOT_PASSWORD），登录时与库内 sha256 哈希比对。
   # 明文仅写入 .env（600），不在部署日志回显；SQL 模板里的哈希占位符由 import_xxl_job_sql 导入前替换。
   XXL_JOB_ADMIN_PASSWORD="${XXL_JOB_ADMIN_PASSWORD:-$(rand_hex 16)}"
+  # 平台超管初始口令：随机生成，由 system 启动时 BCrypt 写入种子账号并强制首登改密（明文不进 SQL）
+  SUPER_ADMIN_INIT_PASSWORD="${SUPER_ADMIN_INIT_PASSWORD:-$(rand_hex 16)}"
   # IoTDB 口令：随机 24 位 hex（满足 IoTDB “<=32 字符、[A-Za-z0-9._~-]”约束），只写 .env(600)；
   # [5.5/7] IoTDB 容器就绪后由 ensure_iotdb_auth 用 stdin 改一次 IoTDB 内口令（三处联动的第一处）。
   IOTDB_PASSWORD="${IOTDB_PASSWORD:-$(rand_hex 12)}"
@@ -1477,6 +1479,7 @@ INTERNAL_TOKEN=$INTERNAL_TOKEN
 GATEWAY_SIGN_TOKEN=$GATEWAY_SIGN_TOKEN
 REDIS_PASSWORD=$REDIS_PASSWORD
 XXL_JOB_ADMIN_PASSWORD=$XXL_JOB_ADMIN_PASSWORD
+SUPER_ADMIN_INIT_PASSWORD=$SUPER_ADMIN_INIT_PASSWORD
 # 留空：模板要求时 install.sh 会 fail-fast（值须与 xxl-job-admin 里 ypbin-system 执行器一致）
 XXL_JOB_ACCESS_TOKEN=
 # IoT 独有（fork 保留）：时序库口令与开放 API 签名 pepper
@@ -1490,6 +1493,7 @@ EOF
   chmod 600 "$ENV_FILE"
   ok "已生成 .env（各随机凭据均已写入，值不打印；路径 $ENV_FILE，600）"
   warn ">>> XXL-Job 控制台初始口令已写入 $ENV_FILE 的 XXL_JOB_ADMIN_PASSWORD（600，不回显；查看：grep ^XXL_JOB_ADMIN_PASSWORD $ENV_FILE）"
+  warn ">>> 平台超管初始口令已生成：admin / $SUPER_ADMIN_INIT_PASSWORD（已写入 $ENV_FILE 的 SUPER_ADMIN_INIT_PASSWORD；首次登录必须修改）"
 else
   warn "复用已有 .env"
   # 复用场景需把 .env 变量载入环境，供后续 Nacos 占位符替换 / compose 使用
@@ -1527,6 +1531,8 @@ env_key_backfill NACOS_ADMIN_USERNAME 'printf nacos'
 env_key_backfill NACOS_ADMIN_PASSWORD 'rand_hex 16'
 env_key_backfill INTERNAL_TOKEN 'rand_hex 32'
 env_key_backfill GATEWAY_SIGN_TOKEN 'rand_hex 32'
+# 旧 .env 升级：补随机超管初始口令；已有键（含显式留空）不覆盖，留空表示保留种子口令
+env_key_backfill SUPER_ADMIN_INIT_PASSWORD 'rand_hex 16'
 if [ "$NO_DOCKER" = "1" ]; then
   env_key_backfill REDIS_PASSWORD 'printf ""'
 else

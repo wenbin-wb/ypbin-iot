@@ -196,45 +196,33 @@ class SourceConventionTest {
      * <p>豁免受<b>消耗检测</b>约束：每个键都必须真的命中一次循环内调用，否则测试失败——
      * 防止有人修好代码后豁免条目静默残留、也防止有人把整类文件丢进豁免里「一键变绿」。</p>
      */
-    private static final Map<String, String> LOOP_DB_EXEMPTIONS = Map.of(
-        "IotDeviceGroupServiceImpl#self.getById",
-        "父链上溯：沿 parentId 逐级爬到根以检测环与层级超限（见 requireParentChain），"
+    private static final Map<String, String> LOOP_DB_EXEMPTIONS = Map.ofEntries(
+        Map.entry("IotDeviceGroupServiceImpl#self.getById", "父链上溯：沿 parentId 逐级爬到根以检测环与层级超限（见 requireParentChain），"
             + "**无法批量化**——要一次查完必须改用递归 CTE，而分组表的数据量级不值得引入 CTE。"
             + "深度受 MAX_PARENT_DEPTH=100 硬限制，最坏 100 次单行主键查询（走主键索引）。"
-            + "**如实登记为已知的非理想形态**：正常数据下层级通常 ≤5，环/异常数据才会逼近上限。",
-        "SysConfigServiceImpl#self.updateById",
-        "**已知技术债，非合法形态**：批量改配置时逐行 updateById（真 N+1，一次改 N 个键就是 N 次 UPDATE）。"
-            + "2026-10-27 给本门禁补上「IService 隐式 this 调用」识别后暴露的历史代码（引入于 2314b48，早于空间功能）。"
-            + "登记豁免只为不让门禁长期红着，正确修法是 SaveBatch 或单条 UPDATE ... CASE WHEN。"
-            + "同循环内还有逐键 SysCache.evictConfig（缓存失效无法批量，那部分属合理）",
-        "NoticePublishServiceImpl#deliveryMapper.insertBatch",
-        "分块批量插入：按 INSERT_BATCH_SIZE 切块后每块一次 insertBatch（见 insertInBatches），非逐行往返",
-        "AiDocumentVectorizer#chunkMapper.insertBatch",
-        "分块批量插入：分块数由文档大小决定（不可控），按 INSERT_BATCH_SIZE 分块后每块一次 insertBatch，"
-            + "规避 max_allowed_packet，非逐行往返",
-        "UserExcelComponent#userMapper.insertBatch",
-        "分块批量插入：导入行数由上传文件决定（不可控），按 INSERT_BATCH_SIZE 分块后每块一次 insertBatch，"
-            + "规避 max_allowed_packet，非逐行往返",
-        "UserExcelComponent#userMapper.selectList",
-        "分块批量 IN 查询：文件内待查值按 QUERY_BATCH_SIZE 切块后每块一次 selectList，"
-            + "规避 IN 参数过多，非逐行往返",
-        "AiModelConfigServiceImpl#httpClient.send",
-        "误报：候选补全地址回退尝试（for 遍历 completionUrls，命中首个非 404 即 break），"
-            + "循环次数与数据量无关，不存在 N+1；规则只看「循环体里有没有 RPC 接收者」，识别不了 break 语义",
-        "DeviceImportServiceImpl#deviceMapper.insertBatch",
-        "分块批量插入：CSV 批量导入的行数由上传文件决定（不可控，上限 1 万），"
-            + "按 ROW_INSERT_BATCH_SIZE 切块后每块一次 insertBatch（见 persistDevices），非逐行往返",
-        "DeviceImportServiceImpl#deviceMapper.insert",
-        "块失败后的**逐行重试回退**（persistDevicesRowByRow）：批量插入按块回退到逐行重试，"
+            + "**如实登记为已知的非理想形态**：正常数据下层级通常 ≤5，环/异常数据才会逼近上限。"),
+        Map.entry("NoticePublishServiceImpl#deliveryMapper.insertBatch", "分块批量插入：按 INSERT_BATCH_SIZE 切块后每块一次 insertBatch（见 insertInBatches），非逐行往返"),
+        Map.entry("AiDocumentVectorizer#chunkMapper.insertBatch", "分块批量插入：分块数由文档大小决定（不可控），按 INSERT_BATCH_SIZE 分块后每块一次 insertBatch，"
+            + "规避 max_allowed_packet，非逐行往返"),
+        Map.entry("UserExcelComponent#userMapper.insertBatch", "分块批量插入：导入行数由上传文件决定（不可控），按 INSERT_BATCH_SIZE 分块后每块一次 insertBatch，"
+            + "规避 max_allowed_packet，非逐行往返"),
+        Map.entry("UserExcelComponent#userMapper.selectList", "分块批量 IN 查询：文件内待查值按 QUERY_BATCH_SIZE 切块后每块一次 selectList，"
+            + "规避 IN 参数过多，非逐行往返"),
+        Map.entry("SysSpaceServiceImpl#baseMapper.insertBatch", "分块批量插入：导入行数由用户表格决定（上限 MAX_IMPORT_ROWS），"
+            + "按 IMPORT_INSERT_BATCH_SIZE 切块后每块一次 insertBatch，非逐行往返"),
+        Map.entry("AiModelConfigServiceImpl#httpClient.send", "误报：候选补全地址回退尝试（for 遍历 completionUrls，命中首个非 404 即 break），"
+            + "循环次数与数据量无关，不存在 N+1；规则只看「循环体里有没有 RPC 接收者」，识别不了 break 语义"),
+        Map.entry("DeviceImportServiceImpl#deviceMapper.insertBatch", "分块批量插入：CSV 批量导入的行数由上传文件决定（不可控，上限 1 万），"
+            + "按 ROW_INSERT_BATCH_SIZE 切块后每块一次 insertBatch（见 persistDevices），非逐行往返"),
+        Map.entry("DeviceImportServiceImpl#deviceMapper.insert", "块失败后的**逐行重试回退**（persistDevicesRowByRow）：批量插入按块回退到逐行重试，"
             + "是因为本能力的语义要求「单行失败只让该行失败」——整块回滚会把同块里的好行一起废掉。"
-            + "该路径只在块级写入失败时进入，不是常态往返",
-        "DeviceImportServiceImpl#groupMemberMapper.insertBatch",
-        "分块批量插入：一台设备可归多个分组、一次导入最多 1 万台 ⇒ 归属行数不可控，"
-            + "按 ROW_INSERT_BATCH_SIZE 切块后每块一次 insertBatch（见 persistGroupMembers），非逐行往返",
-        "DeviceImportServiceImpl#rowMapper.insertBatch",
-        "分块批量插入：明细行数 = 导入行数（不可控，上限 1 万），"
+            + "该路径只在块级写入失败时进入，不是常态往返"),
+        Map.entry("DeviceImportServiceImpl#groupMemberMapper.insertBatch", "分块批量插入：一台设备可归多个分组、一次导入最多 1 万台 ⇒ 归属行数不可控，"
+            + "按 ROW_INSERT_BATCH_SIZE 切块后每块一次 insertBatch（见 persistGroupMembers），非逐行往返"),
+        Map.entry("DeviceImportServiceImpl#rowMapper.insertBatch", "分块批量插入：明细行数 = 导入行数（不可控，上限 1 万），"
             + "按 ROW_INSERT_BATCH_SIZE 切块后每块一次 insertBatch（见 persistRows），非逐行往返。"
-            + "与 IotEventLogMapper#insertBatch 同一形态");
+            + "与 IotEventLogMapper#insertBatch 同一形态")
+    );
 
     /**
      * 构建实体继承例外清单。
