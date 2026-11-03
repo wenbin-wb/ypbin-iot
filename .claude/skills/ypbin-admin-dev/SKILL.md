@@ -80,6 +80,16 @@ description: ypbin-admin 后端开发与合规审计标准。开发任何 Contro
     - **远程调用防雪崩**：所有 RPC/HTTP 调用必须显式指定 `connectTimeout` 和 `readTimeout`，明确降级与重试策略，禁止使用无超时的默认 Client。
     - **敏感词与 Excel 标准**：敏感词走 `@SensitiveWordFilter` AOP 切面；导入导出走 FastExcel `ExcelUtils`。
 
+11. **同步白名单铁律（本仓特有 —— 本仓是 `ypbin-admin` 的 fork）**：
+    - **先跑门禁，再合并**：每次 `git merge upstream/main`（或重跑同步检查）**之前**，必须先执行
+      `bash tools/sync-whitelist-regex.sh`，确认输出**非空**（空正则会让 `grep -Eq ""` 匹配一切 ⇒ 门禁假通过），
+      并用**与 CI 同一判据**复跑一遍：
+      `git diff --name-only --diff-filter=MDR upstream/main...HEAD` → **剔除与 `upstream/main` 逐字节一致**（`git diff --quiet upstream/main HEAD -- <file>` 为真）的文件 → 其余必须**全部**命中白名单正则。
+    - **三处副本必须同步**：白名单只有**一个权威源**（`tools/sync-whitelist-regex.sh`），但它在三处出现——脚本本体、`SYNC.md` 第二节表格、`.github/workflows/sync-whitelist.yml` 头注释的条目计数。改任一处必须同时改另外两处，且**脚本条目数 = `SYNC.md` 第二节表格按行内 `、` 展开后的项数**（直接比表格行数会误判「少 N 项」，因为一行可并列多个文件）。
+    - **能采纳上游就不进白名单**：`ypbin-service-api/ypbin-system-api` 这类模块应保持与 `upstream/main` **零分歧**（实测 `git diff --stat upstream/main HEAD -- <模块>` 输出为空）；只有「问题就落在既有 admin 文件的那几行上、无法用新文件表达」时才登记条目，并在 `SYNC.md` 写明理由与代价。
+    - **改既有 admin 文件必须当场登记**：改完立刻加白名单条目 + `SYNC.md` 表格行 + 更新两处计数，否则 `Sync Whitelist` 会在 `main` 上**恒红**——恒红的门禁只会被当噪音忽略，比没有门禁更坏（2026-10-27 实测：`deploy/sql/migration/2026-10-23-space-management.sql` 改过却漏登记，24 个真实改动中只漏它一个，门禁长期红）。
+    - **fork 里发现的 admin 缺陷优先反哺**：能在 admin 修的就提 PR 到 admin，本仓通过同步继承，不要长期持有分歧（理由是「上面对上游同样成立」的，一律反哺）。
+
 ## 建议（YELLOW — 应遵循，有正当理由可偏离并说明）
 
 - Controller 继承 `BaseController`（starter 的 `ypbin-starter-extension-crud`）拿 `ok()/fail()/userId()/ip()` 等（**仅单体版**；微服务版不继承，用 `R` 静态工厂 + `WebRequestUtils` + `IdentityContext`）；依赖用 `@RequiredArgsConstructor` + `final` 字段注入，不用 `@Autowired` 字段注入。
@@ -280,6 +290,12 @@ rg -n "vben|RouteRecordRaw|前端契约" --glob '*.java'
 9. **Controller 查询出参一律封装 `XxxResp`，禁止裸返实体**（2026-08 审核发现 SysMessage/SysJob/SysNotice/SysFile/AiKnowledgeBase/AiPromptTemplate 等裸返 `R<List<SysXxx>>`；已进规范，新写查询接口必须建 Resp 并在 Service 组装）。`@JsonSerialize(ToStringSerializer)` 字段级注解**无需再加**——starter-json 全局已把 Long/BigInteger/BigDecimal 转字符串，旧注解冗余但保留无害（渐进清理，不阻塞新代码）。
 
 10. **配置/接口与 starter 的键级核对**：admin 的 `application.yml` 与 starter `@ConfigurationProperties` 键双向核对（防死键）；`@Value`/占位符直读（如 `JobInitializer` 的 `fixedDelayString`）属可接受的轻量用法，但新写配置优先走强类型 Properties。
+
+11. **白名单「计数漂移」与「漏登记」是两个不同的坑，都会让 `Sync Whitelist` 恒红**（2026-10-27 实测，铁律 11 的具体案例）：
+   - **漏登记**：改了既有 admin 文件却没加白名单条目。实测 `deploy/sql/migration/2026-10-23-space-management.sql`（`553abb47` 把授权改成按 `auth_code` 反查）从未登记 ⇒ 24 个真实改动的既有文件中 23 个在册、只漏它一个，`bad=1`。**判定命令**：`git diff --name-only --diff-filter=MDR upstream/main...HEAD` 后剔除零分歧文件，逐个 `grep -Eq "$ALLOWED"`。
+   - **计数漂移**：条目删除后文档/workflow 头注释的计数没跟着改（长期写 54、脚本实际 46）。后果是后来者以为「少了 8 项」而**乱补条目**，把分歧面重新扩大。**以脚本为唯一权威**，文档数字必须由脚本现场数出来。
+   - **合并 `upstream/main` 后必复跑一次**：本次同步 `89925d6` 之后复跑仍 `bad=0`，说明修法有效；不复跑就不知道新提交有没有把新文件带进分歧面。
+   - **冲突面判定别被「大量同名文件有差异」吓到**：`git diff upstream/main HEAD -- <file>` 对**上游新增而本仓没有**的文件也报差异，那不算分歧（合并会直接 add）。判定分歧只看「本仓改过的既有文件」。
 
 ## 验证
 

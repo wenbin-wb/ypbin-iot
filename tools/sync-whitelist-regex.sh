@@ -148,6 +148,14 @@ ALLOWED+='ypbin-common/src/main/java/cn/ypbin/admin/common/constant/AdminConstan
 # 为什么不能用新文件表达：issue #303 的修复（identity.enabled=false）必须落在该既有模板文件里。
 ALLOWED+='deploy/nacos/ypbin-auth\.yaml|'
 ALLOWED+='ypbin-service/ypbin-ai/src/main/java/cn/ypbin/admin/ai/core/AiEmbeddingConfigResolverImpl\.java|'
+# ---------------------------------------------------------------------------
+# 第 55 项（2026-10-27 补登记，**漏登记**）：admin 基座迁移
+#   本仓 2026-10-24 的 `553abb47` 把它修成「授权按 auth_code 反查真实 id」。修复本身**已反哺上游**
+#   （admin@337d42b 起该文件两仓逐字节一致），但白名单条目一直没加 ⇒ `Sync Whitelist` 门禁在
+#   main 上**恒红**（24 个真实改动的既有文件里 23 个在册、只漏它一个）。
+# 为什么不能用新文件表达：修复必须落在该既有迁移脚本里（已上线库要单独执行它）。
+# 代价：上游若再改这份迁移，同步时**整体取本仓版本**（含上方那段 auth_code 反查理由）。
+ALLOWED+='deploy/sql/migration/2026-10-23-space-management\.sql|'
 ALLOWED+=')$'
 
 printf '%s' "$ALLOWED"
