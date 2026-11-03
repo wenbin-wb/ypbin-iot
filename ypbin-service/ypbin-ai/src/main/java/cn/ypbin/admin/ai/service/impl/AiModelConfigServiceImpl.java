@@ -9,6 +9,7 @@
  */
 package cn.ypbin.admin.ai.service.impl;
 
+import cn.ypbin.admin.common.support.TenantSupport;
 import cn.ypbin.starter.data.core.EntityStatus;
 import cn.ypbin.admin.ai.core.AiKeyCipher;
 import cn.ypbin.admin.ai.entity.AiModelConfig;
@@ -16,6 +17,7 @@ import cn.ypbin.admin.ai.mapper.AiModelConfigMapper;
 import cn.ypbin.admin.ai.model.req.AiModelConfigSaveReq;
 import cn.ypbin.admin.ai.model.resp.AiModelConfigResp;
 import cn.ypbin.admin.ai.service.AiModelConfigService;
+import cn.ypbin.admin.ai.support.AiUrlSafetyGuard;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.security.core.UserContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
@@ -48,52 +50,39 @@ public class AiModelConfigServiceImpl implements AiModelConfigService {
     /** 向量化模型 */
     public static final String MODEL_TYPE_EMBEDDING = "EMBEDDING";
 
-    /** 连接超时（秒）——**显式**取值，禁止无超时的默认客户端（仓内铁律）。 */
+    /** 连接超时（秒） */
     static final int CONNECT_TIMEOUT_SECONDS = 5;
-    /** 读超时（秒）——同上，显式取值。 */
+    /** 请求超时（秒） */
     static final int READ_TIMEOUT_SECONDS = 15;
+    /** 连接超时 */
+    private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(CONNECT_TIMEOUT_SECONDS);
+    /** 请求超时 */
+    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(READ_TIMEOUT_SECONDS);
 
     /**
-     * 共享的 HTTP 客户端（**进程内单例，必须复用**）。
+     * 连接测试复用同一客户端：每次 new 会丢掉连接池与线程资源。
      *
-     * <p><b>为什么是静态单例而不是每次调用 {@code HttpClient.newBuilder()} 新建</b>：
-     * JDK 的 {@code HttpClient} 自带连接池与 selector 线程；每次新建等于**丢掉连接池**，
-     * 还会让超时/协议策略散落到各调用点（历史上 {@code testConnection} 就是每次新建）。
-     * 抽到一处后，"超时是多少、用哪个协议版本"只有一个答案。</p>
-     *
-     * <p><b>为什么显式指定 HTTP/1.1</b>：JDK 的默认是 HTTP/2（明文下走 h2c upgrade）。
-     * **已实测的失败只发生在"服务端接受 h2c upgrade 随后断开"的那类服务端上**：2026-09-27 用同款 JDK 客户端
-     * 对 EMQX/Cowboy（{@code /api/v5/publish}）实测，<b>带体 POST 作为某条新连接上的第一个请求</b>会抛
-     * {@code java.io.IOException: EOF reached while reading}，强制 HTTP/1.1 则正常
-     * （判据可复跑，见 {@code deploy/emqx/diagnose-emqx-admin-h2c/}）。</p>
-     *
-     * <p>⚠️ <b>不要读成"明文 {@code http://} 必踩坑"</b>：若服务端不对这个 upgrade 做 h2c 切换，JDK 会
-     * **优雅回落 HTTP/1.1 并成功**（独立复核用朴素 JDK {@code HttpServer} 实测即如此）。
-     * ⇒ 本隐患**取决于服务端如何处理"带体 h2c upgrade"，对其它明文服务端未实测**。
-     * 本类的连通性测试恰好是"新连接 + 带体 POST"，且 {@code baseUrl} **允许用户填明文 {@code http://}**
-     * （本机模型/内网网关常见）⇒ 只要对端属于"接受 upgrade 再断"那一类就会踩到；固定 1.1 可一次消掉这一类。</p>
-     *
-     * <p>关于 HTTPS：实测只到「默认客户端可用且**回落** HTTP/1.1」（自签 {@code HttpsServer} 下
-     * status=200、proto=HTTP/1.1）；**h2-over-TLS 未实测**，也**未查到** JDK 21 文档里关于客户端 ALPN
-     * 协商细节的一手说明（独立复核在 {@code HttpClient}/{@code Builder} 文档 grep "ALPN" = 0 命中）
-     * ⇒ 此处**不做**"HTTPS 一样正确"的断言。统一固定 HTTP/1.1 的目的是**少一类未知**，对 OpenAI 兼容接口足够。</p>
+     * <p>显式指定 HTTP/1.1：JDK 默认 HTTP/2，而该方法总是「新连接 + 带体 POST」，
+     * 对仅支持 h2c 探测的服务会出现 {@code EOF reached while reading}（IoT 仓实测）。</p>
      */
-    private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
-        .connectTimeout(Duration.ofSeconds(CONNECT_TIMEOUT_SECONDS))
+    private static final HttpClient httpClient = HttpClient.newBuilder()
         .version(HttpClient.Version.HTTP_1_1)
+        .connectTimeout(CONNECT_TIMEOUT)
         .build();
 
     /**
-     * 取共享客户端（包级可见，仅为让测试能断言"同一个实例 + 协议版本/超时已显式设置"，不做真实网络调用）。
+     * 取共享客户端（包级可见，仅供测试断言「单例 + 协议版本 + 超时」配置，不做真实网络调用）。
      *
      * @return 进程内共享的 {@link HttpClient}
      */
     static HttpClient httpClient() {
-        return HTTP_CLIENT;
+        return httpClient;
     }
 
     private final AiModelConfigMapper modelConfigMapper;
     private final AiKeyCipher keyCipher;
+    /** 统一 SSRF 守卫（与知识库 URL 导入共用同一口径） */
+    private final AiUrlSafetyGuard urlSafetyGuard;
 
     @Override
     public List<AiModelConfigResp> listModels() {
@@ -136,21 +125,28 @@ public class AiModelConfigServiceImpl implements AiModelConfigService {
         config.setIsDefault(0);
         // API Key AES-GCM 加密后存储，禁止明文落库
         config.setApiKey(keyCipher.encrypt(req.getApiKey()));
-        modelConfigMapper.insert(config);
+        if (modelConfigMapper.insert(config) != 1) {
+            throw new BusinessException("模型配置创建失败");
+        }
     }
 
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void updateModel(Long id, AiModelConfigSaveReq req) {
-        requireModel(id);
+        AiModelConfig existing = requireModel(id);
         AiModelConfig config = new AiModelConfig();
         BeanUtils.copyProperties(req, config, "id", "tenantId", "isDefault", "status", "apiKey");
         config.setId(id);
+        // new 出来的实体带着 BaseEntity 的 status 默认值 1，必须显式保留库内状态，
+        // 否则编辑已停用的模型会把它重新启用
+        config.setStatus(existing.getStatus());
         // 留空表示不修改，非空则重新加密
         if (req.getApiKey() != null && !req.getApiKey().isBlank()) {
             config.setApiKey(keyCipher.encrypt(req.getApiKey()));
         }
-        modelConfigMapper.updateById(config);
+        if (modelConfigMapper.updateById(config) != 1) {
+            throw new BusinessException("模型配置更新失败");
+        }
     }
 
     @Override
@@ -160,7 +156,9 @@ public class AiModelConfigServiceImpl implements AiModelConfigService {
         if (existing.getIsDefault() != null && existing.getIsDefault() == 1) {
             throw new BusinessException("默认模型不能删除，请先更换默认模型");
         }
-        modelConfigMapper.deleteById(id);
+        if (modelConfigMapper.deleteById(id) != 1) {
+            throw new BusinessException("模型配置删除失败");
+        }
     }
 
     @Override
@@ -176,10 +174,13 @@ public class AiModelConfigServiceImpl implements AiModelConfigService {
                 .eq(AiModelConfig::getModelType, modelType)
                 .set(AiModelConfig::getIsDefault, 0));
         // 设置新默认
-        modelConfigMapper.update(null,
+        int affected = modelConfigMapper.update(null,
             new LambdaUpdateWrapper<AiModelConfig>()
                 .eq(AiModelConfig::getId, id)
                 .set(AiModelConfig::getIsDefault, 1));
+        if (affected != 1) {
+            throw new BusinessException("默认模型设置失败");
+        }
     }
 
     @Override
@@ -193,7 +194,9 @@ public class AiModelConfigServiceImpl implements AiModelConfigService {
         AiModelConfig update = new AiModelConfig();
         update.setId(id);
         update.setStatus(status);
-        modelConfigMapper.updateById(update);
+        if (modelConfigMapper.updateById(update) != 1) {
+            throw new BusinessException("模型状态更新失败");
+        }
     }
 
     @Override
@@ -207,7 +210,9 @@ public class AiModelConfigServiceImpl implements AiModelConfigService {
         copy.setIsDefault(0);
         copy.setStatus(EntityStatus.ENABLED.getCode());
         // API Key 密文可直接复用（同一把密钥加密，解密语义不变）
-        modelConfigMapper.insert(copy);
+        if (modelConfigMapper.insert(copy) != 1) {
+            throw new BusinessException("模型复制失败");
+        }
         return copy.getId();
     }
 
@@ -218,15 +223,18 @@ public class AiModelConfigServiceImpl implements AiModelConfigService {
         if (baseUrl == null || baseUrl.isBlank()) {
             throw new BusinessException("该模型未配置接口地址（baseUrl），无法测试");
         }
+        // baseUrl 由用户填写：必须与知识库 URL 导入同一套 SSRF 校验，
+        // 否则平台管理员可让服务端去请求内网/云元数据地址
+        urlSafetyGuard.requireSafeUrl(baseUrl, "模型接口地址");
         String apiKey = keyCipher.decrypt(config.getApiKey());
         long start = System.currentTimeMillis();
         try {
-            HttpClient client = httpClient();
+            // 模型名来自用户输入，直接拼进 JSON 会被引号/反斜杠破坏报文（甚至注入字段）
             String payload = """
                 {"model":"%s","messages":[{"role":"user","content":"ping"}],"max_tokens":5}
-                """.formatted(config.getModelName());
+                """.formatted(escapeJson(config.getModelName()));
             HttpRequest.Builder builder = HttpRequest.newBuilder()
-                .timeout(Duration.ofSeconds(READ_TIMEOUT_SECONDS))
+                .timeout(REQUEST_TIMEOUT)
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8));
             if (apiKey != null && !apiKey.isBlank()) {
@@ -235,7 +243,9 @@ public class AiModelConfigServiceImpl implements AiModelConfigService {
             String[] candidates = completionUrls(baseUrl);
             HttpResponse<String> resp = null;
             for (String url : candidates) {
-                resp = client.send(builder.copy().uri(URI.create(url)).build(),
+                // 候选地址由 baseUrl 派生，仍逐个校验（防止拼接后指向非预期主机）
+                urlSafetyGuard.requireSafeUrl(url, "模型接口地址");
+                resp = httpClient.send(builder.copy().uri(URI.create(url)).build(),
                     HttpResponse.BodyHandlers.ofString());
                 // 404 时尝试下一个候选地址，其余错误码直接返回
                 if (resp.statusCode() != 404) {
@@ -244,9 +254,8 @@ public class AiModelConfigServiceImpl implements AiModelConfigService {
             }
             if (resp == null || resp.statusCode() != 200) {
                 int code = resp == null ? 0 : resp.statusCode();
-                String body = resp == null ? "" : resp.body();
-                throw new BusinessException("连接失败（HTTP " + code + "）："
-                    + (body == null || body.isBlank() ? "无响应内容" : truncate(body)));
+                // 不回显响应体：内网目标/元数据服务的返回内容不应出现在接口响应里
+                throw new BusinessException("连接失败（HTTP " + code + "），请检查接口地址与 API Key");
             }
             return System.currentTimeMillis() - start;
         } catch (IOException e) {
@@ -276,8 +285,41 @@ public class AiModelConfigServiceImpl implements AiModelConfigService {
         return new String[] {normalized + "/chat/completions", normalized + "/v1/chat/completions"};
     }
 
-    private String truncate(String text) {
-        return text == null ? "" : (text.length() > 300 ? text.substring(0, 300) + "..." : text);
+    /**
+     * JSON 字符串转义（模型名/地址只用于报文，不引入额外依赖）。
+     *
+     * <p>除 {@code "} 与 {@code \} 外，还必须转义 U+0000–U+001F 控制字符：
+     * JSON 规范禁止裸写控制字符，模型名里混入换行/制表符会让整条报文非法，
+     * 服务端直接返回 400，而错误信息里只显示「连接失败」，排查不到根因。</p>
+     *
+     * @param value 原始字符串，可空
+     * @return 可直接放入 JSON 双引号内的字符串
+     */
+    private static String escapeJson(String value) {
+        if (value == null) {
+            return "";
+        }
+        StringBuilder escaped = new StringBuilder(value.length() + 8);
+        for (int i = 0; i < value.length(); i++) {
+            char ch = value.charAt(i);
+            switch (ch) {
+                case '"' -> escaped.append("\\\"");
+                case '\\' -> escaped.append("\\\\");
+                case '\b' -> escaped.append("\\b");
+                case '\f' -> escaped.append("\\f");
+                case '\n' -> escaped.append("\\n");
+                case '\r' -> escaped.append("\\r");
+                case '\t' -> escaped.append("\\t");
+                default -> {
+                    if (ch < 0x20) {
+                        escaped.append(String.format("\\u%04x", (int) ch));
+                    } else {
+                        escaped.append(ch);
+                    }
+                }
+            }
+        }
+        return escaped.toString();
     }
 
     @Override
@@ -302,8 +344,7 @@ public class AiModelConfigServiceImpl implements AiModelConfigService {
      * 当前登录用户的租户 ID；无登录上下文时明确失败，禁止静默回退默认租户。
      */
     private static Long currentTenantId() {
-        return UserContext.getTenantId()
-            .orElseThrow(() -> new BusinessException("无法获取当前租户上下文"));
+        return TenantSupport.currentTenantId();
     }
 
     private AiModelConfig requireModel(Long id) {
@@ -317,10 +358,9 @@ public class AiModelConfigServiceImpl implements AiModelConfigService {
     private AiModelConfigResp toResp(AiModelConfig config) {
         AiModelConfigResp resp = new AiModelConfigResp();
         BeanUtils.copyProperties(config, resp, "apiKey");
-        // API Key 脱敏
-        if (config.getApiKey() != null && config.getApiKey().length() > 6) {
-            resp.setApiKeyMasked(config.getApiKey().substring(0, 6) + "****");
-        } else if (config.getApiKey() != null) {
+        // 只表示「已配置」，不回显任何密文片段：库内是 AES-GCM 密文，
+        // 取其前几位既无信息量，又会让调用方误以为看到了明文片段
+        if (config.getApiKey() != null) {
             resp.setApiKeyMasked("****");
         }
         return resp;

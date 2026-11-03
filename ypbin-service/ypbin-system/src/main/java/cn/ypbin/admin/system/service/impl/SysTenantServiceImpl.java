@@ -12,13 +12,19 @@ package cn.ypbin.admin.system.service.impl;
 import cn.ypbin.admin.system.api.cache.SysCache;
 import cn.ypbin.admin.system.entity.SysAuthTemplate;
 import cn.ypbin.admin.system.entity.SysDept;
+import cn.ypbin.admin.system.entity.SysMessage;
+import cn.ypbin.admin.system.entity.SysNotice;
 import cn.ypbin.admin.system.entity.SysPost;
 import cn.ypbin.admin.system.entity.SysRole;
+import cn.ypbin.admin.system.entity.SysSpace;
 import cn.ypbin.admin.system.entity.SysTenant;
 import cn.ypbin.admin.system.entity.SysUser;
 import cn.ypbin.admin.system.mapper.SysDeptMapper;
+import cn.ypbin.admin.system.mapper.SysMessageMapper;
+import cn.ypbin.admin.system.mapper.SysNoticeMapper;
 import cn.ypbin.admin.system.mapper.SysPostMapper;
 import cn.ypbin.admin.system.mapper.SysRoleMapper;
+import cn.ypbin.admin.system.mapper.SysSpaceMapper;
 import cn.ypbin.admin.system.mapper.SysTenantMapper;
 import cn.ypbin.admin.system.mapper.SysUserMapper;
 import cn.ypbin.admin.system.model.req.TenantSaveReq;
@@ -27,11 +33,16 @@ import cn.ypbin.admin.system.service.SysAuthTemplateService;
 import cn.ypbin.admin.system.service.SysTenantService;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.crud.service.BaseServiceImpl;
+import cn.ypbin.starter.security.online.OnlineUserService;
 import cn.ypbin.starter.tenant.core.TenantContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import com.baomidou.mybatisplus.core.toolkit.support.SFunction;
 import java.util.List;
 import java.util.Objects;
 import lombok.RequiredArgsConstructor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.BeanUtils;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -46,11 +57,17 @@ import org.springframework.transaction.annotation.Transactional;
 @RequiredArgsConstructor
 public class SysTenantServiceImpl extends BaseServiceImpl<SysTenantMapper, SysTenant> implements SysTenantService {
 
+    private static final Logger log = LoggerFactory.getLogger(SysTenantServiceImpl.class);
+
     private final SysAuthTemplateService authTemplateService;
     private final SysUserMapper userMapper;
     private final SysRoleMapper roleMapper;
     private final SysDeptMapper deptMapper;
     private final SysPostMapper postMapper;
+    private final SysSpaceMapper spaceMapper;
+    private final SysNoticeMapper noticeMapper;
+    private final SysMessageMapper messageMapper;
+    private final OnlineUserService onlineUserService;
 
     @Override
     public List<TenantResp> listTenants() {
@@ -87,10 +104,36 @@ public class SysTenantServiceImpl extends BaseServiceImpl<SysTenantMapper, SysTe
         if (!updateById(tenant)) {
             throw new BusinessException("租户更新失败");
         }
-        if (!Objects.equals(existing.getTemplateId(), req.getTemplateId())) {
-            // 重绑权限模板后，租户下用户角色/权限缓存（永久键）随模板变化，须批量失效
-            evictTenantUsers(id);
+        boolean disabledNow = Integer.valueOf(0).equals(req.getStatus())
+            && !Integer.valueOf(0).equals(existing.getStatus());
+        if (disabledNow || !Objects.equals(existing.getTemplateId(), req.getTemplateId())) {
+            // 重绑模板或禁用租户后，租户下用户的角色/权限缓存（永久键）都必须批量失效
+            List<Long> userIds = evictTenantUsers(id);
+            if (disabledNow) {
+                // 缓存失效不够：已建立的 Sa-Token 会话仍然有效，必须把在线用户踢下线
+                kickoutTenantUsers(id, userIds);
+            }
         }
+    }
+
+    /**
+     * 踢掉指定租户用户的在线会话。
+     *
+     * <p>单个用户踢下线失败不阻断其余用户（Redis 抖动时仍尽量收敛暴露面），但必须记 error 日志。</p>
+     *
+     * @param tenantId 租户 ID
+     * @param userIds  该租户的用户 ID
+     */
+    private void kickoutTenantUsers(Long tenantId, List<Long> userIds) {
+        for (Long userId : userIds) {
+            try {
+                onlineUserService.kickoutByUserId(userId);
+            } catch (RuntimeException e) {
+                log.error("租户禁用后踢下线失败：tenantId={}, userId={}", tenantId, userId, e);
+            }
+        }
+        log.info("租户已禁用：权限缓存已失效并踢下线，tenantId={}, users={}",
+            tenantId, userIds.size());
     }
 
     @Override
@@ -103,17 +146,37 @@ public class SysTenantServiceImpl extends BaseServiceImpl<SysTenantMapper, SysTe
         if (Long.valueOf(1L).equals(id)) {
             throw new BusinessException("内置默认租户不允许删除");
         }
-        // 删除前校验租户下无业务数据，避免产生孤儿数据
-        long userCount = userMapper.selectCount(new LambdaQueryWrapper<SysUser>().eq(SysUser::getTenantId, id));
-        long roleCount = roleMapper.selectCount(new LambdaQueryWrapper<SysRole>().eq(SysRole::getTenantId, id));
-        long deptCount = deptMapper.selectCount(new LambdaQueryWrapper<SysDept>().eq(SysDept::getTenantId, id));
-        long postCount = postMapper.selectCount(new LambdaQueryWrapper<SysPost>().eq(SysPost::getTenantId, id));
-        if (userCount + roleCount + deptCount + postCount > 0) {
-            throw new BusinessException("该租户下存在用户/角色/部门/岗位数据，请先清空后再删除");
+        // 删除前校验租户下无业务数据，避免产生孤儿数据。
+        // 注意必须显式按“被删租户”统计：删除动作由平台用户发起，其身份头里的 tenantId 不是被删租户，
+        // 若沿用隐式租户条件会把统计落到平台租户上（恒为 0），孤儿数据根本拦不住。
+        long total = countByTenant(userMapper, SysUser::getTenantId, id)
+            + countByTenant(roleMapper, SysRole::getTenantId, id)
+            + countByTenant(deptMapper, SysDept::getTenantId, id)
+            + countByTenant(postMapper, SysPost::getTenantId, id)
+            + countByTenant(spaceMapper, SysSpace::getTenantId, id)
+            + countByTenant(noticeMapper, SysNotice::getTenantId, id)
+            + countByTenant(messageMapper, SysMessage::getTenantId, id);
+        if (total > 0) {
+            throw new BusinessException(
+                "该租户下存在用户/角色/部门/岗位/空间/公告/站内信数据，请先清空后再删除");
         }
         if (!removeById(id)) {
             throw new BusinessException("租户删除失败");
         }
+    }
+
+    /**
+     * 统计指定租户下某类数据的行数（显式忽略当前上下文租户）。
+     *
+     * @param mapper       实体 Mapper
+     * @param tenantColumn 实体的租户字段
+     * @param tenantId     被检查的租户 ID
+     * @param <T>          实体类型
+     * @return 数据行数
+     */
+    private <T> long countByTenant(BaseMapper<T> mapper, SFunction<T, ?> tenantColumn, Long tenantId) {
+        return TenantContext.executeIgnore(() -> mapper.selectCount(
+            new LambdaQueryWrapper<T>().eq(tenantColumn, tenantId)));
     }
 
     private void checkNameUnique(String name, Long excludeId) {
@@ -149,15 +212,18 @@ public class SysTenantServiceImpl extends BaseServiceImpl<SysTenantMapper, SysTe
      *
      * @param tenantId 租户 ID
      */
-    private void evictTenantUsers(Long tenantId) {
+    private List<Long> evictTenantUsers(Long tenantId) {
         List<SysUser> users = TenantContext.executeIgnore(() -> userMapper.selectList(
             new LambdaQueryWrapper<SysUser>()
                 .eq(SysUser::getTenantId, tenantId)
                 .select(SysUser::getId)));
         if (users.isEmpty()) {
-            return;
+            return List.of();
         }
-        users.stream().map(SysUser::getId).distinct().forEach(SysCache::evictUserAuth);
+        List<Long> userIds = users.stream().map(SysUser::getId).distinct().toList();
+        // 批版接口合并键后一次删除；逐个 forEach 会让 N 个用户变成 N 次缓存往返
+        SysCache.evictUserAuth(userIds);
+        return userIds;
     }
 
     private TenantResp toResp(SysTenant tenant) {

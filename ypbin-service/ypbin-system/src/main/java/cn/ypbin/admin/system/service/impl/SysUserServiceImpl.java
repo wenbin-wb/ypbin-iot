@@ -10,6 +10,7 @@
 package cn.ypbin.admin.system.service.impl;
 
 import cn.ypbin.admin.common.constant.AdminConstants;
+import cn.ypbin.admin.common.support.PwdChangeKeys;
 import cn.ypbin.admin.system.api.cache.SysCache;
 import cn.ypbin.admin.system.entity.SysPost;
 import cn.ypbin.admin.system.entity.SysRole;
@@ -33,6 +34,7 @@ import cn.ypbin.admin.system.model.vo.UserImportResult;
 import cn.ypbin.admin.system.service.SysUserService;
 import cn.ypbin.admin.system.service.SysSpaceRelationService;
 import cn.ypbin.admin.system.service.support.DataScopeResolver;
+import cn.ypbin.admin.system.service.support.OnlineTokenFingerprint;
 import cn.ypbin.admin.system.service.support.UserAccountSupport;
 import cn.ypbin.starter.cache.annotation.CacheEvict;
 import cn.ypbin.starter.core.exception.BusinessException;
@@ -128,29 +130,53 @@ public class SysUserServiceImpl extends BaseServiceImpl<SysUserMapper, SysUser> 
     }
 
     @Override
-    public long countUsers() {
-        return TenantContext.executeIgnore(this::count);
+    public long countUsers(Long tenantId) {
+        if (tenantId == null) {
+            throw new BusinessException("统计用户数必须指定租户");
+        }
+        return TenantContext.executeIgnore(() -> count(new LambdaQueryWrapper<SysUser>()
+            .eq(SysUser::getTenantId, tenantId)));
     }
 
+    /**
+     * 按用户名或真实姓名模糊搜索（内部端点 / AI 工具用）。
+     *
+     * <p><b>租户边界</b>：调用方显式传入租户，服务端只搜该租户。AI 工具运行在
+     * Reactor 工作线程，Feign 请求既没有登录态也没有租户身份头，服务端若自行
+     * 「尽力解析租户」，要么直接失败（工具不可用），要么在解析失败时退化成全局
+     * 搜索（跨租户泄露）。因此租户由调用方从自身上下文取，并在此强制校验非空。</p>
+     *
+     * <p><b>OR 必须分组</b>：不包一层 {@code and(...)} 时，后续任何追加条件都会
+     * 变成 {@code a LIKE ? OR b LIKE ? AND c = ?}，语义与预期不符。</p>
+     *
+     * @param keyword  关键词
+     * @param tenantId 租户 ID（必填）
+     * @return 匹配用户（最多 10 条）
+     */
     @Override
-    public List<SysUser> searchUsers(String keyword) {
+    public List<SysUser> searchUsers(String keyword, Long tenantId) {
+        if (tenantId == null) {
+            throw new BusinessException("搜索用户必须指定租户");
+        }
+        // 关闭的是租户插件（改用显式条件），不是隔离本身：租户条件由下面显式加上，
+        // 且缺失租户时上面已直接失败，不会退化成全租户搜索。
         return TenantContext.executeIgnore(() -> list(new LambdaQueryWrapper<SysUser>()
-            .like(SysUser::getUsername, keyword)
-            .or()
-            .like(SysUser::getRealName, keyword)
+            .eq(SysUser::getTenantId, tenantId)
+            .and(wrapper -> wrapper
+                .like(SysUser::getUsername, keyword)
+                .or()
+                .like(SysUser::getRealName, keyword))
             .last("LIMIT 10")));
     }
 
     @Override
     public void updateLastLoginTime(Long userId) {
-        SysUser update = new SysUser();
-        update.setId(userId);
-        update.setLastLoginTime(LocalDateTime.now());
+        // 只 set 目标列：new SysUser() + updateById 会连带写入 BaseEntity 的 status 默认值
+        LambdaUpdateWrapper<SysUser> wrapper = new LambdaUpdateWrapper<SysUser>()
+            .eq(SysUser::getId, userId)
+            .set(SysUser::getLastLoginTime, LocalDateTime.now());
         // 登录成功回写时通常尚无租户上下文（auth 经 Feign 调用），须忽略租户行级过滤
-        TenantContext.executeIgnore(() -> {
-            updateById(update);
-            return null;
-        });
+        TenantContext.executeIgnore(() -> update(null, wrapper));
     }
 
     @Override
@@ -222,7 +248,9 @@ public class SysUserServiceImpl extends BaseServiceImpl<SysUserMapper, SysUser> 
         accountSupport.checkPhoneUnique(phone, id);
         validateAssignments(existing, req.getRoleIds(), req.getPostIds());
         SysUser user = new SysUser();
-        BeanUtils.copyProperties(req, user, "roleIds", "postIds", "password", "phone");
+        // status 不随编辑表单更新：它必须走 updateStatus（有「禁止禁用自己」与强制下线保护），
+        // 否则一次普通编辑就能绕过这两道守卫
+        BeanUtils.copyProperties(req, user, "roleIds", "postIds", "password", "phone", "status");
         user.setId(id);
         // 密码留空表示不修改
         String encoded = null;
@@ -232,9 +260,11 @@ public class SysUserServiceImpl extends BaseServiceImpl<SysUserMapper, SysUser> 
             user.setPassword(encoded);
             user.setPwdResetTime(LocalDateTime.now());
         }
+        // 手机号区分「未提交（null，保持不变）」与「显式清空（空串）」：
+        // wrapper 的 set 不受 MyBatis-Plus「null 不更新」保护，无条件 set 会把缺失字段清空
         boolean updated = update(user, new LambdaUpdateWrapper<SysUser>()
             .eq(SysUser::getId, id)
-            .set(SysUser::getPhone, phone));
+            .set(req.getPhone() != null, SysUser::getPhone, phone));
         if (!updated) {
             throw new BusinessException("用户更新失败");
         }
@@ -329,11 +359,17 @@ public class SysUserServiceImpl extends BaseServiceImpl<SysUserMapper, SysUser> 
         accountSupport.validatePassword(password, user.getUsername());
         accountSupport.checkPasswordHistory(id, password);
         String encoded = PasswordEncoderUtil.encode(password);
-        SysUser update = new SysUser();
-        update.setId(id);
-        update.setPassword(encoded);
-        update.setPwdResetTime(LocalDateTime.now());
-        updateById(update);
+        // 只 set 目标列：new SysUser() + updateById 会带上 BaseEntity 的 status 默认值 1，
+        // 导致「重置已禁用用户的密码」把账号静默重新启用
+        boolean updated = update(new LambdaUpdateWrapper<SysUser>()
+            .eq(SysUser::getId, id)
+            .set(SysUser::getPassword, encoded)
+            .set(SysUser::getPwdResetTime, LocalDateTime.now())
+            // 管理员重置的口令也是一次性初始口令：下次登录必须先自行改密
+            .set(SysUser::getPwdChangeRequired, PwdChangeKeys.REQUIRED_YES));
+        if (!updated) {
+            throw new BusinessException("密码重置失败");
+        }
         accountSupport.recordPasswordHistory(id, encoded);
         // 改密后清用户快照缓存并强制下线既有会话，要求重新登录（防旧口令会话长期有效）
         SysCache.evictUser(id, user.getUsername());
@@ -510,10 +546,29 @@ public class SysUserServiceImpl extends BaseServiceImpl<SysUserMapper, SysUser> 
                 .collect(Collectors.toMap(SysUser::getId, SysUser::getRealName, (a, b) -> a));
         List<OnlineUserResp> items = pageUsers.stream().map(u -> {
             OnlineUserResp r = new OnlineUserResp();
-            BeanUtils.copyProperties(u, r);
+            BeanUtils.copyProperties(u, r, "token");
             r.setRealName(realNameById.get(u.getUserId()));
+            // 只回传不可逆指纹：token 原文是可复用的 Bearer 凭据，不能出现在列表响应里
+            r.setTokenHash(OnlineTokenFingerprint.hash(u.getToken()));
             return r;
         }).toList();
         return PageResult.of(items, total, page, pageSize);
+    }
+
+    @Override
+    public void kickoutByTokenHash(String tokenHash) {
+        if (!StringUtils.hasText(tokenHash)) {
+            throw new BusinessException("会话标识不能为空");
+        }
+        // 会话存储没有「按指纹查」的接口，只能枚举当前在线会话后逐个比对；
+        // 在线用户量级有限（单租户通常数百），且该操作是低频管理动作，可接受
+        for (OnlineUser onlineUser : onlineUserService.list()) {
+            String currentHash = OnlineTokenFingerprint.hash(onlineUser.getToken());
+            if (currentHash != null && currentHash.equalsIgnoreCase(tokenHash.trim())) {
+                onlineUserService.kickoutByToken(onlineUser.getToken());
+                return;
+            }
+        }
+        throw new BusinessException("会话不存在或已失效");
     }
 }

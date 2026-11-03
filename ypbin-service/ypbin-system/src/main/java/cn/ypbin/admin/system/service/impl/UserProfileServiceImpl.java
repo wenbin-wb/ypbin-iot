@@ -15,6 +15,8 @@
  */
 package cn.ypbin.admin.system.service.impl;
 
+import cn.ypbin.admin.common.support.PwdChangeKeys;
+import cn.ypbin.admin.system.api.cache.SysCache;
 import cn.ypbin.admin.system.entity.SysUser;
 import cn.ypbin.admin.system.mapper.SysUserMapper;
 import cn.ypbin.admin.system.mapper.SysUserPostMapper;
@@ -27,6 +29,7 @@ import cn.ypbin.admin.system.service.support.UserAccountSupport;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.security.password.PasswordEncoderUtil;
 import cn.ypbin.starter.security.identity.IdentityContext;
+import cn.ypbin.starter.security.online.OnlineUserService;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import java.time.LocalDateTime;
 import lombok.RequiredArgsConstructor;
@@ -48,6 +51,7 @@ public class UserProfileServiceImpl implements UserProfileService {
     private final SysUserRoleMapper userRoleMapper;
     private final SysUserPostMapper userPostMapper;
     private final UserAccountSupport accountSupport;
+    private final OnlineUserService onlineUserService;
 
     @Override
     public ProfileResp getProfile() {
@@ -67,17 +71,36 @@ public class UserProfileServiceImpl implements UserProfileService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void updateProfile(ProfileUpdateReq req) {
-        Long userId = IdentityContext.getUserId().orElse(null);
-        String phone = accountSupport.normalizePhone(req.getPhone());
-        accountSupport.checkPhoneUnique(phone, userId);
+        Long userId = IdentityContext.getUserId()
+            .orElseThrow(() -> new BusinessException("当前用户未登录"));
+        SysUser existing = userMapper.selectById(userId);
+        if (existing == null) {
+            throw new BusinessException("用户不存在");
+        }
+        // null = 未提交该字段（保持不变）；空串 = 显式清空。
+        // 此前无条件 set(phone, null) 会在「只改昵称」的局部提交里把手机号清掉。
+        boolean phoneProvided = req.getPhone() != null;
+        String phone = phoneProvided ? accountSupport.normalizePhone(req.getPhone()) : null;
+        if (phoneProvided) {
+            accountSupport.checkPhoneUnique(phone, userId);
+        }
         SysUser user = new SysUser();
         BeanUtils.copyProperties(req, user, "phone");
         user.setId(userId);
-        boolean updated = userMapper.update(user, new LambdaUpdateWrapper<SysUser>()
-            .eq(SysUser::getId, userId)
-            .set(SysUser::getPhone, phone)) > 0;
-        if (!updated) {
+        LambdaUpdateWrapper<SysUser> wrapper = new LambdaUpdateWrapper<SysUser>()
+            .eq(SysUser::getId, userId);
+        if (phoneProvided) {
+            wrapper.set(SysUser::getPhone, phone);
+        }
+        if (userMapper.update(user, wrapper) == 0) {
             throw new BusinessException("个人资料更新失败");
+        }
+        // SysCache 是永久缓存：个人中心自更新不会经过管理端 updateUser，必须在这里主动失效，
+        // 否则重新登录仍读到旧的姓名/头像/手机号快照
+        SysCache.evictUser(userId, existing.getUsername());
+        SysCache.evictUserByPhone(existing.getPhone());
+        if (phoneProvided) {
+            SysCache.evictUserByPhone(phone);
         }
     }
 
@@ -96,11 +119,21 @@ public class UserProfileServiceImpl implements UserProfileService {
         accountSupport.checkPasswordHistory(userId, req.getNewPassword());
 
         String encoded = PasswordEncoderUtil.encode(req.getNewPassword());
-        SysUser update = new SysUser();
-        update.setId(userId);
-        update.setPassword(encoded);
-        update.setPwdResetTime(LocalDateTime.now());
-        userMapper.updateById(update);
+        // 只 set 目标列：new SysUser() + updateById 会带上 BaseEntity 的 status 默认值 1，
+        // 导致「禁用用户自助改密」把账号静默重新启用
+        int updated = userMapper.update(null, new LambdaUpdateWrapper<SysUser>()
+            .eq(SysUser::getId, userId)
+            .set(SysUser::getPassword, encoded)
+            .set(SysUser::getPwdResetTime, LocalDateTime.now())
+            // 自助改密完成 ⇒ 解除强制改密（下次登录的会话标记随重新登录刷新）
+            .set(SysUser::getPwdChangeRequired, PwdChangeKeys.REQUIRED_NO));
+        if (updated != 1) {
+            throw new BusinessException("密码修改失败");
+        }
         accountSupport.recordPasswordHistory(userId, encoded);
+        // 改密后与管理员重置口令同口径：清快照缓存并强制下线既有会话
+        SysCache.evictUser(userId, user.getUsername());
+        SysCache.evictUserByPhone(user.getPhone());
+        onlineUserService.kickoutByUserId(userId);
     }
 }

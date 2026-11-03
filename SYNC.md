@@ -20,6 +20,10 @@ mvn -B -ntp -fae clean verify               # 同步后必须重跑门禁
 - **Dependabot 的 `github-actions` 更新 PR 一律不合**：它改的是 admin 拥有的
   `ci.yml` / `codeql.yml` / `release.yml` / `sync-starter-version.yml`，合进去就破坏了白名单
   （`Sync Whitelist` 门禁会自动把这类 PR 判红）。要升 actions 版本，**去 admin 仓升**，本仓通过同步拿到。
+- **最近同步**：2026-11-03，upstream `a8e64df`（24 个提交：公告分页/详情、强制首登改密、Nacos 鉴权、
+  AI 入参校验、空间重构等）。冲突处置：IoT 定制保留（CHANGELOG/README、网关 iot 路由、部署脚本的
+  IoT 变量）；`AiModelConfigServiceImpl` 采纳上游（本仓的 HTTP/1.1 修复已回灌 admin，白名单第 10 项
+  因此不再产生分歧，条目暂留以防再分叉）；部署脚本补 `SUPER_ADMIN_INIT_PASSWORD` 的生成与注入。
 
 ## 二、允许改 admin 的文件（全清单，越少越好）
 

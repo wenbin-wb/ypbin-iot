@@ -336,6 +336,8 @@ services:
       SPRING_CLOUD_NACOS_PASSWORD: ${NACOS_ADMIN_PASSWORD:?请在deploy/.env设置NACOS_ADMIN_PASSWORD}
       # 身份头签名密钥（开放 API/轮换事件：Nacos 里是 ${} 占位，由本 env 解析；缺了它服务用空串校验 ⇒ 全链 403）
       GATEWAY_SIGN_TOKEN: ${GATEWAY_SIGN_TOKEN:-}
+      # 平台超管初始口令：非空时由 system 启动写入仍标记需改密的种子账号，并强制首登改密
+      SUPER_ADMIN_INIT_PASSWORD: ${SUPER_ADMIN_INIT_PASSWORD:-}
     ports:
       - "${INTERNAL_BIND_ADDR:-0.0.0.0}:18082:18082"
     depends_on:

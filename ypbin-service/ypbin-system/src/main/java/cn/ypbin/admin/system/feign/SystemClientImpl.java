@@ -9,18 +9,23 @@
  */
 package cn.ypbin.admin.system.feign;
 
+import cn.ypbin.admin.system.api.cache.SysCache;
 import cn.ypbin.admin.system.api.feign.ISystemClient;
 import cn.ypbin.admin.system.entity.SysConfig;
 import cn.ypbin.admin.system.entity.SysUser;
 import cn.ypbin.admin.system.entity.SysUserSocial;
+import cn.ypbin.admin.system.enums.UserStatusEnum;
 import cn.ypbin.admin.system.feign.support.SpaceViewConverter;
 import java.time.LocalDateTime;
 import com.baomidou.mybatisplus.core.toolkit.IdWorker;
 import cn.ypbin.starter.tenant.core.TenantContext;
 import cn.ypbin.starter.messaging.mail.MailService;
+import cn.ypbin.starter.messaging.sms.SmsService;
 import cn.ypbin.starter.data.core.EntityStatus;
 import cn.ypbin.admin.system.model.req.MailSendReq;
 import cn.ypbin.admin.system.model.req.InboxMessageSendReq;
+import cn.ypbin.admin.system.model.req.PasswordVerifyReq;
+import cn.ypbin.admin.system.model.req.SocialBindSaveReq;
 import cn.ypbin.admin.system.mapper.SysMessageMapper;
 import cn.ypbin.admin.system.entity.SysMessage;
 import cn.ypbin.admin.system.feign.support.UserViewConverter;
@@ -32,6 +37,7 @@ import cn.ypbin.admin.system.model.dto.SysSpaceRelationDto;
 import cn.ypbin.admin.system.model.dto.SysUserDto;
 import cn.ypbin.admin.system.model.dto.SysUserSocialDto;
 import cn.ypbin.admin.system.model.query.SpaceRelationQuery;
+import cn.ypbin.admin.system.model.req.SmsSendReq;
 import cn.ypbin.admin.system.model.req.SpaceBindReq;
 import cn.ypbin.admin.system.model.req.SpaceSyncReq;
 import cn.ypbin.admin.system.model.resp.RouteResp;
@@ -55,6 +61,7 @@ import cn.ypbin.starter.security.password.PasswordEncoderUtil;
 import cn.ypbin.starter.tracking.core.TrackEvent;
 import cn.ypbin.starter.tracking.core.TrackRecorder;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import jakarta.validation.Valid;
 import java.time.Duration;
 import java.util.UUID;
 import org.springframework.util.StringUtils;
@@ -122,6 +129,12 @@ public class SystemClientImpl implements ISystemClient {
 
     /** 邮件发送（复用既有 JavaMail 能力与既有超时配置） */
     private final MailService mailService;
+
+    /**
+     * 短信发送（可选）：sms4j 是 starter 的可选依赖，未引入或厂商未配置时 Bean 不存在。
+     * 用 {@link ObjectProvider} 允许 system 在未配置短信时正常启动，但取不到时不静默成功。
+     */
+    private final ObjectProvider<SmsService> smsServiceProvider;
     /** 日志落库端口：system 侧由 {@code DbLogProviders.DbLogDao} 提供，本类只做路由不做映射 */
     private final LogDao logDao;
 
@@ -207,14 +220,15 @@ public class SystemClientImpl implements ISystemClient {
 
     @Override
     @GetMapping("/search-users")
-    public R<List<SysUserDto>> searchUsers(@RequestParam("keyword") String keyword) {
-        return R.ok(UserViewConverter.toUserDtoList(userService.searchUsers(keyword)));
+    public R<List<SysUserDto>> searchUsers(@RequestParam("keyword") String keyword,
+            @RequestParam("tenantId") Long tenantId) {
+        return R.ok(UserViewConverter.toUserDtoList(userService.searchUsers(keyword, tenantId)));
     }
 
     @Override
     @GetMapping("/user-count")
-    public R<Long> countUsers() {
-        return R.ok(userService.countUsers());
+    public R<Long> countUsers(@RequestParam("tenantId") Long tenantId) {
+        return R.ok(userService.countUsers(tenantId));
     }
 
     @Override
@@ -224,6 +238,11 @@ public class SystemClientImpl implements ISystemClient {
         value.setConfigKey(configKey);
         SysConfig config = configMapper.selectOne(new LambdaQueryWrapper<SysConfig>()
             .eq(SysConfig::getConfigKey, configKey), false);
+        if (config == null) {
+            // 参数缺失是合法的读侧默认值（调用方据此走缺省），但配置键写错时表现完全相同，
+            // 留一条 debug 便于定位「开关怎么都不生效」
+            log.debug("内部读取系统参数不存在，按空值返回：configKey={}", configKey);
+        }
         String rawValue = config == null ? "" : config.getConfigValue();
         // 密钥/口令类参数禁止经 internal 出网（纵深防御：即使凭证被泄露，密钥也不得明文返回）。
         // 判据与形态统一由 ConfigValueMasker 提供，与列表页完全一致（详见该类注释的选择理由）。
@@ -235,10 +254,9 @@ public class SystemClientImpl implements ISystemClient {
 
     @Override
     @PostMapping("/verify-password")
-    public R<Boolean> verifyPassword(@RequestParam("userId") Long userId,
-        @RequestParam("rawPassword") String rawPassword) {
-        requireVerifyNotExceeded(userId);
-        return R.ok(userService.verifyPassword(userId, rawPassword));
+    public R<Boolean> verifyPassword(@Valid @RequestBody PasswordVerifyReq req) {
+        requireVerifyNotExceeded(req.getUserId());
+        return R.ok(userService.verifyPassword(req.getUserId(), req.getRawPassword()));
     }
 
     /**
@@ -295,18 +313,14 @@ public class SystemClientImpl implements ISystemClient {
 
     @Override
     @PostMapping("/social-bind-save")
-    public R<Void> saveSocialBinding(@RequestParam("userId") Long userId,
-        @RequestParam("platform") String platform, @RequestParam("openId") String openId,
-        @RequestParam(value = "nickname", required = false) String nickname,
-        @RequestParam(value = "avatar", required = false) String avatar,
-        @RequestParam(value = "accessToken", required = false) String accessToken) {
+    public R<Void> saveSocialBinding(@Valid @RequestBody SocialBindSaveReq req) {
         SysUserSocial social = new SysUserSocial();
-        social.setUserId(userId);
-        social.setPlatform(platform);
-        social.setOpenId(openId);
-        social.setNickname(nickname);
-        social.setAvatar(avatar);
-        social.setAccessToken(accessToken);
+        social.setUserId(req.getUserId());
+        social.setPlatform(req.getPlatform());
+        social.setOpenId(req.getOpenId());
+        social.setNickname(req.getNickname());
+        social.setAvatar(req.getAvatar());
+        social.setAccessToken(req.getAccessToken());
         socialBindService.save(social);
         return R.ok();
     }
@@ -370,8 +384,9 @@ public class SystemClientImpl implements ISystemClient {
         @RequestParam(value = "avatar", required = false) String avatar,
         @RequestParam("userType") String userType,
         @RequestParam("defaultRealName") String defaultRealName) {
-        SysUser user = userService.getOne(new LambdaQueryWrapper<SysUser>()
-            .eq(SysUser::getUsername, username));
+        // 内部链路无租户身份头：显式忽略租户过滤，否则插件 fail-closed 会直接抛「缺少租户上下文」
+        SysUser user = TenantContext.executeIgnore(() -> userService.getOne(
+            new LambdaQueryWrapper<SysUser>().eq(SysUser::getUsername, username)));
         if (user == null) {
             // 端侧标识与展示名必须由调用方显式给出：**不做静默默认**。
             // 理由（2026-09-18 复核教训）：默认值会静默决定落库语义，调用方漏传时表现为
@@ -390,8 +405,18 @@ public class SystemClientImpl implements ISystemClient {
             user.setAvatar(avatar);
             user.setUserType(userType);
             user.setPassword(PasswordEncoderUtil.encode(UUID.randomUUID().toString()));
-            user.setStatus(1);
-            userService.save(user);
+            user.setStatus(UserStatusEnum.ENABLED.getCode());
+            // 写入同样必须忽略租户：sys_user 不在 ignore-tables，匿名内部链路没有身份头，
+            // 漏掉这一层会在 INSERT 时被租户插件 fail-closed 拒绝（查询成功、写入失败）
+            SysUser created = user;
+            if (!TenantContext.executeIgnore(() -> userService.save(created))) {
+                throw new BusinessException("用户创建失败：username=" + username);
+            }
+            // 内部直插绕过 SysUserServiceImpl 的写路径，必须自行失效永久缓存（含「不存在」哨兵）
+            SysCache.evictUser(created.getId(), username);
+            if (StringUtils.hasText(created.getPhone())) {
+                SysCache.evictUserByPhone(created.getPhone());
+            }
         } else {
             boolean updated = false;
             if (StringUtils.hasText(nickname) && !nickname.equals(user.getNickname())) {
@@ -403,8 +428,15 @@ public class SystemClientImpl implements ISystemClient {
                 user.setAvatar(avatar);
                 updated = true;
             }
+            SysUser changed = user;
+            if (updated && !TenantContext.executeIgnore(() -> userService.updateById(changed))) {
+                throw new BusinessException("用户资料更新失败：userId=" + user.getId());
+            }
             if (updated) {
-                userService.updateById(user);
+                SysCache.evictUser(user.getId(), user.getUsername());
+                if (StringUtils.hasText(user.getPhone())) {
+                    SysCache.evictUserByPhone(user.getPhone());
+                }
             }
         }
         return R.ok(UserViewConverter.toDto(user));
@@ -416,10 +448,12 @@ public class SystemClientImpl implements ISystemClient {
         @RequestParam(value = "nickname", required = false) String nickname,
         @RequestParam(value = "avatar", required = false) String avatar,
         @RequestParam(value = "phone", required = false) String phone) {
-        SysUser user = userService.getById(userId);
+        // 同上：内部链路无租户上下文，必须显式忽略租户过滤
+        SysUser user = TenantContext.executeIgnore(() -> userService.getById(userId));
         if (user == null) {
             return R.fail("用户不存在");
         }
+        String oldPhone = user.getPhone();
         boolean updated = false;
         if (StringUtils.hasText(nickname)) {
             user.setNickname(nickname.trim());
@@ -435,7 +469,17 @@ public class SystemClientImpl implements ISystemClient {
             updated = true;
         }
         if (updated) {
-            userService.updateById(user);
+            if (!TenantContext.executeIgnore(() -> userService.updateById(user))) {
+                return R.fail("用户资料更新失败");
+            }
+            // 内部更新绕过 SysUserServiceImpl 的写路径：旧/新手机号与用户快照都必须失效
+            SysCache.evictUser(user.getId(), user.getUsername());
+            if (StringUtils.hasText(oldPhone)) {
+                SysCache.evictUserByPhone(oldPhone);
+            }
+            if (StringUtils.hasText(user.getPhone())) {
+                SysCache.evictUserByPhone(user.getPhone());
+            }
         }
         return R.ok(UserViewConverter.toDto(user));
     }
@@ -596,6 +640,41 @@ public class SystemClientImpl implements ISystemClient {
         } catch (BusinessException e) {
             return R.fail(e.getMessage());
         }
+    }
+
+    @Override
+    @PostMapping("/sms-send")
+    public R<Void> sendSms(@RequestBody SmsSendReq req) {
+        if (req == null || !StringUtils.hasText(req.getPhone())
+            || !StringUtils.hasText(req.getTemplateId())) {
+            return R.fail("短信发送参数不完整：手机号与模板不能为空");
+        }
+        SmsService smsService = smsServiceProvider.getIfAvailable();
+        if (smsService == null) {
+            // 厂商依赖/配置缺失必须暴露：返回成功会让调用方把验证码留在缓存，用户永远收不到短信
+            log.error("短信服务未配置（sms4j 未引入或厂商未配置），拒绝发送：phone={}",
+                maskPhone(req.getPhone()));
+            return R.fail("短信服务未配置，请先完成短信厂商配置");
+        }
+        Map<String, String> variables = req.getVariables() == null ? Map.of() : req.getVariables();
+        boolean sent = smsService.sendByTemplate(req.getPhone(), req.getTemplateId(), variables);
+        if (!sent) {
+            log.error("短信发送失败（厂商返回 false）：phone={}, templateId={}",
+                maskPhone(req.getPhone()), req.getTemplateId());
+            return R.fail("短信发送失败，请检查短信厂商配置");
+        }
+        return R.ok();
+    }
+
+    /**
+     * 手机号脱敏（日志用）：保留前 3 位与后 4 位。
+     *
+     * @param phone 手机号
+     * @return 脱敏后的手机号
+     */
+    private static String maskPhone(String phone) {
+        return phone.length() <= 7 ? "****"
+            : phone.substring(0, 3) + "****" + phone.substring(phone.length() - 4);
     }
 
     /**
