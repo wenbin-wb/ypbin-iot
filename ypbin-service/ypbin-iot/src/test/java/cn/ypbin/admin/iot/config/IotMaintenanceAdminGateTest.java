@@ -169,7 +169,12 @@ class IotMaintenanceAdminGateTest {
             + "AND NOT EXISTS (SELECT 1 FROM sys_template_menu tm WHERE tm.template_id = 1 "
             + "AND tm.menu_id = m.id)",
         "同上：租户模板侧授权，目标菜单同样按 auth_code 反查（5 个菜单均为 platform_only=0，"
-            + "必须进模板，否则租户管理员新建/改角色时报「授权包含模板之外的菜单」)");
+            + "必须进模板，否则租户管理员新建/改角色时报「授权包含模板之外的菜单」)",
+        "2026-11-05-access-blocklist.sql: INSERT IGNORE INTO sys_role_menu (role_id, menu_id) "
+            + "VALUES (1, 6000), (1, 6001), (1, 600101), (1, 600102), (1, 600103), (1, 600104), (1, 600105)",
+        "访问黑名单菜单（id 6000/6001/6001xx）在 002-data.sql 中就是**硬编码 id**、platform_only=1，"
+            + "本迁移只给平台超管角色 1 授权、不进 sys_template_menu，目标集合可静态核对；"
+            + "门禁的解析器只处理 `id IN (...)` 形态的 SELECT 授权，VALUES 列表按既有机制登记豁免");
 
     private static List<Path> grantSqlSources() {
         List<Path> sources = new ArrayList<>();
