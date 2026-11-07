@@ -42,7 +42,6 @@ import cn.ypbin.admin.iot.timeseries.TimeSeriesPoint;
 import cn.ypbin.admin.iot.timeseries.TimeSeriesProperties;
 import cn.ypbin.admin.iot.values.LatestValue;
 import cn.ypbin.starter.tenant.core.TenantContext;
-import cn.ypbin.starter.tenant.handler.DefaultTenantLineHandler;
 import cn.ypbin.starter.tenant.autoconfigure.TenantProperties;
 import cn.ypbin.starter.test.condition.EnabledIfMySqlAvailable;
 import cn.ypbin.starter.test.container.MySqlIntegrationTestSupport;
@@ -140,7 +139,7 @@ class OutageAvailabilityIT {
         tenantProperties.setFailOnMissingTenant(true);
         MybatisPlusInterceptor plugins = new MybatisPlusInterceptor();
         plugins.addInnerInterceptor(new TenantLineInnerInterceptor(
-            new DefaultTenantLineHandler(Optional::empty, tenantProperties)));
+            new CompatTenantLineHandler(Optional::empty, tenantProperties)));
         configuration.addInterceptor(plugins);
         configuration.addMapper(DeviceLivenessMapper.class);
         configuration.addMapper(OutageEventMapper.class);
