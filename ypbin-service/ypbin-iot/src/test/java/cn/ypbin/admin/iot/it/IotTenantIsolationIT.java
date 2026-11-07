@@ -15,7 +15,6 @@ import cn.ypbin.admin.iot.entity.IotProduct;
 import cn.ypbin.admin.iot.mapper.IotProductMapper;
 import cn.ypbin.starter.tenant.autoconfigure.TenantProperties;
 import cn.ypbin.starter.tenant.core.TenantContext;
-import cn.ypbin.starter.tenant.handler.DefaultTenantLineHandler;
 import cn.ypbin.starter.test.condition.EnabledIfMySqlAvailable;
 import cn.ypbin.starter.test.container.MySqlIntegrationTestSupport;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
@@ -199,7 +198,7 @@ class IotTenantIsolationIT {
         properties.setFailOnMissingTenant(true);
         MybatisPlusInterceptor interceptor = new MybatisPlusInterceptor();
         interceptor.addInnerInterceptor(
-            new TenantLineInnerInterceptor(new DefaultTenantLineHandler(Optional::empty, properties)));
+            new TenantLineInnerInterceptor(new CompatTenantLineHandler(Optional::empty, properties)));
         return interceptor;
     }
 

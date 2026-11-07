@@ -29,7 +29,6 @@ import cn.ypbin.admin.iot.mapper.MaintenanceWindowMapper;
 import cn.ypbin.admin.iot.mapper.TenantNodeAssignmentMapper;
 import cn.ypbin.admin.iot.service.impl.LeaseServiceImpl;
 import cn.ypbin.starter.tenant.autoconfigure.TenantProperties;
-import cn.ypbin.starter.tenant.handler.DefaultTenantLineHandler;
 import cn.ypbin.starter.tenant.core.TenantContext;
 import cn.ypbin.starter.test.condition.EnabledIfMySqlAvailable;
 import cn.ypbin.starter.test.container.MySqlIntegrationTestSupport;
@@ -125,7 +124,7 @@ class LeaseDbClockIT {
         tenantProperties.setIgnoreTables(List.of("tenant_node_assignment", "access_node", "tenant_ledger"));
         MybatisPlusInterceptor plugins = new MybatisPlusInterceptor();
         plugins.addInnerInterceptor(new TenantLineInnerInterceptor(
-            new DefaultTenantLineHandler(java.util.Optional::empty, tenantProperties)));
+            new CompatTenantLineHandler(java.util.Optional::empty, tenantProperties)));
         configuration.addInterceptor(plugins);
         configuration.addMapper(MaintenanceWindowMapper.class);
         configuration.addMapper(AccessNodeMapper.class);
