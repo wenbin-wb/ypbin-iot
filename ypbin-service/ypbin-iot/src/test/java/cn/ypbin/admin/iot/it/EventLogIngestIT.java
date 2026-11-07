@@ -27,7 +27,6 @@ import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.crud.model.PageResult;
 import cn.ypbin.starter.tenant.autoconfigure.TenantProperties;
 import cn.ypbin.starter.tenant.core.TenantContext;
-import cn.ypbin.starter.tenant.handler.DefaultTenantLineHandler;
 import cn.ypbin.starter.test.condition.EnabledIfMySqlAvailable;
 import cn.ypbin.starter.test.container.MySqlIntegrationTestSupport;
 import com.baomidou.mybatisplus.annotation.DbType;
@@ -126,7 +125,7 @@ class EventLogIngestIT {
         tenantProperties.setFailOnMissingTenant(true);
         MybatisPlusInterceptor plugins = new MybatisPlusInterceptor();
         plugins.addInnerInterceptor(new TenantLineInnerInterceptor(
-            new DefaultTenantLineHandler(Optional::empty, tenantProperties)));
+            new CompatTenantLineHandler(Optional::empty, tenantProperties)));
         // 分页拦截器：没有它 selectPage 不会算 total、也不会 LIMIT（本 IT 一开始就踩到：
         // 分母为 0 ⇒ 「时间范围/级别过滤」用例拿到 total=0 而误判成过滤失效）
         plugins.addInnerInterceptor(new PaginationInnerInterceptor(DbType.MYSQL));
