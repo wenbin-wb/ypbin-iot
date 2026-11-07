@@ -13,6 +13,20 @@
 
 ## [未发布]
 
+### 变更（2026-11-07）· 同步 admin 基座（starter 4.4.0 + 客户端 IP 口径）
+
+- 合并 `upstream/main`（11 个提交）：`ypbin-starter` 4.2.1 → 4.4.0，接入访问黑名单管理端、
+  auth 黑名单计数与网关自封修复、客户端 IP 解析统一（日志/计数/黑名单同口径）。
+- 冲突只出现在 `pom.xml`（版本取 4.4.0，保留本仓 IoT 模块声明）与
+  `deploy/nacos/ypbin-gateway.yaml`（保留 IoT 路由/openapi 签名，同时采纳
+  `security.blocklist.trusted-proxies`）。
+- 新增迁移 `2026-11-05-access-blocklist.sql`（平台级黑名单表与菜单）；其 `VALUES` 形态授权按
+  `IotMaintenanceAdminGateTest` 既有机制登记豁免——目标菜单 id 硬编码、`platform_only=1`，
+  只授平台超管角色、不进租户模板。
+- 部署侧：`ypbin-iot.yaml` 补 `security.blocklist.trusted-proxies`（网关 172.20.0.20/32），
+  否则日志与埋点记录的客户端 IP 会全部退化成网关地址。若改用宿主机 OpenResty 直连网关，
+  网关侧还需把 `172.20.0.1/32` 加入其 `trusted-proxies`。
+
 ### 变更（2026-10-19）· ai 模块消费 starter #103 / #105 第一步 + admin #89
 
 > 依赖已是 `ypbin-starter 4.1.0`（根 pom 钉正式版，无需 `-D` 覆盖）。本批三个 issue 在 admin 侧

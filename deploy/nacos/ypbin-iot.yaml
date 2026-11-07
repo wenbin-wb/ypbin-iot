@@ -30,6 +30,12 @@ ypbin:
   # 传 ypbin.sa-token.enabled=false 时 saTokenWebConfigurer 仍 matched）。
   security:
     interceptor: false
+    # 客户端 IP 解析（日志/审计/限流 key）：只信网关（compose 固定 172.20.0.20）。
+    # 与 admin 的 auth/system/ai 同口径——不配时 ClientIpResolver 返回直连地址=网关地址，
+    # 日志与埋点记录的全是同一个 IP。本服务不启用访问黑名单（enabled 未开），此段只供解析器读取。
+    blocklist:
+      trusted-proxies:
+        - 172.20.0.20/32
 
   # ---------------------------------------------------------------------------
   # 开放 API 签名强制（与网关侧 `ypbin-gateway.yaml` 的同名开关取**逻辑或**）

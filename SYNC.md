@@ -24,6 +24,12 @@ mvn -B -ntp -fae clean verify               # 同步后必须重跑门禁
   AI 入参校验、空间重构等）。冲突处置：IoT 定制保留（CHANGELOG/README、网关 iot 路由、部署脚本的
   IoT 变量）；`AiModelConfigServiceImpl` 采纳上游（本仓的 HTTP/1.1 修复已回灌 admin，白名单第 10 项
   因此不再产生分歧，条目暂留以防再分叉）；部署脚本补 `SUPER_ADMIN_INIT_PASSWORD` 的生成与注入。
+- **最近同步：2026-11-07，upstream `69d5850`（11 个提交：starter 4.4.0、访问黑名单管理端、auth 黑名单
+  计数与网关自封修复、客户端 IP 口径统一）。冲突处置：`pom.xml` 版本取 4.4.0（保留本仓 IoT 模块声明）；
+  `deploy/nacos/ypbin-gateway.yaml` 保留 IoT 路由与 openapi 签名配置，同时采纳上游
+  `security.blocklist.trusted-proxies`；上游新增迁移 `2026-11-05-access-blocklist.sql` 的
+  `VALUES` 形态授权按门禁既有机制登记到 `UNRESOLVED_GRANT_EXEMPTIONS`（目标菜单 id 硬编码、platform_only=1，
+  只授平台超管角色，不进模板）。
 
 ## 二、允许改 admin 的文件（全清单，越少越好）
 
