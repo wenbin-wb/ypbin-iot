@@ -179,6 +179,7 @@ ALLOWED+='ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/service
 ALLOWED+='ypbin-service/ypbin-system/src/test/java/cn/ypbin/admin/system/service/impl/SysUserServiceImplDeptScopeTest\.java|'
 ALLOWED+='ypbin-service/ypbin-system/src/test/java/cn/ypbin/admin/system/service/impl/SysUserServiceImplOnlineUserTest\.java|'
 ALLOWED+='ypbin-service/ypbin-system/src/test/java/cn/ypbin/admin/system/service/impl/SysUserServiceImplTenantIgnoreTest\.java|'
+ALLOWED+='ypbin-auth/src/test/java/cn/ypbin/admin/auth/service/AuthServiceLogoutTest\.java|'
 ALLOWED+='deploy/sql/002-data\.sql|'
 ALLOWED+=')$'
 

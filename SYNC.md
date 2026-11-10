@@ -41,9 +41,11 @@ mvn -B -ntp -fae clean verify               # 同步后必须重跑门禁
 > `AuthServiceRegisterTest`、`SystemClientImplRegisterTest`、`SysUserServiceImplRegisterTest`、
 > `deploy/sql/migration/2026-11-10-user-register.sql`、`deploy/sql/rollback/2026-11-10-user-register-rollback.sql`。
 >
-> **登记的既有文件（第 56–65 项）**：`AuthController`、`ISystemClient`、`ISystemClientFallback`、`SystemClientImpl`、
-> `SysUserService`、`SysUserServiceImpl`、三个 `SysUserServiceImpl*Test`、`deploy/sql/002-data.sql`
-> （`deploy/nacos/ypbin-gateway.yaml` 与 `AuthService.java` 已在既有条目内）。
+> **登记的既有文件（第 56–66 项）**：`AuthController`、`ISystemClient`、`ISystemClientFallback`、`SystemClientImpl`、
+> `SysUserService`、`SysUserServiceImpl`、三个 `SysUserServiceImpl*Test`、`AuthServiceLogoutTest`、`deploy/sql/002-data.sql`
+> （`deploy/nacos/ypbin-gateway.yaml`、`ypbin-auth.yaml` 与 `AuthService.java` 已在既有条目内）。
+> 第 66 项为 2026-11-10 追加：注册验证方式（`REGISTER_VERIFY_MODE`）给 `AuthService` 构造器新增两个依赖，
+> 既有登出单测必须跟随构造参数。
 > 为什么不能用新文件表达：内部 Feign 契约、用户落库服务、公开登录入口、网关放行与初始化参数**都只能改既有文件**；
 > 另起一套注册专用 Feign/Service 会与上游同功能形成两份实现，违反本仓「能采纳上游就不分叉」的纪律。
 > **代价与处置**：admin 合入该功能后，本仓下次同步应「采纳上游 + 删除第 56–65 项条目」，回归零分歧。
