@@ -50,6 +50,9 @@ ypbin:
         ban-seconds: 600
     excludes:
       - /login
+      # 自助注册：默认关闭（REGISTER_ENABLED），但入口本身必须免登录——
+      # 网关白名单 /auth/register 只决定「放行到 auth」，auth 自己的全局拦截器同样会拦。
+      - /register
       - /sms/send
       - /sms/login
       - /social/authorize/**

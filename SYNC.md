@@ -31,6 +31,23 @@ mvn -B -ntp -fae clean verify               # 同步后必须重跑门禁
   `VALUES` 形态授权按门禁既有机制登记到 `UNRESOLVED_GRANT_EXEMPTIONS`（目标菜单 id 硬编码、platform_only=1，
   只授平台超管角色，不进模板）。
 
+> **2026-11-10（用户自助注册，admin `feat/user-register` 同源功能）**
+>
+> 本仓按与 admin **同一设计**落地注册：公开入口 `POST /auth/register`（网关白名单）→ auth 校验开关/验证码/限流 →
+> 经 `ISystemClient#registerUser` 调 system `/internal/user-register` → system 按系统参数
+> `REGISTER_DEFAULT_TENANT_ID` / `REGISTER_DEFAULT_ROLE_CODE` 落库并校验租户/角色/查重/密码策略 → auth 自动登录。
+>
+> **新增文件（不受白名单限制）**：`RegisterConfigKeys`、`UserRegisterReq`、`RegisterReq`、
+> `AuthServiceRegisterTest`、`SystemClientImplRegisterTest`、`SysUserServiceImplRegisterTest`、
+> `deploy/sql/migration/2026-11-10-user-register.sql`、`deploy/sql/rollback/2026-11-10-user-register-rollback.sql`。
+>
+> **登记的既有文件（第 56–65 项）**：`AuthController`、`ISystemClient`、`ISystemClientFallback`、`SystemClientImpl`、
+> `SysUserService`、`SysUserServiceImpl`、三个 `SysUserServiceImpl*Test`、`deploy/sql/002-data.sql`
+> （`deploy/nacos/ypbin-gateway.yaml` 与 `AuthService.java` 已在既有条目内）。
+> 为什么不能用新文件表达：内部 Feign 契约、用户落库服务、公开登录入口、网关放行与初始化参数**都只能改既有文件**；
+> 另起一套注册专用 Feign/Service 会与上游同功能形成两份实现，违反本仓「能采纳上游就不分叉」的纪律。
+> **代价与处置**：admin 合入该功能后，本仓下次同步应「采纳上游 + 删除第 56–65 项条目」，回归零分歧。
+
 ## 二、允许改 admin 的文件（全清单，越少越好）
 
 IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，改动要尽量是「加法一行」。

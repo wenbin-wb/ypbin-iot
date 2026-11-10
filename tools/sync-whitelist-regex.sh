@@ -160,6 +160,26 @@ ALLOWED+='deploy/sql/migration/2026-10-23-space-management\.sql|'
 # 上游也维护该 skill 文档，但本仓独有的「同步白名单」章节必须保留，无法用新文件表达（skill 按固定路径加载）。
 # 代价：与 upstream 该文件冲突时按语义合并——保留本仓白名单章节 + 采纳上游其它规范更新。
 ALLOWED+='.claude/skills/ypbin-admin-dev/SKILL\.md|'
+# ---------------------------------------------------------------------------
+# 第 56–65 项（2026-11-10 加）：用户自助注册（admin `feat/user-register` 同源功能）。
+# 本功能是一条跨 auth → system 的完整链路，无法用「新文件」绕开既有契约：
+#   · system-api 的内部 Feign 契约（ISystemClient / Fallback）必须加注册端点；
+#   · system 侧的用户服务与内部端点实现必须落注册逻辑（租户/角色/查重/密码策略只有它有数据源）；
+#   · auth 侧登录入口要加公开的 /register（网关白名单）并复用登录收尾；
+#   · 系统参数种子与网关放行只能改既有文件（配置按 Data ID / 文件整体加载）。
+# 新增文件（RegisterConfigKeys / UserRegisterReq / RegisterReq / 三个测试 / 两个 SQL）不受白名单限制。
+# **代价如实登记**：这些文件上游合入同一功能后，同步时应「采纳上游 + 删除本组条目」，
+# 而不是长期各写一份；冲突处置按语义合并（注册逻辑以 admin 为准）。
+ALLOWED+='ypbin-auth/src/main/java/cn/ypbin/admin/auth/controller/AuthController\.java|'
+ALLOWED+='ypbin-service-api/ypbin-system-api/src/main/java/cn/ypbin/admin/system/api/feign/ISystemClient\.java|'
+ALLOWED+='ypbin-service-api/ypbin-system-api/src/main/java/cn/ypbin/admin/system/api/feign/ISystemClientFallback\.java|'
+ALLOWED+='ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/feign/SystemClientImpl\.java|'
+ALLOWED+='ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/service/SysUserService\.java|'
+ALLOWED+='ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/service/impl/SysUserServiceImpl\.java|'
+ALLOWED+='ypbin-service/ypbin-system/src/test/java/cn/ypbin/admin/system/service/impl/SysUserServiceImplDeptScopeTest\.java|'
+ALLOWED+='ypbin-service/ypbin-system/src/test/java/cn/ypbin/admin/system/service/impl/SysUserServiceImplOnlineUserTest\.java|'
+ALLOWED+='ypbin-service/ypbin-system/src/test/java/cn/ypbin/admin/system/service/impl/SysUserServiceImplTenantIgnoreTest\.java|'
+ALLOWED+='deploy/sql/002-data\.sql|'
 ALLOWED+=')$'
 
 printf '%s' "$ALLOWED"

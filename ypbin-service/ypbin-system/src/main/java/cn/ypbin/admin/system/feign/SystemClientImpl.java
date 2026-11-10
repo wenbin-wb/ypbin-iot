@@ -40,6 +40,7 @@ import cn.ypbin.admin.system.model.query.SpaceRelationQuery;
 import cn.ypbin.admin.system.model.req.SmsSendReq;
 import cn.ypbin.admin.system.model.req.SpaceBindReq;
 import cn.ypbin.admin.system.model.req.SpaceSyncReq;
+import cn.ypbin.admin.system.model.req.UserRegisterReq;
 import cn.ypbin.admin.system.model.resp.RouteResp;
 import cn.ypbin.admin.system.model.resp.SpaceRelationResp;
 import cn.ypbin.admin.system.model.resp.SpaceResp;
@@ -375,6 +376,12 @@ public class SystemClientImpl implements ISystemClient {
         }
         recorder.record(events);
         return R.ok();
+    }
+
+    @Override
+    @PostMapping("/user-register")
+    public R<SysUserDto> registerUser(@Valid @RequestBody UserRegisterReq req) {
+        return R.ok(UserViewConverter.toDto(userService.registerUser(req)));
     }
 
     @Override

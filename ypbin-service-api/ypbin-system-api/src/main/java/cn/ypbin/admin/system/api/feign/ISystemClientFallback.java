@@ -21,6 +21,7 @@ import cn.ypbin.admin.system.model.req.SocialBindSaveReq;
 import cn.ypbin.admin.system.model.dto.ConfigValue;
 import cn.ypbin.admin.system.model.dto.SocialAuthConfig;
 import cn.ypbin.admin.system.model.req.SpaceSyncReq;
+import cn.ypbin.admin.system.model.req.UserRegisterReq;
 import cn.ypbin.admin.system.model.resp.RouteResp;
 import cn.ypbin.starter.core.exception.GlobalErrorCode;
 import cn.ypbin.starter.core.model.R;
@@ -177,6 +178,11 @@ public class ISystemClientFallback implements ISystemClient {
      */
     @Override
     public R<Void> ingestTrackEvents(List<TrackEvent> events) {
+        return unavailable();
+    }
+
+    @Override
+    public R<SysUserDto> registerUser(UserRegisterReq req) {
         return unavailable();
     }
 
