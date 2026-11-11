@@ -10,6 +10,7 @@
 package cn.ypbin.admin.system;
 
 import cn.ypbin.admin.common.config.LicenseIssuerProperties;
+import cn.ypbin.admin.common.provider.IpLocationConfiguration;
 import cn.ypbin.admin.system.api.feign.ISystemClientFallback;
 import org.mybatis.spring.annotation.MapperScan;
 import org.springframework.boot.SpringApplication;
@@ -17,6 +18,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.ComponentScan;
 import org.springframework.context.annotation.FilterType;
+import org.springframework.context.annotation.Import;
 
 /**
  * System 服务启动器（微服务版）。
@@ -39,6 +41,7 @@ import org.springframework.context.annotation.FilterType;
 @ComponentScan(excludeFilters = @ComponentScan.Filter(type = FilterType.ASSIGNABLE_TYPE,
     classes = ISystemClientFallback.class))
 @MapperScan("cn.ypbin.admin.**.mapper")
+@Import(IpLocationConfiguration.class)
 @EnableConfigurationProperties(LicenseIssuerProperties.class)
 public class SystemServiceApplication {
 

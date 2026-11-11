@@ -15,6 +15,7 @@ import cn.ypbin.admin.system.model.dto.SysUserDto;
 import cn.ypbin.admin.system.model.dto.SysUserSocialDto;
 import cn.ypbin.admin.system.model.req.InboxMessageSendReq;
 import cn.ypbin.admin.system.model.req.MailSendReq;
+import cn.ypbin.admin.system.model.req.UserRegisterReq;
 import cn.ypbin.admin.system.model.req.PasswordVerifyReq;
 import cn.ypbin.admin.system.model.req.SmsSendReq;
 import cn.ypbin.admin.system.model.req.SocialBindSaveReq;
