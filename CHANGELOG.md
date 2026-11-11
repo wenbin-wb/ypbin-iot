@@ -13,6 +13,17 @@
 
 ## [未发布]
 
+### 变更（2026-11-11）· 同步 admin 基座（upstream/main 29 个提交）
+
+- 合入基座更新：访问黑名单常用规则种子、ip2region 离线归属地、空间关联对象补充「岗位」、
+  注册公开配置与注册频控配置等。
+- 角色授权树接口 `/role/assignable-menus` 与上游逐字节对齐（含 `MenuResp.assignable`），
+  同步白名单门禁 0 违规；后续再同步 upstream 不再产生该文件的长期分叉。
+- 冲突处理：`AuthController`/`AuthService` 保留本仓注册实现与
+  `WebRequestUtils.clientIp(ClientIpResolver)` 解析（上游仍是已废弃的 `ip()`）；
+  `SystemServiceApplication` 合并组件扫描排除与 `IpLocationConfiguration` 导入；
+  `README`/`CHANGELOG` 保留 IoT 版本。
+
 ### 变更（2026-11-07）· 同步 admin 基座（starter 4.4.0 + 客户端 IP 口径）
 
 - 合并 `upstream/main`（11 个提交）：`ypbin-starter` 4.2.1 → 4.4.0，接入访问黑名单管理端、
