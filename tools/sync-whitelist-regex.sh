@@ -181,6 +181,25 @@ ALLOWED+='ypbin-service/ypbin-system/src/test/java/cn/ypbin/admin/system/service
 ALLOWED+='ypbin-service/ypbin-system/src/test/java/cn/ypbin/admin/system/service/impl/SysUserServiceImplTenantIgnoreTest\.java|'
 ALLOWED+='ypbin-auth/src/test/java/cn/ypbin/admin/auth/service/AuthServiceLogoutTest\.java|'
 ALLOWED+='deploy/sql/002-data\.sql|'
+# ---------------------------------------------------------------------------
+# 第 67–75 项（2026-11-15 加）：公告按客户端投放（多选）。
+# 功能只能落在既有的公告实体/查询/请求/响应/服务/控制器与客户端服务上：
+#   · `sys_notice` 新增 `client_ids` 列，结构基线是既有 `001-schema.sql`（新迁移/回滚文件本身不受限）；
+#   · 持久化字段必须在既有 `SysNotice` 实体及其 DTO 上（字段全程同名，另建旁路实体会与上游形成两份模型）；
+#   · 列表过滤与保存归一化是既有 `SysNoticeServiceImpl` 的方法体改动；
+#   · 客户端选项必须复用 `SysClientService`（`ClientResp` 不含状态，无法在控制器侧筛选启用项）。
+# 为什么不能用新文件表达：公告的读写入口、实体映射与客户端读取路径都已存在，另起一套就是与上游同功能重复实现。
+# **代价如实登记**：这些文件上游若再改公告/客户端逻辑，同步时按语义合并——正确解是「采纳上游演进 + 保留
+# 本仓的 client_ids 增量」；上游合入同功能后应「采纳上游 + 删除本组条目」，回归零分歧。
+ALLOWED+='deploy/sql/001-schema\.sql|'
+ALLOWED+='ypbin-service-api/ypbin-system-api/src/main/java/cn/ypbin/admin/system/entity/SysNotice\.java|'
+ALLOWED+='ypbin-service-api/ypbin-system-api/src/main/java/cn/ypbin/admin/system/model/query/NoticeQuery\.java|'
+ALLOWED+='ypbin-service-api/ypbin-system-api/src/main/java/cn/ypbin/admin/system/model/req/NoticeSaveReq\.java|'
+ALLOWED+='ypbin-service-api/ypbin-system-api/src/main/java/cn/ypbin/admin/system/model/resp/NoticeResp\.java|'
+ALLOWED+='ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/service/impl/SysNoticeServiceImpl\.java|'
+ALLOWED+='ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/controller/SysNoticeController\.java|'
+ALLOWED+='ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/service/SysClientService\.java|'
+ALLOWED+='ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/service/impl/SysClientServiceImpl\.java|'
 ALLOWED+=')$'
 
 printf '%s' "$ALLOWED"
