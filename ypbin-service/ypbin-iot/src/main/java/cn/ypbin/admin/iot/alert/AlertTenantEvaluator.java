@@ -335,11 +335,21 @@ public class AlertTenantEvaluator {
         // 而 currentState 非空 ⟺ active 非空 —— 若状态机将来改出其它组合，
         // 下面的分支会 NPE。在此先 loud 失败，不给静默 NPE 机会。
         // （CodeQL 看不出 kind↔active 的关联而报 dereferenced-value；单测锁定状态机侧的不变式。）
-        if (active == null && switch (decision.kind()) {
+        // 上面的复合条件（`active == null && <kind 判定>`）对静态分析而言无法把「active 非空」
+        // 带进后面的 switch —— CodeQL 只做路径敏感的值分析，不认跨枚举分支的关联
+        // （这就是 java/dereferenced-value-may-be-null 的来源）。
+        // 故这里改成**逐分支显式守卫**：先按 kind 判定是否需要活动实例，再在需要时单独断言非空，
+        // 语义与原来完全一致（同样的 fail-loud），但每条路径上的空值状态对分析器都是可判定的。
+        boolean requiresActive = switch (decision.kind()) {
             case DROP_PENDING, PROMOTE, PROGRESS, RESOLVE -> true;
             default -> false;
-        }) {
+        };
+        if (requiresActive && active == null) {
             throw new IllegalStateException("告警决策需要活动实例但 active 为 null：kind=" + decision.kind());
+        }
+        if (requiresActive) {
+            // 只为向静态分析器证明不变式；运行时恒不触发（上一行已抛）。
+            java.util.Objects.requireNonNull(active, "requiresActive 为真时 active 必然非空");
         }
         switch (decision.kind()) {
             case NONE -> {
