@@ -9,6 +9,7 @@
  */
 package cn.ypbin.admin.ai.service.impl;
 
+import cn.ypbin.admin.common.util.AggregateValueReader;
 import cn.ypbin.admin.common.support.TenantSupport;
 import cn.ypbin.admin.ai.mapper.AiUsageLogMapper;
 import cn.ypbin.admin.ai.service.AiUsageService;
@@ -54,8 +55,8 @@ public class AiUsageServiceImpl implements AiUsageService {
         return usageLogMapper.selectDailyTokensByTenant(tenantId, from, to).stream()
             .map(row -> Map.<String, Object>of(
                 "date", row.get("statDate"),
-                "tokens", toLong(row.get("tokenTotal")),
-                "unknownCalls", toLong(row.get("unknownCalls"))))
+                "tokens", AggregateValueReader.asLong(row.get("tokenTotal")),
+                "unknownCalls", AggregateValueReader.asLong(row.get("unknownCalls"))))
             .collect(Collectors.toList());
     }
 
@@ -67,8 +68,8 @@ public class AiUsageServiceImpl implements AiUsageService {
         Map<String, Long> unknownByModel = new LinkedHashMap<>();
         for (Map<String, Object> row : usageLogMapper.selectTokensGroupByModel(tenantId)) {
             String model = row.get("modelName") == null ? UNKNOWN_MODEL_LABEL : row.get("modelName").toString();
-            grouped.merge(model, toLong(row.get("tokenTotal")), Long::sum);
-            unknownByModel.merge(model, toLong(row.get("unknownCalls")), Long::sum);
+            grouped.merge(model, AggregateValueReader.asLong(row.get("tokenTotal")), Long::sum);
+            unknownByModel.merge(model, AggregateValueReader.asLong(row.get("unknownCalls")), Long::sum);
         }
         return grouped.entrySet().stream()
             .sorted(Map.Entry.<String, Long>comparingByValue().reversed())
@@ -86,14 +87,14 @@ public class AiUsageServiceImpl implements AiUsageService {
         Map<String, Object> stats = usageLogMapper.selectSummaryStatsByTenant(tenantId,
             AiUsageOutcome.SUCCESS.code(), AiUsageOutcome.FAILURE.code(), AiUsageOutcome.CANCELLED.code());
         return Map.of(
-            "totalCalls", toLong(stats.get("totalCalls")),
+            "totalCalls", AggregateValueReader.asLong(stats.get("totalCalls")),
             // 0 = 没有任何已回报用量（不等于「真实 0 用量」）；未知条数见 unknownTokenCalls
-            "totalTokens", toLong(stats.get("tokenTotal")),
-            "unknownTokenCalls", toLong(stats.get("unknownTokenCalls")),
-            "successCalls", toLong(stats.get("successCalls")),
-            "failureCalls", toLong(stats.get("failureCalls")),
-            "cancelledCalls", toLong(stats.get("cancelledCalls")),
-            "avgLatencyMs", Math.round(toDouble(stats.get("avgLatencyMs"))));
+            "totalTokens", AggregateValueReader.asLong(stats.get("tokenTotal")),
+            "unknownTokenCalls", AggregateValueReader.asLong(stats.get("unknownTokenCalls")),
+            "successCalls", AggregateValueReader.asLong(stats.get("successCalls")),
+            "failureCalls", AggregateValueReader.asLong(stats.get("failureCalls")),
+            "cancelledCalls", AggregateValueReader.asLong(stats.get("cancelledCalls")),
+            "avgLatencyMs", Math.round(AggregateValueReader.asDouble(stats.get("avgLatencyMs"))));
     }
 
     /**
@@ -103,14 +104,4 @@ public class AiUsageServiceImpl implements AiUsageService {
         return TenantSupport.currentTenantId();
     }
 
-    /**
-     * SQL 聚合列取值：{@code NULL}（无任何已回报用量）按 0 展示，未知条数由响应里的 unknown 计数承载。
-     */
-    private static long toLong(Object value) {
-        return value instanceof Number number ? number.longValue() : 0L;
-    }
-
-    private static double toDouble(Object value) {
-        return value instanceof Number number ? number.doubleValue() : 0D;
-    }
 }

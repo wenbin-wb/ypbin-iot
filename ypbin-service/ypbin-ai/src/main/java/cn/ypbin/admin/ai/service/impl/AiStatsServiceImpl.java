@@ -9,6 +9,7 @@
  */
 package cn.ypbin.admin.ai.service.impl;
 
+import cn.ypbin.admin.common.util.AggregateValueReader;
 import cn.ypbin.admin.common.support.TenantSupport;
 import cn.ypbin.admin.ai.entity.AiDocument;
 import cn.ypbin.admin.ai.entity.AiKnowledgeBase;
@@ -54,10 +55,10 @@ public class AiStatsServiceImpl implements AiStatsService {
             new LambdaQueryWrapper<AiDocument>().eq(AiDocument::getTenantId, tenantId));
         // SQL 聚合对话数、已回报 Token 总量与未知用量条数，避免全表拉取
         Map<String, Object> usage = usageLogMapper.selectSummaryByTenant(tenantId);
-        long chatCount = toLong(usage == null ? null : usage.get("chatCount"));
+        long chatCount = AggregateValueReader.asLong(usage == null ? null : usage.get("chatCount"));
         // 0 = 没有任何已回报用量（不等于「真实 0 用量」）；未知条数见 unknownTokenCalls
-        long tokenTotal = toLong(usage == null ? null : usage.get("tokenTotal"));
-        long unknownTokenCalls = toLong(usage == null ? null : usage.get("unknownTokenCalls"));
+        long tokenTotal = AggregateValueReader.asLong(usage == null ? null : usage.get("tokenTotal"));
+        long unknownTokenCalls = AggregateValueReader.asLong(usage == null ? null : usage.get("unknownTokenCalls"));
         long queryCount = queryLogMapper.selectCount(
             new LambdaQueryWrapper<AiQueryLog>().eq(AiQueryLog::getTenantId, tenantId));
         return Map.of(
@@ -91,10 +92,10 @@ public class AiStatsServiceImpl implements AiStatsService {
         for (Map<String, Object> row : usageRows) {
             Map<String, Object> cell = byDay.get(row.get("statDate"));
             if (cell != null) {
-                cell.put("chatCount", toLong(cell.get("chatCount")) + toLong(row.get("chatCount")));
+                cell.put("chatCount", AggregateValueReader.asLong(cell.get("chatCount")) + AggregateValueReader.asLong(row.get("chatCount")));
                 // 已回报用量求和（NULL 由聚合层跳过，绝不折算成 0 参与求和/均值）
-                cell.put("tokenCount", toLong(cell.get("tokenCount")) + toLong(row.get("tokenTotal")));
-                cell.put("unknownCount", toLong(row.get("unknownCalls")));
+                cell.put("tokenCount", AggregateValueReader.asLong(cell.get("tokenCount")) + AggregateValueReader.asLong(row.get("tokenTotal")));
+                cell.put("unknownCount", AggregateValueReader.asLong(row.get("unknownCalls")));
             }
         }
         for (Map<String, Object> row : queryRows) {
@@ -138,10 +139,4 @@ public class AiStatsServiceImpl implements AiStatsService {
         return TenantSupport.currentTenantId();
     }
 
-    /**
-     * SQL 聚合列取值：{@code NULL}（无任何已回报用量）按 0 展示，未知条数由 unknownCount 单独承载。
-     */
-    private static long toLong(Object value) {
-        return value instanceof Number number ? number.longValue() : 0L;
-    }
 }

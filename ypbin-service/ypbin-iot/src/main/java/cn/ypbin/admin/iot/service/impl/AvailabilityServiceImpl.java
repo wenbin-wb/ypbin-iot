@@ -9,6 +9,7 @@
  */
 package cn.ypbin.admin.iot.service.impl;
 
+import cn.ypbin.admin.common.util.AggregateValueReader;
 import cn.ypbin.admin.iot.availability.AvailabilityProperties;
 import cn.ypbin.admin.iot.availability.AvailabilityResp;
 import cn.ypbin.admin.iot.availability.MaintenanceWindowDto;
@@ -939,9 +940,9 @@ public class AvailabilityServiceImpl implements AvailabilityService {
         }
         Map<String, Object> aggregate = outageMapper.summarizeInWindow(tenantId, deviceId, windowFrom, windowTo,
             now);
-        long rawOutageSeconds = toLong(aggregate == null ? null : aggregate.get("outageSeconds"));
-        long rawLongestOutageSeconds = toLong(aggregate == null ? null : aggregate.get("longestOutageSeconds"));
-        int outageCount = (int) toLong(aggregate == null ? null : aggregate.get("outageCount"));
+        long rawOutageSeconds = AggregateValueReader.asLong(aggregate == null ? null : aggregate.get("outageSeconds"));
+        long rawLongestOutageSeconds = AggregateValueReader.asLong(aggregate == null ? null : aggregate.get("longestOutageSeconds"));
+        int outageCount = (int) AggregateValueReader.asLong(aggregate == null ? null : aggregate.get("outageCount"));
         long windowSeconds = Math.max(0L, Duration.between(windowFrom, windowTo).getSeconds());
         // 维护窗口（spec §12.5）：统计总时长要排除计划停机；断档落在窗口内的部分也一并剔除（否则计划停机仍拉低可用率）。
         // 剔除在 Java 侧做：两段 SQL 保持简单可解析（复杂形状会被 MP 的 JSqlParser 与 MySQL 拒绝，CI 真实测过）。
@@ -1186,22 +1187,6 @@ public class AvailabilityServiceImpl implements AvailabilityService {
      */
     private Long currentTenantId() {
         return TenantContext.getTenantId().or(tenantProvider::getCurrentTenantId).orElse(null);
-    }
-
-    /**
-     * 聚合结果取值（驱动差异：MySQL 的 COUNT 是 Long、SUM 可能是 BigDecimal/Integer）。
-     *
-     * @param value 聚合值（可空）
-     * @return 长整型；空返回 0
-     */
-    private static long toLong(Object value) {
-        if (value == null) {
-            return 0L;
-        }
-        if (value instanceof Number number) {
-            return number.longValue();
-        }
-        return Long.parseLong(value.toString());
     }
 
     /** 取两个时刻里较早的非空值。 */

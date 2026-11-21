@@ -9,6 +9,7 @@
  */
 package cn.ypbin.admin.iot.service.impl;
 
+import cn.ypbin.admin.common.util.AggregateValueReader;
 import cn.ypbin.admin.iot.entity.IotDashboardDailySnapshot;
 import cn.ypbin.admin.iot.entity.IotDevice;
 import cn.ypbin.admin.iot.enums.OnlineStatus;
@@ -123,7 +124,7 @@ public class IotDashboardSnapshotServiceImpl implements IotDashboardSnapshotServ
             IotDashboardDailySnapshot snapshot = new IotDashboardDailySnapshot();
             // 跨租户批处理：自定义 upsert SQL 在 ignore 作用域下不会被插件补 tenant_id，必须逐行显式给
             snapshot.setId(IdWorker.getId());
-            snapshot.setTenantId(toLong(cell(stat, "tenant_id")));
+            snapshot.setTenantId(AggregateValueReader.asLong(cell(stat, "tenant_id")));
             snapshot.setSnapshotDate(today);
             snapshot.setDeviceTotal(toInt(cell(stat, "device_total")));
             snapshot.setDeviceOnline(toInt(cell(stat, "device_online")));
@@ -207,25 +208,6 @@ public class IotDashboardSnapshotServiceImpl implements IotDashboardSnapshotServ
             return Math.toIntExact(number.longValue());
         }
         return new BigDecimal(value.toString().trim()).intValueExact();
-    }
-
-    /**
-     * 聚合值转 {@code long}（tenant_id 列）。
-     *
-     * @param value 聚合值
-     * @return long 值
-     */
-    private static long toLong(Object value) {
-        if (value instanceof BigDecimal decimal) {
-            return decimal.longValueExact();
-        }
-        if (value instanceof BigInteger integer) {
-            return integer.longValueExact();
-        }
-        if (value instanceof Number number) {
-            return number.longValue();
-        }
-        return Long.parseLong(value.toString().trim());
     }
 
     /**
