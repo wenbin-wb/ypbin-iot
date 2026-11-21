@@ -764,7 +764,7 @@ public class CommandInstanceServiceImpl implements CommandInstanceService {
      *
      * @param deviceId 设备
      * @param target   预解析目标（非服务调用时 commandId 为空）
-     * @param mapping  预取的唯一映射（可空 = 未配置）
+     * @param mappings 预取的映射集合（空/null = 未配置）
      * @return 点位；未配置返回 {@code null}
      */
     private static CommandPayloads.ResolvedPoint toResolvedPoint(Long deviceId, Target target,
