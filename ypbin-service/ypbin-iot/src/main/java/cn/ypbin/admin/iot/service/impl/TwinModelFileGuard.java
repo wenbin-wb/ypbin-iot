@@ -197,7 +197,7 @@ public class TwinModelFileGuard {
                 }
                 // 值 token：只在「顶层 asset 的直接子字段 version」上取值
                 if (assetDepth == depth && "version".equals(fieldName)) {
-                    String version = token == JsonToken.VALUE_STRING ? parser.getText() : null;
+                    String version = token == JsonToken.VALUE_STRING ? parser.getValueAsString() : null;
                     if (version == null || !version.startsWith(GLTF_VERSION_PREFIX)) {
                         throw new BusinessException(GlobalErrorCode.BUSINESS_ERROR,
                             "不支持的 glTF 版本：" + (version == null ? "未声明" : version)

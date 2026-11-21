@@ -815,6 +815,12 @@ public class IotDashboardServiceImpl implements IotDashboardService {
         if (value instanceof Number number) {
             return number.longValue();
         }
-        return Long.parseLong(value.toString().trim());
+        try {
+            return Long.parseLong(value.toString().trim());
+        } catch (NumberFormatException ex) {
+            // 行取值口径：ID 列读不出来必须显式失败（静默当 0 会写错关联关系），
+            // 但错误信息要能定位到具体值，而不是只留一句 "For input string"。
+            throw new IllegalStateException("统计行取值无法解析为 long：" + value, ex);
+        }
     }
 }
