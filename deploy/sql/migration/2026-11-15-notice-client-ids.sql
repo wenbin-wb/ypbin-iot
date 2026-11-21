@@ -1,7 +1,16 @@
--- 公告按客户端投放：新增 sys_notice.client_ids
+-- =============================================================
+-- 公告按客户端投放（2026-11-15）：新增 sys_notice.client_ids
 --
--- 语义：逗号分隔的 sys_client.client_id 集合；NULL/空串 = 全部客户端可见。
+-- 值与 sys_client.client_id 对应，逗号分隔；NULL/空串表示全部客户端可见。
+-- 与 deploy/sql/001-schema.sql 的 sys_notice 定义保持等价。
+--
+-- 执行方式：
+--   mysql -uroot -p ypbin_admin < 2026-11-15-notice-client-ids.sql
+--
 -- 幂等：列已存在时跳过 ADD COLUMN。
+--
+-- 回滚：deploy/sql/rollback/2026-11-15-notice-client-ids-rollback.sql
+-- =============================================================
 
 SET @col_exists := (
     SELECT COUNT(*)
