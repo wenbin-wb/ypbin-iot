@@ -38,6 +38,33 @@ jobs:
           java-version: '21'
           cache: maven
 
+      # 🔴 2026-11-21 加：清掉缓存里的「外来仓库标记」，否则本地 install starter 必然失败（假红）。
+      #
+      # 根因（一手日志，run #828）：`setup-java` 的 `cache: maven` 会把 `~/.m2/repository` 整个缓存下来，
+      # 其中每个制品目录都有 Maven Resolver 的 `_remote.repositories` 标记（记录该制品从哪个 repo id 下载）。
+      # 本机/开发机的 `settings.xml` 配了 `aliyun` 镜像与 `central-only` 仓库，于是标记写成
+      #   spring-boot-dependencies-4.1.2.pom>aliyun= / >central-only=
+      # 而 runner 上只有 `central` 这个 repo id ⇒ Maven 判定这些制品「present, but unavailable」，
+      # 且**不会重新下载**（失败被缓存），直接报：
+      #   Non-resolvable import POM: org.springframework.boot:spring-boot-dependencies:pom:4.1.2
+      #   (present, but unavailable) ... was not found in ... during a previous attempt
+      # 注意：这些版本在 Central **真实存在**（2026-11-21 实测 6 个 BOM 全部 HTTP 200），
+      # 所以这是**缓存污染造成的假红**，不是依赖问题。
+      #
+      # 修法：删掉所有 `_remote.repositories` 标记 ⇒ Resolver 视这些制品为「本地已装、来源未知」，
+      # 照常使用，不再做 repo id 校验。代价一次几秒，远小于「随机红被当噪音忽略」的成本。
+      - name: 清理 Maven 缓存里的外来仓库标记（防「present, but unavailable」假红）
+        run: |
+          set -euo pipefail
+          n=$(find "$HOME/.m2/repository" -name '_remote.repositories' -type f 2>/dev/null | wc -l)
+          echo "命中 _remote.repositories 标记文件：$n 个"
+          find "$HOME/.m2/repository" -name '_remote.repositories' -type f -delete 2>/dev/null || true
+          # 同时清掉「解析失败」缓存：*.lastUpdated 会让 Maven 在 update interval 内不再重试
+          m=$(find "$HOME/.m2/repository" -name '*.lastUpdated' -type f 2>/dev/null | wc -l)
+          echo "命中 *.lastUpdated 失败缓存：$m 个"
+          find "$HOME/.m2/repository" -name '*.lastUpdated' -type f -delete 2>/dev/null || true
+          echo "清理完成"
+
       - name: 读取本仓要求的 starter 版本
         id: starter_version
         run: |
