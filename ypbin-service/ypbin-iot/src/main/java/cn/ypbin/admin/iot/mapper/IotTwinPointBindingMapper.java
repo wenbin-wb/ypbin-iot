@@ -75,17 +75,6 @@ public interface IotTwinPointBindingMapper extends BaseMapper<IotTwinPointBindin
     int insertBatch(@Param("list") List<IotTwinPointBinding> list);
 
     /**
-     * 批量回写属性主键缓存（**一条语句**，按 (point_id, service_identifier, property_identifier) 定位）。
-     *
-     * <p>用于「属性行因 TSL 重导入换了主键」的自愈：读侧一次解析可能同时命中多条绑定，
-     * 逐条 UPDATE 是读路径上的写放大。这里用 {@code CASE WHEN} 单语句完成——
-     * 代价是 SQL 稍长，收益是**读路径最多只发一次写**。</p>
-     *
-     * @param list 绑定实体（每行需带 id / pointId / serviceIdentifier / propertyIdentifier /
-     *             propertyId；调用方保证非空）
-     * @return 影响行数
-     */
-    /**
      * 批量自愈回写 {@code property_id} 缓存（单条 CASE WHEN，无 N+1）。
      *
      * <p><b>为什么 `WHERE` 里必须有 {@code oldPropertyId} 条件（工单 #307）</b>：

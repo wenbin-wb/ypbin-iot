@@ -619,7 +619,8 @@ public class SystemClientImpl implements ISystemClient {
         } catch (RuntimeException ex) {
             // 邮件网关 500 / SMTP 超时等：原样把原因带回给调用方（它是唯一知道重试策略的一方），
             // 这里仍记完整堆栈——两处都要留痕，否则排障时只能看到「投递失败了」而不知道为什么
-            log.error("邮件发送失败：to={} subject={}", req.getTo(), req.getSubject(), ex);
+            log.error("邮件发送失败：to={} subject={}",
+                LogValues.oneLine(req.getTo()), LogValues.oneLine(req.getSubject()), ex);
             return R.fail("邮件发送失败：" + ex.getMessage());
         }
         return R.ok();

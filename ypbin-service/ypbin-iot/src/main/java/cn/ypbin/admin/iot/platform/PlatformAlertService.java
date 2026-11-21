@@ -270,12 +270,6 @@ public class PlatformAlertService {
     }
 
     /**
-     * 读 counter 当前值。
-     *
-     * @param name 指标名
-     * @return 值；取不到返回 `null`
-     */
-    /**
      * 把 access 上报值并入快照来源表（R8-2 / R8-8 / 心跳三条规则的数据源）。
      *
      * <p>`latest == null`（从未收到）时：`reconcileDeferred`/`tickDurationMax` 留 `null`（未知），
@@ -298,6 +292,12 @@ public class PlatformAlertService {
         meters.put(PlatformMetrics.METRIC_REPORT_LAG, accessMetricsReportStore.lagMs());
     }
 
+    /**
+     * 读 counter 当前值。
+     *
+     * @param name 指标名
+     * @return 值；取不到返回 {@code null}
+     */
     private Long readCounter(String name) {
         Meter meter = findMeter(name);
         if (!(meter instanceof Counter counter)) {

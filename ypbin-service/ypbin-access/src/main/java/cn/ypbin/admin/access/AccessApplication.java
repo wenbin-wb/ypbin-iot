@@ -20,12 +20,11 @@ import org.springframework.scheduling.annotation.EnableScheduling;
  * <p>与其它业务域不同：access 是**有状态**的（持有长连接/会话），因此独立部署、按连接数扩容；
  * 它不直接连库，租约与归属通过 iot 服务的 /internal/lease/** 获取（见 docs/LEASE.md）。</p>
  *
+ * <p>⚠️ 新增 Feign 客户端时必须同步登记 {@code @EnableFeignClients} 的 basePackages：
+ * access 只扫描上面这几个包；漏登记 ⇒ 启动期 "required a bean of type IAccessMetricsClient"（实测踩过）。</p>
+ *
  * @author wenbin
  * @since 2026-09-20
- */
-/**
- * ⚠️ 新增 Feign 客户端时必须同步登记 {@code @EnableFeignClients} 的 basePackages：
- * access 只扫描上面这几个包；漏登记 ⇒ 启动期 "required a bean of type IAccessMetricsClient"（实测踩过）。
  */
 @EnableScheduling
 @EnableFeignClients(basePackages = {"cn.ypbin.admin.iot.lease", "cn.ypbin.admin.iot.device",

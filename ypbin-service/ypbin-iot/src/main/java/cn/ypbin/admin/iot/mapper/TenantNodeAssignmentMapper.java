@@ -73,19 +73,6 @@ public interface TenantNodeAssignmentMapper extends BaseMapper<TenantNodeAssignm
     LocalDateTime selectNow();
 
     /**
-     * 批量首次分配（单条语句 + 唯一键冲突即跳过）。
-     *
-     * <p>为什么不用循环单条 insert：那是 N+1（架构门禁会拦），而且在多副本抢占时
-     * 一条冲突会让整轮分配中断。{@code INSERT IGNORE} 让「谁先到谁赢」在一条语句里定论，
-     * 冲突行被跳过、其余行照常写入。</p>
-     *
-     * <p>⚠️ {@code INSERT IGNORE} 是 MySQL 语义：它也会忽略除唯一键外的其它可忽略错误
-     * （如数据截断）。本表字段都由服务端生成、无外部输入，风险可控；换数据库时需要同步改这里。</p>
-     *
-     * @param assignments 待写入的归属（id/时间戳由调用方生成或由 SQL 补齐）
-     * @return 实际写入行数（不含被跳过者）
-     */
-    /**
      * 按租户 ID 查询归属行，**包含逻辑删除行**（M3：软删行会占住唯一键，必须先看到才能 revive）。
      *
      * <p>为什么不能用 MyBatis-Plus 的 {@code selectList}：它会自动追加 {@code is_deleted = 0}，
@@ -147,6 +134,19 @@ public interface TenantNodeAssignmentMapper extends BaseMapper<TenantNodeAssignm
         """)
     List<AccessNodeLeaseAggregate> selectActiveAggregateByNode();
 
+    /**
+     * 批量首次分配（单条语句 + 唯一键冲突即跳过）。
+     *
+     * <p>为什么不用循环单条 insert：那是 N+1（架构门禁会拦），而且在多副本抢占时
+     * 一条冲突会让整轮分配中断。{@code INSERT IGNORE} 让「谁先到谁赢」在一条语句里定论，
+     * 冲突行被跳过、其余行照常写入。</p>
+     *
+     * <p>⚠️ {@code INSERT IGNORE} 是 MySQL 语义：它也会忽略除唯一键外的其它可忽略错误
+     * （如数据截断）。本表字段都由服务端生成、无外部输入，风险可控；换数据库时需要同步改这里。</p>
+     *
+     * @param assignments 待写入的归属（id/时间戳由调用方生成或由 SQL 补齐）
+     * @return 实际写入行数（不含被跳过者）
+     */
     @Insert("<script>INSERT IGNORE INTO tenant_node_assignment "
         + "(id, tenant_id, access_node, epoch, state, lease_expire_at, create_time, update_time, "
         + "status, is_deleted) VALUES "

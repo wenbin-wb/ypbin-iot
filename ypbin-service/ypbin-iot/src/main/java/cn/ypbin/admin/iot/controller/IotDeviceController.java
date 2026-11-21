@@ -173,21 +173,6 @@ public class IotDeviceController {
     }
 
     /**
-     * 批量删除设备（列表页多选；单次最多 500 台）。
-     *
-     * <p>逻辑删除 + 一次批量 SQL；删除成功后推进台账版本号，接入侧据此解绑停采。</p>
-     *
-     * @param req 批量删除请求
-     * @return 实际删除台数
-     */
-    /**
-     * 绑定一批设备到指定空间。
-     *
-     * @param id        空间 ID
-     * @param req       绑定请求（设备 ID 列表 + 是否主空间 + 是否清空其他位置）
-     * @return 实际生效的关联条数
-     */
-    /**
      * 取设备当前所在的空间 ID 列表（表单回显用）。
      *
      * @param id 设备 ID
@@ -199,6 +184,13 @@ public class IotDeviceController {
         return R.ok(iotDeviceService.spacesOfDevice(id));
     }
 
+    /**
+     * 绑定一批设备到指定空间。
+     *
+     * @param id        空间 ID
+     * @param req       绑定请求（设备 ID 列表 + 是否主空间 + 是否清空其他位置）
+     * @return 实际生效的关联条数
+     */
     @PostMapping("/space/{id}/bind")
     @SaCheckPermission("iot:device:update")
     @Idempotent
@@ -243,6 +235,14 @@ public class IotDeviceController {
         return R.ok(iotDeviceService.syncDeviceSpaces(id, req.getSpaceIds()));
     }
 
+    /**
+     * 批量删除设备（列表页多选；单次最多 500 台）。
+     *
+     * <p>逻辑删除 + 一次批量 SQL；删除成功后推进台账版本号，接入侧据此解绑停采。</p>
+     *
+     * @param req 批量删除请求
+     * @return 实际删除台数
+     */
     @PostMapping("/batch/delete")
     @SaCheckPermission("iot:device:delete")
     @Idempotent

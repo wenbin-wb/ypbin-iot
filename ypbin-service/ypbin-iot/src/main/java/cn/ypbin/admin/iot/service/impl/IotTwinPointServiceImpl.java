@@ -470,15 +470,6 @@ public class IotTwinPointServiceImpl extends BaseServiceImpl<IotTwinPointMapper,
     }
 
     /**
-     * 取当前租户（原生批量 SQL 必须显式带 tenant_id）。
-     *
-     * <p>fail-closed：拿不到租户就拒绝写入，绝不写出 tenant_id 为 NULL 的行
-     * （那会绕过租户隔离，且 MySQL 的 NOT NULL 约束会以「Column cannot be null」
-     * 这种裸 500 形态暴露，对用户毫无意义）。</p>
-     *
-     * @return 当前租户主键
-     */
-    /**
      * 解析本次写点位绑定应归属的租户（与 MyBatis-Plus 租户插件**完全同源**）。
      *
      * <p><b>解析链必须与插件一致</b>：{@code TenantContext}（ThreadLocal）优先，

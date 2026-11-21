@@ -59,12 +59,6 @@ public class AuthController {
     }
 
     /**
-     * 用户自助注册（公开入口，开关见系统参数 {@code REGISTER_ENABLED}）。
-     *
-     * <p>与登录入口一致按 IP 限流：注册会落库并自动建立会话，是比登录更重的写操作，
-     * 不限流时脚本可批量灌入账号。</p>
-     */
-    /**
      * 注册入口的公开配置（是否开启 / 验证渠道 / 是否需要行为验证码）。
      */
     @GetMapping("/register/options")
@@ -84,6 +78,12 @@ public class AuthController {
         return R.ok();
     }
 
+    /**
+     * 用户自助注册（公开入口，开关见系统参数 {@code REGISTER_ENABLED}）。
+     *
+     * <p>与登录入口一致按 IP 限流：注册会落库并自动建立会话，是比登录更重的写操作，
+     * 不限流时脚本可批量灌入账号。</p>
+     */
     @Log(value = "用户注册", module = "认证")
     @RateLimit(count = 5, window = 60, message = "注册过于频繁，请稍后再试")
     @PostMapping("/register")
