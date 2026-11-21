@@ -34,6 +34,7 @@ import cn.ypbin.starter.core.util.LogSanitizer;
 import cn.ypbin.starter.data.core.EntityStatus;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.IdWorker;
+import java.util.Objects;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Duration;
@@ -349,7 +350,7 @@ public class AlertTenantEvaluator {
         }
         if (requiresActive) {
             // 只为向静态分析器证明不变式；运行时恒不触发（上一行已抛）。
-            java.util.Objects.requireNonNull(active, "requiresActive 为真时 active 必然非空");
+            Objects.requireNonNull(active, "requiresActive 为真时 active 必然非空");
         }
         switch (decision.kind()) {
             case NONE -> {
