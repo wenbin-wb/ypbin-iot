@@ -17,7 +17,6 @@ import cn.ypbin.admin.system.model.resp.ClientResp;
 import cn.ypbin.admin.system.service.SysClientService;
 import cn.ypbin.starter.core.exception.BusinessException;
 import cn.ypbin.starter.crud.service.BaseServiceImpl;
-import cn.ypbin.starter.data.core.EntityStatus;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import java.util.List;
@@ -39,15 +38,6 @@ public class SysClientServiceImpl extends BaseServiceImpl<SysClientMapper, SysCl
     @Override
     public List<ClientResp> listClients() {
         return list().stream().map(this::toResp).toList();
-    }
-
-    @Override
-    public List<String> listEnabledClientIds() {
-        return list(new LambdaQueryWrapper<SysClient>()
-            .eq(SysClient::getStatus, EntityStatus.ENABLED.getCode()))
-            .stream()
-            .map(SysClient::getClientId)
-            .toList();
     }
 
     @Override

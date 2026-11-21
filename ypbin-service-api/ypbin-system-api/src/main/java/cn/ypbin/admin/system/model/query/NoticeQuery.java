@@ -42,6 +42,6 @@ public class NoticeQuery extends PageQuery {
     /** 发布状态：0 草稿、1 已发布、2 已撤回 */
     private Integer publishStatus;
 
-    /** 投放客户端 ID（按 client_ids 集合精确匹配；空表示不按客户端过滤） */
+    /** 投放客户端 ID（按集合精确匹配；为空不限） */
     private String clientId;
 }

@@ -32,15 +32,6 @@ public interface SysClientService extends BaseService<SysClient> {
     List<ClientResp> listClients();
 
     /**
-     * 查询启用状态的客户端 ID 列表。
-     *
-     * <p>供公告等业务选择投放对象；只读，不暴露客户端密钥等信息。</p>
-     *
-     * @return 启用客户端 ID 列表，无数据时返回空集合
-     */
-    List<String> listEnabledClientIds();
-
-    /**
      * 新增客户端（自动生成 clientSecret）。
      *
      * @param req 请求

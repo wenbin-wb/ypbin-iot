@@ -71,6 +71,27 @@ public class SysNoticeServiceImpl extends BaseServiceImpl<SysNoticeMapper, SysNo
         return toResp(requireNotice(id));
     }
 
+    /**
+     * 客户端 ID 集合归一化：null/空白统一为空串，其余 trim、去空、去重后逗号连接。
+     *
+     * <p>空串非 null，才能让「编辑时清空客户端」在 {@code update-strategy: not_null} 下真正写入；
+     * 同时避免带空白或重复的 ID 与查询条件不匹配。</p>
+     *
+     * @param notice 公告
+     */
+    private void normalizeClientIds(SysNotice notice) {
+        String raw = notice.getClientIds();
+        if (!StringUtils.hasText(raw)) {
+            notice.setClientIds("");
+            return;
+        }
+        notice.setClientIds(Arrays.stream(raw.split(","))
+            .map(String::trim)
+            .filter(StringUtils::hasText)
+            .distinct()
+            .collect(Collectors.joining(",")));
+    }
+
     @Override
     @SensitiveWordFilter
     @Transactional(rollbackFor = Exception.class)
@@ -231,28 +252,6 @@ public class SysNoticeServiceImpl extends BaseServiceImpl<SysNoticeMapper, SysNo
         if (publishType == null || (publishType != IMMEDIATE && publishType != SCHEDULED)) {
             throw new BusinessException("发布方式不合法");
         }
-    }
-
-    /**
-     * 客户端 ID 归一化：trim、去空、去重后以逗号连接。
-     *
-     * <p>空串非 null，才能让「编辑时清空客户端」在 {@code update-strategy: not_null} 下真正写入；
-     * 同时避免带空白或重复的 ID 与查询条件不匹配。</p>
-     *
-     * @param notice 公告
-     */
-    private void normalizeClientIds(SysNotice notice) {
-        String raw = notice.getClientIds();
-        if (!StringUtils.hasText(raw)) {
-            notice.setClientIds("");
-            return;
-        }
-        String normalized = Arrays.stream(raw.split(","))
-            .map(String::trim)
-            .filter(StringUtils::hasText)
-            .distinct()
-            .collect(Collectors.joining(","));
-        notice.setClientIds(normalized);
     }
 
     private NoticeResp toResp(SysNotice notice) {

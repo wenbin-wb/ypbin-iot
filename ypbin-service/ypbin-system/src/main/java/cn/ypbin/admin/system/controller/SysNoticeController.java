@@ -11,12 +11,14 @@ package cn.ypbin.admin.system.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
 import cn.ypbin.admin.system.model.query.NoticeQuery;
-import cn.ypbin.admin.system.model.resp.NoticeResp;
 import cn.ypbin.admin.system.model.req.NoticeSaveReq;
+import cn.ypbin.admin.system.model.resp.ClientResp;
+import cn.ypbin.admin.system.model.resp.NoticeResp;
 import cn.ypbin.admin.system.service.SysClientService;
 import cn.ypbin.admin.system.service.SysNoticeService;
 import cn.ypbin.starter.core.model.R;
 import cn.ypbin.starter.crud.model.PageResult;
+import cn.ypbin.starter.data.core.EntityStatus;
 import cn.ypbin.starter.log.annotation.Log;
 import cn.ypbin.starter.tools.idempotent.Idempotent;
 import jakarta.validation.Valid;
@@ -48,15 +50,18 @@ public class SysNoticeController {
     /**
      * 公告可选的客户端列表。
      *
-     * <p>公告菜单对租户可见，但「客户端管理」仅平台用户可读；这里提供只读的客户端 ID 列表，
+     * <p>公告菜单对租户可见，但客户端管理仅平台用户可读；这里提供只读的客户端 ID 列表，
      * 供公告编辑者选择投放对象，避免租户账号因无权访问客户端管理而拿不到选项。</p>
      *
-     * @return 启用客户端 ID 列表
+     * @return 启用客户端的 clientId 列表
      */
     @GetMapping("/options/clients")
     @SaCheckPermission("system:notice:list")
     public R<List<String>> clientOptions() {
-        return R.ok(clientService.listEnabledClientIds());
+        return R.ok(clientService.listClients().stream()
+            .filter(client -> EntityStatus.ENABLED.getCode().equals(client.getStatus()))
+            .map(ClientResp::getClientId)
+            .toList());
     }
 
     @GetMapping("/list")
