@@ -13,6 +13,41 @@
 #   * 逐项是**精确路径正则**（`^…$` 锚定，不是前缀匹配）。
 set -euo pipefail
 
+
+# ---------------------------------------------------------------------------
+# 2026-11-21 清理：**15 条死条目**已移除（文件在 `main` 与 `upstream/main` 两侧都不存在）。
+#
+# 为什么必须清：白名单的两个判据（`--diff-filter=MDR upstream/main...HEAD` 与干跑合并的冲突集）
+# 都不可能命中「两侧都不存在」的路径 ⇒ 这些条目**永远不会生效**，只会让条目计数虚高
+# （本次实测 68 条里 15 条是死的，占 22%），评审时逐条核对的成本全落在噪音上。
+#
+# 为什么它们当初会被加：都是「删除既有文件」「重命名」类条目（消费 starter 4.0.0/4.1.0 把
+# 本仓自建实现上收到基座，即 SYNC.md 第二节第 25–34 / 38–46 项）——文件删了、白名单没跟着删。
+#
+# 它们对应的历史决策记录仍完整保留在 `SYNC.md` 第二节（按批次登记），此处只删「永不命中的正则条目」。
+# 若上游将来**重新引入**这些文件，再按当时的分歧理由重新登记本条即可。
+#
+# 已移除（15 条）：
+#   · ypbin-common/src/main/java/cn/ypbin/admin/common/config/InternalProperties.java
+#   · ypbin-common/src/main/java/cn/ypbin/admin/common/log/IdentityHeaderLogUserProvider.java
+#   · ypbin-common/src/main/java/cn/ypbin/admin/common/log/RemoteLogAutoConfiguration.java
+#   · ypbin-common/src/main/java/cn/ypbin/admin/common/log/RemoteLogDao.java
+#   · ypbin-common/src/main/java/cn/ypbin/admin/common/provider/MicroserviceTenantAutoConfiguration.java
+#   · ypbin-common/src/main/java/cn/ypbin/admin/common/provider/MicroserviceTenantProvider.java
+#   · ypbin-common/src/main/java/cn/ypbin/admin/common/tracking/RemoteTrackAutoConfiguration.java
+#   · ypbin-common/src/main/java/cn/ypbin/admin/common/tracking/RemoteTrackEventSink.java
+#   · ypbin-common/src/test/java/cn/ypbin/admin/common/log/RemoteLogDaoTest.java
+#   · ypbin-common/src/test/java/cn/ypbin/admin/common/log/RemoteLogWiringTest.java
+#   · ypbin-common/src/test/java/cn/ypbin/admin/common/log/SystemRemoteLogIngestClientTest.java
+#   · ypbin-service-api/ypbin-system-api/src/main/java/cn/ypbin/admin/system/api/constant/InternalTokenConstants.java
+#   · ypbin-service-api/ypbin-system-api/src/main/java/cn/ypbin/admin/system/api/feign/config/InternalTokenFeignConfiguration.java
+#   · ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/config/InternalTokenGuardInterceptor.java
+#   · ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/config/InternalTokenGuardWebConfig.java
+#
+# 自检：`bash tools/sync-whitelist-regex.sh --self-check` 会在出现死条目时以非零码退出
+# （CI 已接入，见 .github/workflows/sync-whitelist.yml 的「白名单条目自检」步骤）。
+# ---------------------------------------------------------------------------
+
 ALLOWED='^('
 ALLOWED+='pom\.xml|'
 ALLOWED+='ypbin-service/pom\.xml|'
@@ -74,15 +109,8 @@ ALLOWED+='deploy/nginx-microservice\.conf|'
 # ---------------------------------------------------------------------------
 # 内部凭证：自建拦截器/过滤器/常量/Feign 配置 → starter 的 InternalTokenGuardAutoConfiguration
 # + CloudFeignAutoConfiguration 全局携带（配置键 ypbin.security.internal-token.* / ypbin.cloud.feign.*）。
-ALLOWED+='ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/config/InternalTokenGuardInterceptor\.java|'
-ALLOWED+='ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/config/InternalTokenGuardWebConfig\.java|'
-ALLOWED+='ypbin-service-api/ypbin-system-api/src/main/java/cn/ypbin/admin/system/api/constant/InternalTokenConstants\.java|'
-ALLOWED+='ypbin-service-api/ypbin-system-api/src/main/java/cn/ypbin/admin/system/api/feign/config/InternalTokenFeignConfiguration\.java|'
-ALLOWED+='ypbin-common/src/main/java/cn/ypbin/admin/common/config/InternalProperties\.java|'
 # 租户来源：自建 Provider/自动装配 → starter 的 IdentityTenantProvider（4.0.0 新增）。
 # ⚠️ imports 文件是**部分编辑**（只删 MicroserviceTenantAutoConfiguration 一行，保留 RemoteLog/RemoteTrack）。
-ALLOWED+='ypbin-common/src/main/java/cn/ypbin/admin/common/provider/MicroserviceTenantProvider\.java|'
-ALLOWED+='ypbin-common/src/main/java/cn/ypbin/admin/common/provider/MicroserviceTenantAutoConfiguration\.java|'
 ALLOWED+='ypbin-common/src/main/resources/META-INF/spring/org\.springframework\.boot\.autoconfigure\.AutoConfiguration\.imports|'
 # 随上面删除而必须同步的**连带更新**（去掉 @EnableConfigurationProperties(InternalProperties)、
 # 改一处引用注释、Feign 客户端去掉 configuration 属性）。
@@ -109,22 +137,14 @@ ALLOWED+='ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/provide
 # 对上游同样成立，正确解是上游也删。
 # ---------------------------------------------------------------------------
 # 删除的自建自动配置与实现（4 个主源码类）
-ALLOWED+='ypbin-common/src/main/java/cn/ypbin/admin/common/log/RemoteLogAutoConfiguration\.java|'
-ALLOWED+='ypbin-common/src/main/java/cn/ypbin/admin/common/log/RemoteLogDao\.java|'
-ALLOWED+='ypbin-common/src/main/java/cn/ypbin/admin/common/tracking/RemoteTrackAutoConfiguration\.java|'
-ALLOWED+='ypbin-common/src/main/java/cn/ypbin/admin/common/tracking/RemoteTrackEventSink\.java|'
 # 连带更新：identity provider 的注释改指新装配；LoginEventTracker 注释；两个既有单测随实现迁移
-ALLOWED+='ypbin-common/src/main/java/cn/ypbin/admin/common/log/IdentityHeaderLogUserProvider\.java|'
 ALLOWED+='ypbin-auth/src/main/java/cn/ypbin/admin/auth/service/LoginEventTracker\.java|'
 ALLOWED+='ypbin-auth/src/test/java/cn/ypbin/admin/auth/log/AuthLogIngestTest\.java|'
-ALLOWED+='ypbin-common/src/test/java/cn/ypbin/admin/common/log/RemoteLogDaoTest\.java|'
-ALLOWED+='ypbin-common/src/test/java/cn/ypbin/admin/common/log/RemoteLogWiringTest\.java|'
 # 第 47 项（2026-10-19 加）：`RemoteLogDaoTest.java` 的**重命名**（R086）——
 # 随 starter #100 把「上报实现」从自建 LogDao 换成 SPI 实现，该测试的被测对象同步改名
 # （`SystemRemoteLogIngestClientTest`），断言口径逐条保留。Git 按重命名记录（R086），
 # 但 Sync Whitelist 门禁比对的是**新路径**，故新名字必须单独登记（旧名字条目保留，
 # 因为上游若删除/改动旧文件仍要命中白名单）。
-ALLOWED+='ypbin-common/src/test/java/cn/ypbin/admin/common/log/SystemRemoteLogIngestClientTest\.java|'
 # 第 49–54 项（2026-10-19 加）：补齐 admin #88 的 5 处漏同步（iot 是 admin fork）。
 # 这些是「admin 已修、iot 未跟随」的真实缺口，不是刻意分歧；改动只能落在既有文件上：
 #   - `AdminConstants`：删 3 个零引用死常量 + 通配权限码改引用 starter 的
@@ -202,4 +222,51 @@ ALLOWED+='ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/service
 ALLOWED+='ypbin-service/ypbin-system/src/main/java/cn/ypbin/admin/system/service/impl/SysClientServiceImpl\.java|'
 ALLOWED+=')$'
 
-printf '%s' "$ALLOWED"
+# 正常模式：打印正则（供 workflow 的 ALLOWED="$(bash tools/sync-whitelist-regex.sh)" 消费）。
+# --self-check 模式不打印正则，避免污染自检输出（也不希望有人把它当正则用）。
+if [ "${1:-}" != "--self-check" ]; then
+  printf '%s' "$ALLOWED"
+fi
+
+# ---------------------------------------------------------------------------
+# `--self-check`：检查白名单本身没有「永不生效」的死条目。
+#
+# 判据：每个条目对应的文件必须存在于 **`main` 或 `upstream/main` 之一**。
+# 两侧都不存在 ⇒ 两个门禁（MDR 候选集 / 干跑合并冲突集）都不可能命中它 ⇒ 条目纯噪音。
+#
+# 为什么需要（2026-11-21 实测）：68 条里 15 条是死的（占 22%），全来自「删除/重命名既有文件」类
+# 决策（消费 starter 4.0.0/4.1.0 把自建实现上收到基座）——文件删了、白名单没跟着删，
+# 结果计数虚高、评审逐条核对时大量误判。本模式把这条纪律变成机器检查。
+#
+# 用法：bash tools/sync-whitelist-regex.sh --self-check
+#   0 = 全部条目有效；1 = 存在死条目（CI 判红）；2 = 环境不满足（不在 git 仓内）
+# ---------------------------------------------------------------------------
+if [ "${1:-}" = "--self-check" ]; then
+  cd "$(dirname "$0")/.." || exit 2
+  git rev-parse --git-dir >/dev/null 2>&1 || { echo "::error::--self-check 需要在 git 仓库内运行" >&2; exit 2; }
+
+  # 逐条拆出「可选文字路径」（把正则里的转义去掉）
+  IFS='|' read -r -a _entries <<< "${ALLOWED#^(}"
+  _last=${#_entries[@]}
+  _dead=()
+  _checked=0
+  for _raw in "${_entries[@]}"; do
+    _checked=$((_checked + 1))
+    [ "$_checked" -eq "$_last" ] && continue          # 末尾是 ")$"
+    _path=${_raw//\\/}
+    [ -z "$_path" ] && continue
+    [ -e "$_path" ] && continue                        # 存在于工作树（= main）
+    git cat-file -e "upstream/main:$_path" 2>/dev/null && continue
+    _dead+=("$_path")
+  done
+
+  if [ "${#_dead[@]}" -gt 0 ]; then
+    echo "::error::同步白名单存在 ${#_dead[@]} 条死条目（文件在 main 与 upstream/main 两侧都不存在，永远不会命中）：" >&2
+    printf '  · %s\n' "${_dead[@]}" >&2
+    echo "处置：确属历史「删除/重命名」决策的，直接删条目并在 SYNC.md 保留批次记录；" >&2
+    echo "      上游将来重新引入这些文件的，再按当时理由重新登记。" >&2
+    exit 1
+  fi
+  echo "OK：白名单 ${#_entries[@]} 项全部有效（无死条目）"
+  exit 0
+fi

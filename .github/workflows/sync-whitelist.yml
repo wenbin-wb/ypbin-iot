@@ -2,7 +2,9 @@ name: Sync Whitelist
 
 # 把「与 admin 基座的同步纪律」变成机器检查：
 #   1) 改动的**既有 admin 文件**必须落在白名单内（新增文件不受限——IoT 业务一律加新文件/新模块）；
-#      白名单当前 **68 个文件**（见 SYNC.md 第二节与 tools/sync-whitelist-regex.sh，三处必须一致）；
+#      白名单**权威计数以脚本为准**：`bash tools/sync-whitelist-regex.sh | awk -F'|' '{print NF}'`
+#      （2026-11-21 实测 **53** 项）。SYNC.md 第二节按「批次」登记决策与理由，**不承载计数**——
+#      手工维护的计数必然漂移（此前注释写 68、表格实际 28 行 49 项，两者都对不上脚本）。
 #   2) IoT 的 SQL 迁移脚本必须与全新安装脚本语句等价；
 #   3) Nacos 身份模式配置键齐备（enabled=true ⇒ 必须配 trusted-source-token，否则 3.6.0 起启动失败）；
 #   4) 配置里不得出现已登记**废弃**的键（#297：旧内部凭证键、以及 Sa-Token 的不存在命名空间 ——
@@ -34,10 +36,16 @@ jobs:
           git remote add upstream https://github.com/wenbin-wb/ypbin-admin.git
           git fetch --no-tags upstream main
 
+      - name: 白名单条目自检（防「永不生效的死条目」让计数虚高）
+        # 判据：每个条目对应的文件必须存在于 main 或 upstream/main 之一；
+        # 两侧都不存在 ⇒ 两个门禁（MDR 候选集 / 干跑合并冲突集）都不可能命中它 ⇒ 纯噪音。
+        # 2026-11-21 实测清掉 15 条（68 → 53），全部来自「删除/重命名既有文件」类历史决策。
+        run: bash tools/sync-whitelist-regex.sh --self-check
+
       - name: 校验「改动的既有 admin 文件」都在白名单内
         run: |
           set -euo pipefail
-          # 白名单**单一来源**：tools/sync-whitelist-regex.sh（内容与 SYNC.md 第二节必须一致）。
+          # 白名单**单一来源**与**权威计数**都是 tools/sync-whitelist-regex.sh；SYNC.md 只登记「为什么加」。
           # 抽出来的原因：upstream-sync.yml 的干跑合并也要用同一份清单；
           # 原来内联在此处 ⇒ 第二处使用就会产生第二份副本（本仓明确反对的漂移面）。
           ALLOWED="$(bash tools/sync-whitelist-regex.sh)"

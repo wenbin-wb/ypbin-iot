@@ -73,9 +73,19 @@ IoT 代码一律放**新模块/新文件**；下面这些是唯一的例外，�
 > 长期不一致）。注：本仓 auth 模板显式开启 `ypbin.sse.enabled`，与上游「刻意不配」相反——属真实语义
 > 差异，本次只登记不改行为（改了会变更运行时装配，需单独评估）。
 
-> **白名单膨胀要记账**：目前 **68** 个文件（权威清单 = `tools/sync-whitelist-regex.sh`；本表与它必须逐项一致。
-> 2026-11-15 实测：脚本侧 `ALLOWED+=` 共 **68** 条（存量 59 + 本批公告客户端 9）；
-> 此前文档长期写 47/54 是**未随条目增删更新的陈旧计数**，`sync-whitelist.yml` 头注释里的数字同属陈旧，以脚本为准）。
+> **白名单膨胀要记账**：目前 **53** 项（权威计数 = `bash tools/sync-whitelist-regex.sh | awk -F'|' '{print NF}'`）。
+> **本表不承载计数，只登记「为什么加 / 什么代价」**——此前长期手工维护计数，结果是三个副本各自漂移
+> （2026-11-21 实测：脚本 68 / workflow 注释 68 / 本表 28 行 49 项，全部对不上）。
+> 现在口径固定为：**脚本是唯一权威**，CI 的 `--self-check` 保证条目全部有效；本表按批次记决策。
+>
+> 2026-11-21 清理：**移除 15 条死条目**（68 → 53，净减 15）。判据是「文件在 `main` 与
+> `upstream/main` 两侧都不存在」⇒ 两个门禁都不可能命中它。全部来自「删除/重命名既有文件」类历史决策
+> （消费 starter 4.0.0/4.1.0 把自建实现上收到基座）：`InternalTokenGuardInterceptor`/`...WebConfig`/
+> `InternalTokenConstants`/`InternalTokenFeignConfiguration`/`InternalProperties`/
+> `MicroserviceTenantProvider`/`MicroserviceTenantAutoConfiguration`/`RemoteLogAutoConfiguration`/
+> `RemoteLogDao`/`RemoteTrackAutoConfiguration`/`RemoteTrackEventSink`/`IdentityHeaderLogUserProvider`/
+> `RemoteLogDaoTest`/`RemoteLogWiringTest`/`SystemRemoteLogIngestClientTest`。
+> 对应批次记录仍留在本文件（第 25–34 / 38–46 项），只是不再占正则条目。
 > 2026-10-19：**加第 48 项** —— `SysDeptServiceImpl.java` 补「叶子 children 归一为 null」（#106 树组装）。
 > **admin 的同一迁移漏了这一步**：`TreeUtils.build` 一律写回空集合，而迁移前只在有子节点时 `setChildren`，
 > 实测响应从 `[{"id":2,...}]` 变成 `[{"id":2,...,"children":[]}]`（`DeptResp` 带 `@JsonInclude(NON_NULL)`，
