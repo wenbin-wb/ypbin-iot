@@ -13,6 +13,33 @@
 
 ## [未发布]
 
+### 修复与治理（2026-11-21 ~ 11-22）· 全仓巡检整改
+
+**缺陷**
+- `AsyncDisconnectExceptionHandler` 只写 `ex.getMessage()` 丢异常类型与调用栈，架构门禁
+  `SourceConventionTest#logsMustNotSwallowThrowableStackTrace` 在 main 上恒红的根因；
+  修在基座（admin `6bba3e1`）并随 upstream 同步进本仓。
+- 聚合取值收敛为 `AggregateValueReader`（`ypbin-common` 单一实现），同时修掉
+  `IotDashboardServiceImpl` / `IotDashboardSnapshotServiceImpl` 两处**未捕获
+  NumberFormatException**——聚合列出现 `"12.5"` / `"N/A"` 会打断整个看板渲染
+  （CodeQL `java/uncaught-number-format-exception` 报的就是这两处）。
+- 10 处 `java/log-injection`：改用 **starter 已有的 `LogSanitizer`**（曾自造 `LogValues`，
+  发现与基座重复后删除——「造工具前先查基座」的教训留在此处）。
+
+**门禁与同步**
+- 同步白名单清掉 **15 条死条目**（68 → 53，后因聚合取值收敛登记 2 项 → 55），新增
+  `--self-check` 模式并接入 CI；计数口径改为「脚本为唯一权威」，SYNC.md 不再承载计数。
+- `IoT Integration Tests` 的假红根因是 **Maven 缓存污染**（`present, but unavailable`）：
+  清 `_remote.repositories` / `*.lastUpdated`；该清理在**冷缓存下自身会失败**，已补 `mkdir -p`
+  与 `|| true`（run #557/#826 实测）。
+- 合入 upstream（公告客户端投放、租户 tenant_id、埋点关键词搜索等），冲突面收敛至 0；
+  期间发现「整体取上游 pom」会丢掉本仓 iot 专有的 `ypbin-iot-api` dependencyManagement，已恢复。
+
+**清理**
+- 白名单 15 条死条目、5 处重复 `toLong`、16 处孤儿 javadoc（注释挂错方法，CodeQL
+  `java/unknown-javadoc-parameter` 的来源）。
+- README 的 Spring Boot 徽章 4.1.0 → 4.1.2（与 starter 4.4.0 的实际依赖一致）。
+
 ### 变更（2026-11-11）· 同步 admin 基座（upstream/main 29 个提交）
 
 - 合入基座更新：访问黑名单常用规则种子、ip2region 离线归属地、空间关联对象补充「岗位」、
