@@ -66,6 +66,13 @@ ALLOWED+='ypbin-architecture-tests/src/test/java/cn/ypbin/admin/arch/SourceConve
 # 第 10 项（2026-09-27 加）：修 admin 既有代码里的**缺陷**，无法用新文件实现
 # （问题就在该方法「每次调用新建 HttpClient 且未指定协议版本」那一行上）。理由与代价见 SYNC.md 第二节。
 ALLOWED+='ypbin-service/ypbin-ai/src/main/java/cn/ypbin/admin/ai/service/impl/AiModelConfigServiceImpl\.java|'
+# 第 76–77 项（2026-11-22 加）：聚合取值收敛（`AggregateValueReader`）。
+# AI 统计/用量两个实现类原本各有一份私有 `toLong`（其中一档 Long.parseLong 无 try），
+# 收敛到 ypbin-common 的单一实现后，这两个**既有文件**的方法体必然与上游不同。
+# 无法用新文件表达：被替换的是既有方法的调用点；`AggregateValueReader` 本身是新文件（不受限）。
+# 代价：上游若改这两处的统计逻辑，同步时按语义合并——采纳上游演进 + 保留统一取值口径。
+ALLOWED+='ypbin-service/ypbin-ai/src/main/java/cn/ypbin/admin/ai/service/impl/AiStatsServiceImpl\.java|'
+ALLOWED+='ypbin-service/ypbin-ai/src/main/java/cn/ypbin/admin/ai/service/impl/AiUsageServiceImpl\.java|'
 # 第 11–17 项已于 2026-10-27 **移除**：站内信/邮件端点已下沉到 admin
 # （admin 补齐 sendInboxMessage/sendMail，两仓该组文件逐字节一致），
 # 故 ISystemClient / ISystemClientFallback / SystemClientImpl / SysMessageMapper
