@@ -55,14 +55,16 @@ jobs:
       # 照常使用，不再做 repo id 校验。代价一次几秒，远小于「随机红被当噪音忽略」的成本。
       - name: 清理 Maven 缓存里的外来仓库标记（防「present, but unavailable」假红）
         run: |
-          set -euo pipefail
-          n=$(find "$HOME/.m2/repository" -name '_remote.repositories' -type f 2>/dev/null | wc -l)
-          echo "命中 _remote.repositories 标记文件：$n 个"
-          find "$HOME/.m2/repository" -name '_remote.repositories' -type f -delete 2>/dev/null || true
-          # 同时清掉「解析失败」缓存：*.lastUpdated 会让 Maven 在 update interval 内不再重试
-          m=$(find "$HOME/.m2/repository" -name '*.lastUpdated' -type f 2>/dev/null | wc -l)
-          echo "命中 *.lastUpdated 失败缓存：$m 个"
-          find "$HOME/.m2/repository" -name '*.lastUpdated' -type f -delete 2>/dev/null || true
+          set -uo pipefail
+          repo="$HOME/.m2/repository"
+          # 冷缓存时该目录可能不存在：find 会以非零退出，配 set -e 会让整步失败（2026-11-22 实测 run #557）。
+          mkdir -p "$repo"
+          n=$(find "$repo" -name '_remote.repositories' -type f 2>/dev/null | wc -l || true)
+          echo "命中 _remote.repositories 标记文件：${n:-0} 个"
+          find "$repo" -name '_remote.repositories' -type f -delete 2>/dev/null || true
+          m=$(find "$repo" -name '*.lastUpdated' -type f 2>/dev/null | wc -l || true)
+          echo "命中 *.lastUpdated 失败缓存：${m:-0} 个"
+          find "$repo" -name '*.lastUpdated' -type f -delete 2>/dev/null || true
           echo "清理完成"
 
       - name: 读取本仓要求的 starter 版本
