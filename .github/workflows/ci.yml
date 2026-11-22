@@ -32,7 +32,7 @@ jobs:
         run: |
           set -uo pipefail
           repo="$HOME/.m2/repository"
-          # 冷缓存时该目录可能不存在：find 会以非零退出，配 set -e 会让整步失败（2026-11-22 实测 run #557）。
+          # 冷缓存时该目录可能不存在：find 会以非零退出，配 set -e 会让整步失败（2026-11-22 实测）。
           mkdir -p "$repo"
           n=$(find "$repo" -name '_remote.repositories' -type f 2>/dev/null | wc -l || true)
           echo "命中 _remote.repositories 标记文件：${n:-0} 个"
@@ -43,30 +43,17 @@ jobs:
           echo "清理完成"
 
       - name: 校验 starter 依赖版本为最新 Release（防版本漂移）
-        # ⚠️ 必须带认证头：GitHub REST API 的**未认证**额度是 60 次/小时/IP，
-        #    而托管 runner 的出口 IP 是共享的 ⇒ 实测出现 `curl: (22) ... error: 403`，
-        #    让本步**随机转红**（2026-10-13 main 与 PR 各出现一次）。随机红比没有门禁更坏
-        #    （会让人习惯性忽略红），故用 `github.token` 认证（同仓库只读，额度 5000/小时）。
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           REQ=$(grep -oP '(?<=<ypbin-starter.version>)[^<]+' pom.xml)
-          LATEST=$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
-            https://api.github.com/repos/wenbin-wb/ypbin-starter/releases/latest | grep -oP '"tag_name":\s*"v\K[^"]+')
+          LATEST=$(curl -fsSL https://api.github.com/repos/wenbin-wb/ypbin-starter/releases/latest | grep -oP '"tag_name":\s*"v\K[^"]+')
           echo "admin 依赖 starter ${REQ}，最新 Release v${LATEST}"
           [ "$REQ" = "$LATEST" ] || { echo "依赖版本落后，请升级至最新 Release"; exit 1; }
-          # 供下一步检出用：**按声明的 Release tag**，而不是默认分支
-          echo "STARTER_TAG=v${REQ}" >> "$GITHUB_ENV"
 
-      - name: 检出 ypbin-starter（**按声明的 Release tag**，不取 master）
-        # 2026-10-13 更正：此前这一步取 `master`，与上一步刚断言过的"声明版本"是两回事 ——
-        # 若 master 上已有、而该 Release 里还没有的 API 被本仓使用，CI 会**假绿**
-        # （任何干净机器/外部使用者都会编译失败；审计 issue #233）。
-        # 现在按 `v<声明版本>` 检出 ⇒ CI 验证的就是"消费者真正拿到的那份 starter"。
+      - name: 检出 ypbin-starter（版本以 admin pom 的 ypbin-starter.version 为准）
         uses: actions/checkout@v4
         with:
           repository: wenbin-wb/ypbin-starter
-          ref: ${{ env.STARTER_TAG }}
+          ref: master
           path: ypbin-starter
 
       - name: 本地安装 ypbin-starter
