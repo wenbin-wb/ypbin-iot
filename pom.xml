@@ -88,6 +88,14 @@
                 <artifactId>ypbin-ai-api</artifactId>
                 <version>${project.version}</version>
             </dependency>
+            <!-- 2026-11-22 合并修复：整体取上游 pom 时把这条 iot 专有的 dependencyManagement 弄丢了，
+                 导致 ypbin-iot / ypbin-access 的 ypbin-iot-api 依赖没有版本（Maven 直接读不了 POM）。
+                 白名单第 1 项「pom.xml」本就是为允许本仓多这一块而登记的。 -->
+            <dependency>
+                <groupId>cn.ypbin.admin</groupId>
+                <artifactId>ypbin-iot-api</artifactId>
+                <version>${project.version}</version>
+            </dependency>
         </dependencies>
     </dependencyManagement>
 
